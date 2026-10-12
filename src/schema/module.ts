@@ -31,7 +31,8 @@ import {
 } from "../core/features.js";
 import { batchedFirst } from "../core/d1-batch.js";
 import { readEntryDocs } from "../core/entry-docs.js";
-import { requestMemo } from "../core/request-memo.js";
+import { noteReadFailure, readFailures } from "../core/read-failures.js";
+import { requestMemo, requestStore } from "../core/request-memo.js";
 import { parseInput, workerEnv } from "../shared.js";
 import { type MediaRow, cleanDefaultOgImage, mediaHostImageInfo, ogImageTags, ownImageOnMediaHost, packOwnsOgImage } from "./og-image.js";
 import { ARTICLE_TYPES, ORGANIZATION_PROPERTIES, ORGANIZATION_TYPES, PAGE_TYPES, PERSON_PROPERTIES, PROPERTY_INPUTS } from "./catalog.js";
@@ -217,11 +218,20 @@ async function readAllAuthors(ctx: PluginContext): Promise<Map<string, { rows: P
 	return null;
 }
 
+/** A read that may fail on a page: null instead (a missing byline or media item is null too), and the failure noted (src/core/read-failures.ts). */
+const orNull = <T,>(read: Promise<T> | undefined): Promise<T | null> =>
+	read
+		? read.catch(() => {
+				noteReadFailure("schema: bylines or media");
+				return null;
+			})
+		: Promise.resolve(null);
+
 async function bylineFacts(ctx: PluginContext, id: string): Promise<BylineFacts | null> {
-	const byline = await ctx.bylines?.get(id).catch(() => null);
+	const byline = await orNull(ctx.bylines?.get(id));
 	if (!byline) return null;
 	let avatarUrl: string | null = null;
-	if (byline.avatarMediaId) avatarUrl = (await ctx.media?.get(byline.avatarMediaId).catch(() => null))?.url ?? null;
+	if (byline.avatarMediaId) avatarUrl = (await orNull(ctx.media?.get(byline.avatarMediaId)))?.url ?? null;
 	return { id: byline.id, slug: byline.slug, displayName: byline.displayName, bio: byline.bio, websiteUrl: byline.websiteUrl, avatarUrl };
 }
 
@@ -229,10 +239,11 @@ async function bylineFacts(ctx: PluginContext, id: string): Promise<BylineFacts 
 async function loadConfig(ctx: PluginContext, database?: string, fresh = false): Promise<Config> {
 	if (!fresh && configCache && isCurrent(configCache, CONFIG_TTL_MS)) return configCache.config;
 	const epoch = settingsEpoch();
+	const failures = readFailures();
 	const [settings, stored, authors] = await Promise.all([
 		readSettings(ctx, database, fresh),
 		docs(ctx).getMany(["site", "types"]) as Promise<Map<string, unknown>>,
-		authorsStore(ctx)?.query ? readAllAuthors(ctx).catch(() => null) : null,
+		authorsStore(ctx)?.query ? orNull(readAllAuthors(ctx)) : null,
 	]);
 	const site = { ...DEFAULT_SITE, ...((stored.get("site") as SiteDetails | undefined) ?? {}) };
 	const types = (stored.get("types") as TypeMap | undefined) ?? {};
@@ -245,8 +256,9 @@ async function loadConfig(ctx: PluginContext, database?: string, fresh = false):
 		person = { byline, rows: rows?.rows ?? null };
 	}
 	const config = { settings, site, types, person, authors };
-	// A save while this read ran (the epoch moved) leaves it uncached.
-	if (epoch === settingsEpoch()) configCache = { at: Date.now(), epoch, config };
+	// A save while this read ran (the epoch moved) leaves it uncached, and so does a failed read (a missing byline
+	// would make the publisher a bare Organization on every page for the cache's lifetime).
+	if (epoch === settingsEpoch() && readFailures() === failures) configCache = { at: Date.now(), epoch, config };
 	return config;
 }
 
@@ -283,6 +295,7 @@ async function lookupCleanMedia(options: SchemaOptions, url: string, origin: str
 			// With the page's other pack reads of this tick (one D1 batch).
 			row = db ? await batchedFirst<MediaRow>(db, db.prepare("SELECT width, height, alt, mime_type FROM media WHERE storage_key = ? LIMIT 1").bind(key)) : null;
 		} catch {
+			noteReadFailure("schema: media details");
 			return null; // Don't cache failures.
 		}
 		if (mediaRowCache.size >= MEDIA_MAX) mediaRowCache.delete(mediaRowCache.keys().next().value as string);
@@ -336,6 +349,7 @@ async function lookupMedia(options: SchemaOptions, url: string, origin: string):
 			: null;
 		if (row) info = { url, width: row.width, height: row.height, alt: row.alt, mimeType: row.mime_type };
 	} catch {
+		noteReadFailure("schema: media details");
 		return null; // Don't cache failures.
 	}
 	if (mediaCache.size >= MEDIA_MAX) mediaCache.delete(mediaCache.keys().next().value as string);
@@ -360,7 +374,8 @@ async function siteFacts(ctx: PluginContext, page: PublicPageContext): Promise<S
 		const { getSiteSettings } = await import("emdash");
 		settings = await getSiteSettings();
 	} catch {
-		// Outside a request context (or no database): fall back to the plugin context.
+		// Outside a request context (or no database): fall back to the plugin context. Inside one it's a failed read.
+		if (requestStore()) noteReadFailure("schema: site settings");
 	}
 	const base = page.siteUrl || settings.url || ctx.site.url || (URL.canParse(page.url) ? new URL(page.url).origin : "");
 	const origin = originOf(base);
@@ -419,7 +434,7 @@ function entryBylines(ctx: PluginContext, page: PublicPageContext, themed?: Cred
 	if (!bylines) return Promise.resolve([]);
 	const { collection, id } = page.content;
 	// Once per request, however many times the hook runs for the page.
-	return requestMemo(`coywolf-entry-bylines:${collection}:${id}`, () => bylines.getEntriesBylines(collection, [id]).catch(() => []));
+	return requestMemo(`coywolf-entry-bylines:${collection}:${id}`, async () => (await orNull(bylines.getEntriesBylines(collection, [id]))) ?? []);
 }
 
 async function authorNodes(ctx: PluginContext, credited: Promise<EntryBylines>, config: Config, site: SiteFacts, features: FeatureMap): Promise<Node[]> {
@@ -433,7 +448,7 @@ async function authorNodes(ctx: PluginContext, credited: Promise<EntryBylines>, 
 		bylines.map(async (b) => {
 			const rows = rowsById.get(b.id)?.rows ?? null;
 			const hasImage = rows?.some((r) => r.prop === "image" && r.value);
-			const avatarUrl = !hasImage && b.avatarMediaId ? ((await ctx.media?.get(b.avatarMediaId).catch(() => null))?.url ?? null) : null;
+			const avatarUrl = !hasImage && b.avatarMediaId ? ((await orNull(ctx.media?.get(b.avatarMediaId)))?.url ?? null) : null;
 			const path = authorPath(config.settings.schemaAuthorUrlPattern, b.slug);
 			const authorUrl = path ? absolute(path, site.origin) : null;
 			return personNode({
@@ -510,6 +525,7 @@ async function pageVideosStep(ctx: PluginContext, page: PublicPageContext, origi
 		};
 	} catch (error) {
 		warn(error);
+		noteReadFailure("schema: videos");
 		return noStep;
 	}
 }
@@ -534,6 +550,7 @@ async function entitiesStep(ctx: PluginContext, content: { collection: string; i
 		};
 	} catch (error) {
 		warn(error);
+		noteReadFailure("schema: AI entities");
 		return noStep;
 	}
 }

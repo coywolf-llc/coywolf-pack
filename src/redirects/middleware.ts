@@ -16,6 +16,7 @@
 import type { MiddlewareHandler } from "astro";
 
 import { isCurrent, settingsEpoch } from "../core/features.js";
+import { noteReadFailure } from "../core/read-failures.js";
 import { REDIRECTS_TAG } from "../pageCache/lib.js";
 import { type CompiledRules, compile, findExactRule, loadPatternRules, match, recordHit } from "./rules.js";
 
@@ -107,6 +108,8 @@ export async function serveRedirect(
 		compiled = await rulesFor(url, db, ttlOf(options));
 	} catch (error) {
 		console.error("coywolf redirects: could not load rules", error);
+		// The page this URL renders instead of its redirect mustn't be edge-cached.
+		noteReadFailure("redirect rules");
 		return undefined;
 	}
 

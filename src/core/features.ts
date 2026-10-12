@@ -15,6 +15,7 @@
 import type { FeatureDef } from "./module.js";
 import { workerEnv } from "../shared.js";
 import { batchedAll } from "./d1-batch.js";
+import { noteReadFailure } from "./read-failures.js";
 
 export const PLUGIN_ID = "coywolf-pack";
 export const FEATURES_SETTING = "features";
@@ -79,7 +80,15 @@ interface SettingsCtx {
 }
 
 export async function ctxFeatures(ctx: SettingsCtx): Promise<FeatureMap> {
-	return remember(resolveFeatures(await ctx.settings.get<FeatureMap>(FEATURES_SETTING)));
+	let stored: FeatureMap | null | undefined;
+	try {
+		stored = await ctx.settings.get<FeatureMap>(FEATURES_SETTING);
+	} catch (error) {
+		// A page hook that can't read the switches adds nothing to the page: keep that page out of the edge cache.
+		noteReadFailure("feature switches (plugin context)");
+		throw error;
+	}
+	return remember(resolveFeatures(stored));
 }
 
 /** The switches most recently read in this isolate (null before the first read). */
@@ -230,7 +239,11 @@ let lastGeneration: string | null | undefined;
 export const GENERATION_OPTION = `plugin:${PLUGIN_ID}:state:settingsGeneration`;
 registerSiteOption(GENERATION_OPTION);
 
-/** Read the switches straight from D1. Fails closed (all off) if the database can't be read. */
+/**
+ * Read the switches straight from D1. Fails closed (all off) if the database
+ * can't be read, and notes the failure (src/core/read-failures.ts), so the
+ * page rendered with them isn't edge-cached.
+ */
 export async function siteFeatures(database = "DB"): Promise<FeatureMap> {
 	if (cached && Date.now() - cached.at < TTL_MS) return cached.features;
 	return (await readSiteOptions(database)).features;
@@ -244,7 +257,7 @@ interface SiteOptions {
 	settings: Map<string, unknown>;
 	/** The registered settings this read asked for. */
 	keys: Set<string>;
-	/** False when D1 couldn't be read (features are then all off and settings empty). */
+	/** False when D1 couldn't be read (features are then all off and settings empty; each caller notes it, see readSiteOptions). */
 	ok: boolean;
 }
 
@@ -255,7 +268,11 @@ function readSiteOptions(database: Database): Promise<SiteOptions> {
 		});
 		reading = read;
 	}
-	return reading;
+	// Noted for each caller handed a failed read (concurrent requests share one), not once per query.
+	return reading.then((read) => {
+		if (!read.ok) noteReadFailure("feature switches and settings");
+		return read;
+	});
 }
 
 async function queryOptions(database: Database): Promise<SiteOptions> {
@@ -330,7 +347,8 @@ export function rememberSiteOption(name: string, raw: string | null): void {
 /**
  * The registered settings from the per-isolate cache, or a fresh read when
  * the cache is old or was read before `key` was registered (a module imported
- * after the first read of this isolate). Null when D1 can't be read.
+ * after the first read of this isolate). Null when D1 can't be read (a noted
+ * read failure, see src/core/read-failures.ts).
  */
 async function siteSettings(key: string, database: Database): Promise<Map<string, unknown> | null> {
 	registerSiteSetting(key);

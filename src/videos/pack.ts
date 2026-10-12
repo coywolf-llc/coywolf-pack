@@ -1,6 +1,7 @@
 import { getPublicPluginApiRouteHandler } from "emdash/plugin-utils";
 
 import { PLUGIN_ID, registerFeatures } from "../core/features.js";
+import { noteReadFailure, routeFailed } from "../core/read-failures.js";
 import type { PackMiddleware, PackModule } from "../core/module.js";
 import { BLOCK_TYPE } from "./lib.js";
 import { F, type VideosOptions, videosModule } from "./module.js";
@@ -144,7 +145,9 @@ async function callPublic(locals: unknown, origin: string, route: string, body: 
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(body),
 	});
-	const res = (await handler(PLUGIN_ID, "POST", `/${route}`, request)) as { success?: boolean; data?: unknown };
+	const res = (await handler(PLUGIN_ID, "POST", `/${route}`, request)) as { success?: boolean; data?: unknown; status?: number; error?: { code?: string } };
+	// A server error: whatever answers the URL instead (the site's own route) isn't edge-cached.
+	if (routeFailed(res)) noteReadFailure(route);
 	return res?.success ? res.data : null;
 }
 

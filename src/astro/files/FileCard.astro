@@ -6,6 +6,7 @@
  * CSS come from files/card.ts, which the admin preview uses too.
  */
 import { siteFeatureOn } from "../../core/features.js";
+import { noteReadFailure } from "../../core/read-failures.js";
 import { workerEnv } from "../../shared.js";
 import { FILE_CSS, renderFileCardHtml } from "../../files/card.js";
 import { downloadPath } from "../../files/format.js";
@@ -59,6 +60,8 @@ if (node?.id && (await siteFeatureOn("files"))) {
 		}
 	} catch (error) {
 		console.error("coywolf-pack files: could not render a download card", error);
+		// The page goes out without its card: not into the edge cache.
+		noteReadFailure("file card");
 	}
 }
 
