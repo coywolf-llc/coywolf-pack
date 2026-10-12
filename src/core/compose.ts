@@ -5,6 +5,7 @@ import type { PluginContext } from "emdash";
 
 import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn } from "./features.js";
 import type { PackModule, TaskDef } from "./module.js";
+import { requestStore } from "./request-memo.js";
 import { afterResponse } from "../shared.js";
 
 /**
@@ -56,14 +57,19 @@ const COLLECTING = new Set(["page:metadata", "page:fragments"]);
 /**
  * Hooks EmDash runs without waiting for them. media:afterUpload is fired and
  * forgotten right before the upload's response goes out (emdash-runtime
- * handleMediaCreate), so the composed hook hands the modules' work to
- * waitUntil at once, before anything async: awaiting anything first (the other
- * hooks start with a settings read) let the request finish, which dropped the
- * work without a trace. The modules' handlers check their own feature switch
- * (siteFeatureOn: the per-isolate cache, no query) and use the raw bindings,
- * not the plugin context, since they run after the response.
+ * handleMediaCreate), so the composed hook hands the whole job (the feature
+ * check, then each participant) to waitUntil at once, before anything async:
+ * awaiting anything first (the other hooks start with a settings read) let the
+ * request finish, which dropped the work without a trace. Participants are
+ * gated by hookFeature like everywhere else, inside the job.
  */
 const BACKGROUND = new Set(["media:afterUpload"]);
+
+/** EmDash's deferred-task tracker for the current request (its request context, found through the pack's request memo). */
+function deferredTasks(): { track<T>(promise: Promise<T>): Promise<T> } | undefined {
+	const store = requestStore() as { deferredTasks?: { track?: <T>(promise: Promise<T>) => Promise<T> } } | undefined;
+	return typeof store?.deferredTasks?.track === "function" ? (store.deferredTasks as { track<T>(promise: Promise<T>): Promise<T> }) : undefined;
+}
 /** Scheduled jobs can take far longer than EmDash's 5-second hook default (Workers cron allows 15 minutes). */
 const CRON_TIMEOUT_MS = 14 * 60_000;
 /** plugin:activate schedules every task (one D1 write each); a boot-time failure would disable the plugin. */
@@ -89,13 +95,24 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 		const participants = modules.filter((m) => m.hooks?.[name as keyof NonNullable<PackModule["hooks"]>]);
 		if (BACKGROUND.has(name)) {
 			hooks[name] = (event, ctx) => {
-				for (const module of participants) {
-					afterResponse(
-						Promise.resolve()
-							.then(() => module.hooks?.[name as "media:afterUpload"]?.(event, ctx))
-							.catch((error) => console.error(`coywolf-pack: ${module.id}: ${name} failed`, error)),
-					);
-				}
+				const job = (async () => {
+					try {
+						const features = await cachedCtxFeatures(ctx);
+						for (const module of participants) {
+							if (!isOn(features, hookFeature(module, name))) continue;
+							try {
+								await module.hooks?.[name as "media:afterUpload"]?.(event, ctx);
+							} catch (error) {
+								console.error(`coywolf-pack: ${module.id}: ${name} failed`, error);
+							}
+						}
+					} catch (error) {
+						console.error(`coywolf-pack: ${name} failed`, error);
+					}
+				})();
+				// Synchronous: nothing has been awaited yet. Tracked as one of EmDash's deferred tasks too (as its
+				// own after() does), so a request-scoped database with a close() stays open until the job is done.
+				afterResponse(deferredTasks()?.track(job) ?? job);
 				return Promise.resolve();
 			};
 			continue;

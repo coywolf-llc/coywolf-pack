@@ -326,14 +326,13 @@ function siteOrigin(ctx: PluginContext): string | undefined {
 
 /**
  * Make one uploaded image's stored sizes. Runs after the upload's response
- * (compose.ts hands media:afterUpload work to waitUntil), so it checks the
- * feature switch itself and uses the raw bindings, never the plugin context.
- * Says why when it can't (a missing media host or binding), once per upload:
- * silence here hid a dropped hook for three releases.
+ * (compose.ts hands media:afterUpload work to waitUntil, gated by the feature
+ * switch), on the raw bindings. Says why when it can't (a missing media host
+ * or binding), once per upload: silence here hid a dropped hook for three
+ * releases.
  */
-export async function variantsForUpload(media: { id: string; mimeType?: string | null }): Promise<void> {
+async function variantsForUpload(media: { id: string; mimeType?: string | null }): Promise<void> {
 	if (!eligible(media.mimeType, 1, 0)) return;
-	if (!(await siteFeatureOn(F.main, config.database))) return;
 	const deps = await variantDeps();
 	if (!deps) {
 		const why = imageCdn() ? `the ${config.database}, ${config.bucket} or ${config.images} binding is missing` : "no media host is set";
