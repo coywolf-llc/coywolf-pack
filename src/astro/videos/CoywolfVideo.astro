@@ -28,7 +28,7 @@
 import { getPublicPluginApiRouteHandler } from "emdash/plugin-utils";
 
 import { PLUGIN_ID, siteFeatureOn } from "../../core/features.js";
-import { noteReadFailure } from "../../core/read-failures.js";
+import { noteReadFailure, routeFailed } from "../../core/read-failures.js";
 import {
 	type VideoBlock,
 	aspectRatio,
@@ -82,13 +82,13 @@ if (on && uid) {
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ uid }),
 				}),
-			)) as { success?: boolean; data?: EmbedData; status?: number };
+			)) as { success?: boolean; data?: EmbedData; status?: number; error?: { code?: string } };
 			data = res?.success && res.data ? res.data : null;
 			// A server error (a read that failed): the player renders with defaults, so the page isn't edge-cached.
-			if (res && !res.success && (res.status ?? 500) >= 500) noteReadFailure();
+			if (routeFailed(res)) noteReadFailure("video embed data");
 		} catch (error) {
 			console.warn("coywolf-pack: video embed data failed", error);
-			noteReadFailure();
+			noteReadFailure("video embed data");
 		}
 	}
 }

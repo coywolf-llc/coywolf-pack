@@ -109,7 +109,7 @@ export async function serveRedirect(
 	} catch (error) {
 		console.error("coywolf redirects: could not load rules", error);
 		// The page this URL renders instead of its redirect mustn't be edge-cached.
-		noteReadFailure();
+		noteReadFailure("redirect rules");
 		return undefined;
 	}
 

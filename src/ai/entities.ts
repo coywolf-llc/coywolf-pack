@@ -53,7 +53,7 @@ export async function getEntryEntities(source: Source, collection: string, id: s
 		const entities = Array.isArray(record?.entities) ? record.entities : [];
 		return { entities, ...entityNodes(entities) };
 	} catch {
-		noteReadFailure(); // The page goes out without its entities: not into the edge cache.
+		noteReadFailure("AI entities"); // The page goes out without its entities: not into the edge cache.
 		return EMPTY; // Schema output must never fail because of enrichment.
 	}
 }

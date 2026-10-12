@@ -65,7 +65,7 @@ const COLLECTING = new Set(["page:metadata", "page:fragments"]);
 const PAGE_HOOK_DEADLINE_MS = 4_500;
 function noteIfLate(run: Handler): Handler {
 	return async (event, ctx) => {
-		const late = setTimeout(noteReadFailure, PAGE_HOOK_DEADLINE_MS);
+		const late = setTimeout(() => noteReadFailure("a page hook near EmDash's timeout"), PAGE_HOOK_DEADLINE_MS);
 		try {
 			return await run(event, ctx);
 		} finally {
@@ -151,7 +151,7 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 					} catch (error) {
 						ctx.log.error(`${module.id}: ${name} failed`, { error: String(error) });
 						// The page goes out without this module's part (its schema, its video player…): not into the edge cache.
-						noteReadFailure();
+						noteReadFailure(`${module.id}: ${name}`);
 					}
 				}
 				return out;

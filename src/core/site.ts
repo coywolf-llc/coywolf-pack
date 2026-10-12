@@ -15,7 +15,7 @@ export async function siteName(ctx: Pick<PluginContext, "site">): Promise<string
 		if (typeof settings.title === "string" && settings.title.trim()) return settings.title.trim();
 	} catch {
 		// Outside a request context: fall back to the plugin context. Inside one it's a failed read.
-		if (requestStore()) noteReadFailure();
+		if (requestStore()) noteReadFailure("site settings (site name)");
 	}
 	return ctx.site?.name ?? "";
 }

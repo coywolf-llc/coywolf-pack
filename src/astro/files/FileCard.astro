@@ -61,7 +61,7 @@ if (node?.id && (await siteFeatureOn("files"))) {
 	} catch (error) {
 		console.error("coywolf-pack files: could not render a download card", error);
 		// The page goes out without its card: not into the edge cache.
-		noteReadFailure();
+		noteReadFailure("file card");
 	}
 }
 

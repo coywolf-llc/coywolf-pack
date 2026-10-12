@@ -96,7 +96,7 @@ export async function pageReviewsStep(ctx: PluginContext, page: Page, origin: st
 		reviews = await pageReviews(ctx, page, source);
 	} catch (error) {
 		warn(error);
-		noteReadFailure();
+		noteReadFailure("reviews");
 		return () => {};
 	}
 	return (graph) => {

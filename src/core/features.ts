@@ -85,7 +85,7 @@ export async function ctxFeatures(ctx: SettingsCtx): Promise<FeatureMap> {
 		stored = await ctx.settings.get<FeatureMap>(FEATURES_SETTING);
 	} catch (error) {
 		// A page hook that can't read the switches adds nothing to the page: keep that page out of the edge cache.
-		noteReadFailure();
+		noteReadFailure("feature switches (plugin context)");
 		throw error;
 	}
 	return remember(resolveFeatures(stored));
@@ -270,7 +270,7 @@ function readSiteOptions(database: Database): Promise<SiteOptions> {
 	}
 	// Noted for each caller handed a failed read (concurrent requests share one), not once per query.
 	return reading.then((read) => {
-		if (!read.ok) noteReadFailure();
+		if (!read.ok) noteReadFailure("feature switches and settings");
 		return read;
 	});
 }

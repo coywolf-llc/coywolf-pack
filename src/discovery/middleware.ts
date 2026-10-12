@@ -18,7 +18,7 @@
 import type { MiddlewareHandler } from "astro";
 
 import { PLUGIN_ID } from "../core/features.js";
-import { noteReadFailure } from "../core/read-failures.js";
+import { noteReadFailure, routeFailed } from "../core/read-failures.js";
 import type { PackMiddleware } from "../core/module.js";
 import { keyFromPath } from "./indexnow.js";
 import { pagePathFromMarkdownPath } from "./markdown.js";
@@ -30,8 +30,9 @@ type Context = Parameters<MiddlewareHandler>[0];
 interface PublicRouteResult {
 	success: boolean;
 	data?: unknown;
-	/** HTTP status of the route's answer (EmDash sets it; 500 for an error the route didn't expect). */
+	/** HTTP status of the route's answer (500 for an error the route didn't expect; unset when the plugin isn't enabled). */
 	status?: number;
+	error?: { code?: string };
 }
 type PublicRouteHandler = (pluginId: string, method: string, path: string, request: Request) => Promise<PublicRouteResult>;
 
@@ -52,8 +53,8 @@ async function callRoute<T>(context: Context, route: string, query: Record<strin
 	const result = await dispatch(PLUGIN_ID, "GET", route, new Request(url, { method: "GET" }));
 	const value = result.success ? ((result.data ?? null) as T | null) : null;
 	// A server error (a read that failed) isn't kept as the answer: the next request asks again.
-	if (!result.success && (result.status ?? 500) >= 500) {
-		noteReadFailure();
+	if (routeFailed(result)) {
+		noteReadFailure("discovery route");
 		return null;
 	}
 

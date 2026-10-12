@@ -144,6 +144,8 @@ export interface SettleChecks {
 	markHeader?: string;
 	/** Names the request in the log line when a page isn't cached after a failed read (e.g. "GET /about/"). */
 	label?: string;
+	/** What failed (for the same log line). */
+	reason?(): string | undefined;
 }
 
 /**
@@ -171,6 +173,7 @@ export interface SettleChecks {
  * page instead of getting this copy back.
  */
 export async function settlePage(cache: RouteCache | undefined, response: Response, checks: SettleChecks): Promise<Response> {
+	// No route caching (dev, or a site without a cache provider). Astro's real cache stays `enabled` after set(false).
 	if (!cache?.enabled) return response;
 	const maxAge = cache.options?.maxAge;
 	if (maxAge === undefined || maxAge <= 0 || response.status !== 200 || !response.body || !(response.headers.get("content-type") ?? "").startsWith("text/html")) {
@@ -180,11 +183,11 @@ export async function settlePage(cache: RouteCache | undefined, response: Respon
 	const body = await response.arrayBuffer();
 	const headers = new Headers(response.headers);
 	if (checks.failed()) {
-		console.error(`coywolf-pack: ${checks.label ?? "a page"} not edge-cached: a read failed while it rendered`);
+		console.error(`coywolf-pack: ${checks.label ?? "a page"} not edge-cached: a read failed while it rendered (last failure: ${checks.reason?.() ?? "unknown"})`);
 		cache.set(false);
 		if (checks.markHeader) headers.set(checks.markHeader, "1");
-	} else if (checks.stopgap?.() && cache.enabled && cache.options?.maxAge !== undefined) {
-		// (A component may have turned caching off while rendering: that's left alone.)
+	} else if (checks.stopgap?.() && cache.options?.maxAge !== undefined) {
+		// (A component may have turned caching off while rendering, which clears maxAge: that's left alone.)
 		if (checks.markHeader) {
 			cache.set(false);
 			headers.set(checks.markHeader, "1");

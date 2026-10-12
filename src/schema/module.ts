@@ -222,7 +222,7 @@ async function readAllAuthors(ctx: PluginContext): Promise<Map<string, { rows: P
 const orNull = <T,>(read: Promise<T> | undefined): Promise<T | null> =>
 	read
 		? read.catch(() => {
-				noteReadFailure();
+				noteReadFailure("schema: bylines or media");
 				return null;
 			})
 		: Promise.resolve(null);
@@ -295,7 +295,7 @@ async function lookupCleanMedia(options: SchemaOptions, url: string, origin: str
 			// With the page's other pack reads of this tick (one D1 batch).
 			row = db ? await batchedFirst<MediaRow>(db, db.prepare("SELECT width, height, alt, mime_type FROM media WHERE storage_key = ? LIMIT 1").bind(key)) : null;
 		} catch {
-			noteReadFailure();
+			noteReadFailure("schema: media details");
 			return null; // Don't cache failures.
 		}
 		if (mediaRowCache.size >= MEDIA_MAX) mediaRowCache.delete(mediaRowCache.keys().next().value as string);
@@ -349,7 +349,7 @@ async function lookupMedia(options: SchemaOptions, url: string, origin: string):
 			: null;
 		if (row) info = { url, width: row.width, height: row.height, alt: row.alt, mimeType: row.mime_type };
 	} catch {
-		noteReadFailure();
+		noteReadFailure("schema: media details");
 		return null; // Don't cache failures.
 	}
 	if (mediaCache.size >= MEDIA_MAX) mediaCache.delete(mediaCache.keys().next().value as string);
@@ -375,7 +375,7 @@ async function siteFacts(ctx: PluginContext, page: PublicPageContext): Promise<S
 		settings = await getSiteSettings();
 	} catch {
 		// Outside a request context (or no database): fall back to the plugin context. Inside one it's a failed read.
-		if (requestStore()) noteReadFailure();
+		if (requestStore()) noteReadFailure("schema: site settings");
 	}
 	const base = page.siteUrl || settings.url || ctx.site.url || (URL.canParse(page.url) ? new URL(page.url).origin : "");
 	const origin = originOf(base);
@@ -525,7 +525,7 @@ async function pageVideosStep(ctx: PluginContext, page: PublicPageContext, origi
 		};
 	} catch (error) {
 		warn(error);
-		noteReadFailure();
+		noteReadFailure("schema: videos");
 		return noStep;
 	}
 }
@@ -550,7 +550,7 @@ async function entitiesStep(ctx: PluginContext, content: { collection: string; i
 		};
 	} catch (error) {
 		warn(error);
-		noteReadFailure();
+		noteReadFailure("schema: AI entities");
 		return noStep;
 	}
 }

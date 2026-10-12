@@ -22,13 +22,36 @@
  */
 
 let failures = 0;
+let last: string | undefined;
 
-/** A read failed and a fallback (off, unset, absent) was used instead. */
-export function noteReadFailure(): void {
+/**
+ * A read failed and a fallback (off, unset, absent) was used instead. `what`
+ * names it for the log line of the page left out of the cache: a module that
+ * fails on every render (a bug, not a blip) keeps every page out of the cache
+ * until it's fixed, and the log says which.
+ */
+export function noteReadFailure(what: string): void {
 	failures++;
+	last = what;
 }
 
 /** How many reads have failed in this isolate; compare two counts to tell whether one failed in between. */
 export function readFailures(): number {
 	return failures;
+}
+
+/** What failed most recently in this isolate (for the log). */
+export function lastReadFailure(): string | undefined {
+	return last;
+}
+
+/**
+ * A plugin route's result that failed on the server, as EmDash's HTTP wiring
+ * would answer it (plugins/http-route-dispatch.ts: a missing status is 404 for
+ * NOT_FOUND, else 400): a 5xx means a read failed. Not found (a feature that's
+ * off, the plugin not enabled), bad input and the like don't count.
+ */
+export function routeFailed(result: { success?: boolean; status?: number; error?: { code?: string } } | null | undefined): boolean {
+	if (!result || result.success) return false;
+	return (result.status ?? (result.error?.code === "NOT_FOUND" ? 404 : 400)) >= 500;
 }

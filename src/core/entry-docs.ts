@@ -98,7 +98,7 @@ async function readFromContext(ctx: PluginContext, req: EntryDocsRequest): Promi
 		Promise.all(req.collections.map((c) => storage[c]?.get(key) ?? null)),
 		req.data && ctx.content
 			? ctx.content.get(req.collection, req.id).catch(() => {
-					noteReadFailure();
+					noteReadFailure("entry data");
 					return null;
 				})
 			: null,
@@ -125,6 +125,8 @@ async function readUncached(ctx: PluginContext, req: EntryDocsRequest, mustConta
 			return await readFromD1(db, req, mustContain);
 		} catch (error) {
 			ctx.log?.warn?.("coywolf-pack: entry docs read failed; reading them one by one", { error: String(error) });
+			// Without content access the fallback can't read the entry's data (it reads as null).
+			if (req.data && !ctx.content) noteReadFailure("entry data");
 		}
 	}
 	return readFromContext(ctx, req);

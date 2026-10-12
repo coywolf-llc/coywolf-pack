@@ -20,7 +20,7 @@ import type { MiddlewareHandler } from "astro";
 
 import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOption, siteFeatures, siteOption, siteSetting, isOn } from "./core/features.js";
 import { claimSettle, recordSettingsChange } from "./core/generation.js";
-import { noteReadFailure, readFailures } from "./core/read-failures.js";
+import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
 import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
 import { MIDDLEWARE } from "./modules.js";
@@ -198,7 +198,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			} catch (error) {
 				console.error(`coywolf-pack: ${handler.module} middleware failed`, error);
 				// The request goes on to the site instead (a page, or EmDash's own robots.txt): not into the edge cache.
-				noteReadFailure();
+				noteReadFailure(`${handler.module} middleware`);
 			}
 		}
 		// The last word on edge caching, once the response has rendered (settlePage): not cached after a
@@ -214,6 +214,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				stopgap: method === "GET" && isOn(features, "images") ? () => renderedPendingMedia(context.locals, before) : undefined,
 				markHeader: context.request.headers.get("user-agent") === WARMER_AGENT ? STOPGAP_HEADER : undefined,
 				label: `${method} ${context.url.pathname}`,
+				reason: lastReadFailure,
 			});
 		}
 		return afterWrite(await next());

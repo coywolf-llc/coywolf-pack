@@ -198,7 +198,7 @@ test("healthy reads: pages keep the Page cache lifetime, and nothing is counted 
 		assert.equal(await out.text(), "<html><main>page</main></html>");
 		assert.equal(cdnHeader(cache), FULL_LIFETIME, path);
 	}
-	// A HEAD, a JSON endpoint and a 404 the site turned off go through untouched.
+	// A HEAD without a body, a JSON endpoint and a 404 the site turned off go through untouched.
 	const head = routeCache();
 	await coywolfPack({}, [])(context("/d/", head, "HEAD"), async () => new Response(null, { headers: { "content-type": "text/html" } }));
 	assert.equal(cdnHeader(head), "public, max-age=3600", "the route rule's own lifetime (the pack sets GET's)");
@@ -339,7 +339,10 @@ test("discovery files: a server error isn't kept as the answer for a minute; a 4
 	await llmsMiddleware.handle(ctx("/a/index.html.md"));
 	await llmsMiddleware.handle(ctx("/a/index.html.md"));
 	assert.equal(calls.filter((c) => c === "discovery/public/markdown").length, 1, "a 404 is remembered");
-	assert.equal(readFailures(), before + 1, "and isn't a failure");
+	// EmDash's answer while the plugin isn't enabled: NOT_FOUND with no status (a 404 over HTTP).
+	answer = { success: false, error: { code: "NOT_FOUND", message: "Plugin not enabled: coywolf-pack" } };
+	await llmsMiddleware.handle(ctx("/b/index.html.md"));
+	assert.equal(readFailures(), before + 1, "neither is a failure");
 });
 
 test("reviews: entry data that couldn't be read isn't remembered as \"no reviews\"", async () => {
@@ -347,7 +350,7 @@ test("reviews: entry data that couldn't be read isn't remembered as \"no reviews
 	const { noteReadFailure } = await import("../src/core/read-failures.ts");
 	const page = { content: { collection: "posts", id: "r1" }, articleMeta: { modifiedTime: "2026-10-01" } };
 	// readEntryDocs' plugin-context fallback answers null for data it couldn't read, and notes it.
-	const failed = await pageReviews({}, page, async () => (noteReadFailure(), null));
+	const failed = await pageReviews({}, page, async () => (noteReadFailure("entry data"), null));
 	assert.deepEqual(failed, []);
 	const data = { content: [{ _type: "coywolf-review", _key: "a", itemName: "A", rating: "4" }] };
 	const read = await pageReviews({}, page, async () => data);
@@ -373,4 +376,51 @@ test("entry docs: the plugin-context fallback notes entry data it couldn't read"
 	assert.deepEqual(out.docs.get("schemaEntries"), { a: 1 });
 	assert.equal(readFailures(), before + 1);
 	delete globalThis.__testEnv;
+});
+
+test("routeFailed: only a server error (as EmDash's HTTP wiring would answer it) is a failed read", async () => {
+	const { routeFailed } = await import("../src/core/read-failures.ts");
+	assert.equal(routeFailed({ success: false, status: 500, error: { code: "INTERNAL_ERROR" } }), true);
+	assert.equal(routeFailed({ success: false, status: 503 }), true);
+	assert.equal(routeFailed({ success: false, status: 404, error: { code: "NOT_FOUND" } }), false, "a feature that's off");
+	assert.equal(routeFailed({ success: false, error: { code: "NOT_FOUND" } }), false, "the plugin not enabled (no status)");
+	assert.equal(routeFailed({ success: false, error: { code: "ROUTE_NOT_FOUND" } }), false, "400 without a status");
+	assert.equal(routeFailed({ success: false, status: 400, error: { code: "VALIDATION_ERROR" } }), false);
+	assert.equal(routeFailed({ success: true, status: 200 }), false);
+	assert.equal(routeFailed(undefined), false, "no handler");
+});
+
+test("a response from a handler that sets its own edge caching (redirects) isn't cached after a failed read either", async () => {
+	const db = d1();
+	freshIsolate(db);
+	const redirect = (cache) => () => {
+		cache.set(false);
+		cache.set({ maxAge: 30 * 86400, tags: ["coywolf-redirects"] });
+		return new Response(null, { status: 301, headers: { Location: "/new/" } });
+	};
+	const healthy = routeCache();
+	await coywolfPack({}, [{ module: "redirects", feature: "*", ownsCache: true, handle: redirect(healthy) }])(context("/old/", healthy), page());
+	assert.equal(cdnHeader(healthy), `public, max-age=${30 * 86400}`, "its own lifetime, normally");
+	await Promise.allSettled(globalThis.__waitUntil);
+
+	freshIsolate(db);
+	db.broken = true;
+	const blip = routeCache();
+	await coywolfPack({}, [{ module: "redirects", feature: "*", ownsCache: true, handle: redirect(blip) }])(context("/old/", blip), page());
+	assert.equal(isCacheActive(blip), false);
+	await Promise.allSettled(globalThis.__waitUntil);
+});
+
+test("the log line names the page and what failed", async (t) => {
+	const lines = [];
+	t.mock.method(console, "error", (...args) => lines.push(args.map(String).join(" ")));
+	const db = d1();
+	freshIsolate(db);
+	db.broken = true;
+	await (await coywolfPack({}, [])(context("/logged/", routeCache()), page())).text();
+	assert.ok(
+		lines.some((l) => l.includes("GET /logged/ not edge-cached: a read failed while it rendered (last failure: feature switches and settings)")),
+		lines.join("\n"),
+	);
+	await Promise.allSettled(globalThis.__waitUntil);
 });

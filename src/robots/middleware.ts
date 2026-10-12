@@ -68,7 +68,7 @@ async function importOnce(db: D1Database, siteUrl: string): Promise<RobotsConfig
 			} catch (error) {
 				// Can't tell what EmDash serves: keep serving EmDash's file and try again on a later request.
 				console.error("coywolf robots: could not read EmDash's robots.txt; not importing yet", error);
-				noteReadFailure();
+				noteReadFailure("robots.txt import");
 				return null;
 			}
 			const { config } = importRobots(emdashRobots(custom, siteUrl), siteUrl);
@@ -76,7 +76,7 @@ async function importOnce(db: D1Database, siteUrl: string): Promise<RobotsConfig
 				return await insertIfAbsent(db, config);
 			} catch (error) {
 				console.error("coywolf robots: could not save the imported rules", error);
-				noteReadFailure();
+				noteReadFailure("robots.txt import");
 				return null;
 			}
 		})().finally(() => {
@@ -120,7 +120,7 @@ export async function serveRobots(url: URL, method: string, env: Record<string, 
 		} catch (error) {
 			console.error("coywolf robots: could not load rules", error);
 			// EmDash's own robots.txt answers instead: keep it out of the edge cache.
-			noteReadFailure();
+			noteReadFailure("robots.txt rules");
 			return undefined;
 		}
 	}
