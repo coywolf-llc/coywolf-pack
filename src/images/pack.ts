@@ -324,13 +324,26 @@ function siteOrigin(ctx: PluginContext): string | undefined {
 	}
 }
 
-/** Make one uploaded image's stored sizes (after the response). */
-async function variantsForUpload(id: string): Promise<void> {
+/**
+ * Make one uploaded image's stored sizes. Runs after the upload's response
+ * (compose.ts hands media:afterUpload work to waitUntil, gated by the feature
+ * switch), on the raw bindings. Without a media host there are no stored sizes
+ * (the Worker route resizes on request), so nothing is said; a media host with
+ * a binding missing is a misconfiguration, said once per upload: silence here
+ * hid a dropped hook for three releases. A job cut off at waitUntil's limit
+ * (about 30 seconds after the response) leaves no record, and with sizes for
+ * existing images off nothing comes back for it; a run of the backfill does.
+ */
+async function variantsForUpload(media: { id: string; mimeType?: string | null }): Promise<void> {
+	if (!eligible(media.mimeType, 1, 0)) return;
 	const deps = await variantDeps();
-	if (!deps) return;
-	const row = await mediaRow(deps.db, id);
+	if (!deps) {
+		if (imageCdn()) console.warn(`coywolf-pack images: no stored sizes for upload ${media.id}: the ${config.database}, ${config.bucket} or ${config.images} binding is missing`);
+		return;
+	}
+	const row = await mediaRow(deps.db, media.id);
 	if (row) await processMedia(deps, row);
-	forgetInfo(id);
+	forgetInfo(media.id);
 }
 
 const MEDIA_ITEM = /^\/_emdash\/api\/media\/([A-Za-z0-9_-]+)(?:\/(replace))?$/;
@@ -392,13 +405,10 @@ export function imagesPack(options: ImagesOptions = {}): PackModule {
 		adminPages: [{ path: "/images", label: "Clean Image URLs", icon: "image" }],
 		storage: { [VARIANTS_COLLECTION]: { indexes: [] } },
 		hooks: {
-			// Every new upload (EmDash 1.2.0+ runs it for direct uploads too, after POST …/confirm). Quick: the
-			// sizes are made after the upload's response (waitUntil), not during it; an image whose sizes
-			// already exist is left alone (processMedia).
-			"media:afterUpload": async (event: { media: { id: string; mimeType?: string } }) => {
-				if (!eligible(event.media.mimeType, 1, 0)) return;
-				await afterResponse(variantsForUpload(event.media.id).catch((error) => console.error("coywolf-pack images: stored sizes failed", error)));
-			},
+			// Every new upload (EmDash 1.2.0+ runs it for direct uploads too, after POST …/confirm). EmDash
+			// doesn't wait for this hook, so compose.ts runs it under waitUntil, after the upload's response;
+			// an image whose sizes already exist is left alone (processMedia).
+			"media:afterUpload": (event: { media: { id: string; mimeType?: string } }) => variantsForUpload(event.media),
 		},
 		tasks: [
 			{
