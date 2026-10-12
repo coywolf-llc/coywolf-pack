@@ -5,6 +5,7 @@ import type { PluginContext } from "emdash";
 
 import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn } from "./features.js";
 import type { PackModule, TaskDef } from "./module.js";
+import { afterResponse } from "../shared.js";
 
 /**
  * Capability EmDash requires before it registers each hook
@@ -52,6 +53,17 @@ export function hookCapabilities(modules: PackModule[]): string[] {
 
 /** Hooks whose results are collected from every module. */
 const COLLECTING = new Set(["page:metadata", "page:fragments"]);
+/**
+ * Hooks EmDash runs without waiting for them. media:afterUpload is fired and
+ * forgotten right before the upload's response goes out (emdash-runtime
+ * handleMediaCreate), so the composed hook hands the modules' work to
+ * waitUntil at once, before anything async: awaiting anything first (the other
+ * hooks start with a settings read) let the request finish, which dropped the
+ * work without a trace. The modules' handlers check their own feature switch
+ * (siteFeatureOn: the per-isolate cache, no query) and use the raw bindings,
+ * not the plugin context, since they run after the response.
+ */
+const BACKGROUND = new Set(["media:afterUpload"]);
 /** Scheduled jobs can take far longer than EmDash's 5-second hook default (Workers cron allows 15 minutes). */
 const CRON_TIMEOUT_MS = 14 * 60_000;
 /** plugin:activate schedules every task (one D1 write each); a boot-time failure would disable the plugin. */
@@ -75,6 +87,19 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 	for (const name of names) {
 		if (name === "cron" || name === "plugin:activate") continue; // Composed below.
 		const participants = modules.filter((m) => m.hooks?.[name as keyof NonNullable<PackModule["hooks"]>]);
+		if (BACKGROUND.has(name)) {
+			hooks[name] = (event, ctx) => {
+				for (const module of participants) {
+					afterResponse(
+						Promise.resolve()
+							.then(() => module.hooks?.[name as "media:afterUpload"]?.(event, ctx))
+							.catch((error) => console.error(`coywolf-pack: ${module.id}: ${name} failed`, error)),
+					);
+				}
+				return Promise.resolve();
+			};
+			continue;
+		}
 		hooks[name] = async (event, ctx) => {
 			const features = await cachedCtxFeatures(ctx);
 			if (COLLECTING.has(name)) {
