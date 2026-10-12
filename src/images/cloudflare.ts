@@ -287,7 +287,7 @@ export function checkItems(input: {
 					? `/s/64x64/ answered ${r.type || "an image"}${r.cfResized ? " (resized by Cloudflare)" : ""}.`
 					: r.status === 404
 						? originalOk
-							? "/s/64x64/ wasn't found (404) from inside the Worker. A Worker's request to a host on its own zone can reach the bucket without the zone's URL rewrite rules, so this alone doesn't mean the rules are missing: the Clean Image URLs page checks again from your browser."
+							? "/s/64x64/ wasn't found (404) from inside the Worker. A check from the Worker isn't conclusive for a media host on the site's own zone, so this alone doesn't mean the URL rewrite rules are missing: the Clean Image URLs page checks again from your browser."
 							: "/s/64x64/ wasn't found (404): the URL rewrite rules are missing, or don't match this host."
 						: `/s/64x64/ answered ${r.status}. Are Image Transformations on for the zone?`,
 	});

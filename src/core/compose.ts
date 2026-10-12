@@ -88,13 +88,15 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 	const names = new Set<string>();
 	for (const module of modules) for (const name of Object.keys(module.hooks ?? {})) names.add(name);
 
-	const hooks: Record<string, Handler | { handler: Handler; timeout?: number }> = {};
+	const hooks: Record<string, Handler | { handler: Handler; timeout?: number; priority?: number }> = {};
 
 	for (const name of names) {
 		if (name === "cron" || name === "plugin:activate") continue; // Composed below.
 		const participants = modules.filter((m) => m.hooks?.[name as keyof NonNullable<PackModule["hooks"]>]);
 		if (BACKGROUND.has(name)) {
-			hooks[name] = (event, ctx) => {
+			// Priority 0 (EmDash's default is 100, lower runs first): the pipeline runs plugins' handlers one
+			// after another, so this registration comes before another plugin's handler can keep EmDash waiting.
+			hooks[name] = { priority: 0, handler: (event, ctx) => {
 				const job = (async () => {
 					try {
 						const features = await cachedCtxFeatures(ctx);
@@ -114,7 +116,7 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 				// own after() does), so a request-scoped database with a close() stays open until the job is done.
 				afterResponse(deferredTasks()?.track(job) ?? job);
 				return Promise.resolve();
-			};
+			} };
 			continue;
 		}
 		hooks[name] = async (event, ctx) => {

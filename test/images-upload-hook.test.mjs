@@ -27,7 +27,7 @@ registerHooks({
 });
 
 const { composeHooks, hookCapabilities } = await import("../src/core/compose.ts");
-const { invalidateFeatures, registerFeatures } = await import("../src/core/features.ts");
+const { invalidateFeatures, registerFeatures, siteFeatures } = await import("../src/core/features.ts");
 const { imagesPack } = await import("../src/images/pack.ts");
 const { VARIANTS_VERSION } = await import("../src/images/variants.ts");
 const { definePlugin, HookPipeline } = await import("emdash");
@@ -127,6 +127,19 @@ function arrange(options) {
 const madeSizes = (b) => [...b.objects.keys()].filter((k) => k.startsWith(`v${VARIANTS_VERSION}/01UP-`)).sort();
 const EXPECTED = [400, 640, 800].flatMap((w) => [`v${VARIANTS_VERSION}/01UP-${w}.avif`, `v${VARIANTS_VERSION}/01UP-${w}.webp`]).sort();
 const settled = () => Promise.all(globalThis.__waited);
+/** The composed hook is a config object (priority + handler); this calls it as EmDash's pipeline would. */
+const fire = (hooks, event, ctx) => hooks["media:afterUpload"].handler(event, ctx);
+const quiet = async (level, fn) => {
+	const lines = [];
+	const original = console[level];
+	console[level] = (...args) => lines.push(args.map(String).join(" "));
+	try {
+		await fn();
+	} finally {
+		console[level] = original;
+	}
+	return lines;
+};
 
 // AI Enrichment's share of the hook (src/ai/pack.ts), as compose sees it: a participant gated by a sub-feature.
 registerFeatures([
@@ -152,55 +165,69 @@ function aiStandIn() {
 	};
 }
 
-test("the composed media:afterUpload hook hands its work to waitUntil before anything async", async () => {
+test("the composed media:afterUpload hook hands its whole job to waitUntil before anything async", async () => {
 	const { db, b, ctx } = arrange();
 	const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
-	const returned = hooks["media:afterUpload"](structuredClone({ media: upload }), ctx);
-	// Nothing awaited yet: the work is already registered (the request may end at any time now).
+	assert.equal(hooks["media:afterUpload"].priority, 0, "runs before other plugins' handlers of this hook");
+	const returned = fire(hooks, structuredClone({ media: upload }), ctx);
+	// Nothing awaited yet: the work is already registered (the request may end at any time now), and nothing ran synchronously.
 	assert.equal(globalThis.__waited.length, 1, "waitUntil called synchronously");
+	assert.deepEqual(madeSizes(b), [], "nothing is made synchronously");
 	await returned;
-	assert.deepEqual(madeSizes(b), [], "the sizes are made after the response, not during the hook");
-	await settled();
+	// The promise handed to waitUntil is the whole job: waiting for it alone is enough.
+	await globalThis.__waited[0];
 	assert.deepEqual(madeSizes(b), EXPECTED);
 	const [record] = db.records();
 	assert.equal(record?.id, "01UP");
 	assert.deepEqual(JSON.parse(record.data).w, [400, 640, 800]);
 });
 
-test("EmDash 1.2 registers the hook for the config plugin and its fire-and-forget dispatch still gets the work done", async () => {
+test("EmDash 1.2's pipeline registers the hook for the config plugin, dispatches it fire-and-forget, and the sizes get made", async () => {
 	const { db, b } = arrange();
 	const modules = [imagesPack({ cdn: "https://media.example.com" })];
 	const { hooks } = composeHooks(modules, { tasks: [] });
 	// What createPlugin() hands EmDash: the composed hooks with the capabilities they need (media:read for media:afterUpload).
 	const plugin = definePlugin({ id: "coywolf-pack", version: "0.0.0", capabilities: [...new Set([...modules.flatMap((m) => m.capabilities ?? []), ...hookCapabilities(modules)])], hooks });
-	const pipeline = new HookPipeline([plugin], { db: {}, getDb: () => ({}) });
+	// Another plugin on the same hook, default priority: EmDash runs it after the pack's, and ours has already registered its work by then.
+	const seen = [];
+	const other = definePlugin({
+		id: "other-plugin",
+		version: "0.0.0",
+		capabilities: ["media:read"],
+		hooks: { "media:afterUpload": async () => void seen.push(globalThis.__waited.length) },
+	});
+	const pipeline = new HookPipeline([other, plugin], { db: {}, getDb: () => ({}) });
 	assert.equal(pipeline.hasHooks("media:afterUpload"), true, "registered (EmDash skips hooks whose capability is missing)");
-	const errors = [];
-	const original = console.error;
-	console.error = (...args) => errors.push(args.map(String).join(" "));
-	try {
-		// emdash-runtime handleMediaCreate: not awaited, not attached to anything; the response goes out next.
-		const dispatched = pipeline.runMediaAfterUpload(structuredClone(upload));
-		assert.equal(globalThis.__waited.length, 1, "registered before EmDash's dispatch yields");
-		const results = await dispatched;
-		assert.equal(results[0]?.success, true, "EmDash sees the hook succeed at once; the work runs under waitUntil");
-		// EmDash's real plugin context here has a bare db, so its settings read (the switches cache is cold)
-		// fails inside the job: that's logged and nothing is made, rather than failing the upload.
+	// The pack middleware read the switches earlier in the request (per-isolate cache), as in production.
+	await siteFeatures("DB");
+	// emdash-runtime handleMediaCreate: not awaited, not attached to anything; the response goes out next.
+	const dispatched = pipeline.runMediaAfterUpload(structuredClone(upload));
+	assert.equal(globalThis.__waited.length, 1, "registered before EmDash's dispatch yields");
+	const results = await dispatched;
+	assert.deepEqual(results.map((r) => [r.pluginId, r.success]), [["coywolf-pack", true], ["other-plugin", true]], "the pack's handler ran first");
+	assert.deepEqual(seen, [1], "the other plugin's handler saw the pack's work already registered");
+	await settled();
+	assert.deepEqual(madeSizes(b), EXPECTED);
+	assert.equal(db.records().length, 1);
+
+	// With the switches cache cold, EmDash's real plugin context reads them through its db; here that db is
+	// bare, so the read fails inside the job: logged once, nothing made, and the upload itself is unaffected.
+	const cold = arrange();
+	const errors = await quiet("error", async () => {
+		const again = await new HookPipeline([plugin], { db: {}, getDb: () => ({}) }).runMediaAfterUpload(structuredClone(upload));
+		assert.equal(again[0]?.success, true);
 		await settled();
-		assert.deepEqual(madeSizes(b), []);
-		assert.equal(db.records().length, 0);
-		assert.equal(errors.length, 1);
-		assert.match(errors[0], /^coywolf-pack: media:afterUpload failed/);
-	} finally {
-		console.error = original;
-	}
+	});
+	assert.deepEqual(madeSizes(cold.b), []);
+	assert.equal(errors.length, 1);
+	assert.match(errors[0], /^coywolf-pack: media:afterUpload failed/);
 });
 
 test("participants are gated by their feature inside the job: images off, AI on", async () => {
 	const ai = aiStandIn();
 	const { db, b, ctx } = arrange({ features: { images: false, ai: true, "ai.imageText": true } });
 	const { hooks } = composeHooks([ai.module, imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
-	await hooks["media:afterUpload"](structuredClone({ media: upload }), ctx);
+	await fire(hooks, structuredClone({ media: upload }), ctx);
 	assert.equal(globalThis.__waited.length, 1);
 	await settled();
 	assert.deepEqual(madeSizes(b), [], "Clean image URLs off: no sizes");
@@ -217,7 +244,7 @@ test("AI Enrichment's share is skipped while ai.imageText is off (and while ai i
 		const ai = aiStandIn();
 		const { b, ctx } = arrange({ features });
 		const { hooks } = composeHooks([ai.module, imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
-		await hooks["media:afterUpload"](structuredClone({ media: upload }), ctx);
+		await fire(hooks, structuredClone({ media: upload }), ctx);
 		await settled();
 		assert.deepEqual(ai.calls, [], JSON.stringify(features));
 		assert.equal(ctx.aiQueue.size, 0);
@@ -226,21 +253,16 @@ test("AI Enrichment's share is skipped while ai.imageText is off (and while ai i
 });
 
 test("one participant's failure doesn't stop the others", async () => {
-	const errors = [];
-	const original = console.error;
-	console.error = (...args) => errors.push(args.map(String).join(" "));
-	try {
-		const { b, ctx } = arrange({ features: { images: true, ai: true, "ai.imageText": true } });
-		const broken = { ...aiStandIn().module, hooks: { "media:afterUpload": async () => { throw new Error("no model"); } } };
-		const { hooks } = composeHooks([broken, imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
-		await hooks["media:afterUpload"](structuredClone({ media: upload }), ctx);
+	const { b, ctx } = arrange({ features: { images: true, ai: true, "ai.imageText": true } });
+	const broken = { ...aiStandIn().module, hooks: { "media:afterUpload": async () => { throw new Error("no model"); } } };
+	const { hooks } = composeHooks([broken, imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+	const errors = await quiet("error", async () => {
+		await fire(hooks, structuredClone({ media: upload }), ctx);
 		await settled();
-		assert.deepEqual(madeSizes(b), EXPECTED);
-		assert.equal(errors.length, 1);
-		assert.match(errors[0], /^coywolf-pack: ai: media:afterUpload failed/);
-	} finally {
-		console.error = original;
-	}
+	});
+	assert.deepEqual(madeSizes(b), EXPECTED);
+	assert.equal(errors.length, 1);
+	assert.match(errors[0], /^coywolf-pack: ai: media:afterUpload failed/);
 });
 
 test("the job is one of EmDash's deferred tasks when a request context is open", async () => {
@@ -251,7 +273,7 @@ test("the job is one of EmDash's deferred tasks when a request context is open",
 		const store = { deferredTasks: { track: (promise) => (tracked.push(promise), promise) } };
 		const { b, ctx } = arrange();
 		const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
-		await als.run(store, () => hooks["media:afterUpload"](structuredClone({ media: upload }), ctx));
+		await als.run(store, () => fire(hooks, structuredClone({ media: upload }), ctx));
 		assert.equal(tracked.length, 1, "tracked, so a request-scoped database with a close() waits for it");
 		assert.equal(globalThis.__waited[0], tracked[0]);
 		await settled();
@@ -266,43 +288,36 @@ test("src/ai/pack.ts gates its media:afterUpload share with ai.imageText (what t
 	assert.match(source, /hookFeature:\s*\{[^}]*"media:afterUpload":\s*"ai\.imageText"/);
 });
 
-test("a missing binding or media host is said out loud, once per upload", async () => {
-	const warnings = [];
-	const original = console.warn;
-	console.warn = (...args) => warnings.push(args.join(" "));
-	try {
-		const { b, ctx } = arrange();
-		delete globalThis.__testEnv.IMAGES;
-		const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
-		await hooks["media:afterUpload"](structuredClone({ media: upload }), ctx);
+test("a media host with a binding missing is said out loud, once per upload; no media host is nothing to say", async () => {
+	const { b, ctx } = arrange();
+	delete globalThis.__testEnv.IMAGES;
+	const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+	const warnings = await quiet("warn", async () => {
+		await fire(hooks, structuredClone({ media: upload }), ctx);
 		await settled();
-		assert.deepEqual(madeSizes(b), []);
-		assert.equal(warnings.length, 1);
-		assert.match(warnings[0], /^coywolf-pack images: no stored sizes for upload 01UP: the DB, MEDIA or IMAGES binding is missing/);
+	});
+	assert.deepEqual(madeSizes(b), []);
+	assert.equal(warnings.length, 1);
+	assert.match(warnings[0], /^coywolf-pack images: no stored sizes for upload 01UP: the DB, MEDIA or IMAGES binding is missing/);
 
-		const noHost = arrange({ host: null });
-		const { hooks: hooksNoHost } = composeHooks([imagesPack()], { tasks: [] });
-		await hooksNoHost["media:afterUpload"](structuredClone({ media: upload }), noHost.ctx);
+	// The Worker-route mode (Clean image URLs on, no media host): stored sizes don't apply; silence.
+	const noHost = arrange({ host: null });
+	const { hooks: hooksNoHost } = composeHooks([imagesPack()], { tasks: [] });
+	const silence = await quiet("warn", async () => {
+		await fire(hooksNoHost, structuredClone({ media: upload }), noHost.ctx);
 		await settled();
-		assert.equal(warnings.length, 2);
-		assert.match(warnings[1], /no media host is set$/);
-	} finally {
-		console.warn = original;
-	}
+	});
+	assert.deepEqual(silence, []);
+	assert.deepEqual(madeSizes(noHost.b), []);
 });
 
 test("files that can't have stored sizes are left alone without a word", async () => {
-	const warnings = [];
-	const original = console.warn;
-	console.warn = (...args) => warnings.push(args.join(" "));
-	try {
-		const { db, ctx } = arrange();
-		const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
-		await hooks["media:afterUpload"]({ media: { ...upload, id: "01SVG", mimeType: "image/svg+xml" } }, ctx);
+	const { db, ctx } = arrange();
+	const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+	const warnings = await quiet("warn", async () => {
+		await fire(hooks, { media: { ...upload, id: "01SVG", mimeType: "image/svg+xml" } }, ctx);
 		await settled();
-		assert.equal(db.records().length, 0);
-		assert.deepEqual(warnings, []);
-	} finally {
-		console.warn = original;
-	}
+	});
+	assert.equal(db.records().length, 0);
+	assert.deepEqual(warnings, []);
 });

@@ -327,16 +327,18 @@ function siteOrigin(ctx: PluginContext): string | undefined {
 /**
  * Make one uploaded image's stored sizes. Runs after the upload's response
  * (compose.ts hands media:afterUpload work to waitUntil, gated by the feature
- * switch), on the raw bindings. Says why when it can't (a missing media host
- * or binding), once per upload: silence here hid a dropped hook for three
- * releases.
+ * switch), on the raw bindings. Without a media host there are no stored sizes
+ * (the Worker route resizes on request), so nothing is said; a media host with
+ * a binding missing is a misconfiguration, said once per upload: silence here
+ * hid a dropped hook for three releases. A job cut off at waitUntil's limit
+ * (about 30 seconds after the response) leaves no record, and with sizes for
+ * existing images off nothing comes back for it; a run of the backfill does.
  */
 async function variantsForUpload(media: { id: string; mimeType?: string | null }): Promise<void> {
 	if (!eligible(media.mimeType, 1, 0)) return;
 	const deps = await variantDeps();
 	if (!deps) {
-		const why = imageCdn() ? `the ${config.database}, ${config.bucket} or ${config.images} binding is missing` : "no media host is set";
-		console.warn(`coywolf-pack images: no stored sizes for upload ${media.id}: ${why}`);
+		if (imageCdn()) console.warn(`coywolf-pack images: no stored sizes for upload ${media.id}: the ${config.database}, ${config.bucket} or ${config.images} binding is missing`);
 		return;
 	}
 	const row = await mediaRow(deps.db, media.id);

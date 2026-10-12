@@ -33,16 +33,21 @@ export async function workerEnv(): Promise<Record<string, unknown>> {
  * fire-and-forget right before the upload's response) has no time to spare: this
  * used to await a dynamic import first, the hook awaited a settings read before
  * that, and the request finished before waitUntil was reached, dropping the
- * work with it without a word (0.30.0–0.33.0). Outside a Worker the promise just
- * runs; in the first instant of an isolate, before cloudflare:workers has
- * loaded, it's handed over as soon as it has.
+ * work with it without a word (0.30.0–0.33.0). Never throws: outside a Worker,
+ * or outside a request (waitUntil refuses), the promise just runs on its own; in
+ * the first instant of an isolate, before cloudflare:workers has loaded, it's
+ * handed over as soon as it has.
  */
 export function afterResponse(promise: Promise<unknown>): void {
-	if (workers) {
-		workers.waitUntil?.(promise);
-		return;
-	}
-	void workersReady.then((module) => module?.waitUntil?.(promise));
+	const handOver = (module: Workers | null) => {
+		try {
+			module?.waitUntil?.(promise);
+		} catch {
+			// No request to extend: the promise is already running.
+		}
+	};
+	if (workers) handOver(workers);
+	else void workersReady.then(handOver);
 }
 
 /** Read a Worker secret (env binding, or process.env under nodejs_compat). */
