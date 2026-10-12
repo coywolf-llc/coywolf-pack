@@ -5,6 +5,7 @@ import type { PluginContext } from "emdash";
 
 import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn } from "./features.js";
 import type { PackModule, TaskDef } from "./module.js";
+import { noteReadFailure } from "./read-failures.js";
 import { requestStore } from "./request-memo.js";
 import { afterResponse } from "../shared.js";
 
@@ -54,6 +55,24 @@ export function hookCapabilities(modules: PackModule[]): string[] {
 
 /** Hooks whose results are collected from every module. */
 const COLLECTING = new Set(["page:metadata", "page:fragments"]);
+
+/**
+ * EmDash gives a hook 5 seconds (define-plugin.ts), then renders the page
+ * without its part and only logs it. A page hook still running just before
+ * that (D1 slow, not failing) has its page kept out of the edge cache, like
+ * one whose read failed (src/core/read-failures.ts).
+ */
+const PAGE_HOOK_DEADLINE_MS = 4_500;
+function noteIfLate(run: Handler): Handler {
+	return async (event, ctx) => {
+		const late = setTimeout(noteReadFailure, PAGE_HOOK_DEADLINE_MS);
+		try {
+			return await run(event, ctx);
+		} finally {
+			clearTimeout(late);
+		}
+	};
+}
 /**
  * Hooks EmDash runs without waiting for them. media:afterUpload is fired and
  * forgotten right before the upload's response goes out (emdash-runtime
@@ -119,7 +138,7 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 			} };
 			continue;
 		}
-		hooks[name] = async (event, ctx) => {
+		const run: Handler = async (event, ctx) => {
 			const features = await cachedCtxFeatures(ctx);
 			if (COLLECTING.has(name)) {
 				const out: unknown[] = [];
@@ -131,6 +150,8 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 						else if (result) out.push(result);
 					} catch (error) {
 						ctx.log.error(`${module.id}: ${name} failed`, { error: String(error) });
+						// The page goes out without this module's part (its schema, its video player…): not into the edge cache.
+						noteReadFailure();
 					}
 				}
 				return out;
@@ -158,6 +179,7 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 			}
 			return undefined;
 		};
+		hooks[name] = COLLECTING.has(name) ? noteIfLate(run) : run;
 	}
 
 	const tasks = [...extra.tasks, ...modules.flatMap((m) => (m.tasks ?? []).map((t) => ({ ...t, feature: t.feature ?? mainFeature(m) })))];

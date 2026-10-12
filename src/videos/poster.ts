@@ -317,6 +317,8 @@ export async function hostedPosterImage(
 		markPendingMedia(locals);
 		return { ...stream, full: source };
 	} catch {
+		// Stream's poster for now, like a copy still being made: cached for minutes, not days.
+		markPendingMedia(locals);
 		return { ...stream, full: source };
 	}
 }

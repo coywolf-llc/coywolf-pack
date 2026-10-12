@@ -10,6 +10,7 @@
 import type { PluginContext, StorageCollection } from "emdash";
 
 import { PLUGIN_ID, cachedCtxFeatures, isOn, siteFeatures } from "../core/features.js";
+import { noteReadFailure } from "../core/read-failures.js";
 import { type Entity, entityNodes } from "./logic.js";
 import type { EntryRecord } from "./store.js";
 
@@ -52,6 +53,7 @@ export async function getEntryEntities(source: Source, collection: string, id: s
 		const entities = Array.isArray(record?.entities) ? record.entities : [];
 		return { entities, ...entityNodes(entities) };
 	} catch {
+		noteReadFailure(); // The page goes out without its entities: not into the edge cache.
 		return EMPTY; // Schema output must never fail because of enrichment.
 	}
 }

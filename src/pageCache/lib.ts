@@ -134,32 +134,60 @@ export function applyPageLifetime(cache: RouteCache | undefined, maxAgeDays: num
 /** Lifetime of a page rendered with a stopgap (a Stream poster while its media-host copy is made). */
 export const STOPGAP_LIFETIME = { maxAge: 300, swr: 60 } as const;
 
+/** What settlePage asks about a response once it's rendered. */
+export interface SettleChecks {
+	/** A read the render relied on failed (src/core/read-failures.ts): the response isn't edge-cached at all. */
+	failed(): boolean;
+	/** The render used temporary media (src/images/pending.ts): the page is cached for minutes, not days. */
+	stopgap?(): boolean;
+	/** For the cache warmer's own visits: the header that tells it the page wasn't cached (see below). */
+	markHeader?: string;
+	/** Names the request in the log line when a page isn't cached after a failed read (e.g. "GET /about/"). */
+	label?: string;
+}
+
 /**
- * Give a cacheable HTML page a short lifetime when `stopgap()` says its render
- * used temporary content. Astro streams pages: components deeper in the page
- * (a video's poster) render after `next()` returns, but the cache headers are
- * applied when the middleware returns the response. So the body is read in full
- * first, then `stopgap()` is asked, then the lifetime is set; Astro applies it
- * (handleCache) once the middleware chain has returned. Only cached HTML pages
- * are read this way; anything else is returned untouched.
+ * The last word on a GET or HEAD response's edge caching, given once it's
+ * rendered:
+ * - `failed()`: the pack fell back to "off" or "absent" for something it
+ *   couldn't read, so the response isn't the site's real page. Not cached.
+ * - `stopgap()`: the page showed temporary media. Cached for minutes (STOPGAP_LIFETIME).
  *
- * `markHeader` is for the cache warmer's own visits: such a page isn't cached
- * at all, and the response carries `markHeader: 1` so the warmer visits it
- * again once its posters are copied (see src/pageCache/warm.ts). Not caching it
- * keeps the header out of the cache (visitors never see it) and makes sure the
- * warmer's next visit renders the page instead of getting this copy back.
+ * Astro streams pages: components deeper in the page render after `next()`
+ * returns, and they can read settings (a failure noticed only then), mark a
+ * stopgap, or call cache.set(), which turns caching back on after a
+ * set(false). The cache headers are applied once the middleware chain has
+ * returned (Astro's handleCache). So a page about to be cached (HTML, a 200,
+ * a lifetime from the route rules) is read in full first, then asked, then its
+ * caching set, last. Any other response isn't read: one rendered after a
+ * failed read is left out of the cache at once (headers aren't applied until
+ * the chain returns, so nothing it renders later can undo that).
+ *
+ * `markHeader` is for the cache warmer's own visits: a stopgap page (or one
+ * rendered after a failed read) isn't cached at all, and the response carries
+ * `markHeader: 1` so the warmer visits it again later (see
+ * src/pageCache/warm.ts). Not caching it keeps the header out of the cache
+ * (visitors never see it) and makes sure the warmer's next visit renders the
+ * page instead of getting this copy back.
  */
-export async function shortenStopgapPage(cache: RouteCache | undefined, response: Response, stopgap: () => boolean, markHeader?: string): Promise<Response> {
-	const maxAge = cache?.options?.maxAge;
-	if (!cache?.enabled || maxAge === undefined || maxAge <= 0) return response;
-	if (response.status !== 200 || !response.body || !(response.headers.get("content-type") ?? "").startsWith("text/html")) return response;
+export async function settlePage(cache: RouteCache | undefined, response: Response, checks: SettleChecks): Promise<Response> {
+	if (!cache?.enabled) return response;
+	const maxAge = cache.options?.maxAge;
+	if (maxAge === undefined || maxAge <= 0 || response.status !== 200 || !response.body || !(response.headers.get("content-type") ?? "").startsWith("text/html")) {
+		if (checks.failed()) cache.set(false);
+		return response;
+	}
 	const body = await response.arrayBuffer();
 	const headers = new Headers(response.headers);
-	// A component may have turned caching off while rendering: leave that alone.
-	if (stopgap() && cache.enabled && cache.options?.maxAge !== undefined) {
-		if (markHeader) {
+	if (checks.failed()) {
+		console.error(`coywolf-pack: ${checks.label ?? "a page"} not edge-cached: a read failed while it rendered`);
+		cache.set(false);
+		if (checks.markHeader) headers.set(checks.markHeader, "1");
+	} else if (checks.stopgap?.() && cache.enabled && cache.options?.maxAge !== undefined) {
+		// (A component may have turned caching off while rendering: that's left alone.)
+		if (checks.markHeader) {
 			cache.set(false);
-			headers.set(markHeader, "1");
+			headers.set(checks.markHeader, "1");
 		} else cache.set({ maxAge: Math.min(maxAge, STOPGAP_LIFETIME.maxAge), swr: STOPGAP_LIFETIME.swr });
 	}
 	return new Response(body, { status: response.status, statusText: response.statusText, headers });

@@ -9,6 +9,7 @@
  * with an insert-if-absent, so concurrent first requests can't import twice.
  */
 import { PLUGIN_ID, siteFeatures } from "../core/features.js";
+import { noteReadFailure } from "../core/read-failures.js";
 import { emdashRobots, importRobots } from "./importer.js";
 import { type RobotsConfig, automaticFrom, generate, normalizeConfig } from "./rules.js";
 
@@ -67,6 +68,7 @@ async function importOnce(db: D1Database, siteUrl: string): Promise<RobotsConfig
 			} catch (error) {
 				// Can't tell what EmDash serves: keep serving EmDash's file and try again on a later request.
 				console.error("coywolf robots: could not read EmDash's robots.txt; not importing yet", error);
+				noteReadFailure();
 				return null;
 			}
 			const { config } = importRobots(emdashRobots(custom, siteUrl), siteUrl);
@@ -74,6 +76,7 @@ async function importOnce(db: D1Database, siteUrl: string): Promise<RobotsConfig
 				return await insertIfAbsent(db, config);
 			} catch (error) {
 				console.error("coywolf robots: could not save the imported rules", error);
+				noteReadFailure();
 				return null;
 			}
 		})().finally(() => {
@@ -111,10 +114,13 @@ export async function serveRobots(url: URL, method: string, env: Record<string, 
 			const siteUrl = parse("site:url");
 			const site = typeof siteUrl === "string" ? siteUrl : null;
 			const config = stored ? normalizeConfig(stored) : await importOnce(db, siteOrigin(site, url));
-			if (!config) return undefined; // Import deferred: EmDash's robots.txt is served, and nothing is cached.
+			// Import deferred (it failed, and said so): EmDash's robots.txt is served, and nothing is cached, here or at the edge.
+			if (!config) return undefined;
 			cache = { config, siteUrl: site, at: Date.now() };
 		} catch (error) {
 			console.error("coywolf robots: could not load rules", error);
+			// EmDash's own robots.txt answers instead: keep it out of the edge cache.
+			noteReadFailure();
 			return undefined;
 		}
 	}

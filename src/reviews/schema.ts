@@ -8,6 +8,7 @@
 import type { PageMetadataContribution, PageMetadataEvent, PluginContext } from "emdash";
 
 import { cachedCtxFeatures, isOn } from "../core/features.js";
+import { noteReadFailure, readFailures } from "../core/read-failures.js";
 import { siteName } from "../core/site.js";
 import { originOf, pageUrl } from "../schema/graph.js";
 import { BLOCK_TYPE, type Node, type Review, attachReviews, findReviewBlocks, normalizeReview, reviewDocuments } from "./lib.js";
@@ -60,10 +61,13 @@ async function blockReviews(ctx: PluginContext, page: Page, source?: EntryDataSo
 	const hit = memoHit(page);
 	if (hit) return hit;
 	let data: unknown;
+	const failures = readFailures();
 	if (typeof source === "function") data = await source();
 	else if (ctx.content) data = (await ctx.content.get(page.content.collection, page.content.id))?.data;
 	else return [];
 	const reviews = reviewsIn(data);
+	// Entry data that couldn't be read (null, its failure noted) isn't remembered as "no reviews".
+	if (readFailures() !== failures) return reviews;
 	if (memo.size >= MAX_CACHED) memo.delete(memo.keys().next().value as string);
 	memo.set(`${page.content.collection}:${page.content.id}`, { at: Date.now(), stamp: page.articleMeta?.modifiedTime ?? "", reviews });
 	return reviews;
@@ -92,6 +96,7 @@ export async function pageReviewsStep(ctx: PluginContext, page: Page, origin: st
 		reviews = await pageReviews(ctx, page, source);
 	} catch (error) {
 		warn(error);
+		noteReadFailure();
 		return () => {};
 	}
 	return (graph) => {

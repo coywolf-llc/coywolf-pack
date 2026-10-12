@@ -46,9 +46,11 @@ test("page lifetimes apply only to routes the site made cacheable", () => {
 	assert.equal(applyPageLifetime({ ...routeCache(60), enabled: false }, 7, 1), false);
 });
 
-const { shortenStopgapPage, STOPGAP_LIFETIME } = await import("./lib.ts");
+const { settlePage, STOPGAP_LIFETIME } = await import("./lib.ts");
 
 const html = (body = "<p>hi</p>", init = {}) => new Response(body, { headers: { "content-type": "text/html; charset=utf-8" }, ...init });
+/** settlePage with no failed read: the stopgap checks alone. */
+const shortenStopgapPage = (cache, response, stopgap, markHeader) => settlePage(cache, response, { failed: () => false, stopgap, markHeader });
 
 test("a page rendered with a stopgap poster is cached for minutes, decided after its body has rendered", async () => {
 	const page = routeCache(604800);
@@ -124,4 +126,99 @@ test("watchInvalidation notices EmDash clearing pages by tag, and only a success
 	assert.deepEqual(calls.at(-1), { tags: ["posts", "01ABC"] }, "the route's call still reaches the cache");
 	assert.equal(watchInvalidation(undefined)(), false, "no route cache");
 	assert.equal(watchInvalidation({})(), false);
+});
+
+// ── After a failed read (src/core/read-failures.ts) ─────────────
+
+// Astro's own route cache (what context.cache is in production), so set(false) and a later
+// set() behave as they really do: a later set() turns caching back on.
+const { AstroCache, applyCacheHeaders, isCacheActive } = await import(new URL("../../node_modules/astro/dist/core/cache/runtime/cache.js", import.meta.url).href);
+const PROVIDER = { setHeaders: (options) => new Headers({ "Cloudflare-CDN-Cache-Control": options.maxAge === undefined ? "public" : `public, max-age=${options.maxAge}` }) };
+function astroCache(maxAge = 604800) {
+	const cache = new AstroCache(PROVIDER);
+	cache.set({ maxAge, swr: 86400 });
+	return cache;
+}
+/** The CDN header Astro would send for this cache state. */
+const cdnHeader = (cache) => {
+	const response = new Response(null);
+	applyCacheHeaders(cache, response, new Request("https://example.com/"));
+	return response.headers.get("Cloudflare-CDN-Cache-Control");
+};
+
+test("Astro's cache: a set() after set(false) turns caching back on (why settlePage decides last)", () => {
+	const cache = astroCache();
+	cache.set(false);
+	assert.equal(isCacheActive(cache), false);
+	cache.set({ tags: ["emdash:menu:primary"] });
+	assert.equal(isCacheActive(cache), true);
+	assert.equal(cdnHeader(cache), "public");
+});
+
+test("a page whose render saw a failed read isn't cached, decided after its body (a component's late cache.set can't undo it)", async () => {
+	const cache = astroCache();
+	let failed = false;
+	// The layout renders while the body streams: a settings read fails, then the menu adds its cache tag.
+	const stream = new ReadableStream({
+		async pull(controller) {
+			await new Promise((r) => setTimeout(r, 0));
+			failed = true;
+			cache.set({ tags: ["emdash:menu:primary"] });
+			controller.enqueue(new TextEncoder().encode("<main></main>"));
+			controller.close();
+		},
+	});
+	const out = await settlePage(cache, html(stream, { headers: { "content-type": "text/html", "x-keep": "1" } }), { failed: () => failed, label: "GET /a/" });
+	assert.equal(isCacheActive(cache), false);
+	assert.equal(cdnHeader(cache), null, "no Cloudflare-CDN-Cache-Control: the adapter sends no-store");
+	assert.equal(await out.text(), "<main></main>", "the visitor still gets the page");
+	assert.equal(out.headers.get("x-keep"), "1");
+	assert.equal(out.status, 200);
+});
+
+test("a failed read wins over a stopgap; the cache warmer is told to come back", async () => {
+	const visitor = astroCache();
+	await settlePage(visitor, html(), { failed: () => true, stopgap: () => true });
+	assert.equal(isCacheActive(visitor), false, "not cached for minutes either");
+
+	const warmer = astroCache();
+	const marked = await settlePage(warmer, html(), { failed: () => true, markHeader: "X-Coywolf-Stopgap" });
+	assert.equal(isCacheActive(warmer), false);
+	assert.equal(marked.headers.get("x-coywolf-stopgap"), "1", "visited again later (src/pageCache/warm.ts)");
+});
+
+test("other responses after a failed read: left out of the cache without reading their body", async () => {
+	for (const response of [
+		new Response("User-agent: *\nAllow: /\n", { headers: { "content-type": "text/plain" } }), // EmDash's robots.txt
+		new Response("{}", { headers: { "content-type": "application/json" } }),
+		html("<p>later</p>", { status: 503 }),
+		new Response(null, { status: 200, headers: { "content-type": "text/html" } }), // HEAD
+	]) {
+		const cache = astroCache();
+		const out = await settlePage(cache, response, { failed: () => true });
+		assert.equal(out, response, "returned as is, still streaming");
+		assert.equal(response.bodyUsed, false);
+		assert.equal(isCacheActive(cache), false, response.headers.get("content-type"));
+	}
+	// A route that only had cache tags (no lifetime) is still left out.
+	const tagged = new AstroCache(PROVIDER);
+	tagged.set({ tags: ["posts"] });
+	await settlePage(tagged, html(), { failed: () => true });
+	assert.equal(isCacheActive(tagged), false);
+});
+
+test("no failed read: a cacheable page keeps its lifetime, and an uncached route is never turned on", async () => {
+	const cache = astroCache();
+	const out = await settlePage(cache, html(), { failed: () => false });
+	assert.equal(await out.text(), "<p>hi</p>");
+	assert.equal(cdnHeader(cache), "public, max-age=604800");
+
+	const off = astroCache();
+	off.set(false); // e.g. a 404 the site turned off
+	await settlePage(off, html("gone", { status: 404 }), { failed: () => false });
+	assert.equal(isCacheActive(off), false);
+
+	const untouched = html();
+	assert.equal(await settlePage(undefined, untouched, { failed: () => assert.fail("asked") }), untouched, "no route cache (dev)");
+	assert.equal(await settlePage({ enabled: false, set: () => assert.fail("set") }, untouched, { failed: () => assert.fail("asked") }), untouched);
 });

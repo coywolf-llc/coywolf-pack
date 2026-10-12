@@ -10,16 +10,22 @@
  * ```
  *
  * Each module's handler runs only while its feature is on.
+ *
+ * A GET or HEAD answered after one of the pack's reads failed (it then fails
+ * closed: features at their defaults, settings unset, rules absent) is kept out of the edge
+ * cache, so a page rendered without its schema, reviews, videos or redirects
+ * isn't served for days. See src/core/read-failures.ts and settlePage.
  */
 import type { MiddlewareHandler } from "astro";
 
 import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOption, siteFeatures, siteOption, siteSetting, isOn } from "./core/features.js";
 import { claimSettle, recordSettingsChange } from "./core/generation.js";
+import { noteReadFailure, readFailures } from "./core/read-failures.js";
 import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
 import { MIDDLEWARE } from "./modules.js";
 import { ALWAYS, LIFETIME_DEFAULTS, LIFETIME_SETTINGS } from "./pageCache/pack.js";
-import { type PurgeScope, applyPageLifetime, purgePageCache, purgeScope, purgesAfter, shortenStopgapPage, watchInvalidation } from "./pageCache/lib.js";
+import { type PurgeScope, applyPageLifetime, purgePageCache, purgeScope, purgesAfter, settlePage, watchInvalidation } from "./pageCache/lib.js";
 import { STOPGAP_HEADER, WARMER_AGENT, WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, scheduleRewarm, startWarm, warmMayHaveWork, warmStep } from "./pageCache/warm.js";
 import { prefetchRedirects } from "./redirects/middleware.js";
 import { notePackMiddleware } from "./search/live-serve.js";
@@ -78,6 +84,10 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		}
 		// Pages rendered in this isolate may now load the live search client as a file (it's served below).
 		notePackMiddleware();
+		// Reads that fail from here until the response is rendered keep it out of the edge cache.
+		const failuresBefore = readFailures();
+		const readFailed = () => readFailures() !== failuresBefore;
+		const routeCache = (context as unknown as { cache?: Parameters<typeof settlePage>[0] }).cache;
 		const env = workers.env;
 		const waitUntil = (p: Promise<unknown>) => (workers.waitUntil ? workers.waitUntil(p) : void p);
 		// This request's redirect lookup goes to D1 in the same batch as the switches (when they aren't cached).
@@ -182,25 +192,29 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 					// The pack's own responses (robots.txt, files…) set their own Cache-Control.
 					// Without this, a site route rule (e.g. on a catch-all page route) would add
 					// its edge lifetime to them too. Redirects set their own edge caching.
-					if (!handler.ownsCache) (context as unknown as { cache?: { set?(options: false): void } }).cache?.set?.(false);
+					if (!handler.ownsCache || readFailed()) routeCache?.set?.(false);
 					return response;
 				}
 			} catch (error) {
 				console.error(`coywolf-pack: ${handler.module} middleware failed`, error);
+				// The request goes on to the site instead (a page, or EmDash's own robots.txt): not into the edge cache.
+				noteReadFailure();
 			}
 		}
-		// A page that showed a video's Stream poster or an image's /s/ size while its stored copy is
-		// made (src/images/pending.ts) is cached for minutes, not days, so the next render uses the copy.
-		// The cache warmer's render of such a page isn't cached; it's told so (STOPGAP_HEADER) and visits again.
-		if (context.request.method === "GET" && isOn(features, "images")) {
+		// The last word on edge caching, once the response has rendered (settlePage): not cached after a
+		// failed read; and a page that showed a video's Stream poster or an image's /s/ size while its
+		// stored copy is made (src/images/pending.ts) is cached for minutes, not days, so the next render
+		// uses the copy. The cache warmer's render of such a page isn't cached; it's told so
+		// (STOPGAP_HEADER) and visits again.
+		if (method === "GET" || method === "HEAD") {
 			const before = pendingMediaRenders();
 			const response = await next();
-			return shortenStopgapPage(
-				(context as unknown as { cache?: Parameters<typeof shortenStopgapPage>[0] }).cache,
-				response,
-				() => renderedPendingMedia(context.locals, before),
-				context.request.headers.get("user-agent") === WARMER_AGENT ? STOPGAP_HEADER : undefined,
-			);
+			return settlePage(routeCache, response, {
+				failed: readFailed,
+				stopgap: method === "GET" && isOn(features, "images") ? () => renderedPendingMedia(context.locals, before) : undefined,
+				markHeader: context.request.headers.get("user-agent") === WARMER_AGENT ? STOPGAP_HEADER : undefined,
+				label: `${method} ${context.url.pathname}`,
+			});
 		}
 		return afterWrite(await next());
 	};

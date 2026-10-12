@@ -18,6 +18,7 @@
 import type { MiddlewareHandler } from "astro";
 
 import { PLUGIN_ID } from "../core/features.js";
+import { noteReadFailure } from "../core/read-failures.js";
 import type { PackMiddleware } from "../core/module.js";
 import { keyFromPath } from "./indexnow.js";
 import { pagePathFromMarkdownPath } from "./markdown.js";
@@ -29,13 +30,15 @@ type Context = Parameters<MiddlewareHandler>[0];
 interface PublicRouteResult {
 	success: boolean;
 	data?: unknown;
+	/** HTTP status of the route's answer (EmDash sets it; 500 for an error the route didn't expect). */
+	status?: number;
 }
 type PublicRouteHandler = (pluginId: string, method: string, path: string, request: Request) => Promise<PublicRouteResult>;
 
 /** About 2 MB of documents per isolate; bodies over 256 KB and all but 32 misses aren't kept. */
 const memory = new MemoryCache({ ttlMs: 60_000, maxBytes: 2 * 1024 * 1024, maxEntryBytes: 256 * 1024, maxMisses: 32 });
 
-/** Call one of the module's public routes. Null when it isn't available or answers with an error (e.g. 404). */
+/** Call one of the module's public routes. Null when it isn't available or answers with an error (e.g. 404; a server error isn't kept). */
 async function callRoute<T>(context: Context, route: string, query: Record<string, string> = {}): Promise<T | null> {
 	const cacheKey = `${route}?${new URLSearchParams(query)}`;
 	const hit = memory.get(cacheKey);
@@ -48,6 +51,11 @@ async function callRoute<T>(context: Context, route: string, query: Record<strin
 	for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
 	const result = await dispatch(PLUGIN_ID, "GET", route, new Request(url, { method: "GET" }));
 	const value = result.success ? ((result.data ?? null) as T | null) : null;
+	// A server error (a read that failed) isn't kept as the answer: the next request asks again.
+	if (!result.success && (result.status ?? 500) >= 500) {
+		noteReadFailure();
+		return null;
+	}
 
 	memory.set(cacheKey, value);
 	return value;

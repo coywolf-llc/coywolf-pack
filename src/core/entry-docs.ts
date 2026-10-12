@@ -13,6 +13,7 @@ import type { PluginContext, StorageCollection } from "emdash";
 
 import { batchedAll, batchedFirst } from "./d1-batch.js";
 import { PLUGIN_ID } from "./features.js";
+import { noteReadFailure } from "./read-failures.js";
 import { peekRequestMemo, seedRequestMemo } from "./request-memo.js";
 import { workerEnv } from "../shared.js";
 
@@ -95,7 +96,12 @@ async function readFromContext(ctx: PluginContext, req: EntryDocsRequest): Promi
 	const storage = ctx.storage as Record<string, StorageCollection | undefined>;
 	const [values, entry] = await Promise.all([
 		Promise.all(req.collections.map((c) => storage[c]?.get(key) ?? null)),
-		req.data && ctx.content ? ctx.content.get(req.collection, req.id).catch(() => null) : null,
+		req.data && ctx.content
+			? ctx.content.get(req.collection, req.id).catch(() => {
+					noteReadFailure();
+					return null;
+				})
+			: null,
 	]);
 	const out: EntryDocs = { docs: new Map(req.collections.map((c, i) => [c, values[i] ?? null])) };
 	if (req.data) out.data = (entry?.data as Record<string, unknown> | undefined) ?? null;
