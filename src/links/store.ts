@@ -261,6 +261,11 @@ export interface CollectionLinkInfo {
 
 let schemaCache: { at: number; map: Map<string, CollectionLinkInfo> } | null = null;
 
+/** Forget the cached collections, so the next linkCollections reads the schema again. */
+export function resetLinkCollections(): void {
+	schemaCache = null;
+}
+
 /** Collections with link-bearing fields (cached per isolate for a minute). */
 export async function linkCollections(ctx: PluginContext): Promise<Map<string, CollectionLinkInfo>> {
 	if (schemaCache && Date.now() - schemaCache.at < 60_000) return schemaCache.map;
@@ -544,14 +549,31 @@ export async function staleEntries(ctx: PluginContext, ops?: Ops): Promise<strin
 	} else {
 		keys = [...new Set((await queryAll(refs(ctx), undefined, { ops })).map((r) => r.data.entryKey))];
 	}
+	if (!keys.length) return [];
 	const collections = await linkCollections(ctx);
+	// An empty answer can't be told from a failed one (schema access missing, or a listing that came
+	// back empty), and acting on it would delete every reference. Keep them; the next scan tries again.
+	if (!collections.size) {
+		ctx.log.warn("links: no collections with link fields were listed, so no references were cleaned up");
+		return [];
+	}
+	const get = ctx.content?.get;
+	if (!db && !get) {
+		ctx.log.warn("links: content can't be read, so no references were cleaned up");
+		return [];
+	}
 	const byCollection = new Map<string, string[]>();
 	const stale: string[] = [];
 	for (const key of keys) {
 		const slash = key.indexOf("/");
 		const collection = key.slice(0, slash);
-		if (slash < 1 || !collections.has(collection) || !COLLECTION_SLUG.test(collection)) stale.push(key);
-		else byCollection.set(collection, [...(byCollection.get(collection) ?? []), key.slice(slash + 1)]);
+		if (slash < 1 || !collections.has(collection) || !COLLECTION_SLUG.test(collection)) {
+			stale.push(key);
+			continue;
+		}
+		const ids = byCollection.get(collection);
+		if (ids) ids.push(key.slice(slash + 1));
+		else byCollection.set(collection, [key.slice(slash + 1)]);
 	}
 	for (const [collection, ids] of byCollection) {
 		try {
@@ -565,8 +587,8 @@ export async function staleEntries(ctx: PluginContext, ops?: Ops): Promise<strin
 						.bind(...part)
 						.all<{ id: string }>();
 					for (const row of results ?? []) live.add(row.id);
-				} else {
-					for (const id of part) if (await ctx.content?.get(collection, id)) live.add(id);
+				} else if (get) {
+					for (const id of part) if (await get.call(ctx.content, collection, id)) live.add(id);
 				}
 			}
 			for (const id of ids) if (!live.has(id)) stale.push(entryKey(collection, id));

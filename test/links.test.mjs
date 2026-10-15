@@ -695,6 +695,35 @@ test("scan cleanup: references of trashed or deleted entries, or of collections 
 	assert.equal(counts.unchecked, 3);
 });
 
+test("scan cleanup: an empty collection listing or unreadable content keeps every reference", async () => {
+	const entries = Array.from({ length: 3 }, (_, i) => ({ id: `e${i}`, slug: `e${i}`, status: "published", data: { title: `E${i}`, body: [block("1", `https://x.test/${i}`)] } }));
+	const ctx = fakeCtx({ entries });
+	await fullScan(ctx);
+	assert.equal(ctx.storage.links_refs.rows.size, 3);
+	entries.splice(2, 1); // e2 is gone, so a working cleanup would drop one reference
+
+	const schema = ctx.schema;
+	ctx.schema = { listCollections: async () => [] };
+	store.resetLinkCollections();
+	assert.deepEqual(await store.staleEntries(ctx), [], "no collections listed: nothing is stale");
+	ctx.schema = undefined;
+	store.resetLinkCollections();
+	assert.deepEqual(await store.staleEntries(ctx), [], "no schema access: nothing is stale");
+	ctx.schema = schema;
+	store.resetLinkCollections();
+
+	const content = ctx.content;
+	ctx.content = { list: content.list };
+	assert.deepEqual(await store.staleEntries(ctx), [], "content can't be read: nothing is stale");
+	ctx.content = undefined;
+	assert.deepEqual(await store.staleEntries(ctx), [], "no content access: nothing is stale");
+	ctx.content = content;
+	assert.equal(ctx.storage.links_refs.rows.size, 3);
+	assert.ok(ctx.logs.length >= 4, "each case is logged");
+
+	assert.deepEqual(await store.staleEntries(ctx), ["posts/e2"], "with everything readable, the deleted entry is stale");
+});
+
 // ── Schedule (off by default; daily / weekly / monthly runs) ─────
 
 const { linksModule, isRunDue, RUN_KEY } = await import("../src/links/module.ts");
