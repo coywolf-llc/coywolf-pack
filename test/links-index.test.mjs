@@ -93,3 +93,36 @@ test("refsWhere reads every matching row from D1 in one statement, and falls bac
 	assert.equal((await store.refsWhere(ctx, "entryKey", "posts/3")).length, 1);
 	assert.deepEqual(queried, [{ entryKey: "posts/3" }]);
 });
+
+test("the scan cleanup lists entries with references from the entryKey index, without a sort or a row scan", () => {
+	const detail = plan(database(), store.referencedEntriesSql, "coywolf-pack", "links_refs");
+	assert.match(detail, /USING COVERING INDEX idx_plugin_coywolf-pack_links_refs_entryKey/);
+	assert.doesNotMatch(detail, /idx_plugin_storage_list|TEMP B-TREE/);
+});
+
+test("staleEntries with D1: trashed, deleted and unknown-collection entries, a few statements in all", async () => {
+	const sqlite = database(0);
+	sqlite.exec("CREATE TABLE ec_posts (id TEXT PRIMARY KEY, status TEXT, deleted_at TEXT)");
+	sqlite.exec("INSERT INTO ec_posts VALUES ('live', 'published', NULL), ('draft', 'draft', NULL), ('trashed', 'published', '2026-10-01')");
+	const insert = sqlite.prepare("INSERT INTO _plugin_storage (plugin_id, collection, id, data) VALUES ('coywolf-pack', 'links_refs', ?, ?)");
+	for (const key of ["posts/live", "posts/live", "posts/draft", "posts/trashed", "posts/gone", "old/x"]) insert.run(`${key}|${Math.random()}`, JSON.stringify({ entryKey: key }));
+	const statements = [];
+	globalThis.__testEnv = {
+		DB: {
+			prepare(sql) {
+				statements.push(sql);
+				return { bind: (...values) => ({ all: async () => ({ results: sqlite.prepare(sql).all(...values) }) }) };
+			},
+		},
+	};
+	const ctx = {
+		log: { warn() {} },
+		schema: { listCollections: async () => [{ slug: "posts", label: "Posts", titleField: null, supports: [], fields: [{ slug: "body", type: "portableText" }] }] },
+	};
+	const ops = new store.Ops();
+	const stale = await store.staleEntries(ctx, ops);
+	globalThis.__testEnv = undefined;
+	assert.deepEqual(stale.sort(), ["old/x", "posts/gone", "posts/trashed"]);
+	assert.equal(statements.length, 2, "one DISTINCT over the index, one id lookup for the posts");
+	assert.equal(ops.used, 2);
+});

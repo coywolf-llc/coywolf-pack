@@ -74,6 +74,7 @@ export interface RefRow {
 	kinds: LinkKind[];
 	anchors: string[];
 	count: number;
+	/** When the row was last written (the scan no longer rewrites unchanged rows, so nothing reads it). */
 	seenAt: string;
 }
 
@@ -183,6 +184,12 @@ export async function queryAll<T>(
 export const refsWhereSql = (field: "entryKey" | "urlId") =>
 	`SELECT id, data FROM _plugin_storage WHERE plugin_id = ? AND collection = ? AND json_extract(data, '$.${field}') = ?`;
 
+/** The site's D1 binding, when there is one (none in tests or on other databases). */
+async function d1(): Promise<D1Database | undefined> {
+	const db = ((await workerEnv().catch(() => ({}))) as Record<string, unknown>).DB as D1Database | undefined;
+	return db?.prepare ? db : undefined;
+}
+
 /**
  * Reference rows whose `field` equals `value`, in any order, read straight from
  * D1 (one statement, see refsWhereSql). These lookups run once per entry
@@ -190,8 +197,8 @@ export const refsWhereSql = (field: "entryKey" | "urlId") =>
  * binding (tests, other databases) it falls back to the storage API.
  */
 export async function refsWhere(ctx: PluginContext, field: "entryKey" | "urlId", value: string, ops?: Ops): Promise<Array<{ id: string; data: RefRow }>> {
-	const db = ((await workerEnv().catch(() => ({}))) as Record<string, unknown>).DB as D1Database | undefined;
-	if (!db?.prepare) return queryAll(refs(ctx), { [field]: value }, { ops });
+	const db = await d1();
+	if (!db) return queryAll(refs(ctx), { [field]: value }, { ops });
 	ops?.spend();
 	const { results } = await db.prepare(refsWhereSql(field)).bind(PLUGIN_ID, "links_refs", value).all<{ id: string; data: string }>();
 	return (results ?? []).map((row) => ({ id: row.id, data: JSON.parse(row.data) as RefRow }));
@@ -363,14 +370,14 @@ const sameRef = (a: RefRow, b: RefRow) =>
  * Replace an entry's link references with the links in `data`. Returns the
  * number of distinct links, or -1 when the site URL is unknown (nothing is
  * indexed then, since internal links couldn't be told apart).
- * With `scan`, every reference is rewritten so the scan can tell live rows
- * from stale ones by `seenAt`.
+ * Only new and changed references are written, so re-indexing an unchanged
+ * entry (as every scan does) reads its rows and writes nothing.
  */
 export async function indexEntry(
 	ctx: PluginContext,
 	collection: string,
 	item: { id: string; slug?: string | null; status?: string; data: Record<string, unknown> },
-	options: { ignores?: IgnoreRule[]; ops?: Ops; scan?: boolean } = {},
+	options: { ignores?: IgnoreRule[]; ops?: Ops } = {},
 ): Promise<number> {
 	const base = siteUrl(ctx);
 	if (!base) {
@@ -409,7 +416,7 @@ export async function indexEntry(
 	const added = [...next.keys()].filter((id) => !existing.has(id));
 	const changed = [...next].filter(([id, row]) => {
 		const old = existing.get(id);
-		return options.scan || !old || !sameRef(old, row);
+		return !old || !sameRef(old, row);
 	});
 
 	if (removed.length) await deleteMany(refs(ctx), removed.map((id) => `${key}|${id}`), ops);
@@ -518,13 +525,70 @@ async function releaseLease(ctx: PluginContext, owner: string): Promise<void> {
 	if (current?.value?.owner === owner) await ctx.kv.compareAndDelete(LEASE_KEY, current.revision);
 }
 
+/** Collection slugs as EmDash allows them (its tables are `ec_<slug>`). */
+const COLLECTION_SLUG = /^[a-z][a-z0-9_]*$/;
+
+/**
+ * Entries (keys) that have references but that a scan wouldn't visit now:
+ * deleted or trashed, or in a collection that has no link fields any more.
+ * With D1 this is one statement over the entryKey index plus one per 90
+ * entries of each collection; without it, the storage API and content.get.
+ */
+export async function staleEntries(ctx: PluginContext, ops?: Ops): Promise<string[]> {
+	const db = await d1();
+	let keys: string[];
+	if (db) {
+		ops?.spend();
+		const { results } = await db.prepare(referencedEntriesSql).bind(PLUGIN_ID, "links_refs").all<{ k: string | null }>();
+		keys = (results ?? []).map((r) => r.k).filter((k): k is string => typeof k === "string");
+	} else {
+		keys = [...new Set((await queryAll(refs(ctx), undefined, { ops })).map((r) => r.data.entryKey))];
+	}
+	const collections = await linkCollections(ctx);
+	const byCollection = new Map<string, string[]>();
+	const stale: string[] = [];
+	for (const key of keys) {
+		const slash = key.indexOf("/");
+		const collection = key.slice(0, slash);
+		if (slash < 1 || !collections.has(collection) || !COLLECTION_SLUG.test(collection)) stale.push(key);
+		else byCollection.set(collection, [...(byCollection.get(collection) ?? []), key.slice(slash + 1)]);
+	}
+	for (const [collection, ids] of byCollection) {
+		try {
+			const live = new Set<string>();
+			for (const part of chunked(ids)) {
+				ops?.spend(db ? 1 : part.length);
+				if (db) {
+					const sql = `SELECT id FROM "ec_${collection}" WHERE deleted_at IS NULL AND id IN (${part.map(() => "?").join(", ")})`;
+					const { results } = await db
+						.prepare(sql)
+						.bind(...part)
+						.all<{ id: string }>();
+					for (const row of results ?? []) live.add(row.id);
+				} else {
+					for (const id of part) if (await ctx.content?.get(collection, id)) live.add(id);
+				}
+			}
+			for (const id of ids) if (!live.has(id)) stale.push(entryKey(collection, id));
+		} catch (error) {
+			// Keep references when entries can't be looked up: a later scan tries again.
+			ctx.log.warn("links: could not check entries for cleanup", { collection, error: String(error) });
+		}
+	}
+	return stale;
+}
+
+/** Each entry with references, once, read from the entryKey expression index (no ORDER BY, see refsWhereSql). */
+export const referencedEntriesSql = `SELECT DISTINCT json_extract(data, '$.entryKey') AS k FROM _plugin_storage WHERE plugin_id = ? AND collection = ?`;
+
 /** Statements an entry may take; a step stops before starting one it can't afford. */
 const ENTRY_RESERVE = 25;
 const PAGE = 10;
 
 /**
- * Index entries within `ops` (statements and deadline), then drop references
- * the scan didn't see. Returns the state, plus `busy` when another scan step
+ * Index entries within `ops` (statements and deadline), writing only references
+ * that are new or changed, then drop references of entries the scan can't visit
+ * (staleEntries). Returns the state, plus `busy` when another scan step
  * holds the lease.
  */
 export async function scanStep(ctx: PluginContext, ops: Ops): Promise<ScanState & { busy?: boolean }> {
@@ -561,7 +625,7 @@ export async function scanStep(ctx: PluginContext, ops: Ops): Promise<ScanState 
 			for (; i < page.items.length && ops.has(ENTRY_RESERVE); i++) {
 				const item = page.items[i];
 				const data = await latestData(ctx, collection, item, ops);
-				await indexEntry(ctx, collection, { ...item, data }, { ignores, ops, scan: true });
+				await indexEntry(ctx, collection, { ...item, data }, { ignores, ops });
 				state.processed++;
 			}
 			if (i < page.items.length) {
@@ -574,25 +638,19 @@ export async function scanStep(ctx: PluginContext, ops: Ops): Promise<ScanState 
 		}
 		if (state.phase === "index" && state.index >= state.collections.length) state.phase = "cleanup";
 
-		// References this scan didn't refresh belong to entries that no longer exist.
-		while (state.phase === "cleanup" && ops.has(10)) {
-			ops.spend();
-			const stale = await refs(ctx).query({ where: { seenAt: { lt: state.startedAt ?? new Date().toISOString() } }, limit: 50 });
-			if (stale.items.length) {
-				await deleteMany(
-					refs(ctx),
-					stale.items.map((r) => r.id),
-					ops,
-				);
-				await dropOrphans(
-					ctx,
-					stale.items.map((r) => r.data.urlId),
-					ops,
-				);
+		// Entries the scan visited dropped their removed links as they were indexed. What's left is
+		// references from entries it couldn't visit: deleted or trashed, or in a collection without
+		// link fields now. Recomputed each step (a few statements), so cleanup resumes without state.
+		if (state.phase === "cleanup" && ops.has(ENTRY_RESERVE)) {
+			const stale = await staleEntries(ctx, ops);
+			let i = 0;
+			for (; i < stale.length && ops.has(ENTRY_RESERVE); i++) {
+				const slash = stale[i].indexOf("/");
+				await removeEntry(ctx, stale[i].slice(0, slash), stale[i].slice(slash + 1), ops);
 			}
-			if (!stale.hasMore && stale.items.length < 50) {
+			if (i === stale.length) {
 				Object.assign(state, { status: "idle", phase: "index", finishedAt: new Date().toISOString(), cursor: null, offset: 0 });
-				ctx.log.info("links: scan finished", { entries: state.processed });
+				ctx.log.info("links: scan finished", { entries: state.processed, removed: stale.length });
 			}
 		}
 		await ctx.kv.set(SCAN_KEY, state);
