@@ -525,11 +525,16 @@ function fakeCtx({ siteUrl = "https://site.test", entries = [] } = {}) {
 			},
 		},
 		content: {
+			// Like EmDash: trashed entries are neither listed nor found.
 			async list(_collection, { limit, cursor }) {
+				const live = entries.filter((e) => !e.trashed);
 				const start = cursor ? Number(cursor) : 0;
-				const items = entries.slice(start, start + limit);
-				const hasMore = start + limit < entries.length;
+				const items = live.slice(start, start + limit);
+				const hasMore = start + limit < live.length;
 				return { items, hasMore, cursor: hasMore ? String(start + limit) : undefined };
+			},
+			async get(_collection, id) {
+				return entries.find((e) => e.id === id && !e.trashed) ?? null;
 			},
 		},
 	};
@@ -608,6 +613,115 @@ test("scan: bounded steps resume mid-page, stale refs are dropped, one scan at a
 	assert.equal(ctx.storage.links_refs.rows.size, 23);
 	assert.equal(ctx.storage.links_urls.rows.size, 5, "gone.test dropped");
 	assert.ok(![...ctx.storage.links_urls.rows.values()].some((r) => r.url.includes("gone")));
+});
+
+/** Run a scan to the end; returns the ids of links_refs rows written (put) along the way. */
+async function fullScan(ctx) {
+	const written = [];
+	const refs = ctx.storage.links_refs;
+	const putMany = refs.putMany;
+	refs.putMany = async (items) => {
+		written.push(...items.map((i) => i.id));
+		return putMany.call(refs, items);
+	};
+	try {
+		await store.startScan(ctx);
+		let state = await store.getScan(ctx);
+		for (let i = 0; i < 50 && state.status === "running"; i++) state = await store.scanStep(ctx, new store.Ops(60));
+		assert.equal(state.status, "idle");
+		return written.sort();
+	} finally {
+		refs.putMany = putMany;
+	}
+}
+
+test("scan: unchanged entries write no references; only new or changed rows are written", async () => {
+	const entry = (i, extra = {}) => ({ id: `e${i}`, slug: `e${i}`, status: "published", data: { title: `E${i}`, body: [block("1", `https://x.test/${i}`), block("2", "https://shared.test/")] }, ...extra });
+	const entries = Array.from({ length: 6 }, (_, i) => entry(i));
+	const ctx = fakeCtx({ entries });
+	assert.equal((await fullScan(ctx)).length, 12, "the first scan writes every reference");
+	assert.deepEqual(await fullScan(ctx), [], "an unchanged rescan writes nothing");
+	const before = new Map(ctx.storage.links_refs.rows);
+
+	const id = async (e, href) => `posts/${e}|${await store.urlId(href)}`;
+	entries[0] = entry(0, { data: { title: "E0", body: [block("1", "https://x.test/0", "new anchor"), block("2", "https://shared.test/")] } });
+	entries[1] = entry(1, { data: { ...entries[1].data, title: "Renamed" } });
+	entries[2] = entry(2, { status: "draft" });
+	entries[3] = entry(3, { data: { title: "E3", body: [block("1", "https://x.test/3"), { _type: "image", _key: "i", asset: { _ref: "m" }, link: "https://shared.test/" }] } });
+	entries[4] = entry(4, { data: { title: "E4", body: [block("1", "https://x.test/4"), block("2", "https://shared.test/"), block("3", "https://new.test/")] } });
+	entries[5] = entry(5, { data: { title: "E5", body: [block("2", "https://shared.test/")] } });
+	const written = await fullScan(ctx);
+	assert.deepEqual(
+		written,
+		[
+			await id("e0", "https://x.test/0"), // anchor
+			await id("e1", "https://x.test/1"), // title
+			await id("e1", "https://shared.test/"),
+			await id("e2", "https://x.test/2"), // status
+			await id("e2", "https://shared.test/"),
+			await id("e3", "https://shared.test/"), // kinds
+			await id("e4", "https://new.test/"), // added
+		].sort(),
+	);
+	const refs = ctx.storage.links_refs.rows;
+	assert.equal(refs.get(await id("e1", "https://x.test/1")).title, "Renamed");
+	assert.equal(refs.get(await id("e2", "https://x.test/2")).entryStatus, "draft");
+	assert.deepEqual(refs.get(await id("e3", "https://shared.test/")).kinds, ["image"]);
+	assert.deepEqual(refs.get(await id("e0", "https://x.test/0")).anchors, ["new anchor"]);
+	assert.equal(refs.has(await id("e5", "https://x.test/5")), false, "a link removed from an entry is deleted");
+	assert.ok(![...ctx.storage.links_urls.rows.values()].some((r) => r.url === "https://x.test/5"), "and its orphaned URL row");
+	assert.ok([...ctx.storage.links_urls.rows.values()].some((r) => r.url === "https://new.test/"));
+	assert.deepEqual(refs.get(await id("e4", "https://x.test/4")), before.get(await id("e4", "https://x.test/4")), "untouched rows keep their seenAt");
+});
+
+test("scan cleanup: references of trashed or deleted entries, or of collections without link fields, are removed", async () => {
+	const entries = Array.from({ length: 4 }, (_, i) => ({ id: `e${i}`, slug: `e${i}`, status: i === 3 ? "draft" : "published", data: { title: `E${i}`, body: [block("1", `https://x.test/${i}`), block("2", "https://shared.test/")] } }));
+	const ctx = fakeCtx({ entries });
+	await fullScan(ctx);
+	assert.equal(ctx.storage.links_refs.rows.size, 8);
+	// A reference left by a collection that no longer has link fields (or no longer exists).
+	await ctx.storage.links_refs.put(`old/z|${await store.urlId("https://old.test/")}`, { urlId: await store.urlId("https://old.test/"), entryKey: "old/z", collection: "old", entryId: "z", title: "Z", entryStatus: "published", kinds: ["text"], anchors: [], count: 1, seenAt: "2026-01-01T00:00:00.000Z" });
+	await ctx.storage.links_urls.put(await store.urlId("https://old.test/"), { url: "https://old.test/", ignored: false, status: "unchecked", internal: false });
+	entries[1].trashed = true; // trashed without the hook running
+	entries.splice(2, 1); // e2 deleted for good
+
+	assert.deepEqual(await fullScan(ctx), [], "nothing rewritten");
+	const keys = new Set([...ctx.storage.links_refs.rows.values()].map((r) => r.entryKey));
+	assert.deepEqual([...keys].sort(), ["posts/e0", "posts/e3"], "the draft stays; trashed, deleted and old-collection refs go");
+	const left = [...ctx.storage.links_urls.rows.values()].map((r) => r.url).sort();
+	assert.deepEqual(left, ["https://shared.test/", "https://x.test/0", "https://x.test/3"], "orphaned URL rows dropped");
+	const counts = await store.getCounts(ctx, 0);
+	assert.equal(counts.all, 3);
+	assert.equal(counts.unchecked, 3);
+});
+
+test("scan cleanup: an empty collection listing or unreadable content keeps every reference", async () => {
+	const entries = Array.from({ length: 3 }, (_, i) => ({ id: `e${i}`, slug: `e${i}`, status: "published", data: { title: `E${i}`, body: [block("1", `https://x.test/${i}`)] } }));
+	const ctx = fakeCtx({ entries });
+	await fullScan(ctx);
+	assert.equal(ctx.storage.links_refs.rows.size, 3);
+	entries.splice(2, 1); // e2 is gone, so a working cleanup would drop one reference
+
+	const schema = ctx.schema;
+	ctx.schema = { listCollections: async () => [] };
+	store.resetLinkCollections();
+	assert.deepEqual(await store.staleEntries(ctx), [], "no collections listed: nothing is stale");
+	ctx.schema = undefined;
+	store.resetLinkCollections();
+	assert.deepEqual(await store.staleEntries(ctx), [], "no schema access: nothing is stale");
+	ctx.schema = schema;
+	store.resetLinkCollections();
+
+	const content = ctx.content;
+	ctx.content = { list: content.list };
+	assert.deepEqual(await store.staleEntries(ctx), [], "content can't be read: nothing is stale");
+	ctx.content = undefined;
+	assert.deepEqual(await store.staleEntries(ctx), [], "no content access: nothing is stale");
+	ctx.content = content;
+	assert.equal(ctx.storage.links_refs.rows.size, 3);
+	assert.ok(ctx.logs.length >= 4, "each case is logged");
+
+	assert.deepEqual(await store.staleEntries(ctx), ["posts/e2"], "with everything readable, the deleted entry is stale");
 });
 
 // ── Schedule (off by default; daily / weekly / monthly runs) ─────
