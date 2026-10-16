@@ -12,7 +12,7 @@ import * as React from "react";
 import type { BotEntry } from "../robots/bots.js";
 import { describeRule, summarize } from "../robots/explain.js";
 import { evaluate } from "../robots/rep.js";
-import { type RobotsConfig, type RobotsRule, TEMPLATES, directives, resolveAgents } from "../robots/rules.js";
+import { EMDASH_AI_TRAINING_CRAWLERS, type RobotsConfig, type RobotsRule, TEMPLATES, directives, resolveAgents } from "../robots/rules.js";
 import { exportRobotsRules, readRobotsImport } from "../robots/transfer.js";
 import { type Finding, analyzeConfigChange, checkConfig } from "../robots/validate.js";
 import { BotsTab } from "./robots-bots.js";
@@ -242,6 +242,41 @@ function SitemapOption(props: { config: RobotsConfig; siteUrl: string; busy: boo
 					</Button>
 				</div>
 			)}
+		</section>
+	);
+}
+
+/** AI training: EmDash's own Settings > SEO switch, whose lines this robots.txt includes while it's on. */
+function AiTraining(props: { config: RobotsConfig }) {
+	const on = props.config.automatic?.aiTraining === true;
+	const own = props.config.rules.filter((r) => r.enabled && r.group === "ai_training" && r.directive === "disallow");
+	// A site-wide Allow for one of EmDash's crawlers wins over its Disallow: / (the more specific of equal-length lines is Allow).
+	const named = new Set(EMDASH_AI_TRAINING_CRAWLERS.map((t) => t.toLowerCase()));
+	const allowed = props.config.rules.filter((r) => r.enabled && r.directive === "allow" && r.kind === "entire_site" && r.agents.some((a) => named.has(a.toLowerCase())));
+	return (
+		<section className="space-y-2 rounded-lg border border-kumo-line p-4" aria-labelledby="robots-ai-training">
+			<h2 id="robots-ai-training" className="flex items-center gap-2 text-base font-semibold">
+				AI training <Badge variant={on ? "primary" : "secondary"}>{on ? "Disallowed" : "Not set"}</Badge>
+			</h2>
+			<p className="text-sm text-kumo-subtle">
+				{on
+					? `EmDash's "Disallow AI training" is on, so this robots.txt asks AI training crawlers to stay away: a Content-Signal line (search=yes, ai-train=no) and Disallow: / for ${EMDASH_AI_TRAINING_CRAWLERS.join(", ")}.`
+					: `To ask AI training crawlers to stay away, turn on "Disallow AI training" in EmDash's SEO settings. This robots.txt includes its lines while it's on.`}{" "}
+				To block them outright, use your Cloudflare zone's AI bot policies (Training: Block); robots.txt only asks.
+			</p>
+			{on && own.length > 0 && (
+				<p className="text-sm">
+					{own.length === 1 ? `Your rule “${own[0].name}” repeats` : `${own.length} of your rules repeat`} what EmDash's setting adds. You can delete {own.length === 1 ? "it" : "them"} unless {own.length === 1 ? "it names" : "they name"} crawlers you want to keep blocked.
+				</p>
+			)}
+			{on && allowed.length > 0 && (
+				<p className="text-sm">
+					{allowed.map((r) => `“${r.name}”`).join(", ")} {allowed.length === 1 ? "lets" : "let"} some of these crawlers in anyway: an Allow for the whole site wins over EmDash's Disallow.
+				</p>
+			)}
+			<a className="text-sm font-medium text-kumo-link underline" href="/_emdash/admin/settings/seo">
+				Open SEO settings
+			</a>
 		</section>
 	);
 }
@@ -772,6 +807,7 @@ export function RobotsPage() {
 						)}
 					</section>
 					<AutomaticLines config={config} />
+					<AiTraining config={config} />
 					<Tester robotsTxt={data.preview} bots={bots} siteUrl={data.siteUrl} />
 					<ServedFile text={data.preview} emdash={data.emdash} config={config} siteUrl={data.siteUrl} />
 				</div>

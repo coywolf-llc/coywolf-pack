@@ -17,7 +17,7 @@ export const CONFIG_SETTING = "robots.config";
 export const CONFIG_OPTION = `plugin:${PLUGIN_ID}:settings:${CONFIG_SETTING}`;
 const TTL_MS = 60_000;
 
-let cache: { config: RobotsConfig | null; siteUrl: string | null; at: number } | null = null;
+let cache: { config: RobotsConfig | null; siteUrl: string | null; aiTraining: boolean; at: number } | null = null;
 let importing: Promise<RobotsConfig | null> | null = null;
 
 /** Drop the cached rules so the next request reloads them (called after saving). */
@@ -38,6 +38,15 @@ async function readOption<T>(db: D1Database, name: string): Promise<T | null> {
 export async function readEmdashCustomRobots(db: D1Database): Promise<string | null> {
 	const seo = await readOption<{ robotsTxt?: string }>(db, "site:seo");
 	return seo?.robotsTxt?.trim() ? seo.robotsTxt : null;
+}
+
+/** Whether EmDash's Settings > SEO "Disallow AI training" is on (EmDash 1.3+); off when it can't be read. */
+export async function readEmdashAiTraining(db: D1Database): Promise<boolean> {
+	try {
+		return (await readOption<{ disallowAiTraining?: boolean }>(db, "site:seo"))?.disallowAiTraining === true;
+	} catch {
+		return false;
+	}
 }
 
 /** Site origin the way EmDash's robots.txt computes it: the Site URL setting, else the request origin. */
@@ -96,8 +105,8 @@ export async function serveRobots(url: URL, method: string, env: Record<string, 
 			// Both rows in one query. The rules can be large and are only needed here, so they
 			// stay out of the feature switches' per-request read (core/features.ts).
 			const { results } = await db
-				.prepare("SELECT name, value FROM options WHERE name IN (?, ?)")
-				.bind(CONFIG_OPTION, "site:url")
+				.prepare("SELECT name, value FROM options WHERE name IN (?, ?, ?)")
+				.bind(CONFIG_OPTION, "site:url", "site:seo")
 				.all<{ name: string; value: string }>();
 			const parse = (name: string): unknown => {
 				const value = results.find((r) => r.name === name)?.value;
@@ -113,10 +122,12 @@ export async function serveRobots(url: URL, method: string, env: Record<string, 
 			const stored = parse(CONFIG_OPTION) as Partial<RobotsConfig> | null;
 			const siteUrl = parse("site:url");
 			const site = typeof siteUrl === "string" ? siteUrl : null;
+			// EmDash's "Disallow AI training" (Settings > SEO) adds its lines here too, as it does to EmDash's own file.
+			const seo = parse("site:seo") as { disallowAiTraining?: boolean } | null;
 			const config = stored ? normalizeConfig(stored) : await importOnce(db, siteOrigin(site, url));
 			// Import deferred (it failed, and said so): EmDash's robots.txt is served, and nothing is cached, here or at the edge.
 			if (!config) return undefined;
-			cache = { config, siteUrl: site, at: Date.now() };
+			cache = { config, siteUrl: site, aiTraining: seo?.disallowAiTraining === true, at: Date.now() };
 		} catch (error) {
 			console.error("coywolf robots: could not load rules", error);
 			// EmDash's own robots.txt answers instead: keep it out of the edge cache.
@@ -127,7 +138,7 @@ export async function serveRobots(url: URL, method: string, env: Record<string, 
 	if (!cache.config) return undefined;
 
 	// Discovery and Videos add lines (llms.txt/Markdown allowances, their sitemaps) while their features are on.
-	const automatic = automaticFrom(await siteFeatures(database).catch(() => ({})));
+	const automatic = automaticFrom(await siteFeatures(database).catch(() => ({})), cache.aiTraining);
 	const body = generate({ ...cache.config, automatic }, { siteUrl: siteOrigin(cache.siteUrl, url) });
 	return new Response(method === "HEAD" ? null : body, {
 		status: 200,

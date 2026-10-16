@@ -106,6 +106,8 @@ export interface RobotsConfig {
 export interface AutomaticInfo {
 	/** discovery.llms is on (Discovery serves /llms.txt). */
 	llms: boolean;
+	/** EmDash's Settings > SEO "Disallow AI training" is on: its AI-training lines are added (EMDASH_AI_TRAINING). */
+	aiTraining?: boolean;
 }
 
 /** Machine-discovery locations kept reachable by default (RFC 8615 well-known URIs cover security.txt, ai-plugin.json and future manifests). */
@@ -113,10 +115,26 @@ export const WELL_KNOWN_PATH = "/.well-known/";
 /** Only llms.txt by default: llms-full.txt carries the full site text, so adding it is the owner's call (a discovery path). */
 export const LLMS_PATHS = ["/llms.txt"];
 
-/** What the pack's other features add to robots.txt, from the feature switches. */
-export function automaticFrom(features: Record<string, boolean | undefined>): AutomaticInfo {
-	return { llms: Boolean(features["discovery.llms"]) };
+/** What the pack's other features (and EmDash's "Disallow AI training" setting) add to robots.txt. */
+export function automaticFrom(features: Record<string, boolean | undefined>, aiTraining = false): AutomaticInfo {
+	return { llms: Boolean(features["discovery.llms"]), aiTraining };
 }
+
+/** AI training crawlers and opt-out tokens EmDash's "Disallow AI training" names (emdash/src/astro/routes/robots.txt.ts, 1.3.0). */
+export const EMDASH_AI_TRAINING_CRAWLERS = ["Amazonbot", "Applebot-Extended", "Bytespider", "CCBot", "ClaudeBot", "Google-Extended", "GPTBot", "meta-externalagent"];
+
+/**
+ * The lines EmDash adds to its robots.txt when "Disallow AI training" is on,
+ * word for word, so the setting does the same while the pack serves the file.
+ * The empty Disallow closes the `*` group (Content-Signal isn't a rule).
+ */
+export const EMDASH_AI_TRAINING = [
+	"# Disallow AI training",
+	"User-agent: *",
+	"Content-Signal: search=yes, ai-train=no",
+	"Disallow:",
+	...EMDASH_AI_TRAINING_CRAWLERS.flatMap((agent) => ["", `User-agent: ${agent}`, "Disallow: /"]),
+].join("\n");
 
 /** The discovery paths every crawler keeps (empty when the allowance is off). */
 export function discoveryPathsFor(config: Pick<RobotsConfig, "discoveryAllowances" | "discoveryPaths" | "automatic">): string[] {
@@ -558,6 +576,9 @@ export function generate(config: RobotsConfig, options: GenerateOptions): string
 	const extra = config.extra.trim();
 	if (extra) out.push(extra, "");
 
+	// After everything else, as EmDash adds it after its whole file: Extra lines without a User-agent of their own stay with the group they follow.
+	if (config.automatic?.aiTraining) out.push(EMDASH_AI_TRAINING, "");
+
 	for (const s of sitemapUrls(config, siteUrl)) out.push(`Sitemap: ${s}`);
 
 	return `${out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
@@ -785,16 +806,11 @@ export function refreshGroups(config: RobotsConfig, bots: DirectoryBot[] = []): 
 
 const groupById = (id: string) => CRAWLER_GROUPS.find((g) => g.id === id) as CrawlerGroup;
 
-/** Starting points offered in the admin ("named rules"). Tokens are checked against operators' documentation. */
+/**
+ * Starting points offered in the admin ("named rules"). Tokens are checked against operators' documentation.
+ * No AI-training preset: EmDash's Settings > SEO "Disallow AI training" covers it (see EMDASH_AI_TRAINING).
+ */
 export const PRESETS: Array<Omit<RobotsRule, "id" | "enabled">> = [
-	{
-		name: "Block AI training crawlers",
-		description: "Opt out of crawlers that collect content to train AI models. Search and AI answers are unaffected.",
-		directive: "disallow",
-		kind: "entire_site",
-		agents: [...groupById("ai_training").tokens],
-		group: "ai_training",
-	},
 	{
 		name: "Block AI search and assistants",
 		description: "Keep AI answer engines and on-demand AI fetchers out. Your pages won't be cited in their answers.",
@@ -830,23 +846,6 @@ export interface Template {
 
 /** One-click starting points. They replace the rule list and go through the same checks as any change. */
 export const TEMPLATES: Template[] = [
-	{
-		id: "block-ai-training",
-		name: "Block AI training, allow AI search",
-		description: "AI training crawlers are blocked from the whole site. Search engines and AI search and assistants can crawl everything.",
-		rules: (bots) => [
-			{
-				name: "Block AI training crawlers",
-				description: "Opt out of AI model training. Search and AI answers are unaffected.",
-				enabled: true,
-				directive: "disallow",
-				kind: "entire_site",
-				agents: groupTokens(groupById("ai_training"), bots),
-				group: "ai_training",
-				source: "template",
-			},
-		],
-	},
 	{
 		id: "allow-everything",
 		name: "Allow everything",
