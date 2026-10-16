@@ -133,7 +133,7 @@ function Choice(props: { name: string; value: string; checked: boolean; onSelect
 					<span className="block text-xs text-kumo-subtle">{props.hint}</span>
 				</span>
 			</label>
-			{props.checked && props.children && <div className="mt-3 space-y-3 ps-6">{props.children}</div>}
+			{props.checked && props.children && <div className="mt-3 space-y-3 cw-ps-6">{props.children}</div>}
 		</div>
 	);
 }

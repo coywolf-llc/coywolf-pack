@@ -1068,7 +1068,7 @@ function PreviewTab(props: { config: Config }) {
 						{jsonld.map((j) => (
 							<div key={j.id ?? "jsonld"}>
 								<h3 className="mb-1 text-sm font-medium">JSON-LD ({j.id === "primary" ? "replaces EmDash's" : j.id})</h3>
-								<pre className="max-h-[28rem] overflow-auto rounded bg-kumo-tint p-3 text-xs">{JSON.stringify(j.graph, null, 2)}</pre>
+								<pre className="max-h-[28rem] cw-overflow-auto rounded bg-kumo-tint p-3 text-xs">{JSON.stringify(j.graph, null, 2)}</pre>
 							</div>
 						))}
 						{jsonld.length > 0 && (

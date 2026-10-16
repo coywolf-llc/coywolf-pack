@@ -54,6 +54,39 @@ export function purgeScope(pathname: string): PurgeScope | null {
 	return { purgeEverything: true };
 }
 
+/** Most sources one redirect save clears by path; more than this clears everything instead. */
+const MAX_REDIRECT_PATHS = 30;
+
+/** True for the redirect writes whose request body redirectPagesScope reads (read it before the route consumes it). */
+export function isRedirectSave(pathname: string): boolean {
+	return /^redirects\/(save|import)$/.test(pathname.slice(PACK_API.length));
+}
+
+/**
+ * The pages a redirect save or import also has to clear: the cached page at
+ * each new source. Cached pages are served before the Worker runs, so the
+ * redirect would otherwise wait for them to expire (purgeScope only clears the
+ * cached redirects). An exact source clears by path prefix, which covers its
+ * trailing-slash form and query strings; a pattern can cover any page, so it
+ * clears everything. null: nothing to clear (disabled rules, an unreadable body).
+ */
+export function redirectPagesScope(body: unknown): PurgeScope | null {
+	if (!body || typeof body !== "object") return null;
+	const input = body as { rules?: unknown };
+	const rules = (Array.isArray(input.rules) ? input.rules : [body]) as Array<{ source?: unknown; isRegex?: unknown; enabled?: unknown }>;
+	const paths = new Set<string>();
+	for (const rule of rules) {
+		if (!rule || typeof rule !== "object" || rule.enabled === false || typeof rule.source !== "string") continue;
+		if (rule.isRegex === true) return { purgeEverything: true };
+		const path = rule.source.trim().split("?")[0].replace(/\/+$/, "") || "/";
+		if (!path.startsWith("/")) continue;
+		if (path === "/") return { purgeEverything: true };
+		paths.add(path);
+	}
+	if (!paths.size) return null;
+	return paths.size > MAX_REDIRECT_PATHS ? { purgeEverything: true } : { pathPrefixes: [...paths] };
+}
+
 /** Release an RPC result's stubs (Symbol.dispose, where the runtime has it). Anything else is left alone. */
 export function disposeRpcResult(result: unknown): void {
 	if (typeof Symbol.dispose !== "symbol" || !result || typeof result !== "object") return;

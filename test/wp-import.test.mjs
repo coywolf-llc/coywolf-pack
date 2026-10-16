@@ -46,13 +46,17 @@ test("the block parser round-trips every fixture byte for byte and agrees with W
 	}
 });
 
-test("without preparing, EmDash's importer drops self-closing Coywolf blocks (why the prepare step exists)", () => {
+test("without preparing, EmDash's importer leaves self-closing Coywolf blocks as raw block comments (why the prepare step exists)", () => {
 	const pt = gutenbergToPortableText(fixture("reviews.html") + fixture("toc.html"));
-	const json = JSON.stringify(pt);
-	assert.ok(!json.includes("Level Bolt"));
-	assert.ok(!json.includes("coywolf-seo"));
-	// Heading ids are dropped too.
-	assert.ok(!json.includes('"what"'));
+	// Since EmDash 1.3 they're kept, but only as HTML blocks holding the WordPress comment, which render nothing.
+	const coywolf = pt.filter((b) => /wp:coywolf-/.test(JSON.stringify(b)));
+	assert.ok(coywolf.length > 0);
+	for (const block of coywolf) {
+		assert.equal(block._type, "htmlBlock");
+		assert.match(block.html, /^<!-- wp:coywolf-[^>]* \/-->$/);
+	}
+	// Heading ids are dropped.
+	assert.ok(!JSON.stringify(pt).includes('"what"'));
 });
 
 // ── Videos ───────────────────────────────────────────────────────

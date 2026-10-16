@@ -275,7 +275,7 @@ function CorsDialog(props: { result: CorsResult | null; onClose: () => void }) {
 						<p className="mt-4 text-sm">
 							In the Cloudflare dashboard, open <strong>R2 → your bucket → Settings → CORS Policy</strong> and paste:
 						</p>
-						<pre className="mt-2 max-h-56 overflow-auto rounded-md border border-kumo-line bg-kumo-tint p-3 text-xs">{JSON.stringify(r.policy, null, 2)}</pre>
+						<pre className="mt-2 max-h-56 cw-overflow-auto rounded-md border border-kumo-line bg-kumo-tint p-3 text-xs">{JSON.stringify(r.policy, null, 2)}</pre>
 					</>
 				)}
 				<div className="mt-6 flex justify-end">

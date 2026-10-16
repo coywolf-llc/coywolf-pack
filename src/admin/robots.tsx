@@ -227,7 +227,7 @@ function SitemapOption(props: { config: RobotsConfig; siteUrl: string; busy: boo
 				disabled={props.busy}
 				onCheckedChange={(on: boolean) => props.onChange(on)}
 			/>
-			<p className="ps-6 text-xs text-kumo-subtle">A Sitemap line tells every search engine where your sitemap is. Turn it off if you'd rather submit sitemaps yourself, for example in Google Search Console.</p>
+			<p className="cw-ps-6 text-xs text-kumo-subtle">A Sitemap line tells every search engine where your sitemap is. Turn it off if you'd rather submit sitemaps yourself, for example in Google Search Console.</p>
 			{!props.config.includeSitemap && !props.noteDismissed && (
 				<div className="flex items-start gap-2 rounded bg-kumo-tint/40 px-3 py-2 text-sm" role="note">
 					<Info className="mt-0.5 shrink-0 text-kumo-subtle" aria-hidden="true" />
@@ -414,7 +414,7 @@ function SettingsTab(props: {
 					checked={draft.inheritGeneral}
 					onCheckedChange={(on: boolean) => update({ inheritGeneral: on })}
 				/>
-				<p className="-mt-2 ps-6 text-xs text-kumo-subtle">
+				<p className="-mt-2 cw-ps-6 text-xs text-kumo-subtle">
 					In robots.txt, a crawler that's named anywhere ignores every rule for “all crawlers” (RFC 9309). With this on, Coywolf Pack copies those rules into its group, except where its own
 					rules say otherwise.
 				</p>

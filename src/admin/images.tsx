@@ -192,7 +192,7 @@ function CostEstimate({ estimate }: { estimate: Estimate }) {
 			<p className="text-sm font-medium">
 				What it costs: {count(estimate.images)} images, {count(estimate.done)} with their sizes
 			</p>
-			<ul className="list-disc space-y-1.5 ps-6 text-sm">
+			<ul className="list-disc space-y-1.5 cw-ps-6 text-sm">
 				<li>
 					{estimate.transforms ? (
 						<>

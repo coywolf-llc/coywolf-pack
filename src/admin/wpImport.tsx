@@ -1076,7 +1076,7 @@ function MediaUrlsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 					{shown.length > 0 && (
 						<details>
 							<summary className="cursor-pointer text-sm font-medium">URLs ({shown.length.toLocaleString()})</summary>
-							<div className="mt-2 max-h-96 overflow-auto">
+							<div className="mt-2 max-h-96 cw-overflow-auto">
 								<table className="w-full text-left text-sm">
 									<thead className="text-kumo-subtle">
 										<tr>
@@ -1267,7 +1267,7 @@ function RedirectsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 						{plural(built.rules.length, "rule", "rules")} ready.{built.skipped.length ? ` ${plural(built.skipped.length, "rule was", "rules were")} skipped (listed below).` : ""}
 					</p>
 					{built.rules.length > 0 && (
-						<div className="max-h-96 overflow-auto">
+						<div className="max-h-96 cw-overflow-auto">
 							<table className="w-full text-left text-sm">
 								<thead className="text-kumo-subtle">
 									<tr>
