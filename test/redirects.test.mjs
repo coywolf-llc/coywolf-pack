@@ -246,7 +246,7 @@ test("serving from a database without the table: no rules, no error, no CREATE",
 // ── Edge caching (Workers Cache through Astro's route caching) ──
 
 const { serveCachedRedirect, REDIRECT_EDGE_MAX_AGE } = await import("../src/redirects/middleware.ts");
-const { REDIRECTS_TAG, purgeScope, purgePageCache } = await import("../src/pageCache/lib.ts");
+const { REDIRECTS_TAG, purgeScope, purgePageCache, isRedirectSave, redirectPagesScope } = await import("../src/pageCache/lib.ts");
 const { redirectsMiddleware } = await import("../src/redirects/pack.ts");
 
 /** Astro's per-request cache, recording what's set. */
@@ -337,4 +337,24 @@ test("the purge's RPC result is disposed of, whether the purge succeeded or was 
 	assert.equal(await purgePageCache(), true);
 	globalThis.__purge = () => Promise.resolve(undefined);
 	assert.equal(await purgePageCache(), true);
+});
+
+test("a redirect save also clears the pages cached at its new sources", () => {
+	const API = "/_emdash/api/plugins/coywolf-pack/";
+	assert.ok(isRedirectSave(API + "redirects/save"));
+	assert.ok(isRedirectSave(API + "redirects/import"));
+	for (const route of ["redirects/delete", "redirects/list", "redirects/test", "redirects/removed", "robots/save"]) assert.ok(!isRedirectSave(API + route), route);
+
+	// Exact sources clear by prefix, without the trailing slash or query, so both forms go.
+	assert.deepEqual(redirectPagesScope({ source: "/old-post/", target: "/new-post/" }), { pathPrefixes: ["/old-post"] });
+	assert.deepEqual(redirectPagesScope({ source: "/a?x=1", target: "/b" }), { pathPrefixes: ["/a"] });
+	assert.deepEqual(redirectPagesScope({ rules: [{ source: "/a", target: "/b" }, { source: "/c/", target: "/d" }, { source: "/a/", target: "/e" }] }), { pathPrefixes: ["/a", "/c"] });
+	// Disabled rules serve nothing, so no page needs clearing.
+	assert.equal(redirectPagesScope({ source: "/a", target: "/b", enabled: false }), null);
+	// A pattern, the home page, or more sources than one purge takes: everything.
+	assert.deepEqual(redirectPagesScope({ source: "^/2019/(.*)$", target: "/archive/$1", isRegex: true }), { purgeEverything: true });
+	assert.deepEqual(redirectPagesScope({ source: "/", target: "/home" }), { purgeEverything: true });
+	assert.deepEqual(redirectPagesScope({ rules: Array.from({ length: 31 }, (_, i) => ({ source: `/p${i}`, target: "/x" })) }), { purgeEverything: true });
+	// Unreadable bodies clear nothing beyond the redirects' own tag.
+	for (const body of [null, "x", {}, { rules: [] }, { source: 5 }]) assert.equal(redirectPagesScope(body), null);
 });

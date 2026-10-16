@@ -21,6 +21,8 @@ export const ADMIN_CSS = `.cw-fill-tint{fill:var(--color-kumo-tint)}
 .cw-accent-current{accent-color:currentColor}
 .cw-field-icon{bottom:.625rem}
 .cw-w-60{width:15rem}
+.cw-overflow-auto{overflow:auto}
+.cw-ps-6{padding-inline-start:1.5rem}
 .cw-md-flex,.cw-md-table-cell,.cw-lg-block{display:none}
 @media (min-width:40rem){
 .cw-sm-cols-8-fill{grid-template-columns:8rem minmax(0,1fr)}

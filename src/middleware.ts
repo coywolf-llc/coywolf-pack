@@ -25,7 +25,7 @@ import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
 import { MIDDLEWARE } from "./modules.js";
 import { ALWAYS, LIFETIME_DEFAULTS, LIFETIME_SETTINGS } from "./pageCache/pack.js";
-import { type PurgeScope, applyPageLifetime, purgePageCache, purgeScope, purgesAfter, settlePage, watchInvalidation } from "./pageCache/lib.js";
+import { type PurgeScope, applyPageLifetime, isRedirectSave, purgePageCache, purgeScope, purgesAfter, redirectPagesScope, settlePage, watchInvalidation } from "./pageCache/lib.js";
 import { STOPGAP_HEADER, WARMER_AGENT, WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, scheduleRewarm, startWarm, warmMayHaveWork, warmStep } from "./pageCache/warm.js";
 import { prefetchRedirects } from "./redirects/middleware.js";
 import { notePackMiddleware } from "./search/live-serve.js";
@@ -69,6 +69,8 @@ export interface CoywolfPackMiddlewareOptions {
 }
 
 const PASS_THROUGH = /^\/(_astro|_image)\//;
+/** Largest redirect save body read for its sources (redirects/import takes up to 2 MiB). */
+const REDIRECT_BODY_MAX = 2 * 1024 * 1024 + 64 * 1024;
 /** EmDash admin pages (not its API): the pack adds its admin enhancements (step-by-step guides on the plugin Settings page). */
 const ADMIN_PAGE = /^\/_emdash\/admin(\/|$)/;
 
@@ -103,9 +105,18 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			});
 		// Page cache: a successful pack admin write (settings, redirects, imports…) can change any page.
 		if (purgesAfter(context.request.method, context.url.pathname)) {
+			// A redirect save also clears the pages cached at its sources; read its body before the route does.
+			// Only a body the route would accept (it checks permissions after this): anything else gets the tag purge alone.
+			const length = Number(context.request.headers.get("content-length"));
+			const redirectBody =
+				isRedirectSave(context.url.pathname) && length > 0 && length <= REDIRECT_BODY_MAX
+					? context.request.clone().json().catch(() => null)
+					: null;
 			const response = await next();
-			const scope = purgeScope(context.url.pathname);
 			if (response.status < 400) {
+				const pages = redirectPagesScope(await redirectBody);
+				const scope = pages && "purgeEverything" in pages ? pages : purgeScope(context.url.pathname);
+				if (pages && !("purgeEverything" in pages)) waitUntil(purge(pages).catch((error) => console.error("coywolf-pack: could not clear pages at redirect sources", error)));
 				// This isolate's settings caches go now; other isolates drop theirs when they see the new generation.
 				invalidateFeatures();
 				const recorded = db

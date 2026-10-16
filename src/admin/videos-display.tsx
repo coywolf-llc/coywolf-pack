@@ -126,7 +126,7 @@ export function DisplaySettings(props: {
 					</p>
 					<div className="rounded-md bg-kumo-tint/50 p-3">
 						{check("followSiteDefaults", "Make all video blocks follow the site defaults")}
-						<p className="mt-1 ps-6 text-sm text-kumo-subtle">
+						<p className="mt-1 cw-ps-6 text-sm text-kumo-subtle">
 							Blocks added before these settings existed, and blocks imported from WordPress before this version, saved their own on/off choices for the
 							name, description, views, likes and date. Turn this on to ignore those older choices so they follow the settings here. Blocks set to Show or
 							Hide still override.

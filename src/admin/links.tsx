@@ -489,7 +489,7 @@ function IgnoreRulesDialog(props: { open: boolean; rules: IgnoreRule[]; onClose:
 					</Button>
 				</form>
 				{error && <Banner variant="error" role="alert" className="mt-3" description={error} />}
-				<ul className="mt-4 max-h-80 divide-y divide-kumo-line overflow-auto rounded-lg border">
+				<ul className="mt-4 max-h-80 divide-y divide-kumo-line cw-overflow-auto rounded-lg border">
 					{props.rules.map((rule) => (
 						<li key={rule.id} className="flex items-center gap-3 px-3 py-2 text-sm">
 							<Badge variant="secondary">{rule.type}</Badge>
