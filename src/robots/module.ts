@@ -13,7 +13,7 @@ import { parseInput, workerEnv } from "../shared.js";
 import { type BotOverride, applyOverrides, customSlug, mergeDirectory } from "./bots.js";
 import { baselineBots, baselineDate } from "./directory.js";
 import { ADDITIONS_NOTES, emdashRobots, importRobots } from "./importer.js";
-import { CONFIG_SETTING, invalidateRobotsCache, readEmdashCustomRobots } from "./middleware.js";
+import { CONFIG_SETTING, invalidateRobotsCache, readEmdashAiTraining, readEmdashCustomRobots } from "./middleware.js";
 import { RADAR_TOKEN_SETTING, SYNC_STATE_KEY, type SyncState, radarTokenSource, readOverlays, syncRadar } from "./radar.js";
 import { type GroupChange, PRESETS, RULE_KINDS, type RobotsConfig, automaticFrom, generate, isValidToken, normalizeConfig, refreshGroups } from "./rules.js";
 import { checkConfig, extraLineWarnings } from "./validate.js";
@@ -102,6 +102,12 @@ async function emdashServed(database: string, siteUrl: string): Promise<{ text: 
 }
 
 /** Top-level sections from EmDash collections' URL patterns (e.g. "/recipes/{slug}" → "/recipes/"), for the rule dialog. */
+/** EmDash's "Disallow AI training" (Settings > SEO), which the served robots.txt includes. */
+async function emdashAiTraining(database: string): Promise<boolean> {
+	const db = await siteDb(database);
+	return db ? readEmdashAiTraining(db) : false;
+}
+
 async function siteSections(database: string): Promise<Array<{ label: string; path: string }>> {
 	const db = await siteDb(database);
 	if (!db) return [];
@@ -178,10 +184,10 @@ async function loadOrImport(ctx: PluginContext, database: string): Promise<Robot
 	return normalizeConfig(await ctx.settings.get<Partial<RobotsConfig>>(CONFIG_SETTING));
 }
 
-async function persist(ctx: PluginContext, config: RobotsConfig, label: string, by: string | undefined) {
+async function persist(ctx: PluginContext, database: string, config: RobotsConfig, label: string, by: string | undefined) {
 	const siteUrl = siteUrlOf(ctx);
 	const { automatic: _ignored, ...stored } = config;
-	const live: RobotsConfig = { ...stored, automatic: automaticFrom(await ctxFeatures(ctx)) };
+	const live: RobotsConfig = { ...stored, automatic: automaticFrom(await ctxFeatures(ctx), await emdashAiTraining(database)) };
 	const problem = checkConfig(live, siteUrl || undefined);
 	if (problem) throw PluginRouteError.badRequest(problem);
 	const preview = generate(live, { siteUrl });
@@ -243,7 +249,7 @@ export function robotsModule(options: RobotsOptions) {
 						ctx.log.info("Robots: rules updated to the current crawler groups", { rules: groupChanges.length });
 					}
 				}
-				const config: RobotsConfig = { ...refreshed.config, automatic: automaticFrom(await ctxFeatures(ctx)) };
+				const config: RobotsConfig = { ...refreshed.config, automatic: automaticFrom(await ctxFeatures(ctx), await emdashAiTraining(database)) };
 				const siteUrl = siteUrlOf(ctx);
 				const tokenSource = await radarTokenSource(ctx);
 				const emdash = await emdashServed(database, siteUrl).catch(() => ({ text: "EmDash's robots.txt couldn't be read right now.", custom: false }));
@@ -304,7 +310,7 @@ export function robotsModule(options: RobotsOptions) {
 				await requireFeature(ctx, "robots");
 				const input = parseInput(z.object({ config: configInput, label: z.string().max(200).optional() }), ctx.input);
 				const config = normalizeConfig(input.config as RobotsConfig);
-				return persist(ctx, config, input.label?.trim() || "Saved", who(ctx));
+				return persist(ctx, database, config, input.label?.trim() || "Saved", who(ctx));
 			},
 		}),
 
@@ -319,7 +325,7 @@ export function robotsModule(options: RobotsOptions) {
 				const entry = (await ctx.storage[HISTORY_COLLECTION]?.get(id)) as HistoryEntry | null | undefined;
 				if (!entry) throw PluginRouteError.notFound("That version is no longer kept.");
 				const date = new Date(entry.at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
-				return persist(ctx, normalizeConfig(entry.config), `Restored the version from ${date} UTC`, who(ctx));
+				return persist(ctx, database, normalizeConfig(entry.config), `Restored the version from ${date} UTC`, who(ctx));
 			},
 		}),
 
@@ -333,7 +339,7 @@ export function robotsModule(options: RobotsOptions) {
 				const siteUrl = siteUrlOf(ctx);
 				const { text } = await emdashServed(database, siteUrl);
 				const { config } = importRobots(text, siteUrl || "https://example.com");
-				return persist(ctx, config, "Reset to EmDash's original", who(ctx));
+				return persist(ctx, database, config, "Reset to EmDash's original", who(ctx));
 			},
 		}),
 

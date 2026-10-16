@@ -405,10 +405,6 @@ test("templates pass the checks and do what they say", () => {
 			assert.equal(allowed(txt, "GPTBot", "/x/"), false);
 			assert.equal(allowed(txt, "Random", "/x/"), false);
 		}
-		if (t.id === "block-ai-training") {
-			assert.equal(allowed(txt, "GPTBot", "/x/"), false);
-			assert.equal(allowed(txt, "OAI-SearchBot", "/x/"), true);
-		}
 		if (t.id === "allow-everything") assert.equal(allowed(txt, "GPTBot", "/x/"), true);
 	}
 });
@@ -518,7 +514,7 @@ test("match examples come from the real matcher", () => {
 /* ---------------- automatic discovery allowances ---------------- */
 
 test("automaticFrom reads the llms switch; no sitemap or IndexNow lines are added", () => {
-	assert.deepEqual(rules.automaticFrom({ "discovery.llms": true, "discovery.newsSitemap": true, "videos.sitemap": true }), { llms: true });
+	assert.deepEqual(rules.automaticFrom({ "discovery.llms": true, "discovery.newsSitemap": true, "videos.sitemap": true }), { llms: true, aiTraining: false });
 	const txt = gen(cfg([], { automatic: rules.automaticFrom({ "discovery.newsSitemap": true, "videos.sitemap": true }) }));
 	assert.ok(!txt.includes("news-sitemap") && !txt.includes("video-sitemap"));
 });
@@ -699,4 +695,31 @@ test("takeover: a failed read of EmDash's settings imports nothing and serves Em
 	// The saved rules and the Site URL come from one query.
 	assert.equal(reads, 1);
 	await assert.rejects(() => mw.readEmdashCustomRobots(db));
+});
+
+test("EmDash's Disallow AI training setting adds EmDash's own lines, word for word", () => {
+	const off = gen(cfg([]));
+	assert.ok(!off.includes("Content-Signal"));
+	const c = { ...cfg([]), automatic: rules.automaticFrom({}, true) };
+	const txt = gen(c);
+	assert.ok(txt.includes(`${rules.EMDASH_AI_TRAINING}\n`));
+	// Before the sitemap, as in EmDash's file.
+	assert.ok(txt.indexOf("Content-Signal") < txt.indexOf("Sitemap:"));
+	for (const bot of rules.EMDASH_AI_TRAINING_CRAWLERS) assert.equal(allowed(txt, bot, "/x/"), false, bot);
+	// Everyone else keeps the site, and the admin stays closed.
+	assert.equal(allowed(txt, "Googlebot", "/x/"), true);
+	assert.equal(allowed(txt, "OAI-SearchBot", "/x/"), true);
+	assert.equal(allowed(txt, "Googlebot", "/_emdash/admin"), false);
+	assert.equal(val.checkConfig(c, SITE), null);
+	// No AI-training preset or template of the pack's own: EmDash's setting is the one switch.
+	assert.ok(!rules.PRESETS.some((p) => p.group === "ai_training"));
+	assert.ok(!rules.TEMPLATES.some((t) => t.id === "block-ai-training"));
+});
+
+test("EmDash's AI lines come after Extra lines, so lines without a User-agent keep their group", () => {
+	const base = cfg([], { extra: "Disallow: /tmp/" });
+	const on = { ...base, automatic: rules.automaticFrom({}, true) };
+	for (const c of [base, on]) assert.equal(allowed(gen(c), "Googlebot", "/tmp/x"), false);
+	const txt = gen(on);
+	assert.ok(txt.indexOf("Disallow: /tmp/") < txt.indexOf("# Disallow AI training"));
 });

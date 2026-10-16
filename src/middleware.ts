@@ -20,6 +20,7 @@ import type { MiddlewareHandler } from "astro";
 
 import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOption, siteFeatures, siteOption, siteSetting, isOn } from "./core/features.js";
 import { claimSettle, recordSettingsChange } from "./core/generation.js";
+import { invalidateRobotsCache } from "./robots/middleware.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
 import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
@@ -69,6 +70,8 @@ export interface CoywolfPackMiddlewareOptions {
 }
 
 const PASS_THROUGH = /^\/(_astro|_image)\//;
+/** EmDash's site settings API (POST saves General, SEO, Social…). */
+const EMDASH_SETTINGS_API = "/_emdash/api/settings";
 /** Largest redirect save body read for its sources (redirects/import takes up to 2 MiB). */
 const REDIRECT_BODY_MAX = 2 * 1024 * 1024 + 64 * 1024;
 /** EmDash admin pages (not its API): the pack adds its admin enhancements (step-by-step guides on the plugin Settings page). */
@@ -134,7 +137,28 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			method !== "GET" && method !== "HEAD" && context.url.pathname.startsWith("/_emdash/api/")
 				? watchInvalidation((context as unknown as { cache?: Parameters<typeof watchInvalidation>[0] }).cache)
 				: null;
+		// Only SEO saves can change it (not General, Social…), so other settings saves don't touch the settings generation.
+		const settingsLength = Number(context.request.headers.get("content-length"));
+		const seoSave =
+			method === "POST" && context.url.pathname === EMDASH_SETTINGS_API && settingsLength > 0 && settingsLength <= 64 * 1024
+				? await context.request
+						.clone()
+						.json()
+						.then((body: unknown) => Boolean(body && typeof body === "object" && "seo" in body))
+						.catch(() => false)
+				: false;
 		const afterWrite = (response: Response): Response => {
+			// EmDash's SEO settings include "Disallow AI training", whose lines the pack's robots.txt carries: clear it,
+			// here now and (settling purge) again once every isolate's robots.txt cache has expired.
+			if (seoSave && response.status < 400 && isOn(features, "robots")) {
+				invalidateRobotsCache();
+				const scope: PurgeScope = { pathPrefixes: ["/robots.txt"] };
+				waitUntil(
+					(db ? recordSettingsChange(db, scope) : Promise.resolve())
+						.then(() => purge(scope))
+						.catch((error) => console.error("coywolf-pack: could not clear robots.txt after EmDash's settings changed", error)),
+				);
+			}
 			// Stored image sizes follow media deletes, replaced files and WordPress media imports (new uploads: the media:afterUpload hook).
 			if (method !== "GET" && method !== "HEAD" && response.status < 400) {
 				const work = variantsAfterMediaWrite(method, context.url.pathname, isOn(features, "images"), context.url.origin);
