@@ -35,7 +35,7 @@ A page that isn't in the edge cache yet is built by the Worker, and every D1 rou
 | --- | --- |
 | **Performance** | Always on: page cache lifetimes, cache clearing after deploys and settings changes, a Clear pages and images button, and the media host's Cache Rule (see [Faster sites](#faster-sites)) |
 | **Backups** | Full backups (D1 database + R2 media), rewind with undo, restore to a new database, missing-media restore |
-| **Redirects** | Redirect manager for what EmDash's built-in Redirects can't handle: external destinations and file paths |
+| **Redirects** | Redirect manager for what EmDash's built-in Redirects can't handle: external destinations, file paths, regular expressions, query strings, bulk import and export, a URL tester, and redirects for removed content (see [Redirects](#redirects)) |
 | **Headings & TOC** | Linkable headings (`#jump-…` anchors) and a Table of Contents block |
 | **Breadcrumb Nav** | An accessible breadcrumb trail as a theme component and a Breadcrumbs block, fed by the same trail as the breadcrumb schema |
 | **Code Blocks** | Server-side syntax highlighting, themes, language label, copy button and line numbers for code blocks |
@@ -398,10 +398,22 @@ Keep `EMDASH_ENCRYPTION_KEY` in a password manager. It isn't in backups, and enc
 
 ## Redirects
 
-EmDash's built-in Redirects (**Manage → Redirects**) handle site-relative page redirects (since EmDash 1.2.0 they ignore a trailing slash, as this module does). This module covers what they can't:
+EmDash's built-in Redirects (**Manage → Redirects**) handle site-relative page redirects. This module covers what they can't, and leaves the rest to EmDash. Compared with EmDash 1.3:
 
-- **External destinations**, such as affiliate links (`/visit/partner`) and articles that moved to another site.
-- **File paths**, such as old WordPress `/wp-content/uploads/` image URLs. EmDash's middleware skips any path with a file extension.
+| | EmDash Redirects | Coywolf Pack Redirects |
+|---|---|---|
+| External destinations (affiliate links such as `/visit/partner`, articles that moved to another site) | No: destinations must be site paths | Yes |
+| File paths (old WordPress `/wp-content/uploads/` image URLs, `/file.pdf`) | No: its middleware skips any path with a file extension | Yes |
+| Patterns | Whole-segment placeholders only (`/old/[slug]`, `/docs/[...rest]`) | Regular expressions with `$1`–`$9` substitution |
+| Query strings | Dropped | Passed on to the destination (unless it has its own) |
+| Bulk import and export | No (only seed files and full-site transfers) | Paste or upload JSON, CSV or TSV (a Coywolf SEO export from WordPress works as is); export as CSV or JSON |
+| URL tester | No | Yes |
+| Notes | A group label | A note per rule |
+| Trashed or unpublished entries | Nothing | Prompt for a redirect or 410, undone when the entry comes back (see [Removed content](#removed-content)) |
+| Edge caching | Doesn't cache redirects (checks its rules before a page is cached) | Kept in Workers Cache for 30 days, cleared on any redirect change, along with the pages at new sources |
+| Status codes, trailing slashes, hit counts, enable/disable | Yes (also 451) | Yes (301/302/307/308/410) |
+
+Left to EmDash, which does them and the pack doesn't: **automatic redirects when an entry's slug changes**, the **404 log** with "create redirect from this 404", and **loop detection** across rules. When both have a rule for the same path, EmDash's wins (its middleware runs first).
 
 Features: exact paths (with or without a trailing slash) or regular expressions with `$1`–`$9` substitution, 301/302/307/308/410, enable/disable, notes, hit counts, a URL tester, bulk import (paste or choose a file: JSON, or tab/comma-separated `source, target, type, is_regex` rows; a Coywolf SEO export from WordPress works as is), and **Export** as CSV or JSON. Rules are stored in the site's D1 database (`coywolf_redirects`), so backups include them.
 
