@@ -76,6 +76,12 @@ const EMDASH_SETTINGS_API = "/_emdash/api/settings";
 const REDIRECT_BODY_MAX = 2 * 1024 * 1024 + 64 * 1024;
 /** EmDash admin pages (not its API): the pack adds its admin enhancements (step-by-step guides on the plugin Settings page). */
 const ADMIN_PAGE = /^\/_emdash\/admin(\/|$)/;
+/**
+ * EmDash's admin manifest (the sidebar). Read with fresh switches: another isolate's
+ * cached read could otherwise keep a module that was just switched on (or off) out of
+ * (or in) the sidebar for up to FEATURES_TTL_MS.
+ */
+const ADMIN_MANIFEST = "/_emdash/api/manifest";
 
 export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers: PackMiddleware[] = MIDDLEWARE): MiddlewareHandler {
 	return async (context, next) => {
@@ -99,7 +105,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		// (Skipped when the switches this isolate last read have Redirects off.)
 		const known = knownFeatures();
 		if (!known || isOn(known, "redirects")) prefetchRedirects(context.url, env, { database: options.database });
-		const features = await siteFeatures(options.database);
+		const features = await siteFeatures(options.database, context.url.pathname === ADMIN_MANIFEST);
 		const db = env[options.database ?? "DB"] as D1Database | undefined;
 		/** Clear cached pages, then (for a full purge, when warming is on) start warming them again. */
 		const purge = (scope: PurgeScope) =>
