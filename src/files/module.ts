@@ -1,7 +1,7 @@
 /**
  * File Downloads: the admin side. Routes for the block's file picker, the
  * Files page (list, delete, rebuild the usage index), and direct-to-R2 large
- * uploads (start, sign parts, complete, abort, check CORS). Hooks keep an
+ * uploads (start, upload a part through the site, complete, abort). Hooks keep an
  * index of which entries use which files.
  */
 import type { PluginContext, StorageCollection } from "emdash";
@@ -11,7 +11,7 @@ import { z } from "zod";
 import { ctxFeatures, requireFeature } from "../core/features.js";
 import { parseInput, workerEnv } from "../shared.js";
 import { downloadPath, extensionOf, formatSize, isUploadId, newUploadId, safeFilename } from "./format.js";
-import { type R2Config, S3Error, corsPolicyFor, corsProblems, partSizeFor, r2Client } from "./s3.js";
+import { MAX_THROUGH_SITE, type R2Config, S3Error, partSizeFor, r2Client } from "./s3.js";
 import { uploadsBindingName } from "./serve.js";
 import { COLLECTIONS, type UploadDoc, invalidateSiteCache, settingsFrom } from "./site.js";
 import { entryTitle, fileIdsIn } from "./walker.js";
@@ -27,8 +27,15 @@ export const FILES_FEATURE = "files";
 export const LARGE_UPLOADS_FEATURE = "files.largeUploads";
 export const COUNTS_FEATURE = "files.counts";
 
-const MAX_UPLOAD = 5 * 1024 ** 4; // R2's object limit (just under 5 TiB).
+// Parts go through the site (6 MiB each, 10,000 at most): just under 60 GB.
+const MAX_UPLOAD = MAX_THROUGH_SITE;
+/** The Files → Settings ceiling for the largest upload, in GB (fits MAX_UPLOAD). */
+const MAX_UPLOAD_GB_SETTING = 50;
 const DEFAULT_MAX_UPLOAD_GB = 5;
+/** A part's body: PART_SIZE (6 MiB) plus slack, under EmDash's 8 MiB plugin route cap. */
+const PART_BODY_MAX = 7 * 1024 * 1024;
+export const UPLOAD_ID_HEADER = "x-cw-upload-id";
+export const PART_NUMBER_HEADER = "x-cw-part-number";
 const DEFAULT_BASE = "download";
 const STALE_UPLOAD_MS = 24 * 60 * 60 * 1000;
 export const CLEANUP_TASK = "files-abort-stale-uploads";
@@ -57,7 +64,7 @@ const filesSettingsInput = z.object({
 		.string()
 		.trim()
 		.refine((v) => v === "" || hexColor.test(v), "The accent color must be a hex color such as #007392."),
-	filesMaxUploadGb: z.number().int().min(1, "The largest upload must be at least 1 GB.").max(5000, "The largest upload can be at most 5,000 GB."),
+	filesMaxUploadGb: z.number().int().min(1, "The largest upload must be at least 1 GB.").max(MAX_UPLOAD_GB_SETTING, `The largest upload can be at most ${MAX_UPLOAD_GB_SETTING} GB.`),
 	filesR2AccountId: z
 		.string()
 		.trim()
@@ -485,7 +492,7 @@ export function filesModule(options: FilesOptions) {
 					ctx.input,
 				);
 				const maxGb = (await ctx.settings.get<number>("filesMaxUploadGb")) ?? DEFAULT_MAX_UPLOAD_GB;
-				if (input.size > maxGb * 1024 ** 3)
+				if (input.size > Math.min(maxGb, MAX_UPLOAD_GB_SETTING) * 1024 ** 3)
 					throw PluginRouteError.badRequest(`That file is ${formatSize(input.size)}; the limit is ${maxGb} GB (Files → Settings).`);
 				const r2 = await client(ctx);
 				const id = newUploadId();
@@ -509,17 +516,32 @@ export function filesModule(options: FilesOptions) {
 			},
 		}),
 
-		"files/upload-sign": definePluginRoute({
+		/**
+		 * One part of a large upload, uploaded to R2 by the Worker. EmDash's admin
+		 * Content-Security-Policy (connect-src 'self', since EmDash 1.3.1) blocks the browser
+		 * from sending parts to R2 itself. The part goes to the multipart upload recorded by
+		 * files/upload-start, and must be exactly the size that part should be.
+		 */
+		"files/upload-part": definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
-			request: { body: "json" },
+			request: { body: "bytes", maxBytes: PART_BODY_MAX, headers: [UPLOAD_ID_HEADER, PART_NUMBER_HEADER] },
 			handler: async (ctx) => {
 				await requireFeature(ctx, LARGE_UPLOADS_FEATURE);
-				const input = parseInput(z.object({ id: z.string().max(64), partNumbers: z.array(z.number().int().min(1).max(10_000)).min(1).max(100) }), ctx.input);
-				const doc = await getUpload(ctx, input.id);
-				if (doc.status !== "uploading" || !doc.uploadId) throw PluginRouteError.conflict("That upload is already finished.");
+				const id = ctx.request.headers.get(UPLOAD_ID_HEADER) ?? "";
+				const partNumber = Number(ctx.request.headers.get(PART_NUMBER_HEADER));
+				const bytes = ctx.input as Uint8Array;
+				if (!id || id.length > 64) throw PluginRouteError.badRequest("Unknown upload.");
+				const doc = await getUpload(ctx, id);
+				if (doc.status !== "uploading" || !doc.uploadId || !doc.partSize) throw PluginRouteError.conflict("That upload is already finished.");
+				const partCount = Math.max(1, Math.ceil(doc.size / doc.partSize));
+				if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > partCount) throw PluginRouteError.badRequest("Part number out of range.");
+				const expected = partNumber < partCount ? doc.partSize : doc.size - (partCount - 1) * doc.partSize;
+				if (!(bytes instanceof Uint8Array) || bytes.byteLength !== expected)
+					throw PluginRouteError.badRequest(`Part ${partNumber} should be ${expected} bytes, not ${bytes instanceof Uint8Array ? bytes.byteLength : 0}.`);
 				const r2 = await client(ctx);
-				return { parts: await r2.signParts(doc.key, doc.uploadId, input.partNumbers) };
+				const etag = await s3(() => r2.uploadPart(doc.key, doc.uploadId!, partNumber, bytes));
+				return { partNumber, etag };
 			},
 		}),
 
@@ -566,21 +588,6 @@ export function filesModule(options: FilesOptions) {
 				}
 				await col<UploadDoc>(ctx, COLLECTIONS.uploads).delete(id);
 				return { aborted: true };
-			},
-		}),
-
-		/** Read the bucket's CORS rules and say what browser uploads from this site still need. */
-		"files/cors-check": definePluginRoute({
-			permission: "plugins:manage",
-			methods: ["POST"],
-			request: { body: "json" },
-			handler: async (ctx) => {
-				await requireFeature(ctx, LARGE_UPLOADS_FEATURE);
-				const origin = new URL(ctx.request.url).origin;
-				const r2 = await client(ctx);
-				const rules = await s3(() => r2.getCors());
-				const problems = corsProblems(rules, origin);
-				return { ok: problems.length === 0, origin, problems, policy: corsPolicyFor(origin) };
 			},
 		}),
 	};

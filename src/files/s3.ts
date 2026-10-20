@@ -1,12 +1,11 @@
 /**
- * The few R2 S3-API calls large uploads need: start, complete and abort a
- * multipart upload, presign part uploads for the browser, read the bucket's
- * CORS rules, and delete an object. Requests are signed with ./sigv4.ts.
+ * The few R2 S3-API calls large uploads need: start, upload a part of, complete and
+ * abort a multipart upload, and delete an object. Requests are signed with ./sigv4.ts.
  */
-import { type CorsRule, encodeXml, parseCors, xmlValue } from "./r2-rules.js";
-import { EMPTY_SHA256, type SigV4Credentials, presignUrl, sha256Hex, signRequest } from "./sigv4.js";
+import { encodeXml, xmlValue } from "./r2-rules.js";
+import { EMPTY_SHA256, type SigV4Credentials, UNSIGNED_PAYLOAD, sha256Hex, signRequest } from "./sigv4.js";
 
-export { corsPolicyFor, corsProblems, partSizeFor } from "./r2-rules.js";
+export { MAX_THROUGH_SITE, PART_SIZE, partSizeFor } from "./r2-rules.js";
 
 export interface R2Config extends SigV4Credentials {
 	accountId: string;
@@ -15,18 +14,17 @@ export interface R2Config extends SigV4Credentials {
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
-export const PART_URL_TTL = 3600;
 export function r2Host(accountId: string): string {
 	return `${accountId}.r2.cloudflarestorage.com`;
 }
 
 export class S3Error extends Error {
-	constructor(
-		message: string,
-		readonly status: number,
-		readonly code?: string,
-	) {
+	readonly status: number;
+	readonly code?: string;
+	constructor(message: string, status: number, code?: string) {
 		super(message);
+		this.status = status;
+		this.code = code;
 	}
 }
 
@@ -37,15 +35,16 @@ export function r2Client(config: R2Config, fetchImpl: Fetch) {
 	async function call(
 		method: string,
 		path: string,
-		options: { query?: Record<string, string>; headers?: Record<string, string>; body?: string } = {},
+		options: { query?: Record<string, string>; headers?: Record<string, string>; body?: string | Uint8Array } = {},
 	): Promise<{ status: number; text: string; headers: Headers }> {
-		const payloadHash = options.body ? await sha256Hex(options.body) : EMPTY_SHA256;
+		// A part's bytes go unsigned (TLS protects them; hashing megabytes per request costs CPU).
+		const payloadHash = options.body instanceof Uint8Array ? UNSIGNED_PAYLOAD : options.body ? await sha256Hex(options.body) : EMPTY_SHA256;
 		const signed = await signRequest(
 			{ method, host, path, query: options.query, headers: options.headers, region: "auto" },
 			config,
 			payloadHash,
 		);
-		const response = await fetchImpl(signed.url, { method, headers: signed.headers, body: options.body });
+		const response = await fetchImpl(signed.url, { method, headers: signed.headers, body: options.body instanceof Uint8Array ? new Uint8Array(options.body) : options.body });
 		const text = await response.text();
 		if (!response.ok) {
 			const code = xmlValue(text, "Code");
@@ -66,19 +65,12 @@ export function r2Client(config: R2Config, fetchImpl: Fetch) {
 			return uploadId;
 		},
 
-		async signParts(key: string, uploadId: string, partNumbers: number[]): Promise<Array<{ partNumber: number; url: string }>> {
-			return Promise.all(
-				partNumbers.map(async (partNumber) => ({
-					partNumber,
-					url: (
-						await presignUrl(
-							{ method: "PUT", host, path: objectPath(key), query: { partNumber: String(partNumber), uploadId }, region: "auto" },
-							config,
-							PART_URL_TTL,
-						)
-					).url,
-				})),
-			);
+		/** Uploads one part; returns its ETag (for completeMultipart). */
+		async uploadPart(key: string, uploadId: string, partNumber: number, bytes: Uint8Array): Promise<string> {
+			const { headers } = await call("PUT", objectPath(key), { query: { partNumber: String(partNumber), uploadId }, body: bytes });
+			const etag = headers.get("etag");
+			if (!etag) throw new S3Error("R2 didn't return an ETag for the part.", 502);
+			return etag;
 		},
 
 		async completeMultipart(key: string, uploadId: string, parts: Array<{ partNumber: number; etag: string }>): Promise<string | undefined> {
@@ -116,17 +108,6 @@ export function r2Client(config: R2Config, fetchImpl: Fetch) {
 
 		async deleteObject(key: string): Promise<void> {
 			await call("DELETE", objectPath(key));
-		},
-
-		/** The bucket's CORS rules, or [] when none are set. */
-		async getCors(): Promise<CorsRule[]> {
-			try {
-				const { text } = await call("GET", `/${config.bucket}`, { query: { cors: "" } });
-				return parseCors(text);
-			} catch (error) {
-				if (error instanceof S3Error && (error.code === "NoSuchCORSConfiguration" || error.status === 404)) return [];
-				throw error;
-			}
 		},
 	};
 }

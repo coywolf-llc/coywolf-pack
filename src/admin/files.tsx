@@ -1,10 +1,10 @@
 /**
  * Files page: download files used by File download blocks and large uploads,
- * with downloads, where each is used, a direct-to-R2 uploader, a CORS check,
- * and delete.
+ * with downloads, where each is used, a large-file uploader (through the site to
+ * R2), and delete.
  */
 import { Badge, Banner, Button, Dialog, DropdownMenu, Input, Loader, Meter, Select, Tabs } from "@cloudflare/kumo";
-import { ArrowsClockwise, CloudArrowUp, DotsThree, DownloadSimple, FileArrowDown, LinkSimple, ShieldCheck, Trash, X } from "@phosphor-icons/react";
+import { ArrowsClockwise, CloudArrowUp, DotsThree, DownloadSimple, FileArrowDown, LinkSimple, Trash, X } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
@@ -19,8 +19,6 @@ import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/files";
 const CONCURRENCY = 4;
-const SIGN_BATCH = 8;
-const URL_MAX_AGE_MS = 45 * 60_000;
 
 interface Usage {
 	collection: string;
@@ -63,13 +61,6 @@ interface FilesSettings {
 	r2SecretSet: boolean;
 }
 
-interface CorsResult {
-	ok: boolean;
-	origin: string;
-	problems: string[];
-	policy: unknown;
-}
-
 type Filter = "all" | "used" | "unused";
 
 const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
@@ -104,7 +95,7 @@ function TypeBadge({ ext }: { ext: string }) {
 	);
 }
 
-// ── Direct-to-R2 multipart upload ────────────────────────────────
+// ── Large upload (multipart, through the site) ───────────────────
 
 interface UploadProgress {
 	name: string;
@@ -112,18 +103,31 @@ interface UploadProgress {
 	total: number;
 }
 
-function putPart(url: string, body: Blob, onProgress: (loaded: number) => void, signal: AbortSignal): Promise<string> {
+/**
+ * One part, sent to files/upload-part, which uploads it to R2. EmDash's admin
+ * Content-Security-Policy (connect-src 'self', since EmDash 1.3.1) blocks the browser
+ * from sending parts to R2 itself.
+ */
+function sendPart(id: string, partNumber: number, body: Blob, onProgress: (loaded: number) => void, signal: AbortSignal): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const xhr = new XMLHttpRequest();
-		xhr.open("PUT", url);
+		xhr.open("POST", `${API}/upload-part`);
+		xhr.setRequestHeader("X-EmDash-Request", "1");
+		xhr.setRequestHeader("Content-Type", "application/octet-stream");
+		xhr.setRequestHeader("x-cw-upload-id", id);
+		xhr.setRequestHeader("x-cw-part-number", String(partNumber));
 		xhr.upload.onprogress = (e) => onProgress(e.loaded);
 		xhr.onload = () => {
-			if (xhr.status < 200 || xhr.status >= 300) return reject(new Error(`R2 rejected a part (HTTP ${xhr.status}).`));
-			const etag = xhr.getResponseHeader("ETag");
-			if (!etag) return reject(new Error('R2 accepted the part, but the browser can\'t read its ETag. Add "ETag" to ExposeHeaders in the bucket\'s CORS policy.'));
-			resolve(etag);
+			let body: { success?: boolean; data?: { etag?: string }; error?: { message?: string } } | null = null;
+			try {
+				body = JSON.parse(xhr.responseText);
+			} catch {
+				// Not JSON: report the status below.
+			}
+			if (xhr.status >= 200 && xhr.status < 300 && body?.data?.etag) return resolve(body.data.etag);
+			reject(new Error(body?.error?.message || `The site couldn't store a part (HTTP ${xhr.status}).`));
 		};
-		xhr.onerror = () => reject(new Error("The upload was blocked. Check the bucket's CORS policy (use Check CORS)."));
+		xhr.onerror = () => reject(new Error("The upload was interrupted. Check your connection and try again."));
 		xhr.onabort = () => reject(new DOMException("Upload canceled", "AbortError"));
 		signal.addEventListener("abort", () => xhr.abort(), { once: true });
 		xhr.send(body);
@@ -136,19 +140,7 @@ async function uploadLarge(file: File, onProgress: (p: UploadProgress) => void, 
 	try {
 		const loaded = new Array<number>(partCount + 1).fill(0);
 		const report = () => onProgress({ name: file.name, loaded: loaded.reduce((a, b) => a + b, 0), total: file.size });
-		const urls = new Map<number, { url: string; at: number }>();
 		const etags: Array<{ partNumber: number; etag: string }> = [];
-
-		async function urlFor(partNumber: number): Promise<string> {
-			const cached = urls.get(partNumber);
-			if (cached && Date.now() - cached.at < URL_MAX_AGE_MS) return cached.url;
-			const wanted: number[] = [];
-			for (let n = partNumber; n <= partCount && wanted.length < SIGN_BATCH; n++) if (!urls.has(n)) wanted.push(n);
-			if (!wanted.includes(partNumber)) wanted.unshift(partNumber);
-			const { parts } = await post<{ parts: Array<{ partNumber: number; url: string }> }>("upload-sign", { id, partNumbers: wanted }, signal);
-			for (const p of parts) urls.set(p.partNumber, { url: p.url, at: Date.now() });
-			return urls.get(partNumber)!.url;
-		}
 
 		let next = 1;
 		async function worker() {
@@ -157,8 +149,9 @@ async function uploadLarge(file: File, onProgress: (p: UploadProgress) => void, 
 				const blob = file.slice((partNumber - 1) * partSize, Math.min(file.size, partNumber * partSize));
 				for (let attempt = 1; ; attempt++) {
 					try {
-						const etag = await putPart(
-							await urlFor(partNumber),
+						const etag = await sendPart(
+							id,
+							partNumber,
 							blob,
 							(n) => {
 								loaded[partNumber] = n;
@@ -171,9 +164,8 @@ async function uploadLarge(file: File, onProgress: (p: UploadProgress) => void, 
 						etags.push({ partNumber, etag });
 						break;
 					} catch (error) {
-						if (signal.aborted || attempt >= 3 || (error instanceof Error && error.message.includes("ETag"))) throw error;
+						if (signal.aborted || attempt >= 3) throw error;
 						loaded[partNumber] = 0;
-						urls.delete(partNumber);
 						await new Promise((r) => setTimeout(r, 1000 * attempt));
 					}
 				}
@@ -249,38 +241,6 @@ function DeleteDialog(props: { file: FileItem | null; onClose: () => void; onDel
 					</Button>
 					<Button variant="destructive" disabled={pending} onClick={() => void run()}>
 						{pending ? "Deleting…" : "Delete file"}
-					</Button>
-				</div>
-			</Dialog>
-		</Dialog.Root>
-	);
-}
-
-function CorsDialog(props: { result: CorsResult | null; onClose: () => void }) {
-	const r = props.result;
-	return (
-		<Dialog.Root open={r !== null} onOpenChange={(open) => !open && props.onClose()}>
-			<Dialog className="p-6" size="lg">
-				<Dialog.Title className="text-lg font-semibold">{r?.ok ? "CORS is set up" : "The bucket's CORS policy needs changes"}</Dialog.Title>
-				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
-					Browsers upload straight to R2, so the bucket must allow <code>PUT</code> from {r?.origin} and expose the <code>ETag</code> header.
-				</Dialog.Description>
-				{r && !r.ok && (
-					<>
-						<ul className="mt-4 list-disc space-y-1 ps-5 text-sm">
-							{r.problems.map((p) => (
-								<li key={p}>{p}</li>
-							))}
-						</ul>
-						<p className="mt-4 text-sm">
-							In the Cloudflare dashboard, open <strong>R2 → your bucket → Settings → CORS Policy</strong> and paste:
-						</p>
-						<pre className="mt-2 max-h-56 cw-overflow-auto rounded-md border border-kumo-line bg-kumo-tint p-3 text-xs">{JSON.stringify(r.policy, null, 2)}</pre>
-					</>
-				)}
-				<div className="mt-6 flex justify-end">
-					<Button variant="primary" onClick={props.onClose}>
-						Done
 					</Button>
 				</div>
 			</Dialog>
@@ -423,7 +383,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 						<Input
 							type="number"
 							min={1}
-							max={5000}
+							max={50}
 							label="Largest upload (GB)"
 							description="Larger uploads are refused. Default 5."
 							value={draft.filesMaxUploadGb}
@@ -455,7 +415,6 @@ export function FilesPage() {
 	const [query, setQuery] = React.useState("");
 	const [filter, setFilter] = React.useState<Filter>("all");
 	const [deleting, setDeleting] = React.useState<FileItem | null>(null);
-	const [cors, setCors] = React.useState<CorsResult | null>(null);
 	const [busy, setBusy] = React.useState<string>();
 	const [progress, setProgress] = React.useState<UploadProgress | null>(null);
 	const [tab, setTab] = React.useState("files");
@@ -493,18 +452,6 @@ export function FilesPage() {
 		} finally {
 			abortRef.current = null;
 			setProgress(null);
-		}
-	};
-
-	const checkCors = async () => {
-		setBusy("cors");
-		setError(undefined);
-		try {
-			setCors(await post<CorsResult>("cors-check", {}));
-		} catch (cause) {
-			setError(errorText(cause, "Could not check CORS"));
-		} finally {
-			setBusy(undefined);
 		}
 	};
 
@@ -574,9 +521,6 @@ export function FilesPage() {
 						)}
 						{tab === "files" && data?.largeUploadsEnabled && data.r2Configured && (
 							<>
-								<Button variant="secondary" icon={<ShieldCheck />} disabled={!!busy} onClick={() => void checkCors()}>
-									{busy === "cors" ? "Checking…" : "Check CORS"}
-								</Button>
 								<Button variant="primary" icon={<CloudArrowUp />} disabled={!!progress} onClick={() => inputRef.current?.click()}>
 									Upload large file
 								</Button>
@@ -839,7 +783,6 @@ export function FilesPage() {
 					void load();
 				}}
 			/>
-			<CorsDialog result={cors} onClose={() => setCors(null)} />
 		</div>
 	);
 }

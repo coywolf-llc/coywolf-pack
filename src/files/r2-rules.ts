@@ -1,16 +1,21 @@
 /**
- * Pure R2 helpers: multipart part sizing, minimal XML reading, and the CORS
- * rules browser uploads need. No imports, so `node --test` can load this file.
+ * Pure R2 helpers: multipart part sizing and minimal XML reading. No imports, so
+ * `node --test` can load this file.
  */
 
-const MIN_PART = 8 * 1024 * 1024;
+/**
+ * Every part goes through the site (files/upload-part; EmDash's admin CSP blocks the
+ * browser from reaching R2), so parts must fit a plugin route body (8 MiB). 6 MiB is
+ * above R2's 5 MiB minimum and leaves headroom.
+ */
+export const PART_SIZE = 6 * 1024 * 1024;
 const MAX_PARTS = 10_000;
+/** The largest file that fits in 10,000 parts of PART_SIZE (just under 60 GB). */
+export const MAX_THROUGH_SITE = PART_SIZE * MAX_PARTS;
 
-/** Equal-sized parts (R2 requires every part but the last to be the same size), in whole MiB. */
-export function partSizeFor(size: number): number {
-	const mib = 1024 * 1024;
-	const needed = Math.ceil(size / MAX_PARTS);
-	return Math.max(MIN_PART, Math.ceil(needed / mib) * mib);
+/** Equal-sized parts (R2 requires every part but the last to be the same size). */
+export function partSizeFor(_size: number): number {
+	return PART_SIZE;
 }
 
 export function xmlValue(xml: string, tag: string): string | undefined {
@@ -33,46 +38,4 @@ function decodeXml(value: string): string {
 
 export function encodeXml(value: string): string {
 	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-export interface CorsRule {
-	origins: string[];
-	methods: string[];
-	headers: string[];
-	expose: string[];
-}
-
-export function parseCors(xml: string): CorsRule[] {
-	return xmlValues(xml, "CORSRule").map((rule) => ({
-		origins: xmlValues(rule, "AllowedOrigin"),
-		methods: xmlValues(rule, "AllowedMethod").map((m) => m.toUpperCase()),
-		headers: xmlValues(rule, "AllowedHeader").map((h) => h.toLowerCase()),
-		expose: xmlValues(rule, "ExposeHeader").map((h) => h.toLowerCase()),
-	}));
-}
-
-function originMatches(pattern: string, origin: string): boolean {
-	if (pattern === "*") return true;
-	if (!pattern.includes("*")) return pattern.replace(/\/+$/, "").toLowerCase() === origin.toLowerCase();
-	const re = new RegExp(`^${pattern.split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i");
-	return re.test(origin);
-}
-
-/** What's missing from the bucket's CORS rules for browser uploads from `origin`. Empty when it's fine. */
-export function corsProblems(rules: CorsRule[], origin: string): string[] {
-	if (!rules.length) return ["The bucket has no CORS policy."];
-	const matching = rules.filter((r) => r.origins.some((o) => originMatches(o, origin)));
-	if (!matching.length) return [`No CORS rule allows the origin ${origin}.`];
-	const usable = matching.filter((r) => r.methods.includes("PUT"));
-	if (!usable.length) return [`The CORS rule for ${origin} doesn't allow the PUT method.`];
-	const problems: string[] = [];
-	if (!usable.some((r) => r.headers.includes("*") || r.headers.includes("content-type")))
-		problems.push('Allow the "Content-Type" header (or "*") in AllowedHeaders.');
-	if (!usable.some((r) => r.expose.includes("etag"))) problems.push('Add "ETag" to ExposeHeaders, so the browser can read each part\'s ETag.');
-	return problems;
-}
-
-/** The CORS policy to paste into the R2 dashboard (Settings → CORS Policy). */
-export function corsPolicyFor(origin: string) {
-	return [{ AllowedOrigins: [origin], AllowedMethods: ["PUT"], AllowedHeaders: ["*"], ExposeHeaders: ["ETag"], MaxAgeSeconds: 3600 }];
 }

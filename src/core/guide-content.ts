@@ -86,7 +86,6 @@ export const GUIDES: Record<GuideId, Guide> = {
 			`Choose the ${b("Object Read &amp; Write")} permission and ${b("Apply to specific buckets only")} → that bucket.`,
 			`Select ${b("Create API Token")}. Copy the ${b("Access Key ID")} and ${b("Secret Access Key")}. The secret is shown only once.`,
 			"Paste them into their fields and save. The secret is stored encrypted.",
-			`Add a CORS policy to the bucket so browsers can upload to it (see the README), then use ${b("Check CORS")} on the Files page.`,
 		],
 	},
 	stream: {
