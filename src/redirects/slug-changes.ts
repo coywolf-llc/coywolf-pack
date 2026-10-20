@@ -91,9 +91,36 @@ export function slugChangesModule(options: { database?: string }) {
 				note: `${SLUG_NOTE_PREFIX} ${entry.title ?? entry.slug ?? entry.id}`.slice(0, 500),
 			});
 		}
+		const replaced = await dropEmDashAuto(d1, collection, from, entry.slug);
 		invalidateRedirectCache();
 		await purgePageCache({ tags: [REDIRECTS_TAG] });
-		ctx.log.info("Slug change redirect", { collection, from, to, deleted: plan.deleteIds.length, retargeted: plan.retargetIds.length });
+		ctx.log.info("Slug change redirect", { collection, from, to, deleted: plan.deleteIds.length, retargeted: plan.retargetIds.length, emdashAutoRemoved: replaced });
+	}
+
+	/**
+	 * Delete the redirect EmDash made for the same change (its "Auto: slug change" rows).
+	 * EmDash builds them from the collection's URL pattern: without one it writes
+	 * /<collection>/<slug> paths that don't exist, and for a nested page it writes a
+	 * top-level /<old> that can hijack a real page there. Its middleware runs before
+	 * the pack's, so its rule would also answer first (without the trailing slash).
+	 * Only auto rows whose source ends in the old slug and whose destination ends in
+	 * the new one; EmDash's own table and API keep working for everything else.
+	 */
+	async function dropEmDashAuto(d1: D1Database, collection: string, from: string, newSlug: string | null): Promise<number> {
+		const oldSlug = normalizePath(from).split("/").pop();
+		if (!oldSlug || !newSlug) return 0;
+		try {
+			const sources = [`/${collection}/${oldSlug}`, `/${oldSlug}`, normalizePath(from)];
+			const result = await d1
+				.prepare(
+					`DELETE FROM _emdash_redirects WHERE auto = 1 AND group_name = 'Auto: slug change' AND (rtrim(source, '/') IN (?, ?, ?)) AND (rtrim(destination, '/') LIKE ?)`,
+				)
+				.bind(...sources, `%/${newSlug}`)
+				.run();
+			return result.meta.changes ?? 0;
+		} catch {
+			return 0; // EmDash's table changed shape: leave it.
+		}
 	}
 
 	/**
