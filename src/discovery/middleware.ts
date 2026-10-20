@@ -101,7 +101,7 @@ export const newsSitemapMiddleware: PackMiddleware = {
 		return respond(context, result.body, {
 			"Content-Type": "application/xml; charset=utf-8",
 			"Cache-Control": "public, max-age=300",
-			"X-Robots-Tag": "noindex",
+			// A sitemap never sends a robots noindex header (test/sitemap-headers.test.mjs).
 		});
 	},
 };
