@@ -407,32 +407,31 @@ function CaptionsDialog(props: { video: Video | null; onClose: () => void }) {
 
 // ── Upload ───────────────────────────────────────────────────────
 
-const TUS_CHUNK = 50 * 1024 * 1024;
-
-function uploadBasic(url: string, file: File, onProgress: (pct: number) => void): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const xhr = new XMLHttpRequest();
-		const form = new FormData();
-		form.append("file", file, file.name);
-		xhr.upload.onprogress = (e) => e.lengthComputable && onProgress((e.loaded / e.total) * 100);
-		xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Stream rejected the upload (HTTP ${xhr.status}).`)));
-		xhr.onerror = () => reject(new Error("The upload was interrupted."));
-		xhr.open("POST", url);
-		xhr.send(form);
-	});
-}
-
-async function uploadTus(url: string, file: File, onProgress: (pct: number) => void): Promise<void> {
+/**
+ * Sends the file through the site in pieces (videos/upload-chunk), which forwards each to
+ * Stream. EmDash's admin Content-Security-Policy (connect-src 'self') blocks the browser
+ * from uploading to Stream directly. A piece that fails on the network is retried.
+ */
+async function uploadThroughSite(uid: string, chunkBytes: number, file: File, onProgress: (pct: number) => void): Promise<void> {
 	let offset = 0;
 	while (offset < file.size) {
-		const chunk = file.slice(offset, offset + TUS_CHUNK);
-		const res = await fetch(url, {
-			method: "PATCH",
-			headers: { "Tus-Resumable": "1.0.0", "Upload-Offset": String(offset), "Content-Type": "application/offset+octet-stream" },
-			body: chunk,
-		});
-		if (!res.ok) throw new Error(`Stream rejected part of the upload (HTTP ${res.status}).`);
-		offset = Number(res.headers.get("Upload-Offset") ?? offset + chunk.size);
+		const piece = file.slice(offset, offset + chunkBytes);
+		let response: Response | null = null;
+		for (let attempt = 1; ; attempt++) {
+			try {
+				response = await apiFetch(`${API}/upload-chunk`, {
+					method: "POST",
+					headers: { "Content-Type": "application/octet-stream", "x-cw-upload-uid": uid, "x-cw-upload-offset": String(offset) },
+					body: piece,
+				});
+				break;
+			} catch (cause) {
+				if (attempt >= 3) throw new Error("The upload was interrupted. Check your connection and try again.", { cause });
+				await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+			}
+		}
+		const result = await parseApiResponse<{ offset: number; done: boolean }>(response, "Stream refused part of the upload");
+		offset = result.offset;
 		onProgress((offset / file.size) * 100);
 	}
 }
@@ -449,13 +448,15 @@ function UploadDialog(props: { open: boolean; onClose: () => void; onUploaded: (
 		setError(undefined);
 		setProgress(0);
 		try {
-			const target = await post<{ method: "basic" | "tus"; uploadURL: string }>("upload", {
+			// Stream turns any file into a "video" (a still image becomes a one-frame clip).
+			if (!file.type.startsWith("video/")) throw new Error("Choose a video file (MP4, MOV, WebM…), not an image or other file.");
+			const target = await post<{ uid: string; chunkBytes: number }>("upload", {
 				name: name.trim() || file.name,
 				size: file.size,
+				type: file.type,
 				...(tags.trim() ? { tags } : {}),
 			});
-			if (target.method === "basic") await uploadBasic(target.uploadURL, file, setProgress);
-			else await uploadTus(target.uploadURL, file, setProgress);
+			await uploadThroughSite(target.uid, target.chunkBytes, file, setProgress);
 			const label = name.trim() || file.name;
 			setFile(null);
 			setName("");
@@ -473,7 +474,7 @@ function UploadDialog(props: { open: boolean; onClose: () => void; onUploaded: (
 			<Dialog className="p-6" size="lg">
 				<Dialog.Title className="text-lg font-semibold">Upload a video</Dialog.Title>
 				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
-					The file goes straight from your browser to Cloudflare Stream. Keep this dialog open until the upload finishes;
+					The file goes to Cloudflare Stream through this site, a few megabytes at a time. Keep this dialog open until the upload finishes;
 					Stream then processes the video for a few minutes.
 				</Dialog.Description>
 				<div className="mt-4 space-y-4">

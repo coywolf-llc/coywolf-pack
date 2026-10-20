@@ -1,6 +1,6 @@
 {
 	"name": "@coywolf/emdash",
-	"version": "0.34.2",
+	"version": "0.34.3",
 	"description": "Coywolf Pack for EmDash: one plugin with Coywolf's features for EmDash sites on Cloudflare. Full backups and restore, a redirect manager, and more to come.",
 	"license": "MIT",
 	"author": "Coywolf LLC (https://coywolf.com)",

@@ -412,6 +412,23 @@ async function visitorHash(ctx: Ctx & { requestMeta: { ip: string | null } }): P
 }
 
 const limiter = new EngagementLimiter();
+/**
+ * Video uploads go through the site in pieces (videos/upload → videos/upload-chunk): 5 MiB,
+ * Stream's minimum tus chunk (a multiple of 256 KiB) and under EmDash's 8 MiB plugin route
+ * body cap.
+ */
+export const UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024;
+/** How long a started upload can keep sending pieces. */
+const UPLOAD_TTL_MS = 6 * 60 * 60 * 1000;
+export const UPLOAD_UID_HEADER = "x-cw-upload-uid";
+export const UPLOAD_OFFSET_HEADER = "x-cw-upload-offset";
+interface PendingUpload {
+	url: string;
+	size: number;
+	createdAt: number;
+}
+const uploadKey = (uid: string) => `videos:upload:${uid}`;
+
 const rateLimited = () => new PluginRouteError("RATE_LIMITED", "Too many requests. Try again in a minute.", 429);
 
 /** Videos embedded in published entries: the only ones public routes answer for (drafts stay private). */
@@ -638,7 +655,13 @@ export function videosModule(options: VideosOptions) {
 			},
 		}),
 
-		/** A one-time URL the browser uploads to directly (basic POST up to 200 MB, tus beyond). */
+		/**
+		 * Starts an upload. EmDash's admin Content-Security-Policy (connect-src 'self', since
+		 * EmDash 1.3.1) blocks the browser from sending the file to Stream itself, so the
+		 * browser sends it here in UPLOAD_CHUNK_BYTES pieces (videos/upload-chunk) and the
+		 * Worker forwards each piece to a tus upload created here. The tus URL stays on the
+		 * server (KV, by uid): the chunk route only ever forwards to a URL this route made.
+		 */
 		"videos/upload": definePluginRoute({
 			permission: "media:upload",
 			methods: ["POST"],
@@ -646,26 +669,62 @@ export function videosModule(options: VideosOptions) {
 			handler: async (ctx) => {
 				await requireFeature(ctx, F.main);
 				const input = parseInput(
-					z.object({ name: z.string().min(1).max(200), size: z.number().int().positive(), tags: z.string().max(2000).optional() }),
+					z.object({
+						name: z.string().min(1).max(200),
+						size: z.number().int().positive(),
+						tags: z.string().max(2000).optional(),
+						type: z.string().max(200).optional(),
+					}),
 					ctx.input,
 				);
 				const { name, size } = input;
+				// Stream turns any file it's given into a "video" (a still image becomes a one-frame clip).
+				if (input.type !== undefined && !input.type.startsWith("video/")) throw new PluginRouteError("BAD_REQUEST", "Choose a video file (MP4, MOV, WebM…), not an image or other file.", 400);
 				const api = await requireClient(ctx);
 				await invalidateLibrary(ctx);
 				// The upload dialog starts with the default tags (Settings → Uploads).
 				const tags = parseTags(input.tags ?? (await ctx.settings.get<string>(SETTINGS.defaultTags)) ?? "").join(", ");
 				const meta: Record<string, string> = tags ? { name, tags } : { name };
-				if (size <= 200 * 1024 * 1024) {
-					const r = await stream(() => api.directUpload({ maxDurationSeconds: maxDuration, meta }));
-					return { method: "basic", uploadURL: r.uploadURL, uid: r.uid };
-				}
 				const r = await stream(() => api.tusUpload({ length: size, maxDurationSeconds: maxDuration, name }));
+				if (!r.uid) throw new PluginRouteError("INTERNAL_ERROR", "Cloudflare Stream didn't return an id for the upload.", 502);
+				const uid = r.uid;
 				// tus uploads carry only the name; tags go on the waiting video record.
-				if (tags && r.uid) {
-					const uid = r.uid;
-					await api.update(uid, { meta }).catch((error: unknown) => ctx.log.warn("Videos: could not tag the upload", { uid, error: String(error) }));
+				if (tags) await api.update(uid, { meta }).catch((error: unknown) => ctx.log.warn("Videos: could not tag the upload", { uid, error: String(error) }));
+				await ctx.kv.set(uploadKey(uid), { url: r.uploadURL, size, createdAt: Date.now() } satisfies PendingUpload);
+				return { method: "proxy", uid, chunkBytes: UPLOAD_CHUNK_BYTES };
+			},
+		}),
+
+		/** One piece of an upload started by videos/upload, forwarded to its tus URL. */
+		"videos/upload-chunk": definePluginRoute({
+			permission: "media:upload",
+			methods: ["POST"],
+			request: { body: "bytes", maxBytes: UPLOAD_CHUNK_BYTES, headers: [UPLOAD_UID_HEADER, UPLOAD_OFFSET_HEADER] },
+			handler: async (ctx) => {
+				await requireFeature(ctx, F.main);
+				const uid = ctx.request.headers.get(UPLOAD_UID_HEADER) ?? "";
+				const offset = Number(ctx.request.headers.get(UPLOAD_OFFSET_HEADER));
+				const bytes = ctx.input as Uint8Array;
+				if (!/^[a-f0-9]{32}$/.test(uid)) throw new PluginRouteError("BAD_REQUEST", "Unknown upload.", 400);
+				const pending = await ctx.kv.get<PendingUpload>(uploadKey(uid));
+				if (!pending || Date.now() - pending.createdAt > UPLOAD_TTL_MS) throw new PluginRouteError("NOT_FOUND", "This upload has expired. Start it again.", 404);
+				if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) throw new PluginRouteError("BAD_REQUEST", "Empty upload piece.", 400);
+				if (!Number.isInteger(offset) || offset < 0 || offset + bytes.byteLength > pending.size) throw new PluginRouteError("BAD_REQUEST", "Upload piece out of range.", 400);
+				const res = await fetch(pending.url, {
+					method: "PATCH",
+					headers: { "Tus-Resumable": "1.0.0", "Upload-Offset": String(offset), "Content-Type": "application/offset+octet-stream" },
+					body: new Uint8Array(bytes),
+				});
+				if (!res.ok) {
+					ctx.log.warn("Videos: Stream refused an upload piece", { uid, offset, status: res.status });
+					throw new PluginRouteError("INTERNAL_ERROR", `Cloudflare Stream refused part of the upload (HTTP ${res.status}).`, 502);
 				}
-				return { method: "tus", uploadURL: r.uploadURL, uid: r.uid };
+				const next = Number(res.headers.get("Upload-Offset") ?? offset + bytes.byteLength);
+				if (next >= pending.size) {
+					await ctx.kv.delete(uploadKey(uid));
+					await invalidateLibrary(ctx);
+				}
+				return { offset: next, done: next >= pending.size };
 			},
 		}),
 
