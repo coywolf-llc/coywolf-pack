@@ -22,7 +22,7 @@ const FEATURES = [
 	{
 		id: LARGE_UPLOADS_FEATURE,
 		label: "Large uploads",
-		description: "Upload files of any size and type straight from the browser to R2 (needs R2 API credentials and a bucket CORS rule).",
+		description: "Upload files up to 50 GB of any type to R2 through the site (needs R2 API credentials).",
 		default: false,
 	},
 ];

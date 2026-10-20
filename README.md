@@ -575,7 +575,7 @@ The Coywolf Files plugin for WordPress, on EmDash. Add a **File download** block
 | --- | --- | --- |
 | `files` | off | The block, download URLs, and the Files page |
 | `files.counts` | off | Count downloads (batched D1 writes after the response) |
-| `files.largeUploads` | off | Direct-to-R2 uploads (needs the settings below and a CORS rule) |
+| `files.largeUploads` | off | Large uploads to R2, up to 50 GB (needs the settings below) |
 
 ### Setup
 
@@ -585,17 +585,13 @@ The Coywolf Files plugin for WordPress, on EmDash. Add a **File download** block
 
 ### Large uploads
 
-1. Create an R2 API token (**R2 → Manage API tokens**) with **Object Read & Write** on the bucket. Enter the account ID, access key ID, secret access key (stored encrypted), and bucket name under **Files → Settings → Large uploads**. Until all four are saved, the Files page shows a setup card instead of the uploader and the CORS check. The bucket must be the one bound as `MEDIA` (or `FILES`), since downloads stream through that binding.
-2. Add a CORS policy to the bucket (**R2 → bucket → Settings → CORS Policy**):
+1. Create an R2 API token (**R2 → Manage API tokens**) with **Object Read & Write** on the bucket. Enter the account ID, access key ID, secret access key (stored encrypted), and bucket name under **Files → Settings → Large uploads**. Until all four are saved, the Files page shows a setup card instead of the uploader. The bucket must be the one bound as `MEDIA` (or `FILES`), since downloads stream through that binding.
+2. Add a lifecycle rule to the bucket (**R2 → bucket → Settings → Object lifecycle rules**): **Abort incomplete multipart uploads after 1 day**. The pack also aborts uploads left unfinished for 24 hours in a daily task, but the rule catches anything the task can't reach (for example after the credentials change).
+3. On the Files page, **Upload large file**.
 
-   ```json
-   [{ "AllowedOrigins": ["https://example.com"], "AllowedMethods": ["PUT"], "AllowedHeaders": ["*"], "ExposeHeaders": ["ETag"], "MaxAgeSeconds": 3600 }]
-   ```
+The browser sends the file to the site in 6 MiB parts (`files/upload-part`), and the Worker uploads each to R2's multipart upload. Since EmDash 1.3.1, admin pages send `Content-Security-Policy: connect-src 'self'`, which blocks the browser from talking to R2 directly; the bucket needs no CORS policy. Each part must be exactly its expected size and belongs to the upload `files/upload-start` recorded, so a request can't write anywhere else. With 10,000 parts at most, a file can be up to just under 60 GB; the **largest upload** setting goes up to 50 GB.
 
-3. Add a lifecycle rule to the bucket (**R2 → bucket → Settings → Object lifecycle rules**): **Abort incomplete multipart uploads after 1 day**. The pack also aborts uploads left unfinished for 24 hours in a daily task, but the rule catches anything the task can't reach (for example after the credentials change).
-4. On the Files page, **Check CORS** reads the policy through the S3 API and says what's missing. Then **Upload large file**.
-
-Only administrators (`plugins:manage`) can upload, and uploads above the **largest upload** setting (default 5 GB) are refused. R2 storage and operations are billed to your Cloudflare account.
+Only administrators (`plugins:manage`) can upload, and uploads above the **largest upload** setting (default 5 GB, at most 50 GB) are refused. R2 storage and operations are billed to your Cloudflare account.
 
 Files are stored as `files/<id>/<name>` with their metadata in plugin storage. Files moved from Coywolf Files for WordPress keep their 20-character WordPress id and object key (see [Migrating from WordPress](#migrating-from-wordpress)). The pack calls only `<account>.r2.cloudflarestorage.com`.
 

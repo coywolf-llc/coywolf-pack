@@ -7,41 +7,16 @@ import { test } from "node:test";
 // @ts-expect-error -- Node's type stripping needs the real .ts extension.
 import { parseDownloadPath } from "./format.ts";
 // @ts-expect-error -- Node's type stripping needs the real .ts extension.
-import { corsProblems, parseCors, partSizeFor } from "./r2-rules.ts";
+import { MAX_THROUGH_SITE, PART_SIZE, partSizeFor } from "./r2-rules.ts";
 
 const MiB = 1024 * 1024;
 
-test("part sizes stay at or above 8 MiB and under 10,000 parts", () => {
-	assert.equal(partSizeFor(1), 8 * MiB);
-	assert.equal(partSizeFor(100 * MiB), 8 * MiB);
-	const huge = 200 * 1024 * MiB; // 200 GiB
-	const size = partSizeFor(huge);
-	assert.ok(Math.ceil(huge / size) <= 10_000);
-	assert.equal(size % MiB, 0);
-});
-
-const xml = (rules: string) => `<?xml version="1.0" encoding="UTF-8"?><CORSConfiguration>${rules}</CORSConfiguration>`;
-
-test("CORS: a complete rule passes", () => {
-	const rules = parseCors(
-		xml(
-			"<CORSRule><AllowedOrigin>https://example.com</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedMethod>GET</AllowedMethod><AllowedHeader>*</AllowedHeader><ExposeHeader>ETag</ExposeHeader></CORSRule>",
-		),
-	);
-	assert.deepEqual(rules[0], { origins: ["https://example.com"], methods: ["PUT", "GET"], headers: ["*"], expose: ["etag"] });
-	assert.deepEqual(corsProblems(rules, "https://example.com"), []);
-	assert.deepEqual(corsProblems(rules, "https://other.com"), ["No CORS rule allows the origin https://other.com."]);
-});
-
-test("CORS: wildcard origins, missing ETag and headers", () => {
-	const rules = parseCors(xml("<CORSRule><AllowedOrigin>https://*.example.com</AllowedOrigin><AllowedMethod>PUT</AllowedMethod></CORSRule>"));
-	const problems = corsProblems(rules, "https://www.example.com");
-	assert.equal(problems.length, 2);
-	assert.match(problems[0], /Content-Type/);
-	assert.match(problems[1], /ETag/);
-	assert.deepEqual(corsProblems([], "https://a.com"), ["The bucket has no CORS policy."]);
-	const getOnly = parseCors(xml("<CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>GET</AllowedMethod></CORSRule>"));
-	assert.match(corsProblems(getOnly, "https://a.com")[0], /PUT/);
+test("parts are 6 MiB: above R2's 5 MiB minimum, under EmDash's 8 MiB route body cap", () => {
+	assert.equal(PART_SIZE, 6 * MiB);
+	assert.equal(partSizeFor(1), PART_SIZE);
+	assert.equal(partSizeFor(40 * 1024 * MiB), PART_SIZE);
+	assert.equal(MAX_THROUGH_SITE, 10_000 * PART_SIZE);
+	assert.ok(MAX_THROUGH_SITE >= 50 * 1024 ** 3, "the 50 GB setting fits");
 });
 
 test("download paths", () => {
