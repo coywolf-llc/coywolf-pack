@@ -74,7 +74,8 @@ export function slugChangesModule(options: { database?: string }) {
 	}
 
 	async function moved(ctx: PluginContext, d1: D1Database, collection: string, entry: EntrySnapshot, from: string, to: string) {
-		const plan = planSlugChange(from, to, await related(d1, from, to));
+		const rules = await related(d1, from, to);
+		const plan = planSlugChange(from, to, rules);
 		if (plan.kind === "none") return;
 		for (const id of plan.deleteIds) await deleteRule(d1, id);
 		for (const id of plan.retargetIds) {
@@ -91,7 +92,9 @@ export function slugChangesModule(options: { database?: string }) {
 				note: `${SLUG_NOTE_PREFIX} ${entry.title ?? entry.slug ?? entry.id}`.slice(0, 500),
 			});
 		}
-		const replaced = await dropEmDashAuto(d1, collection, from, entry.slug);
+		// EmDash collapses its own chains too, so its rows from those earlier URLs now point at the new one.
+		const retargetedSources = rules.filter((r) => plan.retargetIds.includes(r.id)).map((r) => r.source);
+		const replaced = await dropEmDashAuto(d1, collection, from, entry.slug, retargetedSources);
 		invalidateRedirectCache();
 		await purgePageCache({ tags: [REDIRECTS_TAG] });
 		ctx.log.info("Slug change redirect", { collection, from, to, deleted: plan.deleteIds.length, retargeted: plan.retargetIds.length, emdashAutoRemoved: replaced });
@@ -103,17 +106,19 @@ export function slugChangesModule(options: { database?: string }) {
 	 * /<collection>/<slug> paths that don't exist, and for a nested page it writes a
 	 * top-level /<old> that can hijack a real page there. Its middleware runs before
 	 * the pack's, so its rule would also answer first (without the trailing slash).
-	 * Only auto rows whose source ends in the old slug and whose destination ends in
-	 * the new one; EmDash's own table and API keep working for everything else.
+	 * Only auto rows from the old URL (or URLs whose rules were just pointed at the new one,
+	 * since EmDash collapses its chains the same way) whose destination ends in the new
+	 * slug; EmDash's own table and API keep working for everything else.
 	 */
-	async function dropEmDashAuto(d1: D1Database, collection: string, from: string, newSlug: string | null): Promise<number> {
+	async function dropEmDashAuto(d1: D1Database, collection: string, from: string, newSlug: string | null, earlier: string[] = []): Promise<number> {
 		const oldSlug = normalizePath(from).split("/").pop();
 		if (!oldSlug || !newSlug) return 0;
 		try {
-			const sources = [`/${collection}/${oldSlug}`, `/${oldSlug}`, normalizePath(from)];
+			const slugs = [oldSlug, ...earlier.map((path) => normalizePath(path).split("/").pop() ?? "")].filter(Boolean);
+			const sources = [...new Set([normalizePath(from), ...earlier.map(normalizePath), ...slugs.flatMap((slug) => [`/${collection}/${slug}`, `/${slug}`])])];
 			const result = await d1
 				.prepare(
-					`DELETE FROM _emdash_redirects WHERE auto = 1 AND group_name = 'Auto: slug change' AND (rtrim(source, '/') IN (?, ?, ?)) AND (rtrim(destination, '/') LIKE ?)`,
+					`DELETE FROM _emdash_redirects WHERE auto = 1 AND group_name = 'Auto: slug change' AND rtrim(source, '/') IN (${sources.map(() => "?").join(", ")}) AND rtrim(destination, '/') LIKE ?`,
 				)
 				.bind(...sources, `%/${newSlug}`)
 				.run();
