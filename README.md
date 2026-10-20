@@ -410,6 +410,7 @@ EmDash's built-in Redirects (**Manage → Redirects**) handle site-relative page
 | URL tester | No | Yes |
 | Notes | A group label | A note per rule |
 | Trashed or unpublished entries | Nothing | Prompt for a redirect or 410, undone when the entry comes back (see [Removed content](#removed-content)) |
+| Changed slugs, categories or parent pages | A redirect built from the collection's URL pattern (posts without a pattern get `/posts/<slug>`, which isn't a real URL; category and parent paths are never covered) | A 301 from the old public URL to the new one (see [Slug changes](#slug-changes)) |
 | Edge caching | Doesn't cache redirects (checks its rules before a page is cached) | Kept in Workers Cache for 30 days, cleared on any redirect change, along with the pages at new sources |
 | Status codes, trailing slashes, hit counts, enable/disable | Yes (also 451) | Yes (301/302/307/308/410) |
 
@@ -449,6 +450,17 @@ Trashing several entries at once (bulk trash) asks once, listing each of them. U
 The old URL is resolved the way EmDash resolves it: the collection's URL pattern (`{slug}`, `{id}`, and date tokens from the publish date), or `/<collection>/<slug>`. Locale prefixes aren't added. Drafts that were never published aren't listed or prompted for. Restoring an entry from the trash (it comes back as a draft) or republishing it removes it from the list and **undoes the rule its decision created**, as long as that rule still has its `Removed:` note and the same source; a republished entry must also be back at the same URL (a new slug keeps the redirect from the old one, and a later publish back at the old URL still undoes it). A redirect that already exists for the old URL is never overwritten or adopted: the decision says so, and you can keep it (Dismiss the entry) or change it under Redirects. An entry that turns out to be live after all (its trash failed, or it came back some other way) is forgotten the next time the list is read. Decisions are kept in plugin storage (`redirects_removed`), and the rules they created in `redirects_applied`. The module declares the `content:read` capability for the delete and publish hooks.
 
 How the prompt knows: EmDash has no admin event for a trash or unpublish, so the pack's admin module watches the admin's own content API calls (`DELETE /_emdash/api/content/<collection>/<id>` and `POST …/<id>/unpublish`), never altering or reading their responses, then asks the server which of those entries it recorded. The trash is recorded before EmDash answers the request; an unpublish is recorded just after, so the prompt looks again for up to about two seconds when an unpublish isn't listed yet (trashed drafts don't hold it up). If a future EmDash release changes those API paths, the prompt stops appearing, but the Removed content list on the Redirects page keeps working.
+
+### Slug changes
+
+Feature **Redirects → Slug changes** (`redirects.slugChanges`, on by default). When a published entry's public URL changes, because of a new slug, category or parent page, the pack adds a 301 from the old URL to the new one, noted `Slug change: <title>`. The URLs come from the pack's URL resolver (the one the sitemaps and breadcrumbs use, with the site's `urls`, `termParents` and `pageParents` options), so they're the URLs readers and search engines saw.
+
+- **How it knows the old URL.** Each published entry's URL is remembered in plugin storage: recorded from the live row before a save, and after every save or publish. An entry that hasn't been saved since the feature was turned on is recorded at its first save, before anything changes.
+- **No chains or loops.** Renaming A → B → C points the A rule at C. Renaming back to A deletes the A → B rule, which would otherwise shadow the live page.
+- **Hand-made rules win.** If a rule someone made already answers the old URL, it's left as is (and logged). Only rules noted `Slug change:` are ever edited or deleted.
+- **Limits.** Translations are skipped (they can share a slug with the default-language entry, so a rule could shadow it); only default-language entries get rules. Recording happens in `content:beforeSave`, which EmDash runs only when a save carries content fields, and within a 1.5-second budget (EmDash fails a save whose beforeSave hook times out), so a slug-only API update to an entry never saved since the feature was turned on isn't caught. A category changed through EmDash's separate terms endpoint fires no content hook; its redirect is made at the entry's next save or publish.
+- **A URL that's live again is freed.** When an entry is published at a URL that a slug-change rule redirects (another entry took the old slug, or this one moved back), that rule is deleted.
+- EmDash still writes its own pattern-based redirect for the same change (under its Redirects, group "Auto: slug change"). For posts without a URL pattern, that rule's paths don't exist, so it never fires.
 
 ### Export redirects from WordPress (Coywolf SEO)
 
