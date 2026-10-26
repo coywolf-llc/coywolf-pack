@@ -19,6 +19,7 @@ import Disclosure from "./customBlocks/Disclosure.astro";
 import Quote from "./customBlocks/Quote.astro";
 import Testimonial from "./customBlocks/Testimonial.astro";
 import Podcast from "./customBlocks/Podcast.astro";
+import CaptionedTable from "./tables/CaptionedTable.astro";
 
 export const blockComponents = {
 	"coywolf-toc": TableOfContents,
@@ -35,8 +36,8 @@ export const blockComponents = {
 	"coywolf-podcast": Podcast,
 };
 
-/** EmDash's table with its `caption` (tables imported from WordPress): pass as `components.type.table`. */
-export { default as CaptionedTable } from "./tables/CaptionedTable.astro";
+/** EmDash's table, keyboard-scrollable, with its `caption` (tables imported from WordPress). In `portableTextComponents`. */
+export { CaptionedTable };
 
 /** Videos module: the Stream player, for theme code. */
 export { CoywolfVideo };
@@ -47,9 +48,10 @@ export { BreadcrumbsComponent as Breadcrumbs };
 
 /**
  * Pass to <PortableText components={...}> so headings get their anchor ids
- * (Headings & TOC module). Plugins can't override EmDash's `block` renderer.
+ * (Headings & TOC module) and tables are keyboard-scrollable, with their
+ * caption. Plugins can't override EmDash's `block` renderer.
  */
-export const portableTextComponents = { block: HeadingBlock };
+export const portableTextComponents = { block: HeadingBlock, type: { table: CaptionedTable } };
 /** Search module: the SearchBox component and OR-fallback search for site search pages. */
 export { default as SearchBox } from "./search/SearchBox.astro";
 export { searchWithFallback } from "../search/query.js";

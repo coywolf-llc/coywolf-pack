@@ -603,6 +603,9 @@ const SCRIPT = String.raw`function (config, css, tools) {
 		}
 
 		input.addEventListener("keydown", function (e) {
+			// Keys pressed while an input method is composing belong to it (Enter confirms a
+			// candidate, Escape cancels it); keyCode 229 covers Safari before 27.
+			if (e.isComposing || e.keyCode === 229) return;
 			switch (e.key) {
 				case "ArrowDown":
 				case "ArrowUp":
@@ -625,7 +628,7 @@ const SCRIPT = String.raw`function (config, css, tools) {
 					break;
 				case "Enter":
 					// Opens what's highlighted; with nothing highlighted the form submits as usual.
-					if (open && active >= 0 && rows[active] && !e.isComposing) {
+					if (open && active >= 0 && rows[active]) {
 						e.preventDefault();
 						location.assign(rows[active].href);
 					}
