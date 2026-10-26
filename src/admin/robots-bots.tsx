@@ -133,6 +133,8 @@ export function BotPicker(props: { bots: BotEntry[]; selected: string[]; onChang
 						aria-describedby={customBad ? customErrorId : undefined}
 						onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCustom(e.target.value)}
 						onKeyDown={(e: React.KeyboardEvent) => {
+							// The Enter that confirms an input-method candidate isn't "add".
+							if (e.nativeEvent.isComposing || e.keyCode === 229) return;
 							if (e.key === "Enter" && customOk) {
 								e.preventDefault();
 								set([custom.trim()], true);

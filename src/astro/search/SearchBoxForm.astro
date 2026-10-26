@@ -454,6 +454,10 @@ const inputId = `${id}-input`;
 
 		// Keys work whenever the list is open (the listener is on the form, not just the field).
 		form.addEventListener("keydown", (e) => {
+			// Keys pressed while an input method (Chinese, Japanese, Korean) is composing belong to
+			// it: Enter confirms a candidate, Escape cancels it. keyCode 229 covers Safari before 27,
+			// which ends the composition before the confirming keydown.
+			if (e.isComposing || e.keyCode === 229) return;
 			if (e.key === "Escape") {
 				if (isOpen()) {
 					close();

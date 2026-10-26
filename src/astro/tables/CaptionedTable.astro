@@ -1,12 +1,20 @@
 ---
 /**
- * EmDash's table, plus its caption: tables imported from WordPress keep their
- * <figcaption> as a `caption` field on the table block (WordPress import
- * module; EmDash's editor keeps the field when it saves). With a caption the
- * table is wrapped in <figure class="cw-table"> with a <figcaption>; without
- * one it renders EmDash's table as is.
+ * EmDash's table, made keyboard-scrollable, plus its caption.
  *
- * Opt in from the theme, for the Portable Text it renders:
+ * Scrolling: wide tables scroll sideways. EmDash's wrapper is the scroller but
+ * can't take focus, and Safari (unlike Chrome and Firefox) never makes a
+ * scroller focusable on its own, so keyboard users there can't scroll the
+ * table. The table goes in a focusable, named region that is the scroller
+ * instead (EmDash's wrapper inside stops scrolling).
+ *
+ * Caption: tables imported from WordPress keep their <figcaption> as a
+ * `caption` field on the table block (WordPress import module; EmDash's
+ * editor keeps the field when it saves). With a caption the table is wrapped
+ * in <figure class="cw-table"> with a <figcaption>, which also names the
+ * region; without one the region is named by `label`.
+ *
+ * Included in `portableTextComponents`; or pass it yourself:
  *
  *   import { CaptionedTable } from "@coywolf/emdash/astro";
  *   <PortableText value={value} components={{ type: { table: CaptionedTable } }} />
@@ -14,19 +22,51 @@
 import { emdashComponents } from "emdash/ui";
 
 interface Props {
-	node: { caption?: unknown };
+	node: { _key?: unknown; caption?: unknown };
+	/** The region's accessible name when the table has no caption. */
+	label?: string;
 }
 
-const { node } = Astro.props;
+const { node, label = "Table" } = Astro.props;
 const Table = emdashComponents.type.table;
 const caption = typeof node?.caption === "string" ? node.caption.trim() : "";
+const key = typeof node?._key === "string" && /^[\w-]+$/.test(node._key) ? node._key : Math.random().toString(36).slice(2, 10);
+const captionId = `cw-table-caption-${key}`;
 ---
 
 {caption ? (
 	<figure class="cw-table">
-		<Table node={node} />
-		<figcaption>{caption}</figcaption>
+		<div class="cw-table-scroll" tabindex="0" role="region" aria-labelledby={captionId}>
+			<Table node={node} />
+		</div>
+		<figcaption id={captionId}>{caption}</figcaption>
 	</figure>
 ) : (
-	<Table node={node} />
+	<div class="cw-table-scroll" tabindex="0" role="region" aria-label={label}>
+		<Table node={node} />
+	</div>
 )}
+
+<style is:global>
+	.cw-table-scroll {
+		max-inline-size: 100%;
+		margin-block: 1.5rem;
+		overflow-x: auto;
+		overscroll-behavior-inline: contain;
+	}
+	/* In a captioned figure, the figure owns the spacing. */
+	.cw-table > .cw-table-scroll {
+		margin-block: 0;
+	}
+	/* EmDash's wrapper (and any theme rule that makes it scroll) stops scrolling, and its margin
+	   moves to the region so the focus outline hugs the table. The doubled class outranks EmDash's
+	   scoped rule (class + data-astro-cid attribute). */
+	.cw-table-scroll > .emdash-table-wrapper.emdash-table-wrapper {
+		overflow: visible;
+		margin-block: 0;
+	}
+	.cw-table-scroll:focus-visible {
+		outline: 2px solid currentColor;
+		outline-offset: 2px;
+	}
+</style>
