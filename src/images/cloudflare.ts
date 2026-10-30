@@ -32,6 +32,7 @@ const PERMISSION_HINT: Record<string, string> = {
 	rules: "Zone → Transform Rules → Edit (and Account → Account Rulesets → Read)",
 	purge: "Zone → Cache Purge → Purge",
 	cacheRules: "Zone → Cache Rules → Edit",
+	tieredCache: "Zone → Zone Settings → Edit",
 };
 
 async function cf<T>(config: CloudflareConfig, path: string, init: RequestInit = {}, step?: string): Promise<{ status: number; result: T | null }> {
@@ -172,14 +173,18 @@ export interface SetupContext {
 export async function planSetup(config: CloudflareConfig, target: SetupTarget): Promise<SetupContext> {
 	const hostname = hostnameOf(target.host);
 	const zone = await findZone(config, hostname);
-	const [transformations, domains, rules] = await Promise.all([
+	const [transformations, domains, rules, tieredCache] = await Promise.all([
 		cf<{ value?: string }>(config, `/zones/${zone.id}/settings/transformations`, {}, "transformations").then((r) => r.result?.value ?? null),
 		cf<{ domains?: CustomDomain[] }>(config, `/accounts/${config.accountId}/r2/buckets/${encodeURIComponent(target.bucket)}/domains/custom`, {}, "domain").then(
 			(r) => r.result?.domains ?? [],
 		),
 		readRules(config, zone.id),
+		// Read only to show the step; a token without the permission still gets the rest of the setup.
+		cf<{ value?: string }>(config, `/zones/${zone.id}/cache/tiered_cache_smart_topology_enable`, {}, "tieredCache")
+			.then((r) => r.result?.value ?? null)
+			.catch(() => null),
 	]);
-	const state: SetupState = { transformations, domains, rules };
+	const state: SetupState = { transformations, domains, rules, tieredCache };
 	return { zone, state, plan: planMediaHostSetup(state, { host: hostname, zoneName: zone.name, bucket: target.bucket }) };
 }
 
@@ -227,6 +232,9 @@ export async function applySetup(config: CloudflareConfig, target: SetupTarget):
 					"rules",
 				);
 				results.push({ id: step.id, ok: true, message: `Saved the URL rewrite rules for ${plan.host}.` });
+			} else if (step.id === "tieredCache") {
+				await cf(config, `/zones/${zone.id}/cache/tiered_cache_smart_topology_enable`, { method: "PATCH", body: JSON.stringify({ value: "on" }) }, "tieredCache");
+				results.push({ id: step.id, ok: true, message: `Turned on Smart Tiered Cache for ${zone.name}.` });
 			}
 		} catch (error) {
 			results.push({ id: step.id, ok: false, message: error instanceof Error ? error.message : "Failed." });

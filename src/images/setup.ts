@@ -37,12 +37,14 @@ export interface SetupState {
 	transformations: string | null;
 	domains: CustomDomain[];
 	rules: RulesetRule[] | null;
+	/** Smart Tiered Cache ("on"/"off"), or null when it couldn't be read (the step then tries to turn it on). */
+	tieredCache?: string | null;
 }
 
 export type StepAction = "none" | "enable" | "add" | "update";
 
 export interface SetupStep {
-	id: "transformations" | "domain" | "rules";
+	id: "transformations" | "domain" | "rules" | "tieredCache";
 	action: StepAction;
 	/** Plain-language summary, e.g. "Turn on Image Transformations for example.com". */
 	label: string;
@@ -172,6 +174,19 @@ export function planMediaHostSetup(state: SetupState, input: { host: string; zon
 					},
 		);
 	}
+
+	// Smart Tiered Cache: a data center that hasn't cached an image yet asks a nearby upper-tier
+	// Cloudflare cache (placed near the R2 bucket) before going back to R2. Free on every plan.
+	// (Pages don't need it: Workers Cache is always tiered.) Only ever turned on, never off.
+	steps.push(
+		state.tieredCache === "on"
+			? { id: "tieredCache", action: "none", label: `Smart Tiered Cache is already on for ${input.zoneName}.` }
+			: {
+					id: "tieredCache",
+					action: "enable",
+					label: `Turn on Smart Tiered Cache for ${input.zoneName}, so a data center that hasn't cached an image yet gets it from a nearby Cloudflare cache instead of R2.`,
+				},
+	);
 
 	return { host: hostname, steps, rules, done: steps.every((s) => s.action === "none") };
 }

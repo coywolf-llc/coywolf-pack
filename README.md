@@ -170,7 +170,7 @@ reading the original from the media bucket (`MEDIA`), resizing it with the Cloud
 
 ### Setting up a media host
 
-The media host needs three things on Cloudflare, in the zone of the site's domain:
+The media host needs three things on Cloudflare, in the zone of the site's domain, and works best with a fourth:
 
 1. **Image Transformations** turned on for the zone (Images → Transformations → Enable for zone; same-zone sources only, so leave "Resize images from any origin" off).
 2. **An R2 custom domain** on the media bucket (the bucket bound as `MEDIA`): R2 → the bucket → Settings → Custom Domains → Add `media.example.com`, minimum TLS 1.2. Cloudflare adds the DNS record and certificate.
@@ -181,12 +181,14 @@ The media host needs three things on Cloudflare, in the zone of the site's domai
 | `media.example.com: /s/<W>x<H>/<file> → cropped resize (Coywolf Pack clean image URLs)` | `(http.host eq "media.example.com" and http.request.uri.path wildcard "/s/*x*/*")` | `wildcard_replace(http.request.uri.path, "/s/*x*/*", "/cdn-cgi/image/width=${1},height=${2},fit=cover,format=auto,quality=85/${3}")` |
 | `media.example.com: /s/<W>/<file> → resize to width (Coywolf Pack clean image URLs)` | `(http.host eq "media.example.com" and http.request.uri.path wildcard "/s/*/*" and not http.request.uri.path wildcard "/s/*x*/*")` | `wildcard_replace(http.request.uri.path, "/s/*/*", "/cdn-cgi/image/width=${1},format=auto,quality=85/${2}")` |
 
-Do it by hand with the step-by-step guide on the Clean Image URLs page, or let **Set up media host** on that page do it through the Cloudflare API: enter the media host, your Cloudflare account ID, the media bucket's name and an API token, select **Review setup** to see the plan ("Turn on Image Transformations for example.com, connect media.example.com to the R2 bucket example-media, add 2 URL rewrite rules"), then **Apply**. Anything already done is skipped, the zone's other URL rewrite rules are kept as they are, and only the pack's own two rules (matched by name) are replaced. It finishes with a check. The page checks the media host each time it opens: when it works, Set up media host shows as done with **Run setup again**, and the host field opens with **Change host**.
+4. **Smart Tiered Cache** turned on for the zone (Caching → Tiered Cache → Smart Tiered Caching; free on every plan). Each Cloudflare data center has its own cache, so an image nobody has loaded there yet goes back to R2. With Smart Tiered Cache, that data center asks a nearby upper-tier Cloudflare cache first (placed near the R2 bucket), so after one visit anywhere, first loads elsewhere come from Cloudflare's cache. Pages don't need it: Workers Cache is always tiered. The setup only ever turns it on, never off.
+
+Do it by hand with the step-by-step guide on the Clean Image URLs page, or let **Set up media host** on that page do it through the Cloudflare API: enter the media host, your Cloudflare account ID, the media bucket's name and an API token, select **Review setup** to see the plan ("Turn on Image Transformations for example.com, connect media.example.com to the R2 bucket example-media, add 2 URL rewrite rules, turn on Smart Tiered Cache"), then **Apply**. Anything already done is skipped (a token without permission for Smart Tiered Cache still gets the other steps, and that step names the missing permission), the zone's other URL rewrite rules are kept as they are, and only the pack's own two rules (matched by name) are replaced. It finishes with a check. The page checks the media host each time it opens: when it works, Set up media host shows as done with **Run setup again**, and the host field opens with **Change host**.
 
 The API token needs these permissions (Account Resources: your account; Zone Resources: the site's zone):
 
 - Zone → Zone → Read (to find the zone)
-- Zone → Zone Settings → Edit (Image Transformations)
+- Zone → Zone Settings → Edit (Image Transformations and Smart Tiered Cache)
 - Zone → Transform Rules → Edit, and Account → Account Rulesets → Read (the URL rewrite rules)
 - Account → Workers R2 Storage → Edit, and Zone → DNS → Edit (the custom domain and its DNS record)
 
