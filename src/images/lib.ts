@@ -87,6 +87,30 @@ export function imageCdn(): string | null {
 	return savedBase ?? optionBase;
 }
 
+/**
+ * Add `Link: <media host>; rel=preconnect` to a page (HTML) response, so the
+ * browser opens the connection to the media host (DNS, TCP, TLS) while the
+ * page is still arriving instead of when it reaches the first image. No
+ * `crossorigin`: images are fetched without CORS, so that's the connection
+ * they use. Returns the response unchanged without a host, for anything but
+ * HTML, or when it already has a preconnect to the host.
+ */
+export function withMediaPreconnect(response: Response, host: string | null = imageCdn()): Response {
+	if (!host || !(response.headers.get("content-type") ?? "").startsWith("text/html")) return response;
+	const link = response.headers.get("link") ?? "";
+	if (link.includes(`<${host}>`) && /rel="?preconnect/i.test(link)) return response;
+	const value = `<${host}>; rel=preconnect`;
+	try {
+		response.headers.append("link", value);
+		return response;
+	} catch {
+		// Immutable headers (a response passed through from fetch): copy it.
+		const copy = new Response(response.body, response);
+		copy.headers.append("link", value);
+		return copy;
+	}
+}
+
 /** Where the media host comes from: the admin setting, the plugin option, or nowhere. */
 export function imageCdnSource(): { host: string | null; option: string | null; saved: string | null } {
 	return { host: imageCdn(), option: optionBase, saved: savedBase };

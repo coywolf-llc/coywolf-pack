@@ -30,7 +30,9 @@ import { type PurgeScope, applyPageLifetime, isRedirectSave, purgePageCache, pur
 import { STOPGAP_HEADER, WARMER_AGENT, WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, scheduleRewarm, startWarm, warmMayHaveWork, warmStep } from "./pageCache/warm.js";
 import { prefetchRedirects } from "./redirects/middleware.js";
 import { notePackMiddleware } from "./search/live-serve.js";
+import { withMediaPreconnect } from "./images/lib.js";
 import { pendingMediaRenders, renderedPendingMedia } from "./images/pending.js";
+import { refreshMediaHost } from "./images/settings.js";
 import { variantsAfterMediaWrite } from "./images/pack.js";
 
 // The warming progress row is read with the feature switches, so requests can skip an idle warmer without a query.
@@ -250,13 +252,16 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		if (method === "GET" || method === "HEAD") {
 			const before = pendingMediaRenders();
 			const response = await next();
-			return settlePage(routeCache, response, {
+			// The media host (read with the feature switches: no extra query) for the page's preconnect header.
+			await refreshMediaHost().catch(() => undefined);
+			const settled = await settlePage(routeCache, response, {
 				failed: readFailed,
 				stopgap: method === "GET" && isOn(features, "images") ? () => renderedPendingMedia(context.locals, before) : undefined,
 				markHeader: context.request.headers.get("user-agent") === WARMER_AGENT ? STOPGAP_HEADER : undefined,
 				label: `${method} ${context.url.pathname}`,
 				reason: lastReadFailure,
 			});
+			return context.url.pathname.startsWith("/_emdash/") ? settled : withMediaPreconnect(settled);
 		}
 		return afterWrite(await next());
 	};
