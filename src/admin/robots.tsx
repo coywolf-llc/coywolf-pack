@@ -350,7 +350,7 @@ function RulesList(props: {
 				const unverified = rule.agents.filter((a) => byToken.get(a.toLowerCase())?.status === "unverified");
 				return (
 					<li key={rule.id} className={`flex items-start gap-3 border-b px-4 py-3 text-sm last:border-0 ${rule.enabled ? "" : "opacity-60"}`}>
-						<Switch size="sm" aria-label={`${rule.name}: ${rule.enabled ? "on" : "off"}`} checked={rule.enabled} disabled={props.busy} onCheckedChange={(on) => props.onToggle(rule, on)} />
+						<Switch className="shrink-0" size="sm" aria-label={`${rule.name}: ${rule.enabled ? "on" : "off"}`} checked={rule.enabled} disabled={props.busy} onCheckedChange={(on) => props.onToggle(rule, on)} />
 						<div className="min-w-0 flex-1">
 							<div className="font-medium">{rule.name || sentence}</div>
 							{rule.name && rule.name !== sentence && <div className="text-xs">{sentence}</div>}

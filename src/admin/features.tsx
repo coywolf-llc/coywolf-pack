@@ -106,7 +106,7 @@ export function FeaturesPage() {
 								<h2 className="text-base font-semibold">{main.label}</h2>
 								<p className="mt-1 text-sm text-kumo-subtle">{main.description}</p>
 							</div>
-							<Switch
+							<Switch className="shrink-0"
 								aria-label={`${main.label}: ${main.enabled ? "on" : "off"}`}
 								checked={main.enabled}
 								disabled={saving !== null}
@@ -122,7 +122,7 @@ export function FeaturesPage() {
 											<h3 className="text-sm font-medium">{feature.label}</h3>
 											<p className="mt-0.5 text-sm text-kumo-subtle">{feature.description}</p>
 										</div>
-										<Switch
+										<Switch className="shrink-0"
 											size="sm"
 											aria-label={`${feature.label}: ${feature.enabled ? "on" : "off"}`}
 											checked={feature.enabled && main.enabled}

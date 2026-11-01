@@ -249,7 +249,7 @@ export function PerformancePage() {
 								publishing an entry, menus, categories, site settings), which clear the home page, archives and related pages.
 							</p>
 						</div>
-						<Switch
+						<Switch className="shrink-0"
 							aria-label={`Cache warming: ${warm?.enabled ? "on" : "off"}`}
 							checked={Boolean(warm?.enabled)}
 							disabled={!warm || busy !== null}

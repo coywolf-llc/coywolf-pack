@@ -974,7 +974,7 @@ function SettingsTab(props: { config: Config; onSaved: (settings: Config["settin
 						onChange={(e: React.ChangeEvent<HTMLInputElement>) => set("schemaRobotsMaxVideo", e.target.value)}
 					/>
 				</div>
-				<Switch
+				<Switch className="shrink-0"
 					label="nofollow on every page"
 					checked={!!values.schemaRobotsNofollow}
 					onCheckedChange={(checked: boolean) => set("schemaRobotsNofollow", checked)}
