@@ -11,13 +11,15 @@ import { COLLECTION_SLUG, ancestorTrail, expandPattern, hostDefaultLocale, prima
 import { siteName } from "../core/site.js";
 import { workerEnv } from "../shared.js";
 import { entryTitle, pickCollections } from "./build.js";
-import { FEED_PATH, type FeedItem, type TermFeedRoute, buildRss, feedDate, parseFeedPath, termFeedRoute, termSegments, withDescendants } from "./feed.js";
+import { FEED_PATH, FEED_TAG, type FeedItem, type TermFeedRoute, buildRss, feedDate, parseFeedPath, termFeedRoute, termSegments, withDescendants } from "./feed.js";
 import type { DiscoverySettings } from "./settings.js";
 import { createUrlResolver, siteOrigin } from "./urls.js";
 
 export interface FeedDocument {
 	body: string;
 	count: number;
+	/** Edge cache tags: EmDash clears a collection's tag (its slug) on every live-content write, and a taxonomy's on term edits. */
+	tags: string[];
 }
 
 const str = (value: unknown) => (typeof value === "string" ? value : "");
@@ -65,28 +67,40 @@ async function findTerm(d1: D1Database, collections: CollectionSchemaInfo[], seg
 	return null;
 }
 
-/** Ids of a term's published entries (default locale), newest first. */
+/** Ids of a term's published, indexable entries (default locale), newest first. */
 async function termEntryIds(d1: D1Database, collection: string, groups: string[], limit: number): Promise<string[]> {
 	if (!groups.length || !COLLECTION_SLUG.test(collection)) return [];
 	const { results } = await d1
 		.prepare(
 			`SELECT content.id AS id FROM "ec_${collection}" AS content
+			LEFT JOIN _emdash_seo AS seo ON seo.collection = ? AND seo.content_id = content.id
 			WHERE content.status = 'published' AND content.deleted_at IS NULL AND content.published_at IS NOT NULL
+				AND coalesce(seo.seo_no_index, 0) = 0
 				AND (content.locale IS NULL OR content.locale = ?)
 				AND content.translation_group IN (SELECT entry_id FROM content_taxonomies WHERE collection = ? AND taxonomy_id IN (${groups.map(() => "?").join(",")}))
 			ORDER BY content.published_at DESC LIMIT ?`,
 		)
-		.bind(await hostDefaultLocale(), collection, ...groups, limit)
+		.bind(collection, await hostDefaultLocale(), collection, ...groups, limit)
 		.all<{ id: string }>();
 	return results.map((r) => r.id);
 }
 
-/** Newest published entries (default locale) of a collection. */
+/** The newest `limit` published, indexable entries (default locale) of a collection: a page of 100 at a time (the content API's most). */
 async function newest(ctx: PluginContext, collection: string, limit: number): Promise<PluginContentItem[]> {
 	if (!ctx.content) return [];
 	const locale = await hostDefaultLocale();
-	const page = await ctx.content.list(collection, { limit, orderBy: { publishedAt: "desc" }, where: { status: "published" } });
-	return page.items.filter((item) => item.publishedAt && (!item.locale || item.locale === locale));
+	const out: PluginContentItem[] = [];
+	let cursor: string | undefined;
+	for (let pages = 0; pages < 10 && out.length < limit; pages++) {
+		const page = await ctx.content.list(collection, { limit: 100, cursor, orderBy: { publishedAt: "desc" }, where: { status: "published" } });
+		for (const item of page.items) {
+			if (item.publishedAt && !item.seo?.noIndex && (!item.locale || item.locale === locale)) out.push(item);
+			if (out.length >= limit) break;
+		}
+		cursor = page.hasMore ? page.cursor : undefined;
+		if (!cursor) break;
+	}
+	return out;
 }
 
 /** Labels of terms by slug (default locale first). */
@@ -125,19 +139,17 @@ export async function buildFeed(ctx: PluginContext, settings: DiscoverySettings,
 	if (!collections.length) return null;
 	const origin = siteOrigin(ctx);
 	const d1 = await db(database);
-	// Room for entries left out (noindex, no URL).
-	const fetch = Math.min(limit * 2, 200);
 
 	let entries: Array<{ collection: CollectionSchemaInfo; item: PluginContentItem }> = [];
 	let term: Term | null = null;
 	if (segments.length === 0) {
-		for (const collection of collections) for (const item of await newest(ctx, collection.slug, fetch)) entries.push({ collection, item });
+		for (const collection of collections) for (const item of await newest(ctx, collection.slug, limit)) entries.push({ collection, item });
 	} else {
 		if (!settings.feed.termFeeds || !d1) return null;
 		const found = await findTerm(d1, collections, segments);
 		if (!found) return null;
 		term = found.term;
-		const ids = await termEntryIds(d1, found.collection.slug, found.groups, fetch);
+		const ids = await termEntryIds(d1, found.collection.slug, found.groups, limit);
 		const items = await Promise.all(ids.map((id) => ctx.content?.get(found.collection.slug, id) ?? null));
 		entries = items.filter((item): item is PluginContentItem => Boolean(item && item.status === "published" && item.publishedAt)).map((item) => ({ collection: found.collection, item }));
 	}
@@ -200,5 +212,6 @@ export async function buildFeed(ctx: PluginContext, settings: DiscoverySettings,
 		image: image ? { url: image, title: name, link: `${origin}/` } : null,
 		items: listed.map(({ changed: _, ...item }) => item),
 	});
-	return { body, count: listed.length };
+	const taxonomies = new Set(collections.map((c) => termFeedRoute(urlOverride(c.slug) ? expandPattern(urlOverride(c.slug)!) : null)?.taxonomy ?? "category"));
+	return { body, count: listed.length, tags: [FEED_TAG, ...collections.map((c) => c.slug), ...[...taxonomies].map((t) => `emdash:taxonomy:${t}`)] };
 }

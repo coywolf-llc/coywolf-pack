@@ -12,20 +12,26 @@
  */
 
 export const FEED_PATH = "/feed/";
+/** Edge cache tag on every feed, cleared when the feed settings are saved. */
+export const FEED_TAG = "coywolf:feed";
+/** How long the edge keeps a feed when nothing clears it sooner (changes that clear no tag, such as a byline edit). */
+export const FEED_EDGE_MAX_AGE = 3600;
 /** Items per feed: the default, and the most allowed. */
 export const FEED_DEFAULT_ITEMS = 20;
 export const FEED_MAX_ITEMS = 100;
 /** Deepest term path followed in a feed URL. */
 const MAX_SEGMENTS = 8;
-const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+/** A term slug: letters (any script), digits, "-" and "_", not starting with "_" or "-" (so never /_emdash/…). */
+const SEGMENT = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}_-]*$/u;
 
 /**
- * The term path a feed URL asks for: [] for the site feed (`/feed/`, or
- * `/feed` without the slash), the segments before `/feed/` otherwise, null
- * when the path isn't a feed URL.
+ * The term path a feed URL asks for: [] for the site feed (`/feed/`), the
+ * segments before `/feed/` otherwise, null when the path isn't a feed URL.
+ * `/feed` without the slash isn't one: the site redirects it to `/feed/`, as
+ * it does for its other pages.
  */
 export function parseFeedPath(pathname: string): string[] | null {
-	const match = /^((?:\/[^/]+)*)\/feed\/?$/.exec(pathname);
+	const match = /^((?:\/[^/]+)*)\/feed\/$/.exec(pathname);
 	if (!match) return null;
 	const segments = match[1].split("/").filter(Boolean);
 	if (segments.length > MAX_SEGMENTS) return null;

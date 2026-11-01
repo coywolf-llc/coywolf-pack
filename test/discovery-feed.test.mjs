@@ -7,7 +7,9 @@ const { expandPattern } = await import("../src/core/content-url.ts");
 
 test("feed URLs: the site feed, term feeds, and paths that aren't feeds", () => {
 	assert.deepEqual(parseFeedPath("/feed/"), []);
-	assert.deepEqual(parseFeedPath("/feed"), []);
+	assert.equal(parseFeedPath("/feed"), null, "the site redirects it to /feed/");
+	assert.deepEqual(parseFeedPath("/caf%C3%A9/feed/"), ["café"]);
+	assert.equal(parseFeedPath("/_emdash/feed/"), null);
 	assert.deepEqual(parseFeedPath("/news/feed/"), ["news"]);
 	assert.deepEqual(parseFeedPath("/news/seo/feed/"), ["news", "seo"]);
 	assert.equal(parseFeedPath("/news/"), null);

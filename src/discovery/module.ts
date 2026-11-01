@@ -13,7 +13,8 @@ import { parseInput } from "../shared.js";
 import { LLMS_CACHE, NEWS_CACHE, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
 import { INDEXNOW_ENDPOINTS, IndexNowBatcher, buildPayload, generateKey } from "./indexnow.js";
 import { buildFeed } from "./feed-build.js";
-import { FEED_PATH } from "./feed.js";
+import { FEED_PATH, FEED_TAG } from "./feed.js";
+import { purgePageCache } from "../pageCache/lib.js";
 import { markdownUrl } from "./markdown.js";
 import {
 	INDEXNOW_KEY_SETTING,
@@ -287,6 +288,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 				const features = await ctxFeatures(ctx);
 				const kinds: DocKind[] = [...(isOn(features, FEATURE.llms) ? (["llms"] as const) : []), ...(isOn(features, FEATURE.news) ? (["news"] as const) : [])];
 				if (kinds.length) scheduleRebuild(ctx, kinds, 0);
+				// Feeds in the edge cache were built with the old settings.
+				await purgePageCache({ tags: [FEED_TAG] }).catch((error: unknown) => ctx.log.warn("Discovery: clearing cached feeds failed", { error: String(error) }));
 				return { settings };
 			},
 		}),
