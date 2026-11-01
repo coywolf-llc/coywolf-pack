@@ -33,6 +33,9 @@ const API = `https://${CLOUDFLARE_API_HOST}/client/v4`;
 export const USAGE_TOKEN_SETTING = "usageApiToken";
 const CACHE_KEY = "cache:usage";
 const TARGET_KEY = "state:usage:target";
+/** After a failed read, wait this long before asking Cloudflare again (rate limits). */
+const FAILED_KEY = "state:usage:failed";
+const RETRY_AFTER_MS = 5 * 60_000;
 /** How long a reading is kept; Refresh reads again, at most once a minute. */
 const TTL_MS = 60 * 60_000;
 const REFRESH_MIN_MS = 60_000;
@@ -45,7 +48,7 @@ export interface UsageReport {
 	planSource: "entitlements" | "usage" | null;
 	worker: string | null;
 	databaseId: string | null;
-	/** Last 24 hours, 7 days and 30 days. */
+	/** Today, the last 7 days and the last 30 days, as UTC dates including today (D1 counts by date, and Free's limits reset at 00:00 UTC). */
 	periods: Record<"day" | "week" | "month", { site: UsageTotals; account: UsageTotals }>;
 	storage: { siteBytes: number | null; accountBytes: number };
 	bill: Bill;
@@ -90,7 +93,8 @@ interface Target {
 async function findTarget(ctx: PluginContext, env: Record<string, unknown>, a: { token: string; accountId: string | null; doFetch: Fetch }, notes: string[]): Promise<Target> {
 	const version = versionId(env) ?? null;
 	const known = await ctx.kv.get<Target>(TARGET_KEY);
-	if (known && known.version === version && known.worker && (!a.accountId || known.accountId === a.accountId)) return known;
+	// Remembered per deployed version, found or not (a Worker that wasn't found isn't searched for again until the next deploy).
+	if (known && known.version === version && (!a.accountId || known.accountId === a.accountId)) return known;
 
 	let accountId = a.accountId;
 	if (!accountId) {
@@ -119,7 +123,7 @@ async function findTarget(ctx: PluginContext, env: Record<string, unknown>, a: {
 	} catch (error) {
 		notes.push(`Couldn't find this site's Worker (the token needs Workers → Metadata Read-Only, or Account → Workers Scripts → Read on a personal token): ${String(error instanceof Error ? error.message : error)}`);
 	}
-	if (target.worker) await ctx.kv.set(TARGET_KEY, target);
+	if (target.worker || version) await ctx.kv.set(TARGET_KEY, target);
 	return target;
 }
 
@@ -144,11 +148,13 @@ async function readUsage(ctx: PluginContext, a: { token: string; doFetch: Fetch 
 	const date = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 	const time = (ms: number) => new Date(ms).toISOString();
 	const n = now.getTime();
+	// Whole UTC dates for both datasets, so D1 (counted by date) and Workers cover the same time.
+	const startOfToday = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 	const body = await api<{ data?: { viewer?: { accounts?: Array<Record<string, Rows<Record<string, unknown>>>> } }; errors?: Array<{ message?: string }> | null }>(a.doFetch, a.token, "/graphql", {
 		method: "POST",
 		body: JSON.stringify({
 			query: USAGE_QUERY,
-			variables: { a: target.accountId, d1: date(n - DAY_MS), d7: date(n - 6 * DAY_MS), d30: date(n - 29 * DAY_MS), today: date(n), t1: time(n - DAY_MS), t7: time(n - 7 * DAY_MS), t30: time(n - 30 * DAY_MS), now: time(n) },
+			variables: { a: target.accountId, d1: date(startOfToday), d7: date(startOfToday - 6 * DAY_MS), d30: date(startOfToday - 29 * DAY_MS), today: date(startOfToday), t1: time(startOfToday), t7: time(startOfToday - 6 * DAY_MS), t30: time(startOfToday - 29 * DAY_MS), now: time(n) },
 		}),
 	});
 	if (body.errors?.length) throw new UsageError(`Cloudflare analytics: ${body.errors.map((e) => e.message).join("; ")}. The token needs Account → Account Analytics → Read.`);
@@ -187,12 +193,14 @@ async function readUsage(ctx: PluginContext, a: { token: string; doFetch: Fetch 
 				body: JSON.stringify({
 					queryId: "coywolf-pack-usage-warming",
 					view: "calculations",
-					timeframe: { from: n - WARM_DAYS * DAY_MS, to: n },
+					timeframe: { from: startOfToday - (WARM_DAYS - 1) * DAY_MS, to: n },
 					parameters: {
 						datasets: ["cloudflare-workers"],
 						filters: [
 							{ key: "$metadata.service", operation: "eq", type: "string", value: target.worker },
 							{ key: "$workers.event.request.headers.user-agent", operation: "eq", type: "string", value: WARMER_AGENT },
+							// Invocations only, not console.log lines from the same requests.
+							{ key: "$metadata.type", operation: "eq", type: "string", value: "cf-worker-event" },
 						],
 						calculations: [
 							{ operator: "count", alias: "visits" },
@@ -222,6 +230,11 @@ export async function usageReport(ctx: PluginContext, refresh = false, bindings?
 	const age = cached ? Date.now() - Date.parse(cached.at) : Number.POSITIVE_INFINITY;
 	if (cached && age < (refresh ? REFRESH_MIN_MS : TTL_MS)) return { configured: true, ...cached };
 	if (reading) return reading;
+	const failed = await ctx.kv.get<{ at: string; message: string }>(FAILED_KEY);
+	if (failed && Date.now() - Date.parse(failed.at) < RETRY_AFTER_MS) {
+		const wait = `Couldn't read usage: ${failed.message} Trying again after ${new Date(Date.parse(failed.at) + RETRY_AFTER_MS).toISOString().slice(11, 16)} UTC.`;
+		return cached ? { configured: true, ...cached, notes: [...cached.notes, wait] } : { configured: false, reason: wait };
+	}
 	reading = (async (): Promise<UsageResult> => {
 		const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
 		const a = await access(ctx, env);
@@ -231,10 +244,12 @@ export async function usageReport(ctx: PluginContext, refresh = false, bindings?
 			const target = await findTarget(ctx, env, a, notes);
 			const report: UsageReport = { at: new Date().toISOString(), ...(await readUsage(ctx, a, target, notes)), notes };
 			await ctx.kv.set(CACHE_KEY, report);
+			await ctx.kv.delete?.(FAILED_KEY);
 			return { configured: true, ...report };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.log.warn("Cloudflare usage: read failed", { error: message });
+			await ctx.kv.set(FAILED_KEY, { at: new Date().toISOString(), message });
 			// The last good reading, if any, with what went wrong.
 			if (cached) return { configured: true, ...cached, notes: [...cached.notes, `Couldn't refresh: ${message}`] };
 			return { configured: false, reason: message };

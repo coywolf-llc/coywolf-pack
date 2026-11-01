@@ -42,8 +42,8 @@ function useUsage() {
 
 const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
 const num = (n: number) => (n < 10_000 ? Math.round(n).toLocaleString("en-US") : compact.format(n));
-const cpu = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : ms < 3_600_000 ? `${num(ms / 1000)} s` : `${num(ms)} ms`);
-const bytes = (b: number | null) => (b === null ? "—" : b < 1024 ** 2 ? `${Math.round(b / 1024)} KB` : b < 1024 ** 3 ? `${(b / 1024 ** 2).toFixed(1)} MB` : `${(b / 1024 ** 3).toFixed(2)} GB`);
+const cpu = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : ms < 3_600_000 ? `${num(ms / 1000)} s` : `${(ms / 3_600_000).toFixed(1)} h`);
+const bytes = (b: number | null) => (b === null ? "—" : b < 1e6 ? `${Math.round(b / 1e3)} KB` : b < 1e9 ? `${(b / 1e6).toFixed(1)} MB` : `${(b / 1e9).toFixed(2)} GB`);
 const money = (n: number) => `$${n.toFixed(2)}`;
 const pct = (used: number, of: number) => {
 	const p = of > 0 ? (used / of) * 100 : 0;
@@ -55,7 +55,7 @@ function allowances(r: Report) {
 	if (r.plan === "free") {
 		const a = r.periods.day.account;
 		return {
-			window: "last 24 hours, against Workers Free's daily limits",
+			window: "today (UTC), against Workers Free's daily limits, which reset at 00:00 UTC",
 			rows: [
 				{ label: "Workers requests", used: a.workers.requests, of: FREE.daily.requests, show: num },
 				{ label: "D1 rows read", used: a.d1.rowsRead, of: FREE.daily.rowsRead, show: num },
@@ -67,7 +67,7 @@ function allowances(r: Report) {
 	const a = r.periods.month.account;
 	const m = PAID.monthly;
 	return {
-		window: "last 30 days, against what Workers Paid includes each month",
+		window: "the last 30 days (UTC dates, including today), against what Workers Paid includes each month",
 		rows: [
 			{ label: "Workers requests", used: a.workers.requests, of: m.requests, show: num },
 			{ label: "Workers CPU time", used: a.workers.cpuMs, of: m.cpuMs, show: cpu },
@@ -135,7 +135,10 @@ export function UsageCard() {
 					</Button>
 				)}
 			</div>
-			<div className="space-y-6 p-4" aria-live="polite">
+			<div className="space-y-6 p-4">
+				<p className="sr-only" role="status">
+					{loading ? "Loading Cloudflare usage…" : data?.configured ? `Cloudflare usage updated ${new Date(data.at).toLocaleString()}.` : ""}
+				</p>
 				{error && <Banner variant="error" role="alert" description={error} />}
 				{!data && !error && (
 					<div className="flex justify-center py-6">
@@ -143,13 +146,13 @@ export function UsageCard() {
 					</div>
 				)}
 				{data && !data.configured && <Setup reason={data.reason} />}
-				{data?.configured && <Report r={data} />}
+				{data?.configured && <Details r={data} />}
 			</div>
 		</section>
 	);
 }
 
-function Report(props: { r: Report }) {
+function Details(props: { r: Report }) {
 	const { r } = props;
 	const plan = allowances(r);
 	return (
@@ -219,7 +222,7 @@ function Report(props: { r: Report }) {
 										Usage
 									</th>
 									<th scope="col" className="py-1 pr-4 font-medium">
-										Last 24 hours
+										Today (UTC)
 									</th>
 									<th scope="col" className="py-1 pr-4 font-medium">
 										Last 7 days

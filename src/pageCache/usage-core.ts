@@ -37,7 +37,7 @@ export const EMPTY_TOTALS: UsageTotals = {
 /** Workers Paid: what the $5 a month includes, and the price of each unit over it. */
 export const PAID = {
 	base: 5,
-	monthly: { requests: 10_000_000, cpuMs: 30_000_000, rowsRead: 25_000_000_000, rowsWritten: 50_000_000, storageBytes: 5 * 1024 ** 3 },
+	monthly: { requests: 10_000_000, cpuMs: 30_000_000, rowsRead: 25_000_000_000, rowsWritten: 50_000_000, storageBytes: 5e9 },
 	/** Per million (storage: per GB-month). */
 	price: { requests: 0.3, cpuMs: 0.02, rowsRead: 0.001, rowsWritten: 1, storageGb: 0.75 },
 } as const;
@@ -46,7 +46,7 @@ export const PAID = {
 export const FREE = {
 	daily: { requests: 100_000, rowsRead: 5_000_000, rowsWritten: 100_000 },
 	cpuMsPerRequest: 10,
-	storageBytes: 5 * 1024 ** 3,
+	storageBytes: 5e9,
 } as const;
 
 interface Entitlement {
@@ -95,7 +95,7 @@ export function estimateBill(account: UsageTotals, storageBytes: number): Bill {
 		cpu: round2((over(account.workers.cpuMs, m.cpuMs) / 1e6) * p.cpuMs),
 		rowsRead: round2((over(account.d1.rowsRead, m.rowsRead) / 1e6) * p.rowsRead),
 		rowsWritten: round2((over(account.d1.rowsWritten, m.rowsWritten) / 1e6) * p.rowsWritten),
-		storage: round2((over(storageBytes, m.storageBytes) / 1024 ** 3) * p.storageGb),
+		storage: round2((over(storageBytes, m.storageBytes) / 1e9) * p.storageGb),
 	};
 	const total = round2(PAID.base + Object.values(overage).reduce((a, b) => a + b, 0));
 	return { base: PAID.base, overage, total };

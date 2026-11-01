@@ -31,7 +31,7 @@ test("bill: the $5 base, plus only what's over the included amounts", () => {
 	const inside = estimateBill(totals({ workers: { requests: 655_000, cpuMs: 19_000_000 }, d1: { rowsRead: 298e6, rowsWritten: 2.9e6 } }), 80 * 1024 ** 2);
 	assert.equal(inside.total, 5);
 	assert.deepEqual(Object.values(inside.overage), [0, 0, 0, 0, 0]);
-	const over = estimateBill(totals({ workers: { requests: 20_000_000, cpuMs: 40_000_000 }, d1: { rowsRead: 26e9, rowsWritten: 52e6 } }), 6 * 1024 ** 3);
+	const over = estimateBill(totals({ workers: { requests: 20_000_000, cpuMs: 40_000_000 }, d1: { rowsRead: 26e9, rowsWritten: 52e6 } }), 6e9);
 	assert.deepEqual(over.overage, { requests: 3, cpu: 0.2, rowsRead: 1, rowsWritten: 2, storage: 0.75 });
 	assert.equal(over.total, 11.95);
 	assert.equal(PAID.base, 5);
@@ -154,4 +154,30 @@ test("analytics refused: not configured, with the reason", async () => {
 	const r = await usageReport(ctx, false, { CF_VERSION_METADATA: { id: "v-123" } });
 	assert.equal(r.configured, false);
 	assert.match(r.reason, /Account Analytics → Read/);
+});
+
+test("a failed read isn't retried for five minutes (rate limits), then is", async () => {
+	let graphql = 0;
+	const api = fakeApi({ "/graphql": () => (graphql++, new Response(JSON.stringify({ success: false, errors: [{ message: "rate limited" }] }), { status: 429 })) });
+	const ctx = { ...fakeCtx({ usageApiToken: "tok" }), http: { fetch: api.fetch } };
+	const first = await usageReport(ctx, false, { CF_VERSION_METADATA: { id: "v-123" } });
+	assert.equal(first.configured, false);
+	const second = await usageReport(ctx, true, { CF_VERSION_METADATA: { id: "v-123" } });
+	assert.equal(graphql, 1, "no second call while the failure is recent");
+	assert.match(second.reason, /Trying again after/);
+	const failed = ctx.kvMap.get("state:usage:failed");
+	ctx.kvMap.set("state:usage:failed", { ...failed, at: new Date(Date.now() - 6 * 60_000).toISOString() });
+	await usageReport(ctx, false, { CF_VERSION_METADATA: { id: "v-123" } });
+	assert.equal(graphql, 2);
+});
+
+test("a Worker that isn't found is remembered for this version, not searched for on every read", async () => {
+	const api = fakeApi();
+	const ctx = { ...fakeCtx({ usageApiToken: "tok" }), http: { fetch: api.fetch } };
+	const r = await usageReport(ctx, false, { CF_VERSION_METADATA: { id: "v-unknown" } });
+	assert.equal(r.worker, null);
+	const scans = api.calls.filter((c) => c.path.endsWith("/deployments")).length;
+	ctx.kvMap.delete("cache:usage");
+	await usageReport(ctx, false, { CF_VERSION_METADATA: { id: "v-unknown" } });
+	assert.equal(api.calls.filter((c) => c.path.endsWith("/deployments")).length, scans);
 });
