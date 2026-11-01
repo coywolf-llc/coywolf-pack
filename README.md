@@ -313,6 +313,23 @@ EmDash clears the pages it tagged when content, menus or site settings change. *
 
 Responses the pack serves itself (robots.txt, llms.txt, files, clean image URLs) keep their own `Cache-Control`: the middleware turns Astro's route caching off for them, so a site route rule (for example on a catch-all page route) doesn't add its edge lifetime. Redirects set their own: see [Redirects](#redirects).
 
+### Cloudflare usage
+
+The Performance page's **Cloudflare usage** card, and a **Cloudflare usage** dashboard widget, show what the site and its account use on Cloudflare, read from Cloudflare's analytics and kept for an hour (**Refresh** reads again):
+
+- **The estimated bill**: Workers Paid's $5 a month plus anything over the included amounts, worked out from the account's last 30 days (allowances are shared by every Worker and database in the account). On Workers Free it compares today (UTC; the limits reset at 00:00 UTC) with the daily limits instead.
+- **The account against its plan**: Workers requests and CPU time, D1 rows read and written, and D1 storage, with the share of each allowance. The plan is read from the account's entitlements (D1's per-database size limit is 10 GB on Paid, 500 MB on Free); without them, a day over Free's limits shows the account is on Paid, and otherwise Paid is assumed.
+- **This site**: its Worker's requests and CPU time and its D1 database's rows read and written, queries and size, for today, the last 7 days and the last 30 days (UTC dates, including today). The Worker is the one whose current deployment runs this version (the `CF_VERSION_METADATA` binding), and the database is the D1 binding named `DB` in that Worker's settings, so nothing is configured per site.
+- **Cache warming (estimate)**: the warmer's visits over the last 7 days from Workers Logs, as a share of the site's requests and CPU time, and its D1 rows read (the site's total times that share). Logs are sampled, so it's labeled as an estimate.
+
+It needs a read-only, account-owned API token (Cloudflare dashboard → Manage Account → Account API Tokens → Create Custom Token):
+
+- Account → Account Analytics → Read (D1 and Workers usage)
+- Workers → Metadata Read-Only, for All Workers (finds the site's Worker and database, and reads Workers Logs for the warming estimate; on a personal token: Account → Workers Scripts → Read and Account → Workers Observability → Edit)
+- Account → Account Settings → Read (the plan, from the account's entitlements)
+
+Set it as the `USAGE_API_TOKEN` Worker secret (one token works for every site in the account), or save it as **Cloudflare usage** on the plugin's Settings page. The account comes from `CF_ACCOUNT_ID`, the Clean Image URLs account ID, or the token itself when it's limited to one account. A part the token can't read is left out with a note naming the permission; the rest still shows.
+
 ## Backups
 
 - **Database**: a restorable SQL dump of the site's D1 database: users, passkeys, settings, redirects, menus, plugin data, and content. Search indexes rebuild automatically on restore.

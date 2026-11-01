@@ -94,6 +94,8 @@ export function coywolfPlugin(options: CoywolfOptions = {}): PluginDescriptor<Co
  */
 function liveAdmin<T extends object>(modules: PackModule[], base: T) {
 	const on = (module: PackModule) => {
+		// A module without switches (Performance) is always on.
+		if (!module.features.length) return true;
 		const features = knownFeatures();
 		return !features || isOn(features, module.features[0]?.id ?? module.id);
 	};
