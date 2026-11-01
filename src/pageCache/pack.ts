@@ -8,6 +8,7 @@ import { mediaApiAccess, purgeMediaHost } from "../images/module.js";
 import type { PackMiddleware, PackModule } from "../core/module.js";
 import { workerEnv } from "../shared.js";
 import { VERSION_OPTION, purgeIfNewVersion, purgePageCache, versionId } from "./lib.js";
+import { usageReport } from "./usage.js";
 import { WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, nextDailyAt, pendingRevisits, readWarmState, remainingUrls, startWarm } from "./warm.js";
 
 /**
@@ -157,6 +158,15 @@ export function pageCachePack(): PackModule {
 				},
 			}),
 
+			/** Cloudflare usage (Performance page and the dashboard widget): kept for an hour; `refresh` reads again. */
+			"cache/usage": {
+				permission: "plugins:manage" as const,
+				handler: async (ctx: Parameters<typeof mediaApiAccess>[0] & { input?: unknown }) => {
+					const { refresh } = parseInput(z.object({ refresh: z.union([z.literal("1"), z.literal(1), z.literal(true)]).optional() }), ctx.input ?? {});
+					return usageReport(ctx, Boolean(refresh));
+				},
+			},
+
 			/**
 			 * Clear every cached page now, and the media host's images in the
 			 * zone cache when Clean image URLs has a media host.
@@ -182,6 +192,7 @@ export function pageCachePack(): PackModule {
 		},
 		// Its page (/performance) is listed by index.ts, always, right below Coywolf Pack.
 		adminPages: [],
+		widgets: [{ id: "cloudflare-usage", title: "Cloudflare usage", size: "third" }],
 		// Clearing the media host's images goes through the Cloudflare API.
 		capabilities: ["network:request"],
 		allowedHosts: [CLOUDFLARE_API_HOST],

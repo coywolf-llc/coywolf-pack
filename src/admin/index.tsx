@@ -12,6 +12,7 @@ import { FeaturesPage } from "./features.js";
 import { HeadingsPage } from "./headings.js";
 import { ImagesPage } from "./images.js";
 import { PerformancePage } from "./performance.js";
+import { UsageWidget } from "./usage.js";
 import { BreadcrumbsPage } from "./breadcrumbs.js";
 import { FilesPage } from "./files.js";
 import { FormUploadsPage } from "./formUploads.js";
@@ -57,4 +58,5 @@ export const pages: PluginAdminExports["pages"] = {
 export const widgets: PluginAdminExports["widgets"] = {
 	"backup-status": BackupStatusWidget,
 	"links-status": LinksWidget,
+	"cloudflare-usage": UsageWidget,
 };

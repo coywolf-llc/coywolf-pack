@@ -50,6 +50,12 @@ export const SECRET_SETTINGS = {
 		description:
 			"Optional. Only for Set up media host on the Clean Image URLs page, which does the Cloudflare setup for you. To get one: (1) Cloudflare dashboard → My Profile → API Tokens → Create Token → Create Custom Token; (2) add the permissions Zone → Zone → Read, Zone → Zone Settings → Edit, Zone → Transform Rules → Edit, Zone → DNS → Edit, Account → Workers R2 Storage → Edit and Account → Account Rulesets → Read; (3) include your account and the site's zone; (4) create it, copy the token (shown once), paste it here and save. Or set the IMAGES_API_TOKEN Worker secret.",
 	},
+	usageApiToken: {
+		type: "secret",
+		label: "Cloudflare usage — read-only API token",
+		description:
+			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) add the permissions Account → Account Analytics → Read, Workers → Metadata Read-Only (All Workers; finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account → Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account).",
+	},
 	robotsRadarToken: {
 		type: "secret",
 		label: "Robots.txt Rules — Cloudflare Radar API token",
