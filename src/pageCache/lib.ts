@@ -31,6 +31,31 @@ export type PurgeScope = { purgeEverything: true } | { pathPrefixes: string[] } 
 
 /** Cache tag on every redirect the pack serves from the edge cache (src/redirects/middleware.ts). */
 export const REDIRECTS_TAG = "coywolf-redirects";
+/** robots.txt in the edge cache (cleared with everything else after the pack's admin saves and settings changes). */
+export const ROBOTS_TAG = "coywolf-robots";
+
+interface EdgeRouteCache {
+	enabled?: boolean;
+	set(options: { maxAge?: number; swr?: number; tags?: string[] } | false): void;
+}
+
+/**
+ * Keep a response the pack serves itself in the edge cache (Workers Cache) for
+ * `maxAge` seconds, replacing any lifetime the site's route rules or Plugins →
+ * Performance gave the request. For middleware marked `ownsCache`. Does
+ * nothing without Astro route caching.
+ */
+export function keepAtEdge(context: unknown, maxAge: number, tags: string[] = []): void {
+	const cache = (context as { cache?: EdgeRouteCache }).cache;
+	if (!cache?.enabled) return;
+	cache.set(false);
+	cache.set({ maxAge, swr: 0, tags });
+}
+
+/** Keep a response out of the edge cache (for an `ownsCache` middleware's other answers). */
+export function keepOffEdge(context: unknown): void {
+	(context as { cache?: EdgeRouteCache }).cache?.set(false);
+}
 
 /**
  * What a successful pack admin write has to clear. Most settings change page
