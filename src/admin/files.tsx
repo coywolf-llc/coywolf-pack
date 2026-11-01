@@ -16,6 +16,7 @@ import { CredentialGuide } from "./guides.js";
 import { PreviewSection } from "./preview.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/files";
 const CONCURRENCY = 4;
@@ -575,6 +576,8 @@ export function FilesPage() {
 				</div>
 				)}
 			</header>
+
+			<PartSwitches module="files" />
 
 			<Tabs
 				value={tab}

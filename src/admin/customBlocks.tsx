@@ -36,6 +36,7 @@ import {
 	renderTestimonialHtml,
 } from "../customBlocks/render.js";
 import { safeUrl } from "../customBlocks/rich.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const HEADING_ITEMS: Array<{ value: PodcastHeadingTag; label: string }> = [
 	{ value: "h2", label: "Heading 2" },
@@ -164,6 +165,8 @@ export function CustomBlocksPage() {
 					</p>
 				</div>
 			</header>
+
+			<PartSwitches module="customBlocks" />
 
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<p className="sr-only" role="status" aria-live="polite">

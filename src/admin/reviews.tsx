@@ -10,6 +10,7 @@ import * as React from "react";
 
 import { SaveBar } from "./save-bar.js";
 import { DEFAULT_ACCENT, MAX_CUSTOM_CSS, SAMPLE_REVIEW, isAccent, pageCss, renderReviewHtml, sanitizeCustomCss } from "../reviews/lib.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack";
 
@@ -123,6 +124,8 @@ export function ReviewsPage() {
 					</p>
 				</div>
 			</header>
+
+			<PartSwitches module="reviews" />
 
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<p className="sr-only" role="status" aria-live="polite">

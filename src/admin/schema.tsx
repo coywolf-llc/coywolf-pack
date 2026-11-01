@@ -9,6 +9,7 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { SaveBar, isDirty } from "./save-bar.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/schema";
 
@@ -1152,6 +1153,8 @@ export function SchemaPage() {
 					keeps everything it had: headline, description, image, dates, author and publisher.
 				</p>
 			</header>
+
+			<PartSwitches module="schema" />
 
 			{error && <Banner variant="error" role="alert" title="Something went wrong" description={error} />}
 			{off.length > 0 && (

@@ -9,6 +9,7 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { SaveBar } from "./save-bar.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack";
 
@@ -130,6 +131,8 @@ export function CodeBlocksPage() {
 					</p>
 				</div>
 			</header>
+
+			<PartSwitches module="codeBlocks" />
 
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<p className="sr-only" role="status" aria-live="polite">

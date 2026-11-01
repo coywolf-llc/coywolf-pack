@@ -52,7 +52,7 @@ A page that isn't in the edge cache yet is built by the Worker, and every D1 rou
 | **WordPress import** | Finishes a move from any WordPress site: keeps heading ids, reusable blocks, quotes and Details blocks through EmDash's importer, credits co-authors and guest authors, restores category and page parents, points leftover `/wp-content/` URLs (size variants and files outside the media library included) at the media library, and turns old slugs and Redirection, Rank Math and Yoast rules into redirects. Blocks from Coywolf's WordPress plugins become Coywolf Pack blocks |
 | **AI Enrichment** | Wikidata-grounded entities for schema, meta-description suggestions, and image alt text, with Workers AI or your own key |
 
-Every feature can be turned on or off under **Plugins → Coywolf Pack**, like Coywolf SEO's feature switches. New features start off, so installing or updating changes nothing on the site until you turn them on. A module that is off also leaves the admin sidebar and dashboard. The pack's pages share one **Coywolf Pack** folder in the sidebar's Plugins section (EmDash 1.2.0+): the feature switches (**Features**) first, then Performance, then Clean Image URLs when it's on, then the other modules.
+Every feature can be turned on or off under **Plugins → Coywolf Pack**, like Coywolf SEO's feature switches. New features start off, so installing or updating changes nothing on the site until you turn them on. A module that is off also leaves the admin sidebar and dashboard. The pack's pages share one **Coywolf Pack** folder in the sidebar's Plugins section (EmDash 1.2.0+): the feature switches (**Features**) first, then Performance, then Clean Image URLs when it's on, then the other modules. A module's parts (its sub-features) can also be switched on or off on the module's own page: a **Turn parts on or off** card under the page title (on Discovery, a switch next to each part's title). The module's main switch stays on **Features**, since turning it off takes its page out of the sidebar.
 
 More modules will follow as Coywolf's WordPress plugins move to EmDash.
 
@@ -927,7 +927,7 @@ Set `ai: false` in `coywolfPlugin()` to leave the module out entirely. The modul
 - Wikidata lookups are cached per Worker isolate and made one at a time, with `maxlag=5`. If Wikidata doesn't answer, the item is retried rather than saved unverified; if it asks to slow down (HTTP 429 or maxlag), every entity job waits for its `Retry-After` without counting as a failed attempt (after 10 waits in a row, the next counts as one). When an item lists several official websites, the preferred-rank one is kept, then https over http, then the first alphabetically.
 ## Discovery
 
-Help search engines, feed readers and AI agents find your content. Ported from Coywolf SEO for WordPress (the RSS feed is new). Everything is off until you turn it on under **Plugins → Coywolf Pack**: the **Discovery** switch, then any of its four parts. Settings and status are under **Plugins → Coywolf Pack → Discovery**.
+Help search engines, feed readers and AI agents find your content. Ported from Coywolf SEO for WordPress (the RSS feed is new). Everything is off until you turn it on under **Plugins → Coywolf Pack**: the **Discovery** switch, then any of its four parts (here or with the switch next to each part's title on the Discovery page). Settings and status are under **Plugins → Coywolf Pack → Discovery**.
 
 | Feature switch | Default | What it does |
 | --- | --- | --- |

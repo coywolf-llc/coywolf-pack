@@ -20,6 +20,7 @@ import { dateTimeFormat, errorText, get, newId, post, tokenIndex, useCopy } from
 import { saveFile, siteSlug, today } from "./download.js";
 import { RuleWizard } from "./robots-wizard.js";
 import { SaveBar, isDirty } from "./save-bar.js";
+import { PartSwitches } from "./feature-switches.js";
 
 interface SyncState {
 	at: string;
@@ -698,6 +699,8 @@ export function RobotsPage() {
 					</p>
 				</div>
 			</header>
+
+			<PartSwitches module="robots" />
 
 			{data.groupChanges.length > 0 && (
 				<Banner
