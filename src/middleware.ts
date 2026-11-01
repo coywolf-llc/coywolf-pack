@@ -26,7 +26,8 @@ import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
 import { MIDDLEWARE } from "./modules.js";
 import { ALWAYS, LIFETIME_DEFAULTS, LIFETIME_SETTINGS } from "./pageCache/pack.js";
-import { type PurgeScope, applyPageLifetime, isRedirectSave, purgePageCache, purgeScope, purgesAfter, redirectPagesScope, settlePage, watchInvalidation } from "./pageCache/lib.js";
+import { ROBOTS_EDGE_MAX_AGE } from "./robots/pack.js";
+import { type PurgeScope, ROBOTS_TAG, applyPageLifetime, keepAtEdge, isRedirectSave, purgePageCache, purgeScope, purgesAfter, redirectPagesScope, settlePage, watchInvalidation } from "./pageCache/lib.js";
 import { STOPGAP_HEADER, WARMER_AGENT, WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, scheduleRewarm, startWarm, warmMayHaveWork, warmStep } from "./pageCache/warm.js";
 import { prefetchRedirects } from "./redirects/middleware.js";
 import { notePackMiddleware } from "./search/live-serve.js";
@@ -252,6 +253,8 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		if (method === "GET" || method === "HEAD") {
 			const before = pendingMediaRenders();
 			const response = await next();
+			// EmDash's own robots.txt (Robots.txt Rules off): kept at the edge for a day, as the pack's is.
+			if (context.url.pathname === "/robots.txt" && response.status === 200 && !readFailed()) keepAtEdge(context, ROBOTS_EDGE_MAX_AGE, [ROBOTS_TAG]);
 			// The media host (read with the feature switches: no extra query) for the page's preconnect header.
 			await refreshMediaHost().catch(() => undefined);
 			const settled = await settlePage(routeCache, response, {

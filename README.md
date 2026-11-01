@@ -313,6 +313,10 @@ EmDash clears the pages it tagged when content, menus or site settings change. *
 
 Responses the pack serves itself (robots.txt, llms.txt, files, clean image URLs) keep their own `Cache-Control`: the middleware turns Astro's route caching off for them, so a site route rule (for example on a catch-all page route) doesn't add its edge lifetime. Redirects set their own: see [Redirects](#redirects).
 
+### robots.txt and the live search script at the edge
+
+Crawlers ask for `/robots.txt` constantly, and each answer used to run the Worker. It's now kept in the edge cache for a day, whether the pack's Robots.txt Rules or EmDash's own file serves it (tag `coywolf-robots`; the pack clears its cache after its admin saves and settings changes, so edits show at once). A `robots.txt` asked for below the root (`/news/robots.txt`, which crawlers try) gets a small plain-text 404, also cached for a day, instead of a rendered 404 page. The live search client (`/_emdash/api/plugins/coywolf-pack/search/live-client?v=<hash>`) is kept at the edge for a year when the URL names the current version (5 minutes otherwise); the live results keep their own short cache.
+
 ### Cloudflare usage
 
 The Performance page's **Cloudflare usage** card, and a **Cloudflare usage** dashboard widget, show what the site and its account use on Cloudflare, read from Cloudflare's analytics and kept for an hour (**Refresh** reads again):

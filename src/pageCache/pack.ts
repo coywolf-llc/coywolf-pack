@@ -7,7 +7,7 @@ import { CLOUDFLARE_API_HOST, CloudflareApiError, applyMediaCacheRule, readMedia
 import { mediaApiAccess, purgeMediaHost } from "../images/module.js";
 import type { PackMiddleware, PackModule } from "../core/module.js";
 import { workerEnv } from "../shared.js";
-import { VERSION_OPTION, purgeIfNewVersion, purgePageCache, versionId } from "./lib.js";
+import { ROBOTS_TAG, VERSION_OPTION, keepAtEdge, purgeIfNewVersion, purgePageCache, versionId } from "./lib.js";
 import { usageReport } from "./usage.js";
 import { WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, nextDailyAt, pendingRevisits, readWarmState, remainingUrls, startWarm } from "./warm.js";
 
@@ -219,5 +219,22 @@ export const pageCacheMiddleware: PackMiddleware = {
 					.catch((error) => console.error("coywolf-pack: page cache version check failed", error)),
 			);
 		return undefined;
+	},
+};
+
+/** robots.txt is only ever read at the root; a crawler asking at /news/robots.txt gets a small 404, kept at the edge for a day, instead of a rendered 404 page. */
+export const strayRobotsMiddleware: PackMiddleware = {
+	module: "pageCache",
+	feature: ALWAYS,
+	ownsCache: true,
+	handle: (context) => {
+		const { pathname } = context.url;
+		const method = context.request.method;
+		if (!pathname.endsWith("/robots.txt") || pathname === "/robots.txt" || (method !== "GET" && method !== "HEAD")) return undefined;
+		keepAtEdge(context, 86400, [ROBOTS_TAG]);
+		return new Response(method === "HEAD" ? null : "Not found. robots.txt is at the site root.\n", {
+			status: 404,
+			headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=86400", "X-Robots-Tag": "noindex" },
+		});
 	},
 };

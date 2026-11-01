@@ -10,7 +10,7 @@ import { customBlocksPack } from "./customBlocks/pack.js";
 import type { PackMiddleware, PackModule } from "./core/module.js";
 import { headingsPack } from "./headings/pack.js";
 import { imagesMiddleware, imagesPack } from "./images/pack.js";
-import { pageCacheMiddleware, pageCachePack } from "./pageCache/pack.js";
+import { pageCacheMiddleware, strayRobotsMiddleware, pageCachePack } from "./pageCache/pack.js";
 import { breadcrumbsPack } from "./breadcrumbs/pack.js";
 import { filesMiddleware, filesPack } from "./files/pack.js";
 import { formUploadsPack } from "./formUploads/pack.js";
@@ -50,4 +50,4 @@ export const MODULES: Factory[] = [
 	(o) => (o.pageCache === false ? null : pageCachePack()),
 ];
 
-export const MIDDLEWARE: PackMiddleware[] = [pageCacheMiddleware, imagesMiddleware, backupsDownloadMiddleware, redirectsMiddleware, robotsMiddleware, filesMiddleware, searchLiveMiddleware, searchRateLimitMiddleware, ...discoveryMiddleware, videosSitemapMiddleware, videosCaptionsMiddleware];
+export const MIDDLEWARE: PackMiddleware[] = [pageCacheMiddleware, strayRobotsMiddleware, imagesMiddleware, backupsDownloadMiddleware, redirectsMiddleware, robotsMiddleware, filesMiddleware, searchLiveMiddleware, searchRateLimitMiddleware, ...discoveryMiddleware, videosSitemapMiddleware, videosCaptionsMiddleware];

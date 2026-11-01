@@ -1,6 +1,7 @@
 import type { PluginContext } from "emdash";
 
 import { registerFeatures } from "../core/features.js";
+import { ROBOTS_TAG, keepAtEdge } from "../pageCache/lib.js";
 import type { PackMiddleware, PackModule } from "../core/module.js";
 import { serveRobots } from "./middleware.js";
 import { BOT_OVERRIDES_COLLECTION, HISTORY_COLLECTION, type RobotsOptions, robotsModule } from "./module.js";
@@ -53,8 +54,16 @@ export function robotsPack(options: RobotsOptions): PackModule {
 }
 
 /** Serves /robots.txt while the feature is on (site database binding "DB"). */
+/** robots.txt barely changes: kept at the edge for a day (crawlers ask for it constantly). */
+export const ROBOTS_EDGE_MAX_AGE = 86400;
+
 export const robotsMiddleware: PackMiddleware = {
 	module: "robots",
 	feature: "robots",
-	handle: (context, env) => serveRobots(context.url, context.request.method, env),
+	ownsCache: true,
+	handle: async (context, env) => {
+		const response = await serveRobots(context.url, context.request.method, env);
+		if (response) keepAtEdge(context, ROBOTS_EDGE_MAX_AGE, [ROBOTS_TAG]);
+		return response;
+	},
 };

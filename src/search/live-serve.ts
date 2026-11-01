@@ -17,6 +17,7 @@
 import { contentUrlFingerprint } from "../core/content-url.js";
 import { isOn, registerSiteSetting, rememberSiteSetting, siteFeatures, siteSetting } from "../core/features.js";
 import type { PackMiddleware } from "../core/module.js";
+import { keepAtEdge, keepOffEdge } from "../pageCache/lib.js";
 import { type QueryStats, countingD1, liveSearchD1, loadSearchMeta } from "./engine.js";
 import { Lru, effectiveVersion, fingerprint, indexCacheKey, liveCacheKey, newContentVersion, normalizeCollections, normalizeLiveQuery, normalizeLocale } from "./live-cache.js";
 import { LIVE_ASSET, LIVE_ASSET_HASH, type LiveClientConfig, liveScript, liveScriptConfig } from "./live-client.js";
@@ -261,13 +262,18 @@ export function liveAssetParts(version: string | null): { status: number; header
 export const searchLiveMiddleware: PackMiddleware = {
 	module: "search",
 	feature: "search.live",
+	// The client file goes to the edge cache (a year when the URL names this version); live results use their own cache.
+	ownsCache: true,
 	handle: async (context, env, waitUntil) => {
 		const path = context.url.pathname.length > 1 ? context.url.pathname.replace(/\/+$/, "") : context.url.pathname;
 		if (path === ASSET_ENDPOINT && (context.request.method === "GET" || context.request.method === "HEAD")) {
-			const asset = liveAssetParts(context.url.searchParams.get("v"));
+			const version = context.url.searchParams.get("v");
+			const asset = liveAssetParts(version);
+			keepAtEdge(context, version === LIVE_ASSET_HASH ? 31536000 : 300);
 			return new Response(context.request.method === "HEAD" ? null : asset.body, { status: asset.status, headers: asset.headers });
 		}
 		if (path !== LIVE_ENDPOINT && path !== INDEX_ENDPOINT) return undefined;
+		keepOffEdge(context);
 		if (context.request.method !== "GET") return undefined;
 		const db = env[config.database] as D1Database | undefined;
 		if (!db) return undefined;
