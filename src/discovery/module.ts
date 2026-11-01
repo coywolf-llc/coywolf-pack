@@ -7,10 +7,14 @@ import { type PluginContext, PluginRouteError, after, definePluginRoute } from "
 import { z } from "zod";
 
 import { absoluteUrl, entryUrl } from "../core/content-url.js";
-import { ctxFeatures, invalidateFeatures, isOn, readSiteSetting, registerSiteSetting, requireFeature } from "../core/features.js";
+import { siteName } from "../core/site.js";
+import { cachedCtxFeatures, ctxFeatures, invalidateFeatures, isOn, readSiteSetting, registerSiteSetting, requireFeature } from "../core/features.js";
 import { parseInput } from "../shared.js";
 import { LLMS_CACHE, NEWS_CACHE, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
 import { INDEXNOW_ENDPOINTS, IndexNowBatcher, buildPayload, generateKey } from "./indexnow.js";
+import { buildFeed } from "./feed-build.js";
+import { FEED_PATH, FEED_TAG } from "./feed.js";
+import { purgePageCache } from "../pageCache/lib.js";
 import { markdownUrl } from "./markdown.js";
 import {
 	INDEXNOW_KEY_SETTING,
@@ -29,10 +33,13 @@ export const FEATURE = {
 	indexnow: "discovery.indexnow",
 	news: "discovery.newsSitemap",
 	llms: "discovery.llms",
+	feed: "discovery.feed",
 } as const;
 
-// biome-ignore lint/complexity/noBannedTypes: options reserved for later.
-export type DiscoveryOptions = {};
+export interface DiscoveryOptions {
+	/** D1 binding of the site database (term feeds read EmDash's taxonomy tables). Default "DB". */
+	database?: string;
+}
 
 // ── IndexNow ─────────────────────────────────────────────────────
 
@@ -144,7 +151,7 @@ const escapeAttr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;
 
 // ── Module ───────────────────────────────────────────────────────
 
-export function discoveryModule(_options: DiscoveryOptions) {
+export function discoveryModule(options: DiscoveryOptions) {
 	const hooks = {
 		"content:afterPublish": async (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) =>
 			onContentChange(ctx, event.collection, idOf(event.content), "publish"),
@@ -157,20 +164,37 @@ export function discoveryModule(_options: DiscoveryOptions) {
 		},
 		"content:afterDelete": async (event: { id: string; collection: string; permanent: boolean }, ctx: PluginContext) =>
 			onContentChange(ctx, event.collection, event.id, "delete", event.permanent),
-		/** <link rel="alternate" type="text/markdown"> (page:metadata links can't carry a type). */
+		/**
+		 * Head links (page:metadata links can't carry a type): the RSS feed on every page, so feed
+		 * readers and apps find it, and the entry's Markdown source on content pages.
+		 */
 		"page:fragments": async (event: { page: { kind: string; url: string; canonical: string | null; title: string | null; pageTitle?: string | null; content?: { collection: string }; seo?: { robots?: string | null } } }, ctx: PluginContext) => {
 			const { page } = event;
-			if (page.kind !== "content" || !page.content || /noindex/i.test(page.seo?.robots ?? "")) return null;
-			const settings = await memoSettings(ctx);
-			if (!settings.llms.markdown || !selected(settings.llms.collections, page.content.collection)) return null;
-			let href: string;
-			try {
-				href = markdownUrl(new URL(page.canonical || page.url, page.url).href);
-			} catch {
-				return null;
+			// The same cached read the hook composer made for this render (no query of its own).
+			const features = await cachedCtxFeatures(ctx);
+			const out: Array<{ kind: "html"; placement: "head"; key: string; html: string }> = [];
+			if (isOn(features, FEATURE.feed)) {
+				try {
+					const href = new URL(FEED_PATH, page.url).href;
+					const name = (await siteName(ctx)) || new URL(page.url).host;
+					out.push({ kind: "html", placement: "head", key: "discovery-feed", html: `<link rel="alternate" type="application/rss+xml" href="${escapeAttr(href)}" title="${escapeAttr(`${name} RSS feed`)}">` });
+				} catch {
+					// No usable page URL: no link.
+				}
 			}
-			const title = `${page.pageTitle || page.title || "This page"} — Markdown source`;
-			return { kind: "html" as const, placement: "head" as const, key: "discovery-markdown", html: `<link rel="alternate" type="text/markdown" href="${escapeAttr(href)}" title="${escapeAttr(title)}">` };
+			if (isOn(features, FEATURE.llms) && page.kind === "content" && page.content && !/noindex/i.test(page.seo?.robots ?? "")) {
+				const settings = await memoSettings(ctx);
+				if (settings.llms.markdown && selected(settings.llms.collections, page.content.collection)) {
+					try {
+						const href = markdownUrl(new URL(page.canonical || page.url, page.url).href);
+						const title = `${page.pageTitle || page.title || "This page"} — Markdown source`;
+						out.push({ kind: "html", placement: "head", key: "discovery-markdown", html: `<link rel="alternate" type="text/markdown" href="${escapeAttr(href)}" title="${escapeAttr(title)}">` });
+					} catch {
+						// No usable page URL: no link.
+					}
+				}
+			}
+			return out;
 		},
 	};
 
@@ -188,6 +212,16 @@ export function discoveryModule(_options: DiscoveryOptions) {
 			handler: async (ctx: PluginContext) => {
 				await requireFeature(ctx, FEATURE.news);
 				return { body: (await readDoc(ctx, "news")).body };
+			},
+		},
+		"discovery/public/feed": {
+			public: true,
+			handler: async (ctx: PluginContext & { input: unknown }) => {
+				await requireFeature(ctx, FEATURE.feed);
+				const { path } = parseInput(z.object({ path: z.string().min(1).max(2000).startsWith("/") }), ctx.input);
+				const doc = await buildFeed(ctx, await loadSettings(ctx), path, options.database);
+				if (!doc) throw PluginRouteError.notFound("No feed at this path.");
+				return doc;
 			},
 		},
 		"discovery/public/llms": {
@@ -224,7 +258,7 @@ export function discoveryModule(_options: DiscoveryOptions) {
 					return d ? { count: d.count, builtAt: d.builtAt } : null;
 				};
 				return {
-					features: { indexnow: isOn(features, FEATURE.indexnow), news: isOn(features, FEATURE.news), llms: isOn(features, FEATURE.llms) },
+					features: { indexnow: isOn(features, FEATURE.indexnow), news: isOn(features, FEATURE.news), llms: isOn(features, FEATURE.llms), feed: isOn(features, FEATURE.feed) },
 					settings,
 					collections,
 					key,
@@ -232,6 +266,7 @@ export function discoveryModule(_options: DiscoveryOptions) {
 						keyFile: key ? `${origin}/${key}.txt` : null,
 						news: `${origin}/news-sitemap.xml`,
 						llms: `${origin}/llms.txt`,
+						feed: `${origin}${FEED_PATH}`,
 					},
 					log: (await ctx.kv.get<PingLogEntry[]>(LOG_KEY)) ?? [],
 					cache: { llms: await doc(LLMS_CACHE), news: await doc(NEWS_CACHE) },
@@ -253,6 +288,8 @@ export function discoveryModule(_options: DiscoveryOptions) {
 				const features = await ctxFeatures(ctx);
 				const kinds: DocKind[] = [...(isOn(features, FEATURE.llms) ? (["llms"] as const) : []), ...(isOn(features, FEATURE.news) ? (["news"] as const) : [])];
 				if (kinds.length) scheduleRebuild(ctx, kinds, 0);
+				// Feeds in the edge cache were built with the old settings.
+				await purgePageCache({ tags: [FEED_TAG] }).catch((error: unknown) => ctx.log.warn("Discovery: clearing cached feeds failed", { error: String(error) }));
 				return { settings };
 			},
 		}),

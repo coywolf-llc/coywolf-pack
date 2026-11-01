@@ -1,5 +1,5 @@
 /**
- * Discovery admin page: IndexNow, the news sitemap, and llms.txt settings
+ * Discovery admin page: IndexNow, the news sitemap, the RSS feed, and llms.txt settings
  * and status.
  */
 import { Badge, Banner, Button, Checkbox, Input, InputArea, Loader, Select } from "@cloudflare/kumo";
@@ -14,6 +14,7 @@ const API = "/_emdash/api/plugins/coywolf-pack/discovery";
 interface Settings {
 	indexnow: { endpoint: "api.indexnow.org" | "www.bing.com"; collections: string[] };
 	news: { collections: string[]; publicationName: string; language: string };
+	feed: { collections: string[]; items: number; termFeeds: boolean };
 	llms: { summary: string; intro: string; collections: string[]; maxEntries: number; markdown: boolean; license: string };
 }
 
@@ -29,11 +30,11 @@ interface PingLogEntry {
 }
 
 interface Status {
-	features: { indexnow: boolean; news: boolean; llms: boolean };
+	features: { indexnow: boolean; news: boolean; llms: boolean; feed: boolean };
 	settings: Settings;
 	collections: { slug: string; label: string; hidden: boolean; hasSeo: boolean }[];
 	key: string | null;
-	urls: { keyFile: string | null; news: string; llms: string };
+	urls: { keyFile: string | null; news: string; llms: string; feed: string };
 	log: PingLogEntry[];
 	cache: { llms: { count: number; builtAt: string } | null; news: { count: number; builtAt: string } | null };
 }
@@ -181,7 +182,7 @@ export function DiscoveryPage() {
 
 	const set = <K extends keyof Settings>(section: K, patch: Partial<Settings[K]>) =>
 		setDraft((d) => (d ? { ...d, [section]: { ...d[section], ...patch } } : d));
-	const anyOn = status.features.indexnow || status.features.news || status.features.llms;
+	const anyOn = status.features.indexnow || status.features.news || status.features.feed || status.features.llms;
 
 	return (
 		<div className="space-y-6">
@@ -313,6 +314,37 @@ export function DiscoveryPage() {
 				</Section>
 
 				<Section
+					title="RSS feed"
+					on={status.features.feed}
+					description="An RSS feed of the newest entries at /feed/, linked from the head of every page so feed readers, podcast and news apps, and bots find it. With category URLs (such as /news/seo/your-post/), each category also has a feed at its address + feed/, including its subcategories. Entries set to noindex aren't listed."
+				>
+					<ExternalLink href={status.urls.feed} />
+					<CollectionPicker
+						legend="Collections"
+						hint="Entries from these collections are listed, newest first."
+						collections={status.collections}
+						value={draft.feed.collections}
+						onChange={(collections) => set("feed", { collections })}
+					/>
+					<div className="grid gap-4 sm:grid-cols-2">
+						<Input
+							label="Entries in each feed"
+							type="number"
+							min={1}
+							max={100}
+							description="1 to 100."
+							value={String(draft.feed.items)}
+							onChange={(e: React.ChangeEvent<HTMLInputElement>) => set("feed", { items: Math.max(1, Math.min(100, Math.round(Number(e.target.value)) || 1)) })}
+						/>
+					</div>
+					<Checkbox
+						label="Category feeds"
+						checked={draft.feed.termFeeds}
+						onCheckedChange={(checked: boolean) => set("feed", { termFeeds: checked })}
+					/>
+				</Section>
+
+				<Section
 					title="llms.txt and Markdown"
 					on={status.features.llms}
 					description="An llms.txt index (llmstxt.org) linking your entries, and a Markdown version of each entry at its URL + index.html.md."
@@ -388,7 +420,7 @@ function Header() {
 		<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
 			<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Discovery</h1>
 			<p className="text-sm leading-5 text-pretty text-kumo-subtle">
-				Help search engines and AI agents find your content: IndexNow pings, a Google News sitemap, and llms.txt with Markdown versions of
+				Help search engines, feed readers and AI agents find your content: IndexNow pings, a Google News sitemap, an RSS feed, and llms.txt with Markdown versions of
 				your entries.
 			</p>
 		</header>

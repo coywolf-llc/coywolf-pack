@@ -3,6 +3,7 @@
  *
  * - `/<key>.txt`                       IndexNow key file
  * - `/news-sitemap.xml`                Google News sitemap (also `/coywolf-news-sitemap.xml`, Coywolf SEO's name)
+ * - `/feed/`, `<term archive>/feed/`  RSS feeds
  * - `/llms.txt`                        llms.txt
  * - `<entry-url>/index.html.md`        Markdown source of an entry
  *
@@ -20,6 +21,7 @@ import type { MiddlewareHandler } from "astro";
 import { PLUGIN_ID } from "../core/features.js";
 import { noteReadFailure, routeFailed } from "../core/read-failures.js";
 import type { PackMiddleware } from "../core/module.js";
+import { FEED_EDGE_MAX_AGE, parseFeedPath } from "./feed.js";
 import { keyFromPath } from "./indexnow.js";
 import { pagePathFromMarkdownPath } from "./markdown.js";
 import { MemoryCache } from "./memory-cache.js";
@@ -40,10 +42,10 @@ type PublicRouteHandler = (pluginId: string, method: string, path: string, reque
 const memory = new MemoryCache({ ttlMs: 60_000, maxBytes: 2 * 1024 * 1024, maxEntryBytes: 256 * 1024, maxMisses: 32 });
 
 /** Call one of the module's public routes. Null when it isn't available or answers with an error (e.g. 404; a server error isn't kept). */
-async function callRoute<T>(context: Context, route: string, query: Record<string, string> = {}): Promise<T | null> {
+async function callRoute<T>(context: Context, route: string, query: Record<string, string> = {}, keep: "all" | "misses" = "all"): Promise<T | null> {
 	const cacheKey = `${route}?${new URLSearchParams(query)}`;
 	const hit = memory.get(cacheKey);
-	if (hit !== undefined) return hit as T | null;
+	if (hit !== undefined && (keep === "all" || hit === null)) return hit as T | null;
 
 	const locals = context.locals as { emdash?: { handlePublicPluginApiRoute?: PublicRouteHandler } };
 	const dispatch = locals.emdash?.handlePublicPluginApiRoute;
@@ -58,7 +60,7 @@ async function callRoute<T>(context: Context, route: string, query: Record<strin
 		return null;
 	}
 
-	memory.set(cacheKey, value);
+	if (keep === "all" || value === null) memory.set(cacheKey, value);
 	return value;
 }
 
@@ -106,6 +108,40 @@ export const newsSitemapMiddleware: PackMiddleware = {
 	},
 };
 
+// ── RSS feeds ────────────────────────────────────────────────────
+
+interface RouteCache {
+	enabled?: boolean;
+	set(options: { maxAge?: number; swr?: number; tags?: string[] } | false): void;
+}
+
+export const feedMiddleware: PackMiddleware = {
+	module: "discovery",
+	feature: FEATURE.feed,
+	// Feeds are kept in the edge cache (Workers Cache), tagged so a publish, edit or term change clears them.
+	ownsCache: true,
+	handle: async (context) => {
+		if (!isRead(context) || !parseFeedPath(context.url.pathname)) return undefined;
+		// No feed at this path (not a term, or the feed's off): the site answers, as it would without the pack.
+		// Only misses are kept in memory: a feed goes to the edge cache, and a copy from memory could put the feed
+		// from before a publish back there for an hour, right after EmDash cleared it.
+		const doc = await callRoute<{ body: string; tags?: string[] }>(context, "discovery/public/feed", { path: context.url.pathname }, "misses");
+		if (!doc?.body) return undefined;
+		const cache = (context as unknown as { cache?: RouteCache }).cache;
+		if (cache?.enabled) {
+			// Replace any lifetime the site's route rules or Plugins → Performance gave the request; swr 0 so a reader
+			// polling once an hour isn't handed the copy its last poll left.
+			cache.set(false);
+			cache.set({ maxAge: FEED_EDGE_MAX_AGE, swr: 0, tags: doc.tags ?? [] });
+		}
+		return respond(context, doc.body, {
+			"Content-Type": "application/rss+xml; charset=utf-8",
+			"Cache-Control": "public, max-age=900",
+			"X-Content-Type-Options": "nosniff",
+		});
+	},
+};
+
 // ── llms.txt and Markdown sources ────────────────────────────────
 
 interface MarkdownDoc {
@@ -147,4 +183,4 @@ export const llmsMiddleware: PackMiddleware = {
 	},
 };
 
-export const discoveryMiddleware: PackMiddleware[] = [indexNowKeyMiddleware, newsSitemapMiddleware, llmsMiddleware];
+export const discoveryMiddleware: PackMiddleware[] = [indexNowKeyMiddleware, newsSitemapMiddleware, feedMiddleware, llmsMiddleware];
