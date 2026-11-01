@@ -228,7 +228,7 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 					title="Schedule and retention"
 					description="How often the site backs itself up, how long backups are kept, and when to warn that backups have stopped."
 				>
-					<Switch
+					<Switch className="shrink-0"
 						label="Back up once a day from the site itself"
 						checked={draft.scheduled}
 						onCheckedChange={(checked: boolean) => setDraft((d) => ({ ...d, scheduled: checked }))}

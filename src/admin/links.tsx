@@ -408,7 +408,7 @@ function SettingsDialog(props: { open: boolean; onClose: () => void; onSaved: (m
 							value={draft.checkBudget}
 							onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, checkBudget: e.target.value })}
 						/>
-						<Switch
+						<Switch className="shrink-0"
 							label="Check links to this site"
 							checked={draft.checkInternal}
 							onCheckedChange={(checked: boolean) => setDraft({ ...draft, checkInternal: checked })}

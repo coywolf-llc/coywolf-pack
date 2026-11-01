@@ -113,7 +113,7 @@ function CollectionCard(props: {
 								: "Not searchable."}
 					</p>
 				</div>
-				<Switch
+				<Switch className="shrink-0"
 					aria-label={`Search ${collection.label}: ${collection.enabled ? "on" : "off"}`}
 					checked={collection.enabled}
 					disabled={props.busy || searchable.length === 0}

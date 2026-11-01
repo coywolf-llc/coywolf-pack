@@ -82,7 +82,7 @@ export function PartSwitch(props: { part: Part | undefined; mainOn: boolean; sav
 	const { part } = props;
 	if (!part) return null;
 	return (
-		<Switch
+		<Switch className="shrink-0"
 			size="sm"
 			aria-label={`${part.label}: ${part.enabled && props.mainOn ? "on" : "off"}`}
 			checked={part.enabled && props.mainOn}
