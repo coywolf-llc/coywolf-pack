@@ -12,6 +12,7 @@ import { entitiesToCsv } from "../ai/export.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/ai";
 
@@ -873,6 +874,8 @@ export function AiPage() {
 					Entities for Schema.org verified against Wikidata, meta descriptions, and image alt text. Everything runs in the background after saves and uploads, within your daily call limit.
 				</p>
 			</header>
+
+			<PartSwitches module="ai" />
 
 			<div aria-live="polite">
 				{notice && <Banner variant="default" role="status" title={notice} />}

@@ -22,6 +22,7 @@ import * as React from "react";
 
 import { linksToCsv } from "../links/export.js";
 import { saveFile, siteSlug, today } from "./download.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/links";
 const ADMIN = "/_emdash/admin";
@@ -733,6 +734,8 @@ export function LinksPage() {
 					</div>
 				</div>
 			</header>
+
+			<PartSwitches module="links" />
 
 			<div aria-live="polite" className="space-y-3">
 				{scanState?.status === "running" && (

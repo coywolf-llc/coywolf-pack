@@ -23,6 +23,7 @@ import { CredentialGuide } from "./guides.js";
 import { DisplaySettings, fromDisplayDraft, toDisplayDraft } from "./videos-display.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/videos";
 
@@ -954,6 +955,8 @@ export function VideosPage() {
 					</div>
 				)}
 			</header>
+
+			<PartSwitches module="videos" />
 
 			<div aria-live="polite">
 				{busy && <p className="text-sm text-kumo-subtle">{busy}…</p>}

@@ -7,6 +7,7 @@ import { ArrowClockwise, ArrowSquareOut, Key, PaperPlaneTilt } from "@phosphor-i
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { FEATURES_CHANGED, PartSwitch, useParts } from "./feature-switches.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/discovery";
@@ -51,14 +52,21 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 	return parseApiResponse<T>(response, "The request failed");
 }
 
-function Section(props: { title: string; on: boolean; description: string; children: React.ReactNode; actions?: React.ReactNode }) {
+/** A part of Discovery (IndexNow, News sitemap, RSS feed, llms.txt), with its on/off switch next to the title. */
+function Section(props: { title: string; part: string; parts: ReturnType<typeof useParts>; description: string; children: React.ReactNode; actions?: React.ReactNode }) {
+	const { parts } = props;
 	return (
 		<section className="rounded-lg border border-kumo-line" aria-labelledby={`discovery-${props.title}`}>
 			<div className="flex flex-wrap items-start justify-between gap-4 border-b border-kumo-line p-4">
 				<div className="min-w-0">
 					<h2 id={`discovery-${props.title}`} className="flex items-center gap-2 text-base font-semibold">
 						{props.title}
-						<Badge variant={props.on ? "primary" : "secondary"}>{props.on ? "On" : "Off"}</Badge>
+						<PartSwitch
+							part={parts.parts?.find((p) => p.id === props.part)}
+							mainOn={Boolean(parts.main?.enabled)}
+							saving={parts.saving}
+							onToggle={(id, on) => void parts.toggle(id, on)}
+						/>
 					</h2>
 					<p className="mt-1 text-sm text-kumo-subtle">{props.description}</p>
 				</div>
@@ -113,6 +121,7 @@ export function DiscoveryPage() {
 	const [error, setError] = React.useState<string>();
 	const [notice, setNotice] = React.useState<string>();
 	const [busy, setBusy] = React.useState<string | null>(null);
+	const parts = useParts("discovery");
 
 	const load = React.useCallback(async () => {
 		try {
@@ -126,6 +135,17 @@ export function DiscoveryPage() {
 	React.useEffect(() => {
 		void load();
 	}, [load]);
+
+	// A part switched on this page: its status (key file, stored copies) may have changed. The draft is kept.
+	React.useEffect(() => {
+		const reload = () =>
+			void apiFetch(`${API}/status`)
+				.then((response) => parseApiResponse<Status>(response, "Couldn't load Discovery"))
+				.then(setStatus)
+				.catch(() => undefined);
+		window.addEventListener(FEATURES_CHANGED, reload);
+		return () => window.removeEventListener(FEATURES_CHANGED, reload);
+	}, []);
 
 	async function run(name: string, task: () => Promise<string>) {
 		setBusy(name);
@@ -182,7 +202,7 @@ export function DiscoveryPage() {
 
 	const set = <K extends keyof Settings>(section: K, patch: Partial<Settings[K]>) =>
 		setDraft((d) => (d ? { ...d, [section]: { ...d[section], ...patch } } : d));
-	const anyOn = status.features.indexnow || status.features.news || status.features.feed || status.features.llms;
+	const anyOn = parts.parts ? parts.parts.some((p) => parts.isOn(p.id)) : status.features.indexnow || status.features.news || status.features.feed || status.features.llms;
 
 	return (
 		<div className="space-y-6">
@@ -191,7 +211,7 @@ export function DiscoveryPage() {
 			{!anyOn && (
 				<Banner
 					variant="default"
-					description="Discovery features are off. Turn on Discovery and the parts you want under Plugins → Coywolf Pack. You can change settings here first."
+					description="Discovery's parts are all off. Turn on the ones you want with the switch next to each title. You can change their settings first."
 				/>
 			)}
 			<div aria-live="polite">
@@ -209,11 +229,12 @@ export function DiscoveryPage() {
 			>
 				<Section
 					title="IndexNow"
-					on={status.features.indexnow}
+					part="discovery.indexnow"
+					parts={parts}
 					description="When an entry is published, updated, unpublished, or deleted, its URL is sent to IndexNow so Bing, Yandex, Seznam, Naver and other participating engines can recrawl it within minutes. Changes made within a few seconds of each other go out together. Entries set to noindex aren't submitted."
 					actions={
 						<>
-							<Button type="button" variant="secondary" icon={<PaperPlaneTilt />} disabled={!status.features.indexnow || busy !== null} onClick={() => void submitHome()}>
+							<Button type="button" variant="secondary" icon={<PaperPlaneTilt />} disabled={!(parts.parts ? parts.isOn("discovery.indexnow") : status.features.indexnow) || busy !== null} onClick={() => void submitHome()}>
 								{busy === "submit" ? "Submitting…" : "Submit home page"}
 							</Button>
 							<Button type="button" variant="secondary" icon={<Key />} disabled={busy !== null} onClick={regenerate}>
@@ -283,7 +304,8 @@ export function DiscoveryPage() {
 
 				<Section
 					title="News sitemap"
-					on={status.features.news}
+					part="discovery.newsSitemap"
+					parts={parts}
 					description="A Google News sitemap of entries published in the last 48 hours. Submit it in Google Search Console, and optionally add a Sitemap: line for it to your robots.txt (Settings → SEO)."
 				>
 					<ExternalLink href={status.urls.news} />
@@ -315,7 +337,8 @@ export function DiscoveryPage() {
 
 				<Section
 					title="RSS feed"
-					on={status.features.feed}
+					part="discovery.feed"
+					parts={parts}
 					description="An RSS feed of the newest entries at /feed/, linked from the head of every page so feed readers, podcast and news apps, and bots find it. With category URLs (such as /news/seo/your-post/), each category also has a feed at its address + feed/, including its subcategories. Entries set to noindex aren't listed."
 				>
 					<ExternalLink href={status.urls.feed} />
@@ -346,7 +369,8 @@ export function DiscoveryPage() {
 
 				<Section
 					title="llms.txt and Markdown"
-					on={status.features.llms}
+					part="discovery.llms"
+					parts={parts}
 					description="An llms.txt index (llmstxt.org) linking your entries, and a Markdown version of each entry at its URL + index.html.md."
 					actions={
 						<Button type="button" variant="secondary" icon={<ArrowClockwise />} disabled={busy !== null} onClick={() => void rebuild()}>

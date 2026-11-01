@@ -11,6 +11,7 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { SaveBar } from "./save-bar.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const PACK_API = "/_emdash/api/plugins/coywolf-pack/search";
 const SEARCH_API = "/_emdash/api/search";
@@ -284,6 +285,8 @@ export function SearchPage() {
 					</p>
 				</div>
 			</header>
+
+			<PartSwitches module="search" />
 
 			<div role="status" aria-live="polite" className="space-y-2">
 				{progress && (

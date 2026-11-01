@@ -10,6 +10,7 @@ import { parseRedirectsImport, redirectsToCsv, redirectsToJson } from "../redire
 import type { RedirectRule } from "../redirects/rules.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { RemovedContentPanel } from "./redirects-removed.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/redirects";
 
@@ -345,6 +346,8 @@ export function RedirectsPage() {
 				</div>
 				{testResult && <p className="text-sm text-kumo-subtle">{testResult}</p>}
 			</header>
+
+			<PartSwitches module="redirects" />
 
 			{notice && <Banner variant="default" role="status" title={notice} />}
 			{error && <Banner variant="error" role="alert" title="Something went wrong" description={error} />}

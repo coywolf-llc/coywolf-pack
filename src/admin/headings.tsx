@@ -11,6 +11,7 @@ import { SAMPLE_TOC_HEADINGS, TOC_CSS, renderTocHtml } from "../headings/render.
 import { buildTocTree, countToc } from "../headings/toc.js";
 import { PreviewSection } from "./preview.js";
 import { SaveBar, isDirty } from "./save-bar.js";
+import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/headings";
 
@@ -127,6 +128,8 @@ export function HeadingsPage() {
 					are saved with the content, so they stay the same when a heading is reworded.
 				</p>
 			</header>
+
+			<PartSwitches module="headings" />
 
 			<div aria-live="polite">{notice && <Banner variant="default" role="status" title={notice} />}</div>
 			{error && <Banner variant="error" role="alert" description={error} />}
