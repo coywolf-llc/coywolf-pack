@@ -55,9 +55,12 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 /** A part of Discovery (IndexNow, News sitemap, RSS feed, llms.txt), with its on/off switch next to the title. */
 function Section(props: { title: string; part: string; parts: ReturnType<typeof useParts>; description: string; children: React.ReactNode; actions?: React.ReactNode }) {
 	const { parts } = props;
+	// Off: only the title, switch and description; its details and settings show once it's on. Until the switches have
+	// loaded nothing below shows either (no flash of settings that then disappear), unless they couldn't be loaded.
+	const open = parts.parts ? parts.isOn(props.part) : Boolean(parts.error);
 	return (
 		<section className="rounded-lg border border-kumo-line" aria-labelledby={`discovery-${props.title}`}>
-			<div className="flex flex-wrap items-start justify-between gap-4 border-b border-kumo-line p-4">
+			<div className={`flex flex-wrap items-start justify-between gap-4 p-4${open ? " border-b border-kumo-line" : ""}`}>
 				<div className="min-w-0">
 					<h2 id={`discovery-${props.title}`} className="flex items-center gap-2 text-base font-semibold">
 						{props.title}
@@ -70,9 +73,9 @@ function Section(props: { title: string; part: string; parts: ReturnType<typeof 
 					</h2>
 					<p className="mt-1 text-sm text-kumo-subtle">{props.description}</p>
 				</div>
-				{props.actions && <div className="flex flex-wrap gap-2">{props.actions}</div>}
+				{open && props.actions && <div className="flex flex-wrap gap-2">{props.actions}</div>}
 			</div>
-			<div className="space-y-4 p-4">{props.children}</div>
+			{open && <div className="space-y-4 p-4">{props.children}</div>}
 		</section>
 	);
 }
