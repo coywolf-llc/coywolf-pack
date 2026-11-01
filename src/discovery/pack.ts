@@ -7,7 +7,7 @@ const FEATURES = [
 	{
 		id: FEATURE.main,
 		label: "Discovery",
-		description: "Help search engines and AI agents find your content: IndexNow, a Google News sitemap, and llms.txt with Markdown versions of entries.",
+		description: "Help search engines, feed readers and AI agents find your content: IndexNow, a Google News sitemap, an RSS feed, and llms.txt with Markdown versions of entries.",
 		default: false,
 	},
 	{
@@ -20,6 +20,12 @@ const FEATURES = [
 		id: FEATURE.news,
 		label: "News sitemap",
 		description: "A Google News sitemap at /news-sitemap.xml with entries published in the last 48 hours.",
+		default: false,
+	},
+	{
+		id: FEATURE.feed,
+		label: "RSS feed",
+		description: "An RSS feed of the newest entries at /feed/ (and a feed per category), linked from every page so feed readers and apps find it.",
 		default: false,
 	},
 	{
@@ -41,9 +47,10 @@ export function discoveryPack(options: DiscoveryOptions): PackModule {
 		features: FEATURES,
 		routes,
 		hooks,
-		hookFeature: { "page:fragments": FEATURE.llms },
+		// page:fragments adds the feed link and the Markdown link, each checked against its own switch.
+		hookFeature: { "page:fragments": FEATURE.main },
 		adminPages: [{ path: "/discovery", label: "Discovery", icon: "compass" }],
-		capabilities: ["content:read", "schema:read", "network:request", "hooks.page-fragments:register"],
+		capabilities: ["content:read", "schema:read", "bylines:read", "network:request", "hooks.page-fragments:register"],
 		allowedHosts: ["api.indexnow.org", "www.bing.com"],
 	};
 }

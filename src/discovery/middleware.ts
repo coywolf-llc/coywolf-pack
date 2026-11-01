@@ -3,6 +3,7 @@
  *
  * - `/<key>.txt`                       IndexNow key file
  * - `/news-sitemap.xml`                Google News sitemap (also `/coywolf-news-sitemap.xml`, Coywolf SEO's name)
+ * - `/feed/`, `<term archive>/feed/`  RSS feeds
  * - `/llms.txt`                        llms.txt
  * - `<entry-url>/index.html.md`        Markdown source of an entry
  *
@@ -20,6 +21,7 @@ import type { MiddlewareHandler } from "astro";
 import { PLUGIN_ID } from "../core/features.js";
 import { noteReadFailure, routeFailed } from "../core/read-failures.js";
 import type { PackMiddleware } from "../core/module.js";
+import { parseFeedPath } from "./feed.js";
 import { keyFromPath } from "./indexnow.js";
 import { pagePathFromMarkdownPath } from "./markdown.js";
 import { MemoryCache } from "./memory-cache.js";
@@ -106,6 +108,24 @@ export const newsSitemapMiddleware: PackMiddleware = {
 	},
 };
 
+// ── RSS feeds ────────────────────────────────────────────────────
+
+export const feedMiddleware: PackMiddleware = {
+	module: "discovery",
+	feature: FEATURE.feed,
+	handle: async (context) => {
+		if (!isRead(context) || !parseFeedPath(context.url.pathname)) return undefined;
+		// No feed at this path (not a term, or the feed's off): the site answers, as it would without the pack.
+		const doc = await callRoute<{ body: string }>(context, "discovery/public/feed", { path: context.url.pathname });
+		if (!doc?.body) return undefined;
+		return respond(context, doc.body, {
+			"Content-Type": "application/rss+xml; charset=utf-8",
+			"Cache-Control": "public, max-age=900",
+			"X-Content-Type-Options": "nosniff",
+		});
+	},
+};
+
 // ── llms.txt and Markdown sources ────────────────────────────────
 
 interface MarkdownDoc {
@@ -147,4 +167,4 @@ export const llmsMiddleware: PackMiddleware = {
 	},
 };
 
-export const discoveryMiddleware: PackMiddleware[] = [indexNowKeyMiddleware, newsSitemapMiddleware, llmsMiddleware];
+export const discoveryMiddleware: PackMiddleware[] = [indexNowKeyMiddleware, newsSitemapMiddleware, feedMiddleware, llmsMiddleware];

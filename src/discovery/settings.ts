@@ -5,6 +5,7 @@
 import { z } from "zod";
 
 import type { SettingsReader } from "../shared.js";
+import { FEED_DEFAULT_ITEMS, FEED_MAX_ITEMS } from "./feed.js";
 import { DEFAULT_MAX_ENTRIES } from "./llms.js";
 import { INDEXNOW_ENDPOINTS, KEY_PATTERN, generateKey } from "./indexnow.js";
 
@@ -31,6 +32,16 @@ export const settingsSchema = z.object({
 			language: z.string().max(20).default(""),
 		})
 		.default({ collections: ["posts"], publicationName: "", language: "" }),
+	feed: z
+		.object({
+			/** Collections in the feed (default: posts). */
+			collections: z.array(z.string().max(100)).max(200).default(["posts"]),
+			/** Newest entries listed in each feed. */
+			items: z.number().int().min(1).max(FEED_MAX_ITEMS).default(FEED_DEFAULT_ITEMS),
+			/** Term feeds at <term archive>/feed/ (WordPress's category feeds). */
+			termFeeds: z.boolean().default(true),
+		})
+		.default({ collections: ["posts"], items: FEED_DEFAULT_ITEMS, termFeeds: true }),
 	llms: z
 		.object({
 			/** Blockquote summary; empty = the site tagline. */
