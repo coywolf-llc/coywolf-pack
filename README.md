@@ -47,13 +47,13 @@ Coywolf Pack is a native (trusted) EmDash plugin: you add it to your site's code
 
 ### 1. Install the package
 
-From the site's folder, install the latest release. Releases are listed under [Tags](https://github.com/coywolf-llc/coywolf-pack/tags); replace `v0.35.13` with the newest one:
+From the site's folder:
 
 ```bash
-npm install https://codeload.github.com/coywolf-llc/coywolf-pack/tar.gz/refs/tags/v0.35.13
+npm install @coywolf/emdash
 ```
 
-The package is named `@coywolf/emdash`. Use the tarball URL rather than `github:coywolf-llc/coywolf-pack`: npm records `github:` installs as SSH Git URLs, which CI runners without an SSH key can't fetch.
+The package is [`@coywolf/emdash` on npm](https://www.npmjs.com/package/@coywolf/emdash). Each version links to the GitHub commit and workflow run that built it (npm provenance). What changed in each release is under [Releases](https://github.com/coywolf-llc/coywolf-pack/releases).
 
 ### 2. Add the plugin to `astro.config.mjs`
 
@@ -156,7 +156,13 @@ A good first set for most sites:
 
 ### Updating
 
-Install the newer release's tarball (step 1 with the new tag), then deploy. Updates never turn features on by themselves: new features start off.
+Install the latest version, then deploy:
+
+```bash
+npm install @coywolf/emdash@latest
+```
+
+If your `package.json` points at a GitHub tarball URL from before the pack was on npm (0.35.13 and earlier), this command replaces it with the npm version. Updates never turn features on by themselves: new features start off.
 
 ### Local development
 
