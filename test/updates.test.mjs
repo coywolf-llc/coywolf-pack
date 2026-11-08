@@ -7,7 +7,7 @@ import "./ts-resolve.mjs";
 
 const { compareVersions, isNewer, parseVersion, DIST_TAGS_URL, UPDATE_COMMAND } = await import("../src/updates/core.ts");
 const { updateStatus, dismissUpdate, showsUpdate, UPDATE_STATE_SETTING } = await import("../src/updates/check.ts");
-const { purgeScope } = await import("../src/pageCache/lib.ts");
+const { purgeScope, purgesAfter } = await import("../src/pageCache/lib.ts");
 const { VERSION } = await import("../src/version.ts");
 
 test("compareVersions follows semver order", () => {
@@ -140,8 +140,10 @@ test("showsUpdate needs a newer, undismissed version", () => {
 	assert.equal(showsUpdate({ checkedAt: null, latest: "0.35.16", dismissed: "0.35.15" }, "0.35.14"), true);
 });
 
-test("dismissing doesn't clear the page cache", () => {
+test("dismissing doesn't clear the page cache or count as a settings save", () => {
+	assert.equal(purgesAfter("POST", "/_emdash/api/plugins/coywolf-pack/updates/dismiss"), false);
 	assert.equal(purgeScope("/_emdash/api/plugins/coywolf-pack/updates/dismiss"), null);
+	assert.equal(purgesAfter("POST", "/_emdash/api/plugins/coywolf-pack/features/save"), true, "other pack saves still do");
 });
 
 test("the update check starts off, can be left out, may reach npm, and checks daily", () => {

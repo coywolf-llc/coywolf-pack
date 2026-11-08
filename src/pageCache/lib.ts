@@ -21,10 +21,12 @@ export const VERSION_OPTION = "plugin:coywolf-pack:pageCache:version";
  */
 const PUBLIC_ROUTE = /^\/_emdash\/api\/plugins\/coywolf-pack\/(search\/|discovery\/public\/|videos\/(like|play|caption|embed|sitemap)(\/|$))/;
 const PACK_API = "/_emdash/api/plugins/coywolf-pack/";
+/** Admin writes that change nothing a page or a cache shows: no purge and no new settings generation. */
+const NO_SETTINGS_CHANGE = /^\/_emdash\/api\/plugins\/coywolf-pack\/updates\//;
 
 /** True when a request is a pack admin write whose success should purge the cache. */
 export function purgesAfter(method: string, pathname: string): boolean {
-	return method === "POST" && pathname.startsWith(PACK_API) && !PUBLIC_ROUTE.test(pathname);
+	return method === "POST" && pathname.startsWith(PACK_API) && !PUBLIC_ROUTE.test(pathname) && !NO_SETTINGS_CHANGE.test(pathname);
 }
 
 export type PurgeScope = { purgeEverything: true } | { pathPrefixes: string[] } | { tags: string[] };
