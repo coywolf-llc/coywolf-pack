@@ -140,6 +140,7 @@ A good first set for most sites:
 
 | Turn on | What you get | Then |
 | --- | --- | --- |
+| **Update check** | A card on the EmDash dashboard when a new version of Coywolf Pack is out, with the command to install it | Nothing: it checks npm once a day (see [Updating](#updating)) |
 | **Performance** (always on) | Page cache lifetimes, clearing after deploys, cache warming | Turn on **Cache warming** on the Performance page (needs `SELF`) |
 | **Clean Image URLs** | Images from a `media.` subdomain, resized and cached | Run **Set up media host** on its page (see [Setting up a media host](docs/images.md#setting-up-a-media-host)) |
 | **Schema & Social** | Schema.org markup and Open Graph tags | Review the publisher on the Schema page |
@@ -164,7 +165,7 @@ npm install @coywolf/emdash@latest
 
 If your `package.json` points at a GitHub tarball URL from before the pack was on npm (0.35.13 and earlier), this command replaces it with the npm version. Updates never turn features on by themselves: new features start off.
 
-**Update notices:** once a day, the pack asks npm for its newest version. When there's an update, a **Coywolf Pack update** card on the EmDash dashboard and a notice at the top of the pack's pages show the command above, with a **Copy command** button. **Dismiss** hides both for everyone on the site until the next version. The check sends nothing about your site and never updates anything by itself. Like every feature, it starts off: turn on **Update check** at the top of **Plugins → Coywolf Pack → Features**.
+**Update notices:** turn on **Update check**, the first switch under **Plugins → Coywolf Pack → Features**. Once a day it asks npm for the newest version of Coywolf Pack. When there's an update, a **Coywolf Pack update** card on the EmDash dashboard and a notice at the top of the pack's pages show the command above, with a **Copy command** button. **Dismiss** hides both for everyone on the site until the next version. The check sends nothing about your site and never updates anything by itself.
 
 ### Local development
 
