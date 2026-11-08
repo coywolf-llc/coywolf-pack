@@ -32,6 +32,8 @@ const PAGE_SIZE = 500;
  * pass that, so each read is sized from the bytes the previous one returned.
  */
 export const PAGE_TARGET_BYTES = 8 * 1024 * 1024;
+/** How D1 words a result over its size limit (its message has said "too large", "exceeds" or "limit" with a size). */
+const RESULT_TOO_LARGE = /too large|too big|exceed|size limit|limit.*(bytes|MB)|SQLITE_TOOBIG/i;
 
 /** Rows to ask for next, from the size of the rows just read. */
 export function nextPageSize(pageBytes: number, rows: number): number {
@@ -258,7 +260,8 @@ export async function* dumpLines(db: D1Database, counts: { tables: number; rows:
 							.all<Record<string, unknown>>());
 			} catch (error) {
 				// D1 refuses results over 50 MB (from November 4, 2026). Ask again for fewer rows, down to one.
-				if (limit === 1) throw error;
+				// Any other error (an outage, a bad query) goes straight up instead of being retried.
+				if (limit === 1 || !RESULT_TOO_LARGE.test(String(error))) throw error;
 				limit = Math.max(1, Math.floor(limit / 4));
 				continue;
 			}

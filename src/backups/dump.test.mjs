@@ -257,3 +257,31 @@ test("a read D1 refuses as too large is asked again for fewer rows; offset pagin
 	assert.equal(restored.prepare("SELECT count(*) AS n FROM odd").get().n, 600, "every row once");
 	assert.equal(restored.prepare("SELECT count(DISTINCT rowid) AS n FROM odd").get().n, 600, "no row twice");
 });
+
+test("other read errors aren't retried with fewer rows: they fail the backup at once", async () => {
+	const db = new DatabaseSync(":memory:");
+	db.exec("CREATE TABLE t (id TEXT PRIMARY KEY, v TEXT)");
+	db.prepare("INSERT INTO t VALUES ('a', 'b')").run();
+	const base = d1(db);
+	let reads = 0;
+	const failing = {
+		prepare(sql) {
+			const stmt = base.prepare(sql);
+			return {
+				bind(...args) {
+					stmt.bind(...args);
+					return this;
+				},
+				async all() {
+					if (/FROM "t"/.test(sql)) {
+						reads++;
+						throw new Error("D1_ERROR: Network connection lost.");
+					}
+					return stmt.all();
+				},
+			};
+		},
+	};
+	await assert.rejects(dumpDatabase(failing), /Network connection lost/);
+	assert.equal(reads, 1, "asked once, not again with fewer rows");
+});

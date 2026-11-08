@@ -47,10 +47,10 @@ Coywolf Pack is a native (trusted) EmDash plugin: you add it to your site's code
 
 ### 1. Install the package
 
-From the site's folder, install the latest release. Releases are listed under [Tags](https://github.com/coywolf-llc/coywolf-pack/tags); replace `v0.35.12` with the newest one:
+From the site's folder, install the latest release. Releases are listed under [Tags](https://github.com/coywolf-llc/coywolf-pack/tags); replace `v0.35.13` with the newest one:
 
 ```bash
-npm install https://codeload.github.com/coywolf-llc/coywolf-pack/tar.gz/refs/tags/v0.35.12
+npm install https://codeload.github.com/coywolf-llc/coywolf-pack/tar.gz/refs/tags/v0.35.13
 ```
 
 The package is named `@coywolf/emdash`. Use the tarball URL rather than `github:coywolf-llc/coywolf-pack`: npm records `github:` installs as SSH Git URLs, which CI runners without an SSH key can't fetch.
