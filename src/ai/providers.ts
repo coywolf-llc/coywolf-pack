@@ -89,7 +89,7 @@ async function postJson(cfg: ProviderConfig, url: string, headers: Record<string
 }
 
 async function workersAi(cfg: ProviderConfig, req: ChatRequest): Promise<ChatResult> {
-	if (!cfg.binding) throw new ProviderError("The Workers AI binding isn't configured. Add an \"ai\" binding to wrangler.jsonc (see README).");
+	if (!cfg.binding) throw new ProviderError("The Workers AI binding isn't configured. Add an \"ai\" binding to wrangler.jsonc (see docs/ai.md in the Coywolf Pack repository).");
 	const content = req.image
 		? [
 				{ type: "text", text: req.user },

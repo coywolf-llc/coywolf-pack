@@ -415,7 +415,7 @@ function ScanPanel({ urlMap, applyLabel, confirmText }: { urlMap?: Record<string
 							<p className="mb-1 text-xs text-kumo-subtle">
 								No Coywolf Pack block for these (yet), or the block is turned off (notes, details, quotes, disclosures, testimonials and podcast links
 								convert once their Custom Blocks switch is on: run this again). Their content is kept; “marker:gravity-form” is an empty placeholder
-								for the theme. See the README.
+								for the theme. See docs/wordpress-import.md in the Coywolf Pack repository.
 							</p>
 							<CountsTable counts={report.leftovers} />
 						</div>
@@ -791,7 +791,7 @@ function ParentsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 					EmDash's importer creates every category at the top level and drops page parents, so WordPress URLs with parent categories
 					(<Code>/news/local/a-post/</Code>) or parent pages (<Code>/about/team/</Code>) are lost. This sets each category's parent the way WordPress had
 					it, with EmDash's own taxonomy API and your account, a dry run first. Running it again changes nothing. EmDash pages have no parent, so page
-					parents are listed as a <Code>pageParents</Code> option to paste into <Code>coywolfPlugin()</Code> (see the README, “Content URLs”).
+					parents are listed as a <Code>pageParents</Code> option to paste into <Code>coywolfPlugin()</Code> (see docs/content-urls.md in the Coywolf Pack repository).
 				</>
 			}
 		>
@@ -1491,7 +1491,7 @@ export function WpImportPage() {
 				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
 					Finish moving a WordPress site to EmDash. EmDash's own importer brings over posts, pages, categories, tags, authors and media; these steps
 					keep what it drops or misses: heading ids, reusable blocks, Details blocks, co-authors and guest authors, category and page parents, old media
-					URLs, and redirects. Work through them in order. The README has the full checklist.
+					URLs, and redirects. Work through them in order. docs/wordpress-import.md in the Coywolf Pack repository has the full checklist.
 				</p>
 			</header>
 			<BeforeImport />

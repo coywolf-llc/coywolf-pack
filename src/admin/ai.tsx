@@ -405,7 +405,7 @@ function SettingsPanel(props: { status: Status; reload: () => Promise<void>; set
 							/>
 						) : (
 							<p className="self-end text-sm text-kumo-subtle">
-								{status.settings.bindingAvailable ? "The Workers AI binding is connected." : "Add an \"ai\" binding to wrangler.jsonc (see README) to use Workers AI."}
+								{status.settings.bindingAvailable ? "The Workers AI binding is connected." : "Add an \"ai\" binding to wrangler.jsonc (see docs/ai.md in the Coywolf Pack repository) to use Workers AI."}
 							</p>
 						)}
 						<div style={{ gridColumn: "1 / -1" }}>

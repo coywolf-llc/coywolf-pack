@@ -72,7 +72,7 @@ export interface ImagesOptions {
 	images?: string;
 	/**
 	 * Media host: an https origin serving the media bucket with the /s/ resize
-	 * rules, e.g. "https://media.example.com" (see README, "Clean Image URLs").
+	 * rules, e.g. "https://media.coywolf.com" (see docs/images.md).
 	 * A host saved on the Clean Image URLs page takes precedence.
 	 */
 	cdn?: string;

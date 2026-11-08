@@ -344,8 +344,7 @@ export function FormUploadsPage() {
 					description={
 						<>
 							Wrap the Forms plugin in astro.config.mjs with <code>privateFormUploads(formsPlugin())</code> (imported from @coywolf/emdash), add an R2
-							bucket binding named FORM_UPLOADS in wrangler.jsonc (a bucket with no public access), and deploy. See the Coywolf Pack README, "Private
-							form uploads".
+							bucket binding named FORM_UPLOADS in wrangler.jsonc (a bucket with no public access), and deploy. See docs/form-uploads.md in the Coywolf Pack repository.
 						</>
 					}
 				/>

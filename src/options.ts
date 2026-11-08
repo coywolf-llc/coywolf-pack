@@ -50,7 +50,7 @@ export interface CoywolfOptions {
 	 * Entry URL patterns for collections the theme routes differently from
 	 * EmDash's url_pattern, e.g. `{ posts: "/{term:category|uncategorized}/{slug}/" }`
 	 * or, with parent categories in the path, `{ posts: "/{termpath:category|uncategorized}/{slug}/" }`.
-	 * Used by every module that builds entry URLs (see README, "Content URLs").
+	 * Used by every module that builds entry URLs (see docs/content-urls.md).
 	 */
 	urls?: Record<string, string>;
 	/** Trailing-slash policy for entry URLs. Default: EmDash's (Astro's `trailingSlash`). */

@@ -119,7 +119,7 @@ async function download(backup: Backup) {
 	const check = await fetch(link.url, { method: "HEAD", credentials: "same-origin" }).catch(() => null);
 	if (!check?.ok) {
 		throw new Error(
-			"The download link didn't answer. Make sure coywolfPack() from @coywolf/emdash/middleware is in the site's src/middleware.ts (see the plugin README).",
+			"The download link didn't answer. Make sure coywolfPack() from @coywolf/emdash/middleware is in the site's src/middleware.ts (see Getting started in the Coywolf Pack README).",
 		);
 	}
 	const a = document.createElement("a");
@@ -422,7 +422,7 @@ export function BackupsPage() {
 				/>
 			)}
 			{data && !data.restore.enabled && (
-				<Banner variant="default" title="Restore isn't set up yet." description={`${data.restore.reason} See the plugin README.`} />
+				<Banner variant="default" title="Restore isn't set up yet." description={`${data.restore.reason} See docs/backups.md in the Coywolf Pack repository.`} />
 			)}
 
 			{!data && !error ? (
