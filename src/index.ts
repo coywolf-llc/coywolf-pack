@@ -17,7 +17,7 @@ import { composeHooks, hookCapabilities } from "./core/compose.js";
 import { configureContentUrls } from "./core/content-url.js";
 import { PLUGIN_ID, isOn, knownFeatures } from "./core/features.js";
 import { featuresRoutes } from "./core/features-module.js";
-import type { AdminPageDef, PackModule } from "./core/module.js";
+import type { AdminPageDef, PackModule, WidgetDef } from "./core/module.js";
 import { secretSettingsSchema } from "./core/secrets.js";
 import { MODULES } from "./modules.js";
 import type { CoywolfOptions } from "./options.js";
@@ -56,10 +56,13 @@ function buildModules(options: CoywolfOptions): PackModule[] {
 	return MODULES.map((factory) => factory(options)).filter((m): m is PackModule => m !== null);
 }
 
+/** A widget as EmDash lists it (without the pack's `when`). */
+const widgetEntry = ({ when: _when, ...widget }: WidgetDef) => widget;
+
 function surfaces(modules: PackModule[]) {
 	return {
 		pages: sidebar(modules),
-		widgets: modules.flatMap((m) => m.widgets ?? []),
+		widgets: modules.flatMap((m) => m.widgets ?? []).map(widgetEntry),
 		blocks: modules.flatMap((m) => m.portableTextBlocks ?? []),
 		settingsSchema: secretSettingsSchema(modules.map((m) => m.settingsSchema)),
 		storage: Object.assign({}, ...modules.map((m) => m.storage ?? {})),
@@ -113,7 +116,12 @@ function liveAdmin<T extends object>(modules: PackModule[], base: T) {
 		},
 		widgets: {
 			enumerable: true,
-			get: () => modules.filter(on).flatMap((m) => m.widgets ?? []),
+			get: () =>
+				modules
+					.filter(on)
+					.flatMap((m) => m.widgets ?? [])
+					.filter((w) => !w.when || w.when())
+					.map(widgetEntry),
 		},
 	}) as T & { pages: PackModule["adminPages"]; widgets: PackModule["widgets"] };
 }

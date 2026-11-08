@@ -6,7 +6,8 @@ import { test } from "node:test";
 import "./ts-resolve.mjs";
 
 const { compareVersions, isNewer, parseVersion, DIST_TAGS_URL, UPDATE_COMMAND } = await import("../src/updates/core.ts");
-const { updateStatus } = await import("../src/updates/check.ts");
+const { updateStatus, dismissUpdate, showsUpdate, UPDATE_STATE_SETTING } = await import("../src/updates/check.ts");
+const { purgeScope } = await import("../src/pageCache/lib.ts");
 const { VERSION } = await import("../src/version.ts");
 
 test("compareVersions follows semver order", () => {
@@ -34,11 +35,12 @@ test("isNewer is false for missing, equal, older or malformed versions", () => {
 });
 
 function fakeCtx(answer) {
-	const kv = new Map();
+	const settings = new Map();
 	const calls = [];
 	return {
 		calls,
-		kv: { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v) },
+		stored: settings,
+		settings: { get: async (k) => settings.get(k) ?? null, set: async (k, v) => void settings.set(k, structuredClone(v)) },
 		log: { warn() {}, info() {} },
 		http: {
 			fetch: async (url, init) => {
@@ -112,16 +114,54 @@ test("nothing is asked while the check is off", async () => {
 	assert.equal(ctx.calls.length, 0);
 });
 
-test("the update check starts off, can be left out, and may reach npm", () => {
+test("dismissing hides that version for the site until a newer one", async () => {
+	let latest = "99.0.0";
+	const ctx = fakeCtx(() => ({ body: { latest } }));
+	assert.equal((await updateStatus(ctx, true, T0)).dismissed, false);
+	await dismissUpdate(ctx, "99.0.0");
+	const after = await updateStatus(ctx, true, T0 + 1000);
+	assert.equal(after.available, true);
+	assert.equal(after.dismissed, true);
+	assert.equal(showsUpdate(ctx.stored.get(UPDATE_STATE_SETTING), "0.35.0"), false);
+	// The next day's check keeps the dismissal; a newer version shows again.
+	latest = "99.1.0";
+	const next = await updateStatus(ctx, true, T0 + DAY);
+	assert.equal(next.latest, "99.1.0");
+	assert.equal(next.dismissed, false);
+	assert.equal(ctx.stored.get(UPDATE_STATE_SETTING).dismissed, "99.0.0", "the old dismissal is kept, not cleared");
+	assert.equal(showsUpdate(ctx.stored.get(UPDATE_STATE_SETTING), "0.35.0"), true);
+});
+
+test("showsUpdate needs a newer, undismissed version", () => {
+	assert.equal(showsUpdate(null, "0.35.14"), false);
+	assert.equal(showsUpdate({ checkedAt: null, latest: "0.35.15" }, "0.35.14"), true);
+	assert.equal(showsUpdate({ checkedAt: null, latest: "0.35.14" }, "0.35.14"), false);
+	assert.equal(showsUpdate({ checkedAt: null, latest: "0.35.15", dismissed: "0.35.15" }, "0.35.14"), false);
+	assert.equal(showsUpdate({ checkedAt: null, latest: "0.35.16", dismissed: "0.35.15" }, "0.35.14"), true);
+});
+
+test("dismissing doesn't clear the page cache", () => {
+	assert.equal(purgeScope("/_emdash/api/plugins/coywolf-pack/updates/dismiss"), null);
+});
+
+test("the update check starts off, can be left out, may reach npm, and checks daily", () => {
 	const pack = readFileSync(new URL("../src/updates/pack.ts", import.meta.url), "utf8");
 	assert.match(pack, /id: "updates",[\s\S]*?default: false/);
 	assert.match(pack, /allowedHosts: \[NPM_HOST\]/);
+	assert.match(pack, /schedule: "@daily"/);
+	assert.match(pack, /widgets: \[\{ id: "update", [^}]*when: updateCardVisible \}\]/);
 	const modules = readFileSync(new URL("../src/modules.ts", import.meta.url), "utf8");
 	assert.match(modules, /o\.updates === false \? null : updatesPack\(\)/);
 });
 
-test("every pack page and the usage widget carry the notice", () => {
+test("the dashboard lists a conditional widget only while it applies, without its condition", () => {
+	const index = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(index, /\.filter\(\(w\) => !w\.when \|\| w\.when\(\)\)\s*\.map\(widgetEntry\)/);
+	assert.match(index, /widgets: modules\.flatMap\(\(m\) => m\.widgets \?\? \[\]\)\.map\(widgetEntry\)/);
+});
+
+test("every pack page carries the notice and the dashboard has the update card", () => {
 	const admin = readFileSync(new URL("../src/admin/index.tsx", import.meta.url), "utf8");
 	assert.match(admin, /export const pages[^=]*= Object\.fromEntries\(Object\.entries\(PAGES\)\.map\(\(\[path, Page\]\) => \[path, withUpdateNotice\(Page\)\]\)\)/);
-	assert.match(admin, /"cloudflare-usage": withUpdateLine\(UsageWidget\)/);
+	assert.match(admin, /update: UpdateWidget/);
 });
