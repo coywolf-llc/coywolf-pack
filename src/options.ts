@@ -42,6 +42,8 @@ export interface CoywolfOptions {
 	images?: import("./images/pack.js").ImagesOptions | false;
 	/** Page cache upkeep for Cloudflare Workers Cache (no options yet). `false` leaves the module out. */
 	pageCache?: Record<string, never> | false;
+	/** The daily check for a newer Coywolf Pack on npm (off until turned on on the Features page). `false` leaves the module out. */
+	updates?: Record<string, never> | false;
 	/** @deprecated Until 0.12.0 the Custom Blocks module was called Content Blocks; `contentBlocks: false` still leaves it out. */
 	contentBlocks?: Record<string, never> | false;
 	/** WordPress import tools (no options yet). `false` leaves the module out. */

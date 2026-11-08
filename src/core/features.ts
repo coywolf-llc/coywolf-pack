@@ -374,6 +374,16 @@ export async function readSiteSetting<T = unknown>(key: string, database: Databa
 	return settings ? { value: (settings.get(key) as T | undefined) ?? null } : null;
 }
 
+/**
+ * A registered setting as this isolate last read it, synchronously (undefined before any read),
+ * for EmDash's admin manifest like knownFeatures. The middleware reads the settings afresh for
+ * every manifest request, so it's current there.
+ */
+export function knownSiteSetting<T>(key: string): T | null | undefined {
+	if (!cached?.keys?.has(key)) return undefined;
+	return (cached.settings?.get(key) as T | undefined) ?? null;
+}
+
 /** Update a registered setting in this isolate's cache after writing it (other isolates see it within FEATURES_TTL_MS). */
 export function rememberSiteSetting(key: string, value: unknown): void {
 	cached?.settings?.set(key, value);

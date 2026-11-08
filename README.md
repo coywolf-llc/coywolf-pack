@@ -164,6 +164,8 @@ npm install @coywolf/emdash@latest
 
 If your `package.json` points at a GitHub tarball URL from before the pack was on npm (0.35.13 and earlier), this command replaces it with the npm version. Updates never turn features on by themselves: new features start off.
 
+**Update notices:** once a day, the pack asks npm for its newest version. When there's an update, a **Coywolf Pack update** card on the EmDash dashboard and a notice at the top of the pack's pages show the command above, with a **Copy command** button. **Dismiss** hides both for everyone on the site until the next version. The check sends nothing about your site and never updates anything by itself. Like every feature, it starts off: turn on **Update check** at the top of **Plugins → Coywolf Pack → Features**.
+
 ### Local development
 
 In development, keep Vite from pre-bundling the plugin. A pre-bundled copy gets its own instance of `emdash`, which breaks plugin error handling. Its UI libraries should stay pre-bundled:

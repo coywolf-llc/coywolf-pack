@@ -21,10 +21,12 @@ export const VERSION_OPTION = "plugin:coywolf-pack:pageCache:version";
  */
 const PUBLIC_ROUTE = /^\/_emdash\/api\/plugins\/coywolf-pack\/(search\/|discovery\/public\/|videos\/(like|play|caption|embed|sitemap)(\/|$))/;
 const PACK_API = "/_emdash/api/plugins/coywolf-pack/";
+/** Admin writes that change nothing a page or a cache shows: no purge and no new settings generation. */
+const NO_SETTINGS_CHANGE = /^\/_emdash\/api\/plugins\/coywolf-pack\/updates\//;
 
 /** True when a request is a pack admin write whose success should purge the cache. */
 export function purgesAfter(method: string, pathname: string): boolean {
-	return method === "POST" && pathname.startsWith(PACK_API) && !PUBLIC_ROUTE.test(pathname);
+	return method === "POST" && pathname.startsWith(PACK_API) && !PUBLIC_ROUTE.test(pathname) && !NO_SETTINGS_CHANGE.test(pathname);
 }
 
 export type PurgeScope = { purgeEverything: true } | { pathPrefixes: string[] } | { tags: string[] };
@@ -70,7 +72,7 @@ export function keepOffEdge(context: unknown): void {
 export function purgeScope(pathname: string): PurgeScope | null {
 	const route = pathname.slice(PACK_API.length);
 	if (/^redirects\/(?!(list|test|removed)$)|^backups\/(rewind|undo)$/.test(route)) return { tags: [REDIRECTS_TAG] };
-	if (/^(redirects|backups|links)\//.test(route) || /^cache\/(media|warm|purge)(\/|$)/.test(route)) return null;
+	if (/^(redirects|backups|links|updates)\//.test(route) || /^cache\/(media|warm|purge)(\/|$)/.test(route)) return null;
 	// Stored image sizes: new uploads and crops are picked up after a short stopgap lifetime; a backfill run clears the cache itself once when it is done.
 	if (/^images\/variants\/(settings|run|bulk|estimate)$/.test(route)) return null;
 	// Videos admin reads (library, details, status, storage, settings, captions list) change nothing.

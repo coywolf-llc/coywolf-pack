@@ -35,6 +35,8 @@ export interface WidgetDef {
 	id: string;
 	title: string;
 	size: "full" | "half" | "third";
+	/** Listed on the dashboard only while this returns true (read on every admin manifest request; must be synchronous). */
+	when?: () => boolean;
 }
 
 /** A scheduled job. `schedule` is cron syntax or @hourly/@daily/@weekly. */
