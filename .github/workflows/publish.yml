@@ -5,8 +5,8 @@
 # package's Settings → Trusted publishing on npmjs.com. Packages published this way get a
 # provenance statement linking them to the commit and workflow run.
 #
-# The first version has to be published by hand (npm only lets a trusted publisher be set up
-# for a package that exists). Until then this workflow skips publishing instead of failing.
+# The first version was published by hand (npm only lets a trusted publisher be set up for a
+# package that exists). npm reviews a new package's first versions before they're public.
 name: Publish to npm
 
 on:
@@ -53,15 +53,12 @@ jobs:
             exit 1
           fi
 
-      - name: Is this version already on npm, and does the package exist?
+      - name: Is this version already on npm?
         id: npm
         run: |
           NAME="$(node -p "require('./package.json').name")"
           VERSION="$(node -p "require('./package.json').version")"
-          if ! npm view "$NAME" name >/dev/null 2>&1; then
-            echo "::notice::$NAME isn't on npm yet. Publish the first version by hand (README, Releasing); after that, releases publish here."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          elif npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
             echo "::notice::$NAME@$VERSION is already on npm."
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
