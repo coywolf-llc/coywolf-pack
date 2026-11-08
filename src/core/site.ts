@@ -19,3 +19,18 @@ export async function siteName(ctx: Pick<PluginContext, "site">): Promise<string
 	}
 	return ctx.site?.name ?? "";
 }
+
+/**
+ * Whether the site is in EmDash's staging mode (Settings → General → Site Status, EmDash 1.5+):
+ * hidden from search engines until it goes live. Sites without the setting (all sites before
+ * that release, and sites that went live) are live. A failed read counts as live.
+ */
+export async function siteInStaging(): Promise<boolean> {
+	try {
+		const { getSiteSetting } = await import("emdash");
+		// biome-ignore lint/suspicious/noExplicitAny: "staging" isn't in older EmDash versions' setting keys.
+		return (await (getSiteSetting as (key: any) => Promise<unknown>)("staging")) === true;
+	} catch {
+		return false;
+	}
+}

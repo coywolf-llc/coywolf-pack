@@ -26,6 +26,21 @@ interface MasterRow {
 }
 
 const PAGE_SIZE = 500;
+/**
+ * About how much a read of rows should return. D1 refuses query results over 50 MB (from
+ * November 4, 2026); 500 rows of a table with very large rows (long posts, revisions) could
+ * pass that, so each read is sized from the bytes the previous one returned.
+ */
+export const PAGE_TARGET_BYTES = 8 * 1024 * 1024;
+/** How D1 words a result over its size limit (its message has said "too large", "exceeds" or "limit" with a size). */
+const RESULT_TOO_LARGE = /too large|too big|exceed|size limit|limit.*(bytes|MB)|SQLITE_TOOBIG/i;
+
+/** Rows to ask for next, from the size of the rows just read. */
+export function nextPageSize(pageBytes: number, rows: number): number {
+	if (rows <= 0) return PAGE_SIZE;
+	const perRow = Math.max(1, pageBytes / rows);
+	return Math.max(1, Math.min(PAGE_SIZE, Math.floor(PAGE_TARGET_BYTES / perRow)));
+}
 const SEARCH_PREFIX = "_emdash_fts_";
 /** Longest statement written, in UTF-8 bytes; D1's limit is 100,000. */
 export const MAX_STATEMENT_BYTES = 90_000;
@@ -229,24 +244,42 @@ export async function* dumpLines(db: D1Database, counts: { tables: number; rows:
 		const select = byRowid || (withRowid && !pk.length) ? `rowid AS ${ROWID}, *` : "*";
 		const order = withRowid ? " ORDER BY rowid" : "";
 		let after: unknown = null;
-		for (let offset = 0; ; offset += PAGE_SIZE) {
-			const { results } = byRowid
-				? await db
-						.prepare(`SELECT ${select} FROM ${table}${after === null ? "" : ` WHERE rowid > ?`}${order} LIMIT ?`)
-						.bind(...(after === null ? [PAGE_SIZE] : [after, PAGE_SIZE]))
-						.all<Record<string, unknown>>()
-				: await db
-						.prepare(`SELECT ${select} FROM ${table}${order} LIMIT ? OFFSET ?`)
-						.bind(PAGE_SIZE, offset)
-						.all<Record<string, unknown>>();
+		let offset = 0;
+		let limit = PAGE_SIZE;
+		for (;;) {
+			let results: Record<string, unknown>[];
+			try {
+				({ results } = byRowid
+					? await db
+							.prepare(`SELECT ${select} FROM ${table}${after === null ? "" : ` WHERE rowid > ?`}${order} LIMIT ?`)
+							.bind(...(after === null ? [limit] : [after, limit]))
+							.all<Record<string, unknown>>()
+					: await db
+							.prepare(`SELECT ${select} FROM ${table}${order} LIMIT ? OFFSET ?`)
+							.bind(limit, offset)
+							.all<Record<string, unknown>>());
+			} catch (error) {
+				// D1 refuses results over 50 MB (from November 4, 2026). Ask again for fewer rows, down to one.
+				// Any other error (an outage, a bad query) goes straight up instead of being retried.
+				if (limit === 1 || !RESULT_TOO_LARGE.test(String(error))) throw error;
+				limit = Math.max(1, Math.floor(limit / 4));
+				continue;
+			}
+			let pageBytes = 0;
 			for (const row of results) {
 				if (t.name === "options" && typeof row.name === "string" && SKIP_OPTION.test(row.name)) continue;
 				const key = Object.fromEntries(keyColumns.map((c) => [c, row[c]]));
-				yield* rowStatements(table, row, key);
+				for (const sql of rowStatements(table, row, key)) {
+					pageBytes += sql.length;
+					yield sql;
+				}
 				counts.rows++;
 			}
-			if (results.length < PAGE_SIZE) break;
+			if (results.length < limit) break;
+			offset += results.length;
 			if (byRowid) after = results[results.length - 1][ROWID];
+			// Size the next read from this one: about PAGE_TARGET_BYTES, never more than PAGE_SIZE rows.
+			limit = nextPageSize(pageBytes, results.length);
 		}
 	}
 

@@ -147,15 +147,17 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				? watchInvalidation((context as unknown as { cache?: Parameters<typeof watchInvalidation>[0] }).cache)
 				: null;
 		// Only SEO saves can change it (not General, Social…), so other settings saves don't touch the settings generation.
+		// A staging change (EmDash's Site Status: Go live, or back to staging) changes every page's robots tag.
 		const settingsLength = Number(context.request.headers.get("content-length"));
-		const seoSave =
+		const settingsKeys: { seo: boolean; staging: boolean } =
 			method === "POST" && context.url.pathname === EMDASH_SETTINGS_API && settingsLength > 0 && settingsLength <= 64 * 1024
 				? await context.request
 						.clone()
 						.json()
-						.then((body: unknown) => Boolean(body && typeof body === "object" && "seo" in body))
-						.catch(() => false)
-				: false;
+						.then((body: unknown) => (body && typeof body === "object" ? { seo: "seo" in body, staging: "staging" in body } : { seo: false, staging: false }))
+						.catch(() => ({ seo: false, staging: false }))
+				: { seo: false, staging: false };
+		const seoSave = settingsKeys.seo;
 		const afterWrite = (response: Response): Response => {
 			// EmDash's SEO settings include "Disallow AI training", whose lines the pack's robots.txt carries: clear it,
 			// here now and (settling purge) again once every isolate's robots.txt cache has expired.
@@ -166,6 +168,17 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 					(db ? recordSettingsChange(db, scope) : Promise.resolve())
 						.then(() => purge(scope))
 						.catch((error) => console.error("coywolf-pack: could not clear robots.txt after EmDash's settings changed", error)),
+				);
+			}
+			// Going live (or back to staging) changes every page's robots tag: EmDash renders noindex, nofollow on every page
+			// while the site is in staging, and only clears pages tagged with its settings. Clear every cached page (which
+			// restarts warming), and again once every isolate has the new settings (settling purge).
+			if (settingsKeys.staging && response.status < 400) {
+				const scope: PurgeScope = { purgeEverything: true };
+				waitUntil(
+					(db ? recordSettingsChange(db, scope) : Promise.resolve())
+						.then(() => purge(scope))
+						.catch((error) => console.error("coywolf-pack: could not clear pages after the site's staging status changed", error)),
 				);
 			}
 			// Stored image sizes follow media deletes, replaced files and WordPress media imports (new uploads: the media:afterUpload hook).

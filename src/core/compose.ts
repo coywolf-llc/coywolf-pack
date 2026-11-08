@@ -189,9 +189,22 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 	// it. Scheduling a dozen tasks is a dozen D1 writes: give it room.
 	hooks["plugin:activate"] = {
 		timeout: ACTIVATE_TIMEOUT_MS,
+		// Never throws: EmDash leaves a plugin whose activation fails turned off, and a brief D1 error here
+		// shouldn't switch off the whole pack. Each step is logged; tasks are scheduled again whenever the
+		// Features page loads (features/list), and module steps run again on the next activation.
 		handler: async (event, ctx) => {
-			await ensureTasks(ctx, tasks);
-			for (const module of modules) await module.hooks?.["plugin:activate"]?.(event, ctx);
+			try {
+				await ensureTasks(ctx, tasks);
+			} catch (error) {
+				ctx.log.error("plugin:activate: scheduling tasks failed; they're scheduled again when the Features page opens", { error: String(error) });
+			}
+			for (const module of modules) {
+				try {
+					await module.hooks?.["plugin:activate"]?.(event, ctx);
+				} catch (error) {
+					ctx.log.error(`${module.id}: plugin:activate failed`, { error: String(error) });
+				}
+			}
 		},
 	};
 

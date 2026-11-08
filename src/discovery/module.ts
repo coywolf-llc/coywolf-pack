@@ -7,7 +7,7 @@ import { type PluginContext, PluginRouteError, after, definePluginRoute } from "
 import { z } from "zod";
 
 import { absoluteUrl, entryUrl } from "../core/content-url.js";
-import { siteName } from "../core/site.js";
+import { siteInStaging, siteName } from "../core/site.js";
 import { cachedCtxFeatures, ctxFeatures, invalidateFeatures, isOn, readSiteSetting, registerSiteSetting, requireFeature } from "../core/features.js";
 import { parseInput } from "../shared.js";
 import { LLMS_CACHE, NEWS_CACHE, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
@@ -127,7 +127,14 @@ async function onContentChange(ctx: PluginContext, collection: string, id: strin
 	const news = isOn(features, FEATURE.news);
 	const kinds: DocKind[] = [...(llms ? (["llms"] as const) : []), ...(news ? (["news"] as const) : [])];
 	if (kinds.length) scheduleRebuild(ctx, kinds);
-	if (id && isOn(features, FEATURE.indexnow)) await queueIndexNow(ctx, await loadSettings(ctx), collection, id, kind, permanent);
+	if (id && isOn(features, FEATURE.indexnow)) {
+		// A site in EmDash's staging mode is hidden from search engines: don't tell them about its pages.
+		if (await siteInStaging()) {
+			ctx.log.info("IndexNow: skipped, the site is in staging", { collection, id, kind });
+			return;
+		}
+		await queueIndexNow(ctx, await loadSettings(ctx), collection, id, kind, permanent);
+	}
 }
 
 const idOf = (content: Record<string, unknown>) => (typeof content.id === "string" ? content.id : undefined);
@@ -258,6 +265,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 					return d ? { count: d.count, builtAt: d.builtAt } : null;
 				};
 				return {
+					staging: await siteInStaging(),
 					features: { indexnow: isOn(features, FEATURE.indexnow), news: isOn(features, FEATURE.news), llms: isOn(features, FEATURE.llms), feed: isOn(features, FEATURE.feed) },
 					settings,
 					collections,
@@ -313,6 +321,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 			request: { body: "json" },
 			handler: async (ctx) => {
 				await requireFeature(ctx, FEATURE.indexnow);
+				if (await siteInStaging()) throw PluginRouteError.badRequest("The site is in staging, hidden from search engines, so nothing is sent to IndexNow. Go live under Settings → General → Site Status first.");
 				const { urls } = parseInput(z.object({ urls: z.array(z.string().url().max(2000)).max(100).optional() }), ctx.input ?? {});
 				await ensureIndexNowKey(ctx);
 				const origin = siteOrigin(ctx);
