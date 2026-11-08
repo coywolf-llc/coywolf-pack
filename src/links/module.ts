@@ -203,7 +203,7 @@ export async function runChecks(ctx: PluginContext, options: { ids?: string[]; b
 						? "Can't be resolved to a web address."
 						: !checkInternal
 							? "Internal links aren't checked (Link Manager → Settings)."
-							: `Internal links need a "${SELF_BINDING}" service binding to the site's own Worker (see README).`,
+							: `Internal links need a "${SELF_BINDING}" service binding to the site's own Worker (see docs/links.md in the Coywolf Pack repository).`,
 					nextCheckAt: nextCheckAt("ok", now),
 				});
 				continue;

@@ -358,7 +358,7 @@ export function tocBlock(a: Record<string, unknown>): Block {
 
 // ── Files ────────────────────────────────────────────────────────
 
-/** Coywolf Files' coywolf/file → coywolf-file. The id stays the WordPress file id (see the README for moving the file). */
+/** Coywolf Files' coywolf/file → coywolf-file. The id stays the WordPress file id (see docs/wordpress-import.md for moving the file). */
 export function fileBlock(a: Record<string, unknown>, d: FileDefaults): Block | null {
 	const id = str(a.fileId);
 	if (!/^[0-9a-z]{6,40}$/i.test(id)) return null;

@@ -191,7 +191,7 @@ export function ReviewsPage() {
 							/>
 							<p id="cw-reviews-css-limit" className={`text-xs ${tooLong ? "text-kumo-danger" : "text-kumo-subtle"}`}>
 								{style.css.length.toLocaleString()} / {MAX_CUSTOM_CSS.toLocaleString()} characters. Added after the built-in styles on pages
-								with a review. Start rules with <code>.cw-review</code> and set the <code>--cw-review-*</code> properties (see the README) to
+								with a review. Start rules with <code>.cw-review</code> and set the <code>--cw-review-*</code> properties (see docs/reviews.md in the Coywolf Pack repository) to
 								change colors and layout.
 							</p>
 						</div>
