@@ -2,7 +2,7 @@ import type { PluginAdminExports } from "emdash";
 
 import { injectAdminCss } from "./admin-css.js";
 import { mountTrashPrompt } from "./trash-prompt.js";
-import { withUpdateLine, withUpdateNotice } from "./update-notice.js";
+import { UpdateWidget, withUpdateNotice } from "./update-notice.js";
 
 import { AiPage } from "./ai.js";
 import { BackupStatusWidget, BackupsPage } from "./backups.js";
@@ -62,6 +62,7 @@ export const pages: PluginAdminExports["pages"] = Object.fromEntries(Object.entr
 export const widgets: PluginAdminExports["widgets"] = {
 	"backup-status": BackupStatusWidget,
 	"links-status": LinksWidget,
-	// Always on the dashboard (unless the pageCache module is left out), so it carries the update line.
-	"cloudflare-usage": withUpdateLine(UsageWidget),
+	"cloudflare-usage": UsageWidget,
+	// Listed by the server only while a Coywolf Pack update is waiting.
+	update: UpdateWidget,
 };
