@@ -192,6 +192,8 @@ Each module has its own page in [docs](docs/README.md), with its setup, settings
 
 ## Development
 
+Releases are tagged, published on GitHub and on npm: see [Releasing](docs/releasing.md).
+
 ```bash
 npx tsc --noEmit -p .        # typecheck
 npm test                     # unit tests: test/ and src/**/*.test.ts (Node 22.15+; runs the TypeScript sources directly)

@@ -1,0 +1,82 @@
+# Publishes @coywolf/emdash to npm when a GitHub release is published.
+#
+# Uses npm trusted publishing (OIDC): no npm token is stored anywhere. npm checks that the
+# request comes from this repository and this workflow file, configured once under the
+# package's Settings → Trusted publishing on npmjs.com. Packages published this way get a
+# provenance statement linking them to the commit and workflow run.
+#
+# The first version has to be published by hand (npm only lets a trusted publisher be set up
+# for a package that exists). Until then this workflow skips publishing instead of failing.
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (for example v0.35.13)"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for npm trusted publishing and provenance
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+
+      - name: The tag matches package.json's version
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          VERSION="v$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::Tag $TAG doesn't match package.json version $VERSION"
+            exit 1
+          fi
+
+      - name: Is this version already on npm, and does the package exist?
+        id: npm
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          if ! npm view "$NAME" name >/dev/null 2>&1; then
+            echo "::notice::$NAME isn't on npm yet. Publish the first version by hand (README, Releasing); after that, releases publish here."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::$NAME@$VERSION is already on npm."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.npm.outputs.publish == 'true'
+        run: npm ci
+
+      - if: steps.npm.outputs.publish == 'true'
+        run: npx tsc --noEmit
+
+      - if: steps.npm.outputs.publish == 'true'
+        run: npm test
+
+      - if: steps.npm.outputs.publish == 'true'
+        name: Publish
+        run: npm publish --access public

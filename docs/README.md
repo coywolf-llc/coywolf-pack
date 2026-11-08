@@ -39,3 +39,7 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 ## Moving to EmDash
 
 - [Migrating from WordPress](wordpress-import.md)
+
+## Maintaining
+
+- [Releasing](releasing.md): tags, GitHub releases and npm publishing
