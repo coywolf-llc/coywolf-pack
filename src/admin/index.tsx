@@ -2,6 +2,7 @@ import type { PluginAdminExports } from "emdash";
 
 import { injectAdminCss } from "./admin-css.js";
 import { mountTrashPrompt } from "./trash-prompt.js";
+import { withUpdateLine, withUpdateNotice } from "./update-notice.js";
 
 import { AiPage } from "./ai.js";
 import { BackupStatusWidget, BackupsPage } from "./backups.js";
@@ -30,7 +31,7 @@ injectAdminCss();
 // Asks what a trashed or unpublished entry's old URL should do (Redirects → Removed content).
 mountTrashPrompt();
 
-export const pages: PluginAdminExports["pages"] = {
+const PAGES: PluginAdminExports["pages"] = {
 	"/features": FeaturesPage,
 	"/performance": PerformancePage,
 	"/backups": BackupsPage,
@@ -55,8 +56,12 @@ export const pages: PluginAdminExports["pages"] = {
 	"/images": ImagesPage,
 };
 
+// Every pack page shows the update notice at the top when a newer Coywolf Pack is out.
+export const pages: PluginAdminExports["pages"] = Object.fromEntries(Object.entries(PAGES).map(([path, Page]) => [path, withUpdateNotice(Page)]));
+
 export const widgets: PluginAdminExports["widgets"] = {
 	"backup-status": BackupStatusWidget,
 	"links-status": LinksWidget,
-	"cloudflare-usage": UsageWidget,
+	// Always on the dashboard (unless the pageCache module is left out), so it carries the update line.
+	"cloudflare-usage": withUpdateLine(UsageWidget),
 };

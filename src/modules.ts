@@ -23,11 +23,14 @@ import { robotsMiddleware, robotsPack } from "./robots/pack.js";
 import { reviewsPack } from "./reviews/pack.js";
 import type { CoywolfOptions } from "./options.js";
 import { videosCaptionsMiddleware, videosPack, videosSitemapMiddleware } from "./videos/pack.js";
+import { updatesPack } from "./updates/pack.js";
 import { wpImportPack } from "./wpImport/pack.js";
 
 type Factory = (options: CoywolfOptions) => PackModule | null;
 
 export const MODULES: Factory[] = [
+	// First on the Features page, where it's easy to find (no hooks or middleware, so its place changes nothing else).
+	(o) => (o.updates === false ? null : updatesPack()),
 	(o) => (o.backups ? backupsPack(o.backups) : null),
 	(o) => (o.redirects === false ? null : redirectsPack(o.redirects ?? {})),
 	// Before Headings & TOC: imported heading ids must be in place when anchors are stamped.
