@@ -17,17 +17,20 @@ const CHANGED_EVENT = "coywolf-pack:update-changed";
 
 type Available = Extract<UpdateStatus, { enabled: true }> & { latest: string };
 
-/** One request per admin visit (the admin is a single-page app); a failure is retried on the next page. */
+/** One request per admin visit (the admin is a single-page app). */
 let pending: Promise<UpdateStatus | null> | null = null;
 function loadStatus(): Promise<UpdateStatus | null> {
+	// Not an admin, the module left out, or offline: no notice for this visit.
 	pending ??= apiFetch(`${API}/status`)
 		.then((response) => parseApiResponse<UpdateStatus>(response, "Couldn't check for updates"))
-		.catch(() => {
-			pending = null;
-			// Not an admin, an older server, or offline: no notice.
-			return null;
-		});
+		.catch(() => null);
 	return pending;
+}
+
+/** Ask again (after Update check is switched on or off): the notices on the page refresh. */
+export function resetUpdateStatus(): void {
+	pending = null;
+	window.dispatchEvent(new Event(CHANGED_EVENT));
 }
 
 /** The EmDash admin's query client, to refresh the dashboard after a dismissal (null if unavailable). */
@@ -128,7 +131,7 @@ function UpdateDetails(props: { update: Available; dismiss: () => Promise<void>;
 					Copy command
 				</Button>
 				<a className="text-kumo-link hover:underline" href={update.releasesUrl} target="_blank" rel="noopener noreferrer">
-					What's new
+					What's new<span className="sr-only"> (opens in a new tab)</span>
 				</a>
 				<Button
 					variant="ghost"
@@ -174,7 +177,7 @@ export function UpdateWidget() {
 	}
 	return (
 		<div className="space-y-3 text-sm">
-			<p className="text-base font-semibold">Coywolf Pack {update.latest} is available</p>
+			<h3 className="text-base font-semibold">Coywolf Pack {update.latest} is available</h3>
 			<UpdateDetails update={update} dismiss={dismiss} error={error} />
 		</div>
 	);

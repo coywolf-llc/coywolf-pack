@@ -6,6 +6,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { resetUpdateStatus } from "./update-notice.js";
+
 
 const API = "/_emdash/api/plugins/coywolf-pack/features";
 
@@ -65,6 +67,8 @@ export function FeaturesPage() {
 			setModules((current) =>
 				current?.map((m) => ({ ...m, features: m.features.map((f) => ({ ...f, enabled: features[f.id] ?? f.enabled })) })) ?? null,
 			);
+			// The update notices ask again whether to show (the dashboard card follows the manifest below).
+			if (id === "updates") resetUpdateStatus();
 			// A module's pages show in the sidebar only while it's on: refresh the admin manifest.
 			if (!id.includes(".")) {
 				if (queryClient) void queryClient.invalidateQueries({ queryKey: ["manifest"] });

@@ -92,8 +92,9 @@ export async function checkForUpdate(ctx: Ctx, now = Date.now()): Promise<Update
 			latest = await askNpm(ctx);
 		} catch (error) {
 			ctx.log.warn("Update check: couldn't ask npm", { error: error instanceof Error ? error.message : String(error) });
-			// Keep the last answer; try again later.
-			const state: UpdateState = { ...saved, failedAt: new Date(now).toISOString() };
+			// Keep the last answer (re-read, so a dismissal made meanwhile isn't lost); try again later.
+			const current = await readState(ctx);
+			const state: UpdateState = { ...current, failedAt: new Date(now).toISOString() };
 			await writeState(ctx, state).catch(() => undefined);
 			return state;
 		}
