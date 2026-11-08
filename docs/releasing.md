@@ -18,4 +18,4 @@ The workflow uses npm trusted publishing: npm accepts publishes from this reposi
 3. On npmjs.com, open `@coywolf/emdash` → **Settings** → **Trusted publishing**, choose **GitHub Actions**, and enter organization `coywolf-llc`, repository `coywolf-pack`, workflow `publish.yml` (no environment).
 4. Optional, recommended: in the package's **Settings → Publishing access**, choose **Require two-factor authentication and disallow tokens**. Trusted publishing keeps working.
 
-Until step 2 is done, the workflow notes that the package isn't on npm yet and skips publishing.
+npm reviews a new package's first versions before they're public: until then `npm view` reports the package as not found and the package page shows a "Temporary Holding Version". A new trusted publisher shows **Pending validation** until the workflow publishes through it once.
