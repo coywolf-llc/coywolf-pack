@@ -1,5 +1,7 @@
 # Coywolf Pack documentation
 
+Coywolf Pack is an [EmDash](https://emdashcms.com) plugin that enhances existing features and adds features not available in EmDash. It helps you manage your site like a pro and ensure it's absurdly fast for humans and bots.
+
 Start with [Getting started](../README.md#getting-started) to install the pack and turn features on.
 
 ## Site-wide
