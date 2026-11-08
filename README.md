@@ -1,6 +1,6 @@
 # Coywolf Pack for EmDash
 
-One plugin with [Coywolf](https://coywolf.com)'s features for [EmDash](https://emdashcms.com) sites on Cloudflare: what Coywolf's WordPress plugins did, for EmDash. coywolf.com runs on it, scores 100 in every PageSpeed category, and costs $5 a month to host alongside six other sites.
+Coywolf Pack is an [EmDash](https://emdashcms.com) plugin that enhances existing features and adds features not available in EmDash. It helps you manage your site like a pro and ensure it's absurdly fast for humans and bots.
 
 - **Fast:** cached pages answer in 60–90 ms, cache warming keeps them cached, and images come straight from Cloudflare's edge.
 - **Complete:** backups and restore, redirects, schema, robots.txt rules, link checking, search, videos, feeds and more, in one plugin.
