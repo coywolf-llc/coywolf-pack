@@ -2,6 +2,8 @@
 
 One plugin with [Coywolf](https://coywolf.com)'s features for [EmDash](https://emdashcms.com) sites on Cloudflare: the things Coywolf's WordPress plugins do that EmDash doesn't do natively. Enable only the modules you want.
 
+**New to Coywolf Pack?** Start with [Getting started](#getting-started): install it, add it to your site, and turn features on.
+
 ## Faster sites
 
 EmDash on Cloudflare builds every page in a Worker, and a Worker that hasn't run recently in a data center has to start up, load EmDash and query D1 before it can answer. On coywolf.com that meant 1.1–2 seconds before the first byte and a mobile PageSpeed Speed Index of 5–8 seconds. With Coywolf Pack's performance features, the same site scores 100 in every PageSpeed category.
@@ -56,40 +58,128 @@ Every feature can be turned on or off under **Plugins → Coywolf Pack**, like C
 
 More modules will follow as Coywolf's WordPress plugins move to EmDash.
 
-This is a native (trusted) EmDash plugin, so it installs from GitHub or npm rather than the EmDash plugin directory. The directory lists only sandboxed plugins, which can't read the database or buckets directly.
+## Getting started
 
-## Requirements
+Coywolf Pack is a native (trusted) EmDash plugin: you add it to your site's code and deploy, rather than installing it from EmDash's plugin directory (which lists only sandboxed plugins, and those can't read the database or buckets directly). The steps below use coywolf.com as the example: change the names to your site's.
 
-EmDash 1.2+ on the Cloudflare adapter, with a D1 database (`DB`) and an R2 media bucket (`MEDIA`).
+### What you need
 
-## Install
+- An EmDash site (1.2 or later) on Cloudflare Workers, using EmDash's Cloudflare adapter with a D1 database bound as `DB` and an R2 media bucket bound as `MEDIA`. That's the setup EmDash's own Cloudflare starter creates.
+- The site's code in a folder (or Git repository) you can edit and deploy, with Node.js and Wrangler.
+
+### 1. Install the package
+
+From the site's folder, install the latest release. Releases are listed under [Tags](https://github.com/coywolf-llc/coywolf-pack/tags); replace `v0.35.11` with the newest one:
 
 ```bash
-npm install https://codeload.github.com/coywolf-llc/coywolf-pack/tar.gz/refs/tags/v0.17.0
+npm install https://codeload.github.com/coywolf-llc/coywolf-pack/tar.gz/refs/tags/v0.35.11
 ```
 
-Use the tarball URL rather than `github:coywolf-llc/coywolf-pack`: npm records `github:` installs as SSH Git URLs, which CI runners without an SSH key can't fetch.
+The package is named `@coywolf/emdash`. Use the tarball URL rather than `github:coywolf-llc/coywolf-pack`: npm records `github:` installs as SSH Git URLs, which CI runners without an SSH key can't fetch.
+
+### 2. Add the plugin to `astro.config.mjs`
+
+Import `coywolfPlugin` and add it to EmDash's `plugins`:
 
 ```js
 // astro.config.mjs
 import { coywolfPlugin } from "@coywolf/emdash";
 
-emdash({
+export default defineConfig({
   // ...
-  plugins: [
-    coywolfPlugin({
-      backups: { name: "mysite" },
-      redirects: {},
+  integrations: [
+    emdash({
+      // ...your existing database and storage settings
+      plugins: [
+        coywolfPlugin({
+          // Backups is the one module that's added only when you give it a name (it names the backup files).
+          backups: { name: "coywolf" },
+        }),
+      ],
     }),
   ],
 });
 ```
 
-Each module appears under **Plugins → Coywolf Pack** in the admin. Omit a module (or set it to `false`) to turn it off.
+`coywolfPlugin()` with no options works too: every module except Backups is included with its defaults. Each module's section below lists its options; set a module to `false` (for example `videos: false`) to leave it out of the site entirely.
+
+### 3. Add the middleware
+
+Several features answer their own URLs before EmDash renders a page: redirects, `/robots.txt` rules, the RSS feed, llms.txt and Markdown versions, file downloads, sitemaps for videos and news, image sizes, and cache warming. They need the pack's middleware, first in `src/middleware.ts`:
+
+```ts
+// src/middleware.ts
+import { sequence } from "astro:middleware";
+import { coywolfPack } from "@coywolf/emdash/middleware";
+
+export const onRequest = sequence(coywolfPack() /* , your own middleware */);
+```
+
+If the site has no `src/middleware.ts` yet, create it with just these lines.
+
+### 4. Check `wrangler.jsonc`
+
+`DB` and `MEDIA` are all the pack needs to start. Other bindings turn on more features; add them when you turn those features on (each module's section has the details):
+
+```jsonc
+// wrangler.jsonc (coywolf.com)
+{
+  "name": "coywolf",
+  "d1_databases": [{ "binding": "DB", "database_name": "coywolf", "database_id": "<D1 database id>" }],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "coywolf-media" },
+    // Backups: a second bucket for backup files.
+    { "binding": "BACKUPS", "bucket_name": "coywolf-backups" }
+  ],
+  // Page cache: Workers Cache in front of the Worker, and the deployed version so old pages are cleared after a deploy.
+  "cache": { "enabled": true },
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  // Cache warming and checking internal links: the Worker calling itself.
+  "services": [{ "binding": "SELF", "service": "coywolf" }]
+}
+```
+
+API keys and tokens (for AI Enrichment, Videos, Robots.txt's Cloudflare Radar sync, Clean Image URLs setup, Cloudflare usage) are stored encrypted, so the site also needs EmDash's `EMDASH_ENCRYPTION_KEY` secret. EmDash's setup usually creates it; if not:
+
+```bash
+npx wrangler secret put EMDASH_ENCRYPTION_KEY
+```
+
+Keep that key in a password manager: encrypted settings can't be read without it.
+
+### 5. Deploy
+
+Deploy the site the way you usually do (for example `npx wrangler deploy`, or your CI). Nothing changes for visitors yet: every feature starts off.
+
+### 6. Turn features on
+
+1. Sign in to the site's admin (`https://coywolf.com/_emdash/admin`).
+2. Open **Plugins → Coywolf Pack → Features**.
+3. Turn on the modules you want, and any of their parts. Each module that's on adds its page to the **Coywolf Pack** section of the sidebar.
+4. Open each module's page for its settings and step-by-step guides. A part can also be turned on or off there.
+
+A good first set for most sites:
+
+| Turn on | What you get | Then |
+| --- | --- | --- |
+| **Performance** (always on) | Page cache lifetimes, clearing after deploys, cache warming | Turn on **Cache warming** on the Performance page (needs `SELF`) |
+| **Clean Image URLs** | Images from a `media.` subdomain, resized and cached | Run **Set up media host** on its page (see [Setting up a media host](#setting-up-a-media-host)) |
+| **Schema & Social** | Schema.org markup and Open Graph tags | Review the publisher on the Schema page |
+| **Redirects** | Redirects EmDash's own can't handle, plus slug-change and removed-content redirects | Import old redirects on the Redirects page |
+| **Discovery** | IndexNow, an RSS feed, a news sitemap, llms.txt | Turn on the parts you want on the Discovery page |
+| **Backups** | Backups of the database and media, on demand or daily | Add `backups: { name: "coywolf" }` (step 2) and the `BACKUPS` bucket, then turn on the daily backup (see [Backups](#backups)) |
+
+### Using the admin
 
 Each module's settings live on its own page (Backups, Files → Settings, Videos → Settings, Link Manager → Settings, AI Enrichment → Settings, Schema, Code Blocks, Discovery, Robots.txt, Clean Image URLs), grouped into sections. Features that need an API key or binding stay hidden until it's there, with a setup card in their place. The plugin's generic **Settings** page (**Plugins → Coywolf Pack → Settings**) lists only the API keys and tokens, which EmDash stores encrypted (so the site needs `EMDASH_ENCRYPTION_KEY`): the AI Enrichment API key, the File Downloads R2 secret access key, the Videos Stream API token and webhook secret, the Cloudflare Radar API token, and the Clean image URLs Cloudflare API token. Each can also be entered on its module's page, which has a step-by-step guide (closed by default) for getting it; the Settings page shows the same guides (the pack's middleware adds them to that EmDash page; without it, each field keeps a short plain-text version).
 
 Settings pages save from one bar pinned to the bottom of the page: it appears only when there are unsaved changes, with **Discard** (back to what's saved) and **Save** (also Ctrl/⌘+S), and the browser asks before you leave with changes unsaved.
+
+### Updating
+
+Install the newer release's tarball (step 1 with the new tag), then deploy. Updates never turn features on by themselves: new features start off.
+
+### Local development
 
 In development, keep Vite from pre-bundling the plugin. A pre-bundled copy gets its own instance of `emdash`, which breaks plugin error handling. Its UI libraries should stay pre-bundled:
 
@@ -103,14 +193,22 @@ export default defineConfig({
 });
 ```
 
+### Troubleshooting
+
+- **Coywolf Pack isn't in the admin.** Check that `coywolfPlugin()` is in `emdash({ plugins: [...] })` in `astro.config.mjs` and that the site was deployed (or the dev server restarted) after adding it.
+- **A module's page isn't in the sidebar.** Its main switch is off: turn it on under **Plugins → Coywolf Pack → Features**.
+- **Redirects, `/robots.txt` rules, the feed or downloads don't answer.** The middleware isn't running: check step 3, and that `coywolfPack()` comes before your own middleware in `sequence()`.
+- **A feature shows a setup card instead of its settings.** It needs a binding, an API key or `EMDASH_ENCRYPTION_KEY`; the card says which.
+- **Pages don't change after an edit.** EmDash and the pack clear cached pages on edits and deploys; **Plugins → Coywolf Pack → Performance → Clear pages and images** clears everything now. Cloudflare's zone **Purge Everything** doesn't reach the Worker's page cache.
+
 ## Content URLs
 
 Several modules link to entries: llms.txt and the news sitemap, IndexNow, per-entry Markdown, the video sitemap, Schema previews, search results, and removed-content redirects. By default they resolve an entry's URL the way EmDash does, from the collection's URL pattern (`{slug}`, `{id}`, and date tokens such as `{year}`). If your theme routes a collection differently, tell the pack with `urls`:
 
 ```js
-// wellbeing.io serves posts at WordPress-style /{category}/{slug}/
+// coywolf.com serves posts under their category path, as WordPress did (/news/seo/<slug>/)
 coywolfPlugin({
-  urls: { posts: "/{term:category|uncategorized}/{slug}/" },
+  urls: { posts: "/{termpath:category|uncategorized}/{slug}/" },
 });
 ```
 
@@ -137,7 +235,7 @@ coywolfPlugin({
 
 `termParents` (taxonomy → term slug → parent slug) is a fallback: it's used only for terms that have no parent in EmDash, so once the parents are restored (see [Migrating from WordPress](#migrating-from-wordpress), "Category and page parents") it can go.
 
-Collections without an override keep EmDash's resolution. The pack also maps paths back to entries (for example, the Markdown source at `/mind/some-post/index.html.md` resolves only when `mind` is the post's primary category), so a wrong category doesn't match. With `{termpath:…}` the whole path must match: `/news/seo/some-post/` resolves, `/seo/some-post/` doesn't (the theme should redirect it, as WordPress did). With `{pagepath}`, a page under a parent resolves only at its full path.
+Collections without an override keep EmDash's resolution. The pack also maps paths back to entries (for example, the Markdown source at `/news/seo/some-post/index.html.md` resolves only when `news/seo` is the post's primary category path), so a wrong category doesn't match. With `{termpath:…}` the whole path must match: `/news/seo/some-post/` resolves, `/seo/some-post/` doesn't (the theme should redirect it, as WordPress did). With `{pagepath}`, a page under a parent resolves only at its full path.
 
 Trailing slashes follow Astro's `trailingSlash` setting. With the default (`"ignore"`), an override keeps the pattern's own trailing slash. Set `trailingSlash: "always" | "never"` on `coywolfPlugin()` to force one for every entry URL the pack builds. Override URLs get no locale prefix.
 
@@ -149,12 +247,12 @@ Resized copies of media-library images at short, cacheable addresses instead of 
 
 ### Two modes
 
-**Media host (recommended).** A subdomain of the site, such as `media.example.com`, serves the media bucket directly from Cloudflare, which resizes on the fly and picks AVIF or WebP for browsers that accept them. Images never touch the site's Worker.
+**Media host (recommended).** A subdomain of the site, such as `media.coywolf.com`, serves the media bucket directly from Cloudflare, which resizes on the fly and picks AVIF or WebP for browsers that accept them. Images never touch the site's Worker.
 
 ```
-https://media.example.com/<file>               the original file
-https://media.example.com/s/<w>x<h>/<file>     cropped to fill (fit: cover)
-https://media.example.com/s/<w>/<file>         width only, keeps the ratio
+https://media.coywolf.com/<file>               the original file
+https://media.coywolf.com/s/<w>x<h>/<file>     cropped to fill (fit: cover)
+https://media.coywolf.com/s/<w>/<file>         width only, keeps the ratio
 ```
 
 `<file>` is the media item's stored file name (`<id>.<ext>`, as in `/_emdash/api/media/file/<id>.<ext>`). Sizes go up to 2560px.
@@ -173,19 +271,19 @@ reading the original from the media bucket (`MEDIA`), resizing it with the Cloud
 The media host needs three things on Cloudflare, in the zone of the site's domain, and works best with a fourth:
 
 1. **Image Transformations** turned on for the zone (Images → Transformations → Enable for zone; same-zone sources only, so leave "Resize images from any origin" off).
-2. **An R2 custom domain** on the media bucket (the bucket bound as `MEDIA`): R2 → the bucket → Settings → Custom Domains → Add `media.example.com`, minimum TLS 1.2. Cloudflare adds the DNS record and certificate.
+2. **An R2 custom domain** on the media bucket (the bucket bound as `MEDIA`): R2 → the bucket → Settings → Custom Domains → Add `media.coywolf.com`, minimum TLS 1.2. Cloudflare adds the DNS record and certificate.
 3. **Two URL rewrite rules** (Rules → URL Rewrite, phase `http_request_transform`), named exactly so the setup button recognizes them:
 
 | Name | Filter expression | Path rewrite (dynamic) |
 | --- | --- | --- |
-| `media.example.com: /s/<W>x<H>/<file> → cropped resize (Coywolf Pack clean image URLs)` | `(http.host eq "media.example.com" and http.request.uri.path wildcard "/s/*x*/*")` | `wildcard_replace(http.request.uri.path, "/s/*x*/*", "/cdn-cgi/image/width=${1},height=${2},fit=cover,format=auto,quality=85/${3}")` |
-| `media.example.com: /s/<W>/<file> → resize to width (Coywolf Pack clean image URLs)` | `(http.host eq "media.example.com" and http.request.uri.path wildcard "/s/*/*" and not http.request.uri.path wildcard "/s/*x*/*")` | `wildcard_replace(http.request.uri.path, "/s/*/*", "/cdn-cgi/image/width=${1},format=auto,quality=85/${2}")` |
+| `media.coywolf.com: /s/<W>x<H>/<file> → cropped resize (Coywolf Pack clean image URLs)` | `(http.host eq "media.coywolf.com" and http.request.uri.path wildcard "/s/*x*/*")` | `wildcard_replace(http.request.uri.path, "/s/*x*/*", "/cdn-cgi/image/width=${1},height=${2},fit=cover,format=auto,quality=85/${3}")` |
+| `media.coywolf.com: /s/<W>/<file> → resize to width (Coywolf Pack clean image URLs)` | `(http.host eq "media.coywolf.com" and http.request.uri.path wildcard "/s/*/*" and not http.request.uri.path wildcard "/s/*x*/*")` | `wildcard_replace(http.request.uri.path, "/s/*/*", "/cdn-cgi/image/width=${1},format=auto,quality=85/${2}")` |
 
 4. **Smart Tiered Cache** turned on for the zone (Caching → Tiered Cache → Smart Tiered Caching; free on every plan). Each Cloudflare data center has its own cache, so an image nobody has loaded there yet goes back to R2. With Smart Tiered Cache, that data center asks a nearby upper-tier Cloudflare cache first (placed near the R2 bucket), so after one visit anywhere, first loads elsewhere come from Cloudflare's cache. Pages don't need it: Workers Cache is always tiered. The setup only ever turns it on, never off.
 
-Do it by hand with the step-by-step guide on the Clean Image URLs page, or let **Set up media host** on that page do it through the Cloudflare API: enter the media host, your Cloudflare account ID, the media bucket's name and an API token, select **Review setup** to see the plan ("Turn on Image Transformations for example.com, connect media.example.com to the R2 bucket example-media, add 2 URL rewrite rules, turn on Smart Tiered Cache"), then **Apply**. Anything already done is skipped (a token without permission for Smart Tiered Cache still gets the other steps, and that step names the missing permission), the zone's other URL rewrite rules are kept as they are, and only the pack's own two rules (matched by name) are replaced. It finishes with a check. The page checks the media host each time it opens: when it works, Set up media host shows as done with **Run setup again**, and the host field opens with **Change host**.
+Do it by hand with the step-by-step guide on the Clean Image URLs page, or let **Set up media host** on that page do it through the Cloudflare API: enter the media host, your Cloudflare account ID, the media bucket's name and an API token, select **Review setup** to see the plan ("Turn on Image Transformations for coywolf.com, connect media.coywolf.com to the R2 bucket example-media, add 2 URL rewrite rules, turn on Smart Tiered Cache"), then **Apply**. Anything already done is skipped (a token without permission for Smart Tiered Cache still gets the other steps, and that step names the missing permission), the zone's other URL rewrite rules are kept as they are, and only the pack's own two rules (matched by name) are replaced. It finishes with a check. The page checks the media host each time it opens: when it works, Set up media host shows as done with **Run setup again**, and the host field opens with **Change host**.
 
-With a media host set, every page the site serves carries `Link: <https://media.example.com>; rel=preconnect`, so browsers open the connection to the media host (DNS, TCP and TLS) while the page is still arriving, not when they reach the first image.
+With a media host set, every page the site serves carries `Link: <https://media.coywolf.com>; rel=preconnect`, so browsers open the connection to the media host (DNS, TCP and TLS) while the page is still arriving, not when they reach the first image.
 
 The API token needs these permissions (Account Resources: your account; Zone Resources: the site's zone):
 
@@ -201,7 +299,7 @@ The token can be typed just for the setup, saved (encrypted) on the page or the 
 Then turn the media host on, either on the Clean Image URLs page (takes effect within a minute, no deploy) or in `astro.config.mjs`:
 
 ```js
-coywolfPlugin({ images: { cdn: "https://media.example.com" } })
+coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })
 ```
 
 A host saved on the page wins over the option; clear it there to fall back to the option. The host must be an `https://` origin with no path.
@@ -212,7 +310,7 @@ A host saved on the page wins over the option; clear it there to fall back to th
 
 With Schema & Social's Open Graph extras on:
 
-- Pages without their own image use the site's default OG image (Settings → SEO) at a clean 1200×630 URL with its width, height, type and alt. On the media host that's `https://media.example.com/s/1200x630/<file>` (crawlers that don't ask for WebP get the original format, so the type is the original's); on the Worker route PNG stays PNG and anything else becomes JPEG.
+- Pages without their own image use the site's default OG image (Settings → SEO) at a clean 1200×630 URL with its width, height, type and alt. On the media host that's `https://media.coywolf.com/s/1200x630/<file>` (crawlers that don't ask for WebP get the original format, so the type is the original's); on the Worker route PNG stays PNG and anything else becomes JPEG.
 - With a media host, a page's own image (featured image or SEO image from the media library) is output as its original on the media host, with its width, height, type and alt. The JSON-LD `primaryImageOfPage` uses the same URL.
 - These og:image and twitter:image tags replace EmDash's own (never a second og:image), and clean URLs anywhere in og:image resolve back to their media item.
 
@@ -238,15 +336,15 @@ const full = await originalImageUrl(src);
 With a media host, each image is also stored, once, in a few sizes as AVIF and WebP, next to the original in the media bucket, and pages use those files instead of resizing on each visit:
 
 ```
-https://media.example.com/v1/<id>-<w>.avif|.webp          widths 400, 640, 800, 1200, 1600 (keeps the ratio)
-https://media.example.com/v1/<id>-<w>x<h>.avif|.webp      the site's crops (fit: cover, around the image's focal point)
+https://media.coywolf.com/v1/<id>-<w>.avif|.webp          widths 400, 640, 800, 1200, 1600 (keeps the ratio)
+https://media.coywolf.com/v1/<id>-<w>x<h>.avif|.webp      the site's crops (fit: cover, around the image's focal point)
 ```
 
 - **What's made.** Each width smaller than the original (the original is always the largest candidate; images under 400 pixels have none and render as a plain `<img>`), and, when a page first shows it, each crop in `images.crops` that fits inside the original (never upscaled). JPEG, PNG and WebP originals up to 20 MB; GIFs, SVGs, AVIF originals and larger files keep using `/s/`. WebP is made at quality 85, AVIF at 80; Cloudflare doesn't encode AVIF beyond 1200 pixels on a side, so those sizes are stored as WebP under the `.avif` name too (with their real `Content-Type: image/webp`; a `<source type="image/avif">` only picks the candidate list, and every browser that takes AVIF also decodes WebP). Files are stored with `Cache-Control: public, max-age=31536000, immutable`.
 - **Crops** are the exact sizes the theme shows (list thumbnails, avatars at 1x and 2x, the Testimonial block's 64×64 and 128×128 photo). They're made **on first use**: when `croppedImage()` finds an image's widths stored but a listed crop missing, it makes just that crop after the response (one at a time per isolate, at most 6 images queued; a failure waits an hour before it's tried again), merges it into the record in SQL (crops added meanwhile by another isolate are kept), and marks the page as a stopgap so its next render uses it. So avatars and testimonial crops are made only for the images that are shown that way, and list crops only for featured images. A size not in `images.crops` always uses `/s/`.
 
   ```js
-  coywolfPlugin({ images: { cdn: "https://media.example.com", crops: [[400, 210], [600, 315], [900, 473], [50, 50], [100, 100], [64, 64], [128, 128]] } })
+  coywolfPlugin({ images: { cdn: "https://media.coywolf.com", crops: [[400, 210], [600, 315], [900, 473], [50, 50], [100, 100], [64, 64], [128, 128]] } })
   ```
 
   Adding crops later is fine: they're made as pages show them. Removed crops' files stay until the image is deleted.
@@ -354,13 +452,13 @@ Each backup's menu has **Download (.sql.gz)**: the gzipped SQL dump of the whole
 1. Create a backup bucket and bind it as `BACKUPS` in `wrangler.jsonc`:
 
    ```bash
-   npx wrangler r2 bucket create mysite-backups
+   npx wrangler r2 bucket create coywolf-backups
    ```
 
    ```jsonc
    "r2_buckets": [
-     { "binding": "MEDIA", "bucket_name": "mysite-media" },
-     { "binding": "BACKUPS", "bucket_name": "mysite-backups" }
+     { "binding": "MEDIA", "bucket_name": "coywolf-media" },
+     { "binding": "BACKUPS", "bucket_name": "coywolf-backups" }
    ]
    ```
 
@@ -382,7 +480,7 @@ Restores use the Cloudflare API, because a Worker can't create databases or time
 
    ```js
    coywolfPlugin({
-     backups: { name: "mysite", restore: { accountId: "<account id>", databaseId: "<D1 database id>" } },
+     backups: { name: "coywolf", restore: { accountId: "<account id>", databaseId: "<D1 database id>" } },
    });
    ```
 
@@ -408,9 +506,9 @@ External jobs (a nightly GitHub Action, for example) can write to the same layou
 Restore a downloaded backup (or one copied from the bucket) into a **new, empty** D1 database and switch the `DB` binding to it. Never import over the live database:
 
 ```bash
-npx wrangler d1 create mysite-restore
-gunzip -c mysite.sql.gz > restore.sql
-npx wrangler d1 execute mysite-restore --remote --file restore.sql
+npx wrangler d1 create coywolf-restore
+gunzip -c coywolf.sql.gz > restore.sql
+npx wrangler d1 execute coywolf-restore --remote --file restore.sql
 ```
 
 Keep `EMDASH_ENCRYPTION_KEY` in a password manager. It isn't in backups, and encrypted plugin settings can't be read without it.
@@ -443,17 +541,17 @@ Left to EmDash, which does them and the pack doesn't: **automatic redirects when
 
 Features: exact paths (with or without a trailing slash) or regular expressions with `$1`–`$9` substitution, 301/302/307/308/410, enable/disable, notes, hit counts, a URL tester, bulk import (paste or choose a file: JSON, or tab/comma-separated `source, target, type, is_regex` rows; a Coywolf SEO export from WordPress works as is), and **Export** as CSV or JSON. Rules are stored in the site's D1 database (`coywolf_redirects`), so backups include them.
 
-A capture group can't send visitors to another site: with a site-path destination such as `/$1`, leading slashes from the capture are collapsed (`/blog//evil.com` → `/evil.com` on your site, never `//evil.com`), and a destination that names its host (`https://example.com$1`) only redirects when the result keeps that host. A destination whose host is itself a capture (`https://$1/`) is followed as written.
+A capture group can't send visitors to another site: with a site-path destination such as `/$1`, leading slashes from the capture are collapsed (`/blog//evil.com` → `/evil.com` on your site, never `//evil.com`), and a destination that names its host (`https://coywolf.com$1`) only redirects when the result keeps that host. A destination whose host is itself a capture (`https://$1/`) is followed as written.
 
 ### Setup
 
-Add the middleware to `src/middleware.ts`:
+Add the middleware to `src/middleware.ts` (step 3 of [Getting started](#getting-started); `coywolfRedirects` is its earlier name and still works):
 
 ```ts
 import { sequence } from "astro:middleware";
-import { coywolfRedirects } from "@coywolf/emdash/middleware";
+import { coywolfPack } from "@coywolf/emdash/middleware";
 
-export const onRequest = sequence(coywolfRedirects(), /* your middleware */);
+export const onRequest = sequence(coywolfPack(), /* your middleware */);
 ```
 
 Each request looks up its exact rule in D1: one indexed read of the request path (trailing slash removed), so an exact rule edit applies at once and the database reads at most one row however many rules there are. Pattern rules (usually few) are kept in memory per Worker isolate, in source order, and read again after a redirect edit (at once in the isolate that saved it, in others within five minutes; see [Database reads](#database-reads)) or after ten minutes, through their own index (`coywolf_redirects_patterns`, added to existing sites the next time the Redirects page opens). Exact rules win over patterns. When the feature switches aren't cached, the lookup goes in the same D1 batch as them. Serving never writes: the `coywolf_redirects` table is created by the first admin write (saving or importing a rule), and until then there are simply no rules. Hits are counted after the response is sent.
@@ -661,13 +759,13 @@ Everything else about the form is still the Forms plugin's own: spam protection 
 
 ### Setup
 
-1. Create the bucket and leave public access off: `npx wrangler r2 bucket create mysite-form-uploads`.
+1. Create the bucket and leave public access off: `npx wrangler r2 bucket create coywolf-form-uploads`.
 2. Bind it in `wrangler.jsonc`:
 
    ```jsonc
    "r2_buckets": [
-     { "binding": "MEDIA", "bucket_name": "mysite-media" },
-     { "binding": "FORM_UPLOADS", "bucket_name": "mysite-form-uploads" }
+     { "binding": "MEDIA", "bucket_name": "coywolf-media" },
+     { "binding": "FORM_UPLOADS", "bucket_name": "coywolf-form-uploads" }
    ]
    ```
 
@@ -761,7 +859,7 @@ const page = { ...createPublicPageContext({ Astro, kind: "content", content: { c
 - Page types come from the page context your theme passes to `EmDashHead`: an entry page is matched to its collection through `content`, and `pageType: "article"` is what makes a page an article by default. Pages without `content` use the home page or "other pages" types.
 - Derived breadcrumbs name parent segments from the URL (`/health-tips/` → "Health tips"); pass `breadcrumbs` in the page context for exact names.
 - A content page costs a few extra database reads per render (the entry override, its bylines, and saved author properties); image lookups and settings are cached.
-- **Default bylines: link your byline to your user account under Bylines** (Content → Bylines → your byline → user; that also turns off **Guest**). EmDash then credits every post or page you create without picking a byline to your byline: the editor shows it as **Automatic**, and EmDash's reads (`entry.data.bylines`, `getEntriesBylines`) return it like a picked one, so the article's author schema names you with no change here. EmDash stores no credit for it, so `where: { byline }` (and `getEntriesByByline`) don't list those entries: an author page that should has to add the user's own (`where: { author_id }`) entries credited to the byline, as the Coywolf themes' `src/lib/byline-entries.ts` does. To link from the command line: `node scripts/byline-link-user.mjs --url=https://example.com` (a dry run that finds the site's admin and the byline with their name and lists the entries that will start showing it; `--byline=<slug>` and `--user=<id>` pick others, `--apply` saves, `--purge-cache` then clears the page cache). It uses EmDash's admin API with your `npx emdash login` (or `EMDASH_TOKEN`) and sends the byline's bio, avatar and website back with it, since EmDash's byline save clears them when they're left out.
+- **Default bylines: link your byline to your user account under Bylines** (Content → Bylines → your byline → user; that also turns off **Guest**). EmDash then credits every post or page you create without picking a byline to your byline: the editor shows it as **Automatic**, and EmDash's reads (`entry.data.bylines`, `getEntriesBylines`) return it like a picked one, so the article's author schema names you with no change here. EmDash stores no credit for it, so `where: { byline }` (and `getEntriesByByline`) don't list those entries: an author page that should has to add the user's own (`where: { author_id }`) entries credited to the byline, as the Coywolf themes' `src/lib/byline-entries.ts` does. To link from the command line: `node scripts/byline-link-user.mjs --url=https://coywolf.com` (a dry run that finds the site's admin and the byline with their name and lists the entries that will start showing it; `--byline=<slug>` and `--user=<id>` pick others, `--apply` saves, `--purge-cache` then clears the page cache). It uses EmDash's admin API with your `npx emdash login` (or `EMDASH_TOKEN`) and sends the byline's bio, avatar and website back with it, since EmDash's byline save clears them when they're left out.
 
 ### Main subject
 
@@ -773,8 +871,8 @@ An override's **Main subject** makes the page's WebPage node point at what the p
 For an author's profile page, set the page type to **Profile page**, the article type to **None**, and the main subject to the person:
 
 ```json
-{ "@type": "ProfilePage", "@id": "https://example.com/jon-henshaw/#webpage", "mainEntity": { "@id": "https://example.com/jon-henshaw/#person" }, "dateCreated": "…", "dateModified": "…" },
-{ "@type": "Person", "@id": "https://example.com/jon-henshaw/#person", "name": "Jon Henshaw", "birthDate": "1973-09-09", "…": "…" }
+{ "@type": "ProfilePage", "@id": "https://coywolf.com/jon-henshaw/#webpage", "mainEntity": { "@id": "https://coywolf.com/jon-henshaw/#person" }, "dateCreated": "…", "dateModified": "…" },
+{ "@type": "Person", "@id": "https://coywolf.com/jon-henshaw/#person", "name": "Jon Henshaw", "birthDate": "1973-09-09", "…": "…" }
 ```
 
 A ProfilePage also gets `dateCreated` (the entry's publish date) next to `dateModified`. When the main subject is the publisher, or is also credited as the article's author, it's still one node: the copies are merged. `birthPlace`, `homeLocation` and `workLocation` are output as a `Place` and `nationality` as a `Country` (named by the value).
@@ -840,11 +938,11 @@ To measure on a live site:
 
 ```sh
 # A miss, then a hit (same query, any case or spacing).
-curl -s -o /dev/null -D - "https://example.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf%20$RANDOM" | grep -iE "server-timing|x-coywolf-cache|cache-control"
-curl -s -o /dev/null -D - "https://example.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf" | grep -iE "server-timing|x-coywolf-cache"
+curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf%20$RANDOM" | grep -iE "server-timing|x-coywolf-cache|cache-control"
+curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf" | grep -iE "server-timing|x-coywolf-cache"
 # The title index and the warm-up.
-curl -s --compressed -o /dev/null -w "%{size_download} bytes, %{time_total}s\n" "https://example.com/_emdash/api/plugins/coywolf-pack/search/index?v=x"
-curl -s -o /dev/null -D - "https://example.com/_emdash/api/plugins/coywolf-pack/search/live?warm=1" | grep -i server-timing
+curl -s --compressed -o /dev/null -w "%{size_download} bytes, %{time_total}s\n" "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/index?v=x"
+curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?warm=1" | grep -i server-timing
 ```
 
 ### Search box
@@ -959,8 +1057,8 @@ Help search engines, feed readers and AI agents find your content. Ported from C
 | `discovery.llms` | off | `/llms.txt`, Markdown versions of entries, and the `<link rel="alternate" type="text/markdown">` head tag |
 
 - **IndexNow**: when an entry is published, updated (in collections without draft revisions), unpublished, or deleted, its public URL goes to `api.indexnow.org` (or `www.bing.com`), which shares it with Bing, Yandex, Seznam, Naver, and the other participating engines. Changes made within 3 seconds of each other go out as one request, after the response is sent. A changed slug submits the old URL too. Entries set to noindex aren't submitted. The key is generated the first time it's needed (or when you open the Discovery page with IndexNow on) and served at `/<key>.txt`; **New key** replaces it. The page shows the last 25 submissions and has **Submit home page** for checking the setup.
-- **News sitemap**: entries published in the last 48 hours (the window Google News uses), newest first, at most 1,000, with publication name and language (defaults: site title and locale). Choose the collections (default: `posts`). Also served at `/coywolf-news-sitemap.xml`, Coywolf SEO's URL, so a sitemap submitted from WordPress keeps working. Submit it in Google Search Console; to list it in robots.txt, add `Sitemap: https://example.com/news-sitemap.xml` to the custom robots.txt under **Settings → SEO**. The module doesn't change robots.txt.
-- **RSS feed**: RSS 2.0 at `/feed/` (WordPress's feed URL) with the newest entries of the chosen collections (default `posts`, 20 entries, up to 100), each with its title, link, author (the first byline), publish date, category (its first term in the taxonomy its URL uses, or `category`), and summary (the `excerpt` field or SEO description). The channel has the site title, tagline, locale, and the site logo (or favicon) when it's a PNG, JPEG or GIF. Every page gets `<link rel="alternate" type="application/rss+xml" href="https://example.com/feed/">` in the head, so feed readers, apps and bots find it. **Category feeds** (on by default): when a collection's URL override is a term then the slug (`urls: { posts: "/{termpath:category|uncategorized}/{slug}/" }`, or `{term:…}` or `{category}`, with an optional fixed prefix), each term's archive URL + `feed/` is that term's feed, including its child terms' entries (`/news/feed/`, `/news/seo/feed/`), titled "<term> Archives - <site>" as WordPress titles them. A path that isn't a feed (no such term) goes on to the site. Entries set to noindex aren't listed. Feeds are built when requested and kept in the edge cache (Workers Cache, with Astro route caching on) for up to an hour, tagged with their collections and taxonomy: EmDash clears those tags on every publish, live edit, removal and term change, and saving the Discovery settings clears all feeds, so a change shows up on the next request. Readers may keep their own copy for up to 15 minutes (`Cache-Control: public, max-age=900`). Paths that aren't feeds are remembered in each isolate's memory for a minute. `/feed` without the slash is left to the site (which redirects it to `/feed/`).
+- **News sitemap**: entries published in the last 48 hours (the window Google News uses), newest first, at most 1,000, with publication name and language (defaults: site title and locale). Choose the collections (default: `posts`). Also served at `/coywolf-news-sitemap.xml`, Coywolf SEO's URL, so a sitemap submitted from WordPress keeps working. Submit it in Google Search Console; to list it in robots.txt, add `Sitemap: https://coywolf.com/news-sitemap.xml` to the custom robots.txt under **Settings → SEO**. The module doesn't change robots.txt.
+- **RSS feed**: RSS 2.0 at `/feed/` (WordPress's feed URL) with the newest entries of the chosen collections (default `posts`, 20 entries, up to 100), each with its title, link, author (the first byline), publish date, category (its first term in the taxonomy its URL uses, or `category`), and summary (the `excerpt` field or SEO description). The channel has the site title, tagline, locale, and the site logo (or favicon) when it's a PNG, JPEG or GIF. Every page gets `<link rel="alternate" type="application/rss+xml" href="https://coywolf.com/feed/">` in the head, so feed readers, apps and bots find it. **Category feeds** (on by default): when a collection's URL override is a term then the slug (`urls: { posts: "/{termpath:category|uncategorized}/{slug}/" }`, or `{term:…}` or `{category}`, with an optional fixed prefix), each term's archive URL + `feed/` is that term's feed, including its child terms' entries (`/news/feed/`, `/news/seo/feed/`), titled "<term> Archives - <site>" as WordPress titles them. A path that isn't a feed (no such term) goes on to the site. Entries set to noindex aren't listed. Feeds are built when requested and kept in the edge cache (Workers Cache, with Astro route caching on) for up to an hour, tagged with their collections and taxonomy: EmDash clears those tags on every publish, live edit, removal and term change, and saving the Discovery settings clears all feeds, so a change shows up on the next request. Readers may keep their own copy for up to 15 minutes (`Cache-Control: public, max-age=900`). Paths that aren't feeds are remembered in each isolate's memory for a minute. `/feed` without the slash is left to the site (which redirects it to `/feed/`).
 - **llms.txt** ([llmstxt.org](https://llmstxt.org/)): the site name, a summary (default: the site tagline), an optional introduction, then one list per collection (newest first, 100 per collection) and an **Optional** list for the rest, up to 500 entries (configurable up to 5,000). Each link points at the entry's Markdown version, or at the page itself when Markdown is off. Excerpts (`excerpt` field or SEO description) become link notes. A static `public/llms.txt` takes precedence, because Cloudflare serves static assets before the Worker runs.
 - **Markdown versions**: each entry at its URL + `index.html.md` (`/blog/post/` → `/blog/post/index.html.md`, Coywolf SEO's convention). The Portable Text body becomes Markdown (headings, paragraphs, lists, links, images with captions, code, block quotes, tables, and horizontal rules; other blocks are skipped) under YAML frontmatter with the title, URL, dates, sources, and an optional license. There's no `Accept: text/markdown` negotiation on the entry's own URL: Cloudflare's cache key ignores `Accept`, so one such request could put Markdown into the cached HTML page. Responses carry `X-Markdown-Tokens`, an estimate at about 4 characters per token. Entry pages get `<link rel="alternate" type="text/markdown">` in the head.
 
@@ -983,7 +1081,7 @@ An inventory of every link in your content, ported from Coywolf SEO's Link Manag
 
 - **Inventory**: link marks in Portable Text (including nested blocks, columns and tables), linked images, buttons, embeds, iframes, and URL fields. Each link shows its anchor text, internal or external, and the entries that use it, with links to edit them. Entries are re-indexed when they're saved, deleted or restored; **Scan content** (and each scheduled run, when **Scheduled link checking** is on) indexes everything else.
 - **Checking** (sub-feature, off by default): nothing runs in the background until **Scheduled link checking** is on. Then a scheduled run starts **weekly** (or **daily** or **monthly**: **How often** in **Link Manager → Settings**), scans the content, then checks the links that are due, continuing hourly until it's done. Each check is HEAD first, then GET when HEAD is refused, 10-second timeout, up to 5 redirects recorded. Statuses are **OK**, **Redirect** (with where it ends up), **Broken** (4xx/5xx), **Blocked** (403, 429, LinkedIn's 999, or a Cloudflare/AWS/DataDome bot challenge: the link is probably fine but can't be verified from a server), and **Error** (DNS, TLS, timeout, too many redirects). Within runs, broken links and errors are due again after a day, the rest after a week. **Check now** and **Recheck** run checks on demand.
-- **Bulk actions**: **Replace** a URL across every entry that uses it (link text and other formatting are kept), **Unlink** (the text stays; linked images and buttons lose their link; embeds are left alone), **Ignore** a URL or domain, and **Recheck**. Ignore rules can also be domains, exact URLs, wildcards (`https://example.com/visit/*`) or regular expressions. Ignored links aren't checked or counted.
+- **Bulk actions**: **Replace** a URL across every entry that uses it (link text and other formatting are kept), **Unlink** (the text stays; linked images and buttons lose their link; embeds are left alone), **Ignore** a URL or domain, and **Recheck**. Ignore rules can also be domains, exact URLs, wildcards (`https://coywolf.com/visit/*`) or regular expressions. Ignored links aren't checked or counted.
 - **Export CSV**: every link matching the current filters (all pages), with its status, HTTP code, final URL, the entries that use it, and their anchor text. Filter by **Broken** first for a list to hand to whoever fixes links. Cells that look like spreadsheet formulas are prefixed with an apostrophe.
 - **Dashboard widget** with the number of broken links.
 
@@ -1005,7 +1103,7 @@ No bindings or secrets, but EmDash needs to know the site URL (**Settings → Ge
 A Worker can't fetch its own custom domain over HTTP (Cloudflare answers 522), so internal links are checked through a service binding to the site's own Worker. Add it to `wrangler.jsonc` (use your Worker's `name`):
 
 ```jsonc
-"services": [{ "binding": "SELF", "service": "mysite" }]
+"services": [{ "binding": "SELF", "service": "coywolf" }]
 ```
 
 Without the binding, internal links are listed but not checked (they're never reported as broken).
@@ -1020,7 +1118,7 @@ EmDash 1.2.0 added its own **Video** block (`video`): a media-library video in t
 - **Light embed** (the default; **Videos → Player → Load the player only when it's needed**): pages show the video's poster as a responsive image (Stream thumbnails at 480, 800 and 1200 px) with a play button, and load Stream's player (about 350 KB of JavaScript) when someone presses play, already playing. Autoplaying and GIF-style videos show the poster until the visitor's first scroll, touch, pointer move or key press, then load their player once on screen (loading it on idle still ran Stream's ~1.5 s of player script inside PageSpeed's measuring window). Without it, a video near the top of a page loads with the page and, on a slow phone connection, becomes its largest paint several seconds late (coywolf.com's mobile Performance score was 70 on such a page, 100 on the home page). Without JavaScript the player loads as before. Turn the setting off to load the player with the page.
 - **Pause and reduced motion** (WCAG 2.2.2): autoplaying videos without controls (including the GIF style) show a pause/play button in the corner, so the motion can always be stopped; pausing before the player has loaded keeps the poster (also when that press is the visitor's first interaction), and a pause pressed while the player is still starting holds once it's ready. Visitors whose system asks for reduced motion get the poster and a play button instead of autoplay.
 - **Posters from your media host**: with **Clean Image URLs** on and a media host set, each video's poster is copied from Stream into the media bucket the first time it's shown (`cwposter-<uid>-<hash>.jpg`, one per video and poster time), then served as resized WebP/AVIF from the media host like any other image. Stream makes thumbnails on request: even cached ones took 120–450 ms to start arriving (over a second for a new one), always as JPEG, from a host the browser had to connect to first. Rendering never waits for the copy: the copied posters are listed in one plugin setting (`videosMirroredPosters`, read with the feature switches, so it adds no query), and a poster that isn't listed yet is shown from Stream for that page view while it's copied and listed in the background. A page shown that way is cached for 5 minutes (plus 1 minute served while refreshing) instead of the Page cache lifetime, so the next render uses the media host; when cache warming rendered it, it isn't cached at all and the warmer visits it again once the poster is copied (see **Cache warming**). This needs the pack middleware: since Astro streams pages and a video renders after the page's headers are ready, the middleware reads each cacheable HTML page in full before returning it (it does for every cacheable HTML page, so it can also keep a page rendered after a failed read out of the cache; see [Page cache](#page-cache)). Pass `Astro.locals` as the last argument of `hostedPosterImage()` in your own components so the page is marked exactly; without it the middleware still notices, but may also shorten another page rendered at the same moment. Without a media host, or if a copy fails, Stream's thumbnails are used and the copy is retried later. Themes can use `hostedPosterImage()` from `@coywolf/emdash/astro` for their own video markup. A newly copied poster is resized at each size right away (AVIF and WebP), so the first visitor doesn't wait for it. Posters load lazily; when a video is the first thing on the page, set `Astro.locals.coywolfPriorityKey` to its block's `_key` and its poster loads at once with high priority.
-- **Views & likes** (**Videos → Settings**, like Video Manager's): site-wide defaults for showing the name, description, views, like button, like count and upload date (all on), the date style (**Oct 6, 2026** or **7 months ago**; a relative date is refreshed in the browser, since pages are cached). Blocks set to **Site default** follow them. Blocks saved before these settings existed (with the old on/off toggles) and blocks imported from WordPress with an earlier pack keep their own choices; **Make all video blocks follow the site defaults** ignores those older choices without editing any content (turn it off to bring them back). Blocks set to Show or Hide always win. The WordPress importer now sets these only when the WordPress block did (or when the WordPress site had the option off), as Video Manager inherited them, and always as Show or Hide. Older blocks store those choices as true/false, which the block editor can't show (it says **Site default** while the page follows the stored choice). `node scripts/video-show-migrate.mjs --url=https://example.com` lists them; add `--apply` to rewrite them as Show/Hide (or, with **Make all video blocks follow the site defaults** on, as Site default), so pages render the same. It uses EmDash's content API with your `npx emdash login` (or `EMDASH_TOKEN`), backs up each entry to a local folder first, republishes published entries (keeping their published date), saves drafts as drafts, and skips published entries with pending draft changes. Republishing sets each entry's updated date to now (EmDash's API can't save without it), which a theme may show as **Updated** and use for `article:modified_time`, sitemap `lastmod` and feed dates; `node scripts/video-show-migrate.mjs --url=https://example.com --restore-updated-at --backup-dir=<the backup folder>` lists the original dates and writes the guarded SQL that puts them back, and with `--apply --d1=<database>` (run from the folder with the site's wrangler config) runs it through `wrangler d1 execute --remote` and clears the page cache. An entry edited since the migration keeps its new date.
+- **Views & likes** (**Videos → Settings**, like Video Manager's): site-wide defaults for showing the name, description, views, like button, like count and upload date (all on), the date style (**Oct 6, 2026** or **7 months ago**; a relative date is refreshed in the browser, since pages are cached). Blocks set to **Site default** follow them. Blocks saved before these settings existed (with the old on/off toggles) and blocks imported from WordPress with an earlier pack keep their own choices; **Make all video blocks follow the site defaults** ignores those older choices without editing any content (turn it off to bring them back). Blocks set to Show or Hide always win. The WordPress importer now sets these only when the WordPress block did (or when the WordPress site had the option off), as Video Manager inherited them, and always as Show or Hide. Older blocks store those choices as true/false, which the block editor can't show (it says **Site default** while the page follows the stored choice). `node scripts/video-show-migrate.mjs --url=https://coywolf.com` lists them; add `--apply` to rewrite them as Show/Hide (or, with **Make all video blocks follow the site defaults** on, as Site default), so pages render the same. It uses EmDash's content API with your `npx emdash login` (or `EMDASH_TOKEN`), backs up each entry to a local folder first, republishes published entries (keeping their published date), saves drafts as drafts, and skips published entries with pending draft changes. Republishing sets each entry's updated date to now (EmDash's API can't save without it), which a theme may show as **Updated** and use for `article:modified_time`, sitemap `lastmod` and feed dates; `node scripts/video-show-migrate.mjs --url=https://coywolf.com --restore-updated-at --backup-dir=<the backup folder>` lists the original dates and writes the guarded SQL that puts them back, and with `--apply --d1=<database>` (run from the folder with the site's wrangler config) runs it through `wrangler d1 execute --remote` and clears the page cache. An entry edited since the migration keeps its new date.
 - **Appearance** (**Videos → Settings**, with a live preview of unsaved changes): color scheme (auto, always light, always dark, or off to use the theme's text color), alignment of the name and of the like/views/date row, corner radius, an optional border, player background, name and description color, size and weights, the like icon (heart, thumbs up or star, Video Manager's icons), like colors (unclicked, clicked and their backgrounds; hovering previews the other state, and the clicked state holds until the pointer leaves), and the views/date color and size. The like icon pops when clicked (not with reduced motion). Each Coywolf Video block can override the alignments, corner radius and border (on/off, width, color) for that video; left empty, it uses these settings (WordPress imports keep Video Manager's per-block values where they were set). Only settings changed from their defaults are printed (as `--cw-video-*` custom properties on the figure), so a site that changes nothing looks as before, and theme CSS that targets `.cw-video__*` still wins. The figure's CSS is printed once per page.
 - **Admin** (**Plugins → Coywolf Pack → Videos**): the library with thumbnails, tags, length, upload date, plays, likes and the number of entries each video is used in; search (with `#tag`) and a filter (with plays, with likes, used, not used); Stream storage used; a notice for embedded videos no longer in Stream; edit name, description, tags, creator, poster, allowed origins and MP4 downloads; delete (from Stream and the site, with a warning listing the entries that use it); captions; and uploads (tagged with the default tags from **Settings → Uploads** unless you enter others) that go straight from the browser to Stream (tus for files over 200 MB), so they never pass through the Worker.
 - **Embed index**: saving, publishing, unpublishing, restoring or deleting an entry records which videos it embeds (any Portable Text field, at any depth). **Rebuild embed index** scans existing content. WordPress `cloudflare-stream` marker blocks (as imported to wellbeing.io) are indexed too, for usage counts and the sitemap.
@@ -1042,7 +1140,7 @@ EmDash 1.2.0 added its own **Video** block (`video`): a media-library video in t
 4. For the sitemap and caption files, add `coywolfPack()` to the site middleware (see Redirects), and list the sitemap in `robots.txt`:
 
    ```text
-   Sitemap: https://example.com/coywolf-video-sitemap.xml
+   Sitemap: https://coywolf.com/coywolf-video-sitemap.xml
    ```
 
 Option: `videos: { maxUploadDurationSeconds: 3600 }` (the longest upload Stream accepts; Stream reserves that much quota while an upload is in progress). `videos: false` leaves the module out.
@@ -1402,7 +1500,7 @@ Old-slug rules point at the URLs WordPress used. If EmDash serves different URLs
    ```bash
    wp post list --post_type=post,page --post_status=publish --field=url > old-urls.txt
    while read -r url; do
-     new="${url/https:\/\/old.example.com/https://new.example.com}"
+     new="${url/https:\/\/old.coywolf.com/https://coywolf.com}"
      code=$(curl -s -o /dev/null -w '%{http_code}' "$new")
      [ "$code" = 200 ] || echo "$code $new"
    done < old-urls.txt
