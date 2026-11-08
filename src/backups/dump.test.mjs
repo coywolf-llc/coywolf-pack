@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 
-const { dumpDatabase, splitText, MAX_STATEMENT_BYTES } = await import("./dump.ts");
+const { dumpDatabase, splitText, MAX_STATEMENT_BYTES, nextPageSize, PAGE_TARGET_BYTES } = await import("./dump.ts");
 
 /** The slice of the D1 binding that dumpDatabase uses, over node:sqlite. */
 function d1(db) {
@@ -209,4 +209,51 @@ test("a failed upload stops the dump instead of hanging", async () => {
 	const stopped = produced;
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	assert.equal(produced, stopped, "the dump stops reading rows");
+});
+
+test("reads are sized by bytes: big rows mean fewer rows per read, never more than 500", () => {
+	assert.equal(nextPageSize(0, 0), 500);
+	assert.equal(nextPageSize(500 * 200, 500), 500, "small rows: the full page");
+	assert.equal(nextPageSize(10 * 1024 * 1024, 10), Math.floor(PAGE_TARGET_BYTES / (1024 * 1024)), "1 MB rows: about 8 a read");
+	assert.equal(nextPageSize(50 * 1024 * 1024, 1), 1, "never below one row");
+});
+
+test("a read D1 refuses as too large is asked again for fewer rows; offset paging skips nothing", async () => {
+	// 600 rows of ~40 KB each in a table paged by OFFSET (a column named rowid shadows the real one),
+	// with a fake D1 that refuses any result over 5 MB, as D1 does over 50 MB.
+	const db = new DatabaseSync(":memory:");
+	db.exec("CREATE TABLE odd (rowid TEXT, body TEXT)");
+	const body = "x".repeat(40_000);
+	for (let i = 0; i < 600; i++) db.prepare("INSERT INTO odd VALUES (?, ?)").run(`r${i}`, `${i}:${body}`);
+	const base = d1(db);
+	let refused = 0;
+	const limited = {
+		prepare(sql) {
+			const stmt = base.prepare(sql);
+			let params = [];
+			return {
+				bind(...args) {
+					params = args;
+					stmt.bind(...args);
+					return this;
+				},
+				async all() {
+					const out = await stmt.all();
+					const size = JSON.stringify(out.results).length;
+					if (/FROM "odd"/.test(sql) && size > 5_000_000) {
+						refused++;
+						throw new Error("D1_ERROR: result too large");
+					}
+					return out;
+				},
+			};
+		},
+	};
+	const { sql, rows } = await dumpDatabase(limited);
+	assert.ok(refused >= 1, "the first 500-row read was refused");
+	assert.equal(rows, 600);
+	const restored = new DatabaseSync(":memory:");
+	for (const s of sql.trim().split("\n")) restored.exec(s);
+	assert.equal(restored.prepare("SELECT count(*) AS n FROM odd").get().n, 600, "every row once");
+	assert.equal(restored.prepare("SELECT count(DISTINCT rowid) AS n FROM odd").get().n, 600, "no row twice");
 });

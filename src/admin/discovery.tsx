@@ -31,6 +31,8 @@ interface PingLogEntry {
 }
 
 interface Status {
+	/** EmDash's staging mode: the site is hidden from search engines, so IndexNow sends nothing. */
+	staging?: boolean;
 	features: { indexnow: boolean; news: boolean; llms: boolean; feed: boolean };
 	settings: Settings;
 	collections: { slug: string; label: string; hidden: boolean; hasSeo: boolean }[];
@@ -215,6 +217,12 @@ export function DiscoveryPage() {
 				<Banner
 					variant="default"
 					description="Discovery's parts are all off. Turn on the ones you want with the switch next to each title. You can change their settings first."
+				/>
+			)}
+			{status.staging && (
+				<Banner
+					variant="default"
+					description="This site is in staging (Settings → General → Site Status), hidden from search engines, so IndexNow sends nothing until it goes live. The other parts keep working."
 				/>
 			)}
 			<div aria-live="polite">
