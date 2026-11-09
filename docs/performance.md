@@ -68,5 +68,6 @@ It needs a read-only, account-owned API token (Cloudflare dashboard → Manage A
 - Account → Account Analytics → Read (D1 and Workers usage)
 - Workers → Metadata Read-Only, for All Workers (finds the site's Worker and database, and reads Workers Logs for the warming estimate; on a personal token: Account → Workers Scripts → Read and Account → Workers Observability → Edit)
 - Account → Account Settings → Read (the plan, from the account's entitlements)
+- Optional: Zone → Zone → Read, for all zones or the site's zone, so the Discovery page can show whether [Crawler Hints](discovery.md#crawler-hints) is on
 
 Set it as the `USAGE_API_TOKEN` Worker secret (one token works for every site in the account), or save it as **Cloudflare usage** on the plugin's Settings page. The account comes from `CF_ACCOUNT_ID`, the Clean Image URLs account ID, or the token itself when it's limited to one account. A part the token can't read is left out with a note naming the permission; the rest still shows.

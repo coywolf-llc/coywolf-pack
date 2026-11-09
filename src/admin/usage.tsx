@@ -106,6 +106,7 @@ function Setup(props: { reason: string }) {
 				<li>Add Account → Account Analytics → Read.</li>
 				<li>Add Workers → Metadata Read-Only, for All Workers (finds this site's Worker and database, and reads Workers Logs for the cache-warming estimate).</li>
 				<li>Add Account → Account Settings → Read (detects your plan).</li>
+				<li>Optional: add Zone → Zone → Read (all zones, or this site's), so the Discovery page can show whether Crawler Hints is on.</li>
 				<li>Create the token and copy it (it's shown once).</li>
 				<li>
 					Set it as the <code>USAGE_API_TOKEN</code> Worker secret (one token works for every site in the account), or paste it in Cloudflare usage on the plugin's Settings page.

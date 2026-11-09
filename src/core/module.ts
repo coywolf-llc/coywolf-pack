@@ -70,6 +70,12 @@ export interface PackModule {
 	/** Feature gating a hook, when it isn't the main feature. Keyed by hook name. */
 	hookFeature?: Partial<Record<keyof PluginHooks, string>>;
 	tasks?: TaskDef[];
+	/**
+	 * Tasks an earlier version scheduled and this one no longer has, by name. EmDash keeps firing a
+	 * scheduled task until it's cancelled, so when one fires its handler runs (whatever the switches say)
+	 * to clean up after the removed feature, and cancels the task (ctx.cron.cancel).
+	 */
+	retiredTasks?: Record<string, (ctx: PluginContext) => Promise<void>>;
 	adminPages?: AdminPageDef[];
 	widgets?: WidgetDef[];
 	/**

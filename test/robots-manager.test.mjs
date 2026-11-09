@@ -513,7 +513,7 @@ test("match examples come from the real matcher", () => {
 
 /* ---------------- automatic discovery allowances ---------------- */
 
-test("automaticFrom reads the llms switch; no sitemap or IndexNow lines are added", () => {
+test("automaticFrom reads the llms switch; no sitemap lines are added", () => {
 	assert.deepEqual(rules.automaticFrom({ "discovery.llms": true, "discovery.newsSitemap": true, "videos.sitemap": true }), { llms: true, aiTraining: false });
 	const txt = gen(cfg([], { automatic: rules.automaticFrom({ "discovery.newsSitemap": true, "videos.sitemap": true }) }));
 	assert.ok(!txt.includes("news-sitemap") && !txt.includes("video-sitemap"));

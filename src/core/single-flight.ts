@@ -98,20 +98,11 @@ export const DEADLINES = {
 	/** A targeted page cache purge made by a route (the Stream webhook). */
 	purgeMs: 10_000,
 	/**
-	 * One search engine call from Discovery: an IndexNow ping, or a Bing
-	 * Webmaster API request (a quota check or one batch of URLs). Each answers
-	 * in well under a second when healthy; 10 s leaves room for a slow one and
-	 * keeps a stalled engine from holding the background task, which
-	 * Cloudflare cuts off 30 s after the response.
+	 * One Cloudflare API read from Discovery's Crawler Hints card (the zone
+	 * lookup, then the zone's flags). Each answers in well under a second;
+	 * 8 s keeps a stalled call from holding the admin page.
 	 */
-	searchPingMs: 10_000,
-	/**
-	 * All the Bing Webmaster API calls of one submission (a quota check, then
-	 * batches of up to 500 URLs). A batch starts only while a full
-	 * searchPingMs is left, so a submission ends within this, plus the 3 s
-	 * batching window, well inside waitUntil's 30 s.
-	 */
-	bingSubmitBudgetMs: 20_000,
+	cloudflareReadMs: 8_000,
 };
 
 /** Work that didn't finish within its deadline. */
