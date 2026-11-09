@@ -20,7 +20,7 @@ Every module starts off. Turn on only the ones you want under **Plugins → Coyw
 | [Clean Image URLs](docs/images.md) | Images from a `media.` subdomain on R2, resized to the sizes the theme uses, cached for a year |
 | [Backups](docs/backups.md) | Backups of the D1 database and R2 media, rewind with undo, restore to a new database |
 | [Redirects](docs/redirects.md) | External, file-path and regex redirects, bulk import and export, and automatic redirects for slug changes and removed content |
-| [Schema & Social](docs/schema.md) | One Schema.org graph per page (publisher, articles, authors), breadcrumbs, robots directives, Open Graph |
+| [Schema & Social](docs/schema.md) | One Schema.org graph per page (publisher, articles, authors), breadcrumbs, robots directives, Open Graph, custom JSON-LD |
 | [Discovery](docs/discovery.md) | IndexNow, an RSS feed, a Google News sitemap, and llms.txt with Markdown versions of entries |
 | [Robots.txt Rules](docs/robots.md) | Plain-English robots.txt rules with a guided editor, a verified crawler directory, history and a URL tester |
 | [Search](docs/search.md) | Fast as-you-type results on EmDash's full-text search, a search box, and rate limiting |

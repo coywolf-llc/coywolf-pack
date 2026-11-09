@@ -1,0 +1,66 @@
+ {
+		"@context":"https://schema.org",
+		"@graph":[
+		{
+		    "@type": "WebSite",
+		    "@id": "https://recollect.fyi#Organization",
+		    "name": "Recollect",
+		    "alternateName":["Recollect Notes","Recollect Notes App","Recollect.fyi"],
+		    "description": "A minimalist full-featured notes app that supports sharing and is a joy to use.",
+		    "url": "https://recollect.fyi"
+		},{
+			"@type": "WebApplication",
+			"name": "Recollect",
+			"description": "A minimalist full-featured notes app that supports sharing and is a joy to use.",
+			"alternateName":["Recollect Notes","Recollect Notes App","Recollect.fyi"],
+			"operatingSystem": ["macOS","iOS","iPadOS","Windows","Android","Linux"],
+			"applicationCategory": ["ReferenceApplication","UtilitiesApplication","BusinessApplication","BrowserApplication"],
+			"browserRequirements":"Requires JavaScript and HTML5",
+			"featureList":["Works on any device","Optimized for speed","Share notes with anyone","Automatic saving & syncing","Import and export notes","Organize with tags","Write with markdown","Use light or dark mode","Convert emails to notes","All notes encrypted"],
+			"keywords":["notes","productivity","collaboration","pwa","web app"],
+			"screenshot": [
+				{
+
+				}
+			],
+			"thumbnail": [
+				{
+
+				}
+			],
+			"creator": {
+				"@type": "Organization",
+		        "@id": "https://coywolf.llc#Organization",
+				"name": "Coywolf LLC",
+				"alternateName":"Coywolf",
+				"url": "https://coywolf.llc"
+			},
+			"aggregateRating": {
+				"@type": "AggregateRating",
+				"ratingValue": 0,
+				"ratingCount": 0
+			},
+			"offers": {
+				"@type": "AggregateOffer",
+				"priceCurrency": "USD",
+			    "highPrice": "4",
+			    "lowPrice": "0",
+			    "offerCount": "2",
+			    "priceSpecification": [
+			    	{
+			    		"@type":"UnitPriceSpecification",
+			    		"price":"0.00",
+			    		"pricecurrency":"USD",
+			    		"name":"Free",
+			    		"description":"Full-featured account that is limited to 50 notes."
+			    	},{
+			    		"@type":"UnitPriceSpecification",
+			    		"price":"4.00",
+			    		"pricecurrency":"USD",
+			    		"name":"Premium",
+			    		"description":"Full-featured account with unlimited notes"
+			    	}
+				]
+			}
+		}]
+	} 

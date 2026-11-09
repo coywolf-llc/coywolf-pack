@@ -23,6 +23,7 @@ export const ADMIN_CSS = `.cw-fill-tint{fill:var(--color-kumo-tint)}
 .cw-w-60{width:15rem}
 .cw-overflow-auto{overflow:auto}
 .cw-ps-6{padding-inline-start:1.5rem}
+.cw-dialog-scroll{max-height:calc(100dvh - 12rem);overflow-y:auto;overscroll-behavior:contain;padding-inline-end:.25rem}
 .cw-md-flex,.cw-md-table-cell,.cw-lg-block{display:none}
 @media (min-width:40rem){
 .cw-sm-cols-8-fill{grid-template-columns:8rem minmax(0,1fr)}

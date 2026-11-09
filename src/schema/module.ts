@@ -4,9 +4,10 @@
  *
  * Simple values are settings (settingsSchema); structured data lives in
  * plugin storage: schemaDocs ("site" = Site Details, "types" = per-collection
- * type defaults), schemaEntries (per-entry type overrides and main
- * subject, id "<collection>:<entry id>") and schemaAuthors (Person property
- * rows per byline id; a row may be marked profile-only).
+ * type defaults, "custom" = custom markup path rules), schemaEntries
+ * (per-entry type overrides, main subject and custom markup, id
+ * "<collection>:<entry id>") and schemaAuthors (Person property rows per
+ * byline id; a row may be marked profile-only).
  */
 import { getManyBatched } from "../core/storage.js";
 import { FORMATS, cdnOriginalUrl, imageCdn, parseCdnUrl, parseImagePath } from "../images/lib.js";
@@ -16,7 +17,7 @@ import type { PageMetadataContribution, PluginContext, PublicPageContext } from 
 import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
-import { absoluteUrl, entryUrl } from "../core/content-url.js";
+import { absoluteUrl, entryUrl, trailingPolicy } from "../core/content-url.js";
 import {
 	type FeatureMap,
 	cachedCtxFeatures,
@@ -64,8 +65,29 @@ import {
 	resolveTypes,
 	robotsContent,
 	attachVideos,
+	publisherId,
 	themeVideoNode,
 } from "./graph.js";
+import {
+	type CompiledRule,
+	type CustomDoc,
+	type CustomMarkup,
+	type LintWarning,
+	type PathRule,
+	CUSTOM_DOC_ID,
+	MAX_MARKUP_BYTES,
+	MAX_PATH_RULES,
+	RULE_ID,
+	checkMarkup,
+	compileEntryRule,
+	compilePathRules,
+	customOutput,
+	normalizeRulePath,
+	pageRule,
+	pathKey,
+	pathRuleConflicts,
+} from "./custom.js";
+import { lintNodes } from "./custom-lint.js";
 
 export interface SchemaOptions {
 	/** D1 binding of the site database (for media dimension lookups). Default "DB". */
@@ -79,6 +101,7 @@ export const SCHEMA_FEATURES = {
 	robots: "schema.robots",
 	openGraph: "schema.openGraph",
 	authors: "schema.authors",
+	custom: "schema.custom",
 } as const;
 
 export const schemaSettingsSchema = {
@@ -156,6 +179,8 @@ interface EntryOverride extends TypeChoice {
 	title?: string;
 	/** What the entry is about: a byline (Person) or the site publisher. */
 	mainSubject?: MainSubject;
+	/** The entry's custom markup (its own page:metadata contribution; wins over a path rule for the same page). */
+	custom?: CustomMarkup;
 	updatedAt?: string;
 }
 
@@ -175,6 +200,8 @@ interface Config {
 	person: { byline: BylineFacts | null; rows: PropertyRow[] | null } | null;
 	/** Every byline's saved Person rows, by byline id; null when there are too many to keep (read per page then). */
 	authors: Map<string, { rows: PropertyRow[] }> | null;
+	/** Custom markup path rules: as stored, and the enabled ones parsed, by path. */
+	custom: { doc: CustomDoc; byPath: Map<string, CompiledRule> };
 }
 
 /**
@@ -242,11 +269,15 @@ async function loadConfig(ctx: PluginContext, database?: string, fresh = false):
 	const failures = readFailures();
 	const [settings, stored, authors] = await Promise.all([
 		readSettings(ctx, database, fresh),
-		docs(ctx).getMany(["site", "types"]) as Promise<Map<string, unknown>>,
+		// One read for all three docs (the custom markup path rules come with the rest).
+		docs(ctx).getMany(["site", "types", CUSTOM_DOC_ID]) as Promise<Map<string, unknown>>,
 		authorsStore(ctx)?.query ? orNull(readAllAuthors(ctx)) : null,
 	]);
 	const site = { ...DEFAULT_SITE, ...((stored.get("site") as SiteDetails | undefined) ?? {}) };
 	const types = (stored.get("types") as TypeMap | undefined) ?? {};
+	const customDoc = (stored.get(CUSTOM_DOC_ID) as CustomDoc | undefined) ?? { rules: [] };
+	const customRules: CustomDoc = { ...customDoc, rules: Array.isArray(customDoc.rules) ? customDoc.rules : [] };
+	const custom = { doc: customRules, byPath: compilePathRules(customRules) };
 	let person: Config["person"] = null;
 	if (site.publisherType === "person" && site.personBylineId) {
 		const [byline, rows] = await Promise.all([
@@ -255,7 +286,7 @@ async function loadConfig(ctx: PluginContext, database?: string, fresh = false):
 		]);
 		person = { byline, rows: rows?.rows ?? null };
 	}
-	const config = { settings, site, types, person, authors };
+	const config = { settings, site, types, person, authors, custom };
 	// A save while this read ran (the epoch moved) leaves it uncached, and so does a failed read (a missing byline
 	// would make the publisher a bare Organization on every page for the cache's lifetime).
 	if (epoch === settingsEpoch() && readFailures() === failures) configCache = { at: Date.now(), epoch, config };
@@ -572,6 +603,49 @@ function mergeEntities(graph: { "@graph": Node[] }, about: Record<string, unknow
 }
 
 /**
+ * The page's custom markup, as its own jsonld contribution (see
+ * src/schema/custom.ts): the entry's rule (from its override, read with the
+ * graph's entry docs, or on its own when the graph is off), else the path
+ * rule for the page's path (from the cached config). With the graph on,
+ * references to the pack's nodes resolve to their @ids and the WebPage can
+ * point at the rule's first node (mainEntity). Errors are logged, never fatal.
+ */
+async function customContributions(
+	ctx: PluginContext,
+	page: PublicPageContext,
+	options: SchemaOptions,
+	config: Config,
+	pack: { graph: Node[] | null; publisherId: string | null; override: EntryOverride | null | undefined; cleanImages: boolean },
+): Promise<PageMetadataContribution[]> {
+	try {
+		let entryRule: CompiledRule | null = null;
+		if (page.content) {
+			const override =
+				pack.override !== undefined
+					? pack.override
+					: ((
+							await readEntryDocs(ctx, { collection: page.content.collection, id: page.content.id, collections: ["schemaEntries"], database: options.database })
+						).docs.get("schemaEntries") as EntryOverride | null);
+			entryRule = compileEntryRule(page.content.collection, page.content.id, override?.custom);
+		}
+		const rule = pageRule(page, config.custom.byPath, entryRule);
+		if (!rule) return [];
+		const url = pageUrl(page);
+		const output = customOutput(rule, { pageUrl: url, graph: pack.graph, publisherId: pack.publisherId });
+		if (!output) return [];
+		if (output.mainEntityId && pack.graph) {
+			const webpage = pack.graph.find((n) => n["@id"] === `${url}#webpage`);
+			if (webpage) webpage.mainEntity = { "@id": output.mainEntityId };
+		}
+		if (pack.cleanImages && imageCdn()) rewriteMediaUrls(output.contribution.graph);
+		return [output.contribution];
+	} catch (error) {
+		ctx.log.warn("schema: could not add custom markup", { error: String(error) });
+		return [];
+	}
+}
+
+/**
  * Every contribution this module makes for a page (also used by the admin
  * preview). Reads that don't depend on each other run at once: config and
  * site facts, then the page image, the entry's docs (override, embed index,
@@ -596,6 +670,10 @@ export async function schemaContributions(
 	const cleanImages = isOn(on, "images");
 	const [config, site] = await Promise.all([loadConfig(ctx, options.database), siteFacts(ctx, page), cleanImages ? refreshMediaHost() : undefined]);
 	const imageRead = graphOn || ogOn ? primaryImage(options, page, site, cleanImages) : Promise.resolve(null);
+	// With the graph on: its nodes, the publisher's @id and the entry's override, for the custom markup.
+	let packGraph: Node[] | null = null;
+	let packPublisherId: string | null = null;
+	let entryOverride: EntryOverride | null | undefined;
 
 	if (graphOn) {
 		const personPath = config.person?.byline ? authorPath(config.settings.schemaAuthorUrlPattern, config.person.byline.slug) : null;
@@ -649,6 +727,7 @@ export async function schemaContributions(
 			// AI Enrichment's Wikidata-grounded entities, when that feature is on.
 			page.content && isOn(on, "ai.entities") ? entitiesStep(ctx, page.content, doc("aiEntries")) : noStep,
 		]);
+		entryOverride = override;
 		enrichImageObjects(publisher, (url) => (url === logoUrl ? logoInfo : null));
 		const { articleType } = resolveTypes(page, config.types, override);
 		const subjectByline = mainSubjectByline(override?.mainSubject);
@@ -677,11 +756,17 @@ export async function schemaContributions(
 		// Same id as EmDash's own JSON-LD, so this graph replaces it (first contribution wins).
 		// With a media host, every media-library file in the graph (author images, logo, …) points at it.
 		if (cleanImages && imageCdn()) rewriteMediaUrls(graph);
+		packGraph = (graph as { "@graph": Node[] })["@graph"];
+		packPublisherId = String(publisher["@id"]);
 		out.push({ kind: "jsonld", id: "primary", graph });
 	} else if (isOn(on, SCHEMA_FEATURES.breadcrumbs)) {
 		const doc = breadcrumbDocument(page, site.origin, config.settings.schemaBreadcrumbHome || "Home");
 		if (doc) out.push({ kind: "jsonld", id: "coywolf-breadcrumbs", graph: doc });
 	}
+
+	// Custom markup: its own contribution, after the graph (whose WebPage it may set mainEntity on).
+	if (isOn(on, SCHEMA_FEATURES.custom))
+		out.push(...(await customContributions(ctx, page, options, config, { graph: packGraph, publisherId: packPublisherId, override: entryOverride, cleanImages })));
 
 	if (isOn(on, SCHEMA_FEATURES.robots)) {
 		const s = config.settings;
@@ -780,6 +865,41 @@ function cleanChoice(choice: TypeChoice): TypeChoice {
 	return out;
 }
 
+/** Custom markup as sent: JSON-LD text, or the JSON itself (stored as text). The byte limit is checked when it's parsed. */
+const markupInput = z.union([z.string().max(MAX_MARKUP_BYTES * 2), z.record(z.string(), z.unknown()), z.array(z.unknown()).max(500)]);
+const customInput = z.object({ markup: markupInput, enabled: z.boolean().optional(), mainEntity: z.boolean().optional() });
+
+/**
+ * Custom markup checked the way the editor checks it (src/schema/custom.ts),
+ * with relative @ids resolved against `base` (the page's URL): refused with
+ * its errors, else its text and lint warnings.
+ */
+async function checkedMarkup(ctx: PluginContext, options: SchemaOptions, markup: unknown, base: string): Promise<{ text: string; warnings: LintWarning[] }> {
+	const text = typeof markup === "string" ? markup : JSON.stringify(markup, null, "\t");
+	const origin = originOf(ctx.site.url);
+	const [config, features] = await Promise.all([loadConfig(ctx, options.database), ctxFeatures(ctx)]);
+	const check = checkMarkup(text, {
+		origin,
+		base,
+		reserved: [publisherId(config.site, origin, config.person?.rows)],
+		graph: isOn(features, SCHEMA_FEATURES.graph),
+	});
+	if (check.errors.length) throw PluginRouteError.badRequest(check.errors.join(" "));
+	return { text, warnings: check.warnings };
+}
+
+async function savedPathRules(ctx: PluginContext): Promise<PathRule[]> {
+	const doc = (await docs(ctx).get(CUSTOM_DOC_ID)) as CustomDoc | null;
+	return Array.isArray(doc?.rules) ? doc.rules : [];
+}
+
+function newRuleId(rules: PathRule[]): string {
+	for (;;) {
+		const id = `r-${crypto.randomUUID().slice(0, 8)}`;
+		if (!rules.some((r) => r.id === id)) return id;
+	}
+}
+
 function entryTitle(data: Record<string, unknown>, titleField: string | null | undefined): string {
 	const value = (titleField && data[titleField]) || data.title || data.name || data.headline;
 	return typeof value === "string" ? value : "";
@@ -795,11 +915,13 @@ export function schemaModule(options: SchemaOptions) {
 			handler: async (ctx: PluginContext) => {
 				await requireFeature(ctx, MAIN);
 				invalidateSchemaConfig();
-				const [config, collections, features] = await Promise.all([
+				const [config, collections, features, trailingSlash] = await Promise.all([
 					loadConfig(ctx, options.database, true),
 					ctx.schema?.listCollections().catch(() => []) ?? [],
 					ctxFeatures(ctx),
+					trailingPolicy(ctx).catch(() => "ignore" as const),
 				]);
+				const origin = originOf(ctx.site.url);
 				return {
 					settings: config.settings,
 					site: config.site,
@@ -817,6 +939,8 @@ export function schemaModule(options: SchemaOptions) {
 						inputs: PROPERTY_INPUTS,
 					},
 					keys: { home: HOME_KEY, custom: CUSTOM_KEY },
+					// Custom markup: the path rules, and what the editor needs to check markup the way a save does.
+					custom: { rules: config.custom.doc.rules, origin, trailingSlash, publisherId: publisherId(config.site, origin, config.person?.rows) },
 				};
 			},
 		},
@@ -1001,12 +1125,16 @@ export function schemaModule(options: SchemaOptions) {
 							entryId: z.string().min(1).max(100),
 							title: z.string().max(500).optional(),
 							mainSubject: z.string().max(120).nullish(),
+							// Left out: keep the entry's custom markup as it is; null: remove it.
+							custom: customInput.nullish(),
 						})
 						.merge(typeChoiceInput),
 					ctx.input,
 				);
 				const choice = cleanChoice(input);
 				const id = `${input.collection}:${input.entryId}`;
+				if (input.custom) await requireFeature(ctx, SCHEMA_FEATURES.custom);
+				const kept = input.custom === undefined ? ((await entries(ctx).get(id)) as EntryOverride | null)?.custom : undefined;
 				let mainSubject: MainSubject | undefined;
 				if (input.mainSubject === "publisher") mainSubject = "publisher";
 				else if (input.mainSubject) {
@@ -1015,23 +1143,34 @@ export function schemaModule(options: SchemaOptions) {
 					if (ctx.bylines && !(await ctx.bylines.get(bylineId).catch(() => null))) throw PluginRouteError.notFound("That byline doesn't exist.");
 					mainSubject = `byline:${bylineId}`;
 				}
-				if (!choice.pageType && !choice.articleType && !mainSubject) {
+				if (!choice.pageType && !choice.articleType && !mainSubject && !input.custom && !kept) {
 					await entries(ctx).delete(id);
 					return { deleted: true };
 				}
 				if (!ctx.content) throw PluginRouteError.badRequest("Content access is unavailable.");
 				const entry = await ctx.content.get(input.collection, input.entryId).catch(() => null);
 				if (!entry) throw PluginRouteError.notFound("That entry doesn't exist.");
+				let custom = kept;
+				let warnings: LintWarning[] = [];
+				if (input.custom) {
+					// Relative @ids resolve against the entry's page, as they will on it.
+					const origin = originOf(ctx.site.url);
+					const path = await entryUrl(ctx, input.collection, entry).catch(() => null);
+					const checked = await checkedMarkup(ctx, options, input.custom.markup, path ? absoluteUrl(path, origin) : `${origin}/`);
+					custom = { markup: checked.text, enabled: input.custom.enabled ?? true, mainEntity: input.custom.mainEntity ?? false };
+					warnings = checked.warnings;
+				}
 				const item: EntryOverride = {
 					collection: input.collection,
 					entryId: input.entryId,
 					title: input.title,
 					...choice,
 					...(mainSubject ? { mainSubject } : {}),
+					...(custom ? { custom } : {}),
 					updatedAt: new Date().toISOString(),
 				};
 				await entries(ctx).put(id, item);
-				return { item };
+				return { item, warnings };
 			},
 		}),
 
@@ -1043,6 +1182,74 @@ export function schemaModule(options: SchemaOptions) {
 				await requireFeature(ctx, MAIN);
 				const { collection, entryId } = parseInput(z.object({ collection: z.string().max(100), entryId: z.string().max(100) }), ctx.input);
 				return { deleted: await entries(ctx).delete(`${collection}:${entryId}`) };
+			},
+		}),
+
+		/**
+		 * Save a custom markup path rule (new when its id isn't saved yet; an id
+		 * is made up when there's none). Refused when the markup has errors or
+		 * another enabled rule is on the same path; lint warnings come back.
+		 */
+		"schema/custom/save": definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await requireFeature(ctx, SCHEMA_FEATURES.custom);
+				const { rule: input } = parseInput(
+					z.object({
+						rule: z.object({
+							id: z.string().max(40).optional(),
+							label: z.string().max(120).optional(),
+							path: z.string().max(600),
+							enabled: z.boolean().optional(),
+							mainEntity: z.boolean().optional(),
+							markup: markupInput,
+						}),
+					}),
+					ctx.input,
+				);
+				if (input.id !== undefined && !RULE_ID.test(input.id)) throw PluginRouteError.badRequest("A rule id is lowercase letters, digits and dashes (up to 40).");
+				const normalized = normalizeRulePath(input.path, await trailingPolicy(ctx).catch(() => "ignore" as const));
+				if ("error" in normalized) throw PluginRouteError.badRequest(normalized.error);
+				const checked = await checkedMarkup(ctx, options, input.markup, `${originOf(ctx.site.url)}${normalized.path}`);
+				const rules = await savedPathRules(ctx);
+				const id = input.id ?? newRuleId(rules);
+				const now = new Date().toISOString();
+				const rule: PathRule = {
+					id,
+					label: input.label?.trim() || normalized.path,
+					path: normalized.path,
+					enabled: input.enabled ?? true,
+					mainEntity: input.mainEntity ?? false,
+					markup: checked.text,
+					updatedAt: now,
+				};
+				const at = rules.findIndex((r) => r.id === id);
+				const next = at === -1 ? [...rules, rule] : rules.map((r, i) => (i === at ? rule : r));
+				if (next.length > MAX_PATH_RULES) throw PluginRouteError.badRequest(`A site can have at most ${MAX_PATH_RULES} path rules.`);
+				const conflicts = pathRuleConflicts(next);
+				if (conflicts.length) throw PluginRouteError.badRequest(conflicts[0]);
+				await docs(ctx).put(CUSTOM_DOC_ID, { rules: next, updatedAt: now } satisfies CustomDoc);
+				invalidateSchemaConfig();
+				return { rule, rules: next, warnings: checked.warnings };
+			},
+		}),
+
+		"schema/custom/delete": definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await requireFeature(ctx, MAIN);
+				const { id } = parseInput(z.object({ id: z.string().min(1).max(40) }), ctx.input);
+				const rules = await savedPathRules(ctx);
+				const next = rules.filter((r) => r.id !== id);
+				if (next.length !== rules.length) {
+					await docs(ctx).put(CUSTOM_DOC_ID, { rules: next, updatedAt: new Date().toISOString() } satisfies CustomDoc);
+					invalidateSchemaConfig();
+				}
+				return { deleted: next.length !== rules.length, rules: next };
 			},
 		}),
 
@@ -1072,17 +1279,29 @@ export function schemaModule(options: SchemaOptions) {
 			handler: async (ctx) => {
 				await requireFeature(ctx, MAIN);
 				const input = parseInput(
-					z.object({ target: z.enum(["home", "entry"]), collection: z.string().max(100).optional(), entryId: z.string().max(100).optional() }),
+					z.object({
+						target: z.enum(["home", "path", "entry"]),
+						path: z.string().max(600).optional(),
+						collection: z.string().max(100).optional(),
+						entryId: z.string().max(100).optional(),
+					}),
 					ctx.input,
 				);
 				invalidateSchemaConfig();
 				// Fresh settings and docs for the preview (and the cache it then renders from).
-				await loadConfig(ctx, options.database, true);
+				const config = await loadConfig(ctx, options.database, true);
 				const siteUrl = originOf(ctx.site.url);
 				const name = await siteName(ctx);
 				let page: PublicPageContext;
 				if (input.target === "home") {
 					page = { url: `${siteUrl}/`, path: "/", locale: null, kind: "custom", pageType: "website", title: name, pageTitle: name, description: null, canonical: `${siteUrl}/`, image: null, siteName: name };
+				} else if (input.target === "path") {
+					// A page from the site's code (EmDash's kind: "custom"), as a path rule sees it. The live page passes its own title.
+					const normalized = normalizeRulePath(input.path, await trailingPolicy(ctx).catch(() => "ignore" as const));
+					if ("error" in normalized) throw PluginRouteError.badRequest(normalized.error);
+					const url = `${siteUrl}${normalized.path}`;
+					const home = pathKey(normalized.path) === "/";
+					page = { url, path: normalized.path, locale: null, kind: "custom", pageType: "website", title: home ? name : null, pageTitle: home ? name : null, description: null, canonical: url, image: null, siteName: name };
 				} else {
 					if (!input.collection || !input.entryId || !ctx.content) throw PluginRouteError.badRequest("Choose an entry.");
 					const [item, info] = await Promise.all([ctx.content.get(input.collection, input.entryId), ctx.schema?.getCollection(input.collection)]);
@@ -1109,8 +1328,16 @@ export function schemaModule(options: SchemaOptions) {
 						siteName: name,
 					};
 				}
-				const contributions = await schemaContributions(ctx, page, options);
-				return { page: { url: pageUrl(page), pageType: page.pageType }, contributions };
+				const features = await ctxFeatures(ctx);
+				const contributions = await schemaContributions(ctx, page, options, features);
+				// The custom markup rule that applies to the page, with its lint warnings.
+				let custom: { id: string; label: string; warnings: LintWarning[] } | null = null;
+				if (isOn(features, SCHEMA_FEATURES.custom)) {
+					const override = page.content ? ((await entries(ctx).get(`${page.content.collection}:${page.content.id}`)) as EntryOverride | null) : null;
+					const rule = pageRule(page, config.custom.byPath, page.content ? compileEntryRule(page.content.collection, page.content.id, override?.custom) : null);
+					if (rule) custom = { id: rule.contributionId, label: rule.label, warnings: lintNodes(rule.nodes, { graph: isOn(features, SCHEMA_FEATURES.graph) }) };
+				}
+				return { page: { url: pageUrl(page), pageType: page.pageType }, contributions, custom };
 			},
 		}),
 	};
