@@ -7,18 +7,34 @@ const { purgesAfter, watchInvalidation } = await import("./lib.ts");
 const api = "/_emdash/api/plugins/coywolf-pack/";
 
 test("admin writes to pack routes purge the page cache", () => {
-	for (const route of ["schema/site/save", "redirects/import", "features/save", "robots/save", "videos/webhook", "videos/update", "backups/run"]) {
+	for (const route of ["schema/site/save", "redirects/import", "features/save", "robots/save", "videos/update", "videos/webhook/subscribe", "backups/run"]) {
 		assert.equal(purgesAfter("POST", api + route), true, route);
 	}
 });
 
-test("public pack routes, reads, and other plugins don't", () => {
-	for (const route of ["search/live", "search/index", "discovery/public/llms", "videos/like", "videos/play", "videos/caption", "videos/embed", "videos/sitemap"]) {
+test("public pack routes, the Stream webhook, reads, and other plugins don't", () => {
+	// The webhook clears only the pages that show its video (src/videos/module.ts): not everything, no settings generation, no re-warm.
+	for (const route of ["search/live", "search/index", "discovery/public/llms", "videos/like", "videos/play", "videos/caption", "videos/embed", "videos/sitemap", "videos/webhook"]) {
 		assert.equal(purgesAfter("POST", api + route), false, route);
 	}
 	assert.equal(purgesAfter("GET", api + "schema/config"), false);
 	assert.equal(purgesAfter("POST", "/_emdash/api/plugins/emdash-forms/submit"), false);
 	assert.equal(purgesAfter("POST", "/_emdash/api/content/posts"), false, "EmDash purges its own content by tag");
+});
+
+test("no public pack route (anyone can call it: a webhook, a visitor) counts as an admin save that purges everything", async () => {
+	const { readFileSync, readdirSync, statSync } = await import("node:fs");
+	const { join } = await import("node:path");
+	const files = (dir) => readdirSync(dir).flatMap((f) => (statSync(join(dir, f)).isDirectory() ? files(join(dir, f)) : f.endsWith(".ts") && !f.endsWith(".test.ts") ? [join(dir, f)] : []));
+	const routes = [];
+	for (const file of files("src")) {
+		const src = readFileSync(file, "utf8");
+		// "name": definePluginRoute({ public: true, …  or  "name": { public: true, …
+		for (const m of src.matchAll(/"([a-z][\w/-]*)":\s*(?:definePluginRoute\()?\{\s*public:\s*true/g)) routes.push(m[1]);
+	}
+	assert.ok(routes.length >= 14, `found ${routes.length} public routes`);
+	assert.ok(routes.includes("videos/webhook"));
+	for (const route of routes) assert.equal(purgesAfter("POST", api + route), false, route);
 });
 
 const { applyPageLifetime } = await import("./lib.ts");

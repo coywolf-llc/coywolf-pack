@@ -677,3 +677,34 @@ export class RecentKeys {
 		return this.map.size;
 	}
 }
+
+// ── Webhook: pages to clear ──────────────────────────────────────
+
+/** Most pages one webhook call clears by path; a video shown on more is left to expire on its own. */
+export const MAX_WEBHOOK_PAGES = 30;
+
+/**
+ * The cached pages a Stream webhook call for `uid` has to clear: the
+ * published entries that embed the video (from the embed index), as path
+ * prefixes, which cover each page's trailing-slash form and query strings.
+ * Never everything: null when no page shows the video, when one of them is
+ * the home page (a "/" prefix would clear every page), or when more than
+ * MAX_WEBHOOK_PAGES do. Pages aren't cache-tagged per video, so paths are
+ * how to reach just these.
+ */
+export function videoPagesScope(entries: Array<{ uids: string[]; status: string; url: string | null }>, uid: string, max = MAX_WEBHOOK_PAGES): { pathPrefixes: string[] } | null {
+	const paths = new Set<string>();
+	for (const entry of entries) {
+		if (entry.status !== "published" || !entry.url || !entry.uids.includes(uid)) continue;
+		let path: string;
+		try {
+			path = new URL(entry.url).pathname.replace(/\/+$/, "") || "/";
+		} catch {
+			continue;
+		}
+		if (path === "/") return null;
+		paths.add(path);
+	}
+	if (!paths.size || paths.size > max) return null;
+	return { pathPrefixes: [...paths] };
+}

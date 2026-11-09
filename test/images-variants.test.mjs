@@ -519,6 +519,61 @@ test("renders: stopgaps only when sizes are coming; missing crops are made after
 	globalThis.__testEnv = undefined;
 });
 
+test("crops: a job that never settles (its request was canceled) doesn't stop the crops queued after it", { timeout: 3_000 }, async () => {
+	const pack = await import("../src/images/pack.ts");
+	const { setImageCdn } = await import("../src/images/lib.ts");
+	const { invalidateFeatures } = await import("../src/core/features.ts");
+	const { DEADLINES } = await import("../src/core/single-flight.ts");
+	const saved = DEADLINES.cropJobMs;
+	DEADLINES.cropJobMs = 40;
+	const db = d1();
+	db.sqlite.prepare("INSERT INTO options (name, value) VALUES (?, ?)").run("plugin:coywolf-pack:settings:features", JSON.stringify({ images: true }));
+	const b = bucket();
+	const img = images();
+	globalThis.__testEnv = { DB: db, MEDIA: b, IMAGES: img };
+	setImageCdn("https://media.example.com");
+	invalidateFeatures();
+	V.setImageCrops([[400, 210]]);
+	pack.resetCropJobs();
+	const thumbs = [[400, 210, "400w"]];
+	for (const id of ["01HANG", "01NEXT"]) {
+		addMedia(db, id, "jpg", "image/jpeg", 1000, 600);
+		b.objects.set(`${id}.jpg`, { body: new Uint8Array([1]).buffer, options: {} });
+		await store.writeVariantRecord(db, id, { v: V.VARIANTS_VERSION, w: [400, 640, 800], c: [], at: "" });
+	}
+	// The first image's original never arrives, and its job's deadline timer goes with its canceled request.
+	const get = b.get.bind(b);
+	b.get = (key) => (key === "01HANG.jpg" ? new Promise(() => {}) : get(key));
+	const realSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = (fn, ms, ...args) => (ms === DEADLINES.cropJobMs ? 0 : realSetTimeout(fn, ms, ...args));
+	await pack.croppedImage("https://media.example.com/01HANG.jpg", thumbs, { locals: {} });
+	globalThis.setTimeout = realSetTimeout;
+	await new Promise((resolve) => setTimeout(resolve, 50)); // Past that job's end.
+	await pack.croppedImage("https://media.example.com/01NEXT.jpg", thumbs, { locals: {} });
+	await pack.cropsIdle();
+	assert.ok(b.objects.has(`v${V.VARIANTS_VERSION}/01NEXT-400x210.webp`), "the next image's crop was made");
+	assert.ok(!b.objects.has(`v${V.VARIANTS_VERSION}/01HANG-400x210.webp`));
+
+	// A job that's merely slow ends at its deadline (and is retried later); the one behind it runs.
+	pack.resetCropJobs();
+	const errors = [];
+	const error = console.error;
+	console.error = (...args) => errors.push(args.map(String).join(" "));
+	try {
+		await pack.croppedImage("https://media.example.com/01HANG.jpg", [[400, 210, "1x"]], { locals: {} });
+		await pack.cropsIdle();
+	} finally {
+		console.error = error;
+	}
+	assert.match(errors[0], /couldn't make crops 400x210 of 01HANG.*took longer than 40 ms/);
+
+	DEADLINES.cropJobMs = saved;
+	V.setImageCrops([]);
+	pack.resetCropJobs();
+	setImageCdn(null);
+	globalThis.__testEnv = undefined;
+});
+
 test("a run stops where it is once sizes for existing images are turned off (keepGoing)", async () => {
 	const db = d1();
 	const b = bucket();

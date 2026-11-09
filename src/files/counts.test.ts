@@ -83,6 +83,23 @@ test("a failed write doesn't stop later counts", async () => {
 	assert.deepEqual(total(db.writes), { b: 1 });
 });
 
+test("a flush whose timer was dropped (its request was canceled) is replaced, and its counts still land", { timeout: 3_000 }, async () => {
+	const counter = createDownloadCounter("p", "c", 5, 30);
+	const db = stubDb();
+	const waits: Promise<unknown>[] = [];
+	const waitUntil = (p: Promise<unknown>) => waits.push(p);
+	// workerd drops a canceled request's timers: the first flush's wait never ends.
+	const realSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((fn: () => void, ms?: number) => (ms === 5 ? 0 : realSetTimeout(fn, ms))) as typeof setTimeout;
+	counter.count(db, "a", () => undefined);
+	globalThis.setTimeout = realSetTimeout;
+	await new Promise((r) => setTimeout(r, 40)); // Past staleMs.
+	counter.count(db, "a", waitUntil);
+	await Promise.all(waits);
+	assert.deepEqual(total(db.writes), { a: 2 }, "the stranded flush's count went out with the new one");
+	assert.ok(counter.idle);
+});
+
 test("Range parsing: single ranges only", () => {
 	assert.deepEqual(parseRange("bytes=0-99"), { offset: 0, end: 99 });
 	assert.deepEqual(parseRange("bytes=100-"), { offset: 100 });

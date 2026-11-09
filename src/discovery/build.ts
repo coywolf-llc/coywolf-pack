@@ -6,6 +6,7 @@ import { siteName } from "../core/site.js";
 import { type CollectionSchemaInfo, type PluginContentItem, type PluginContext, after, getSiteSetting } from "emdash";
 
 import { absoluteUrl, matchEntryPath } from "../core/content-url.js";
+import { DEADLINES, type SharedSlot, sharedRead, sharedSlot } from "../core/single-flight.js";
 
 import { buildLlmsTxt, type LlmsSection } from "./llms.js";
 import { estimateTokens, frontmatter, markdownUrl, portableTextToMarkdown } from "./markdown.js";
@@ -150,19 +151,31 @@ async function buildDoc(ctx: PluginContext, kind: DocKind): Promise<CachedDocume
 }
 
 const pendingRebuild = new Set<DocKind>();
-let rebuildScheduled = false;
-const coldBuilds = new Map<DocKind, Promise<CachedDocument>>();
+/**
+ * When the scheduled rebuild's wait ends (0: none scheduled). Its timer
+ * belongs to the request that scheduled it: if that request is canceled
+ * first, the rebuild never runs, so a schedule this far past its time no
+ * longer holds new ones back.
+ */
+let rebuildDueAt = 0;
+const REBUILD_STALE_MS = 30_000;
+/**
+ * A cold build (nothing stored yet) under way, shared by concurrent requests
+ * for a bounded time (DEADLINES.coldBuildWaitMs, src/core/single-flight.ts).
+ */
+const coldBuilds = new Map<DocKind, SharedSlot<CachedDocument>>();
 
 /** Rebuild these documents in the background, after the response (debounced). */
 export function scheduleRebuild(ctx: PluginContext, kinds: DocKind[], delayMs = REBUILD_DEBOUNCE_MS): void {
 	for (const kind of kinds) pendingRebuild.add(kind);
-	if (rebuildScheduled || !pendingRebuild.size) return;
-	rebuildScheduled = true;
+	if ((rebuildDueAt && Date.now() < rebuildDueAt + REBUILD_STALE_MS) || !pendingRebuild.size) return;
+	const due = Date.now() + delayMs;
+	rebuildDueAt = due;
 	after(async () => {
 		await new Promise((resolve) => setTimeout(resolve, delayMs));
 		const kinds = [...pendingRebuild];
 		pendingRebuild.clear();
-		rebuildScheduled = false;
+		if (rebuildDueAt === due) rebuildDueAt = 0;
 		for (const kind of kinds) {
 			try {
 				await buildDoc(ctx, kind);
@@ -180,12 +193,12 @@ export async function readDoc(ctx: PluginContext, kind: DocKind): Promise<Cached
 		if (Date.now() - Date.parse(hit.builtAt) >= DOC_TTL[kind]) scheduleRebuild(ctx, [kind], 0);
 		return hit;
 	}
-	let cold = coldBuilds.get(kind);
-	if (!cold) {
-		cold = buildDoc(ctx, kind).finally(() => coldBuilds.delete(kind));
-		coldBuilds.set(kind, cold);
+	let slot = coldBuilds.get(kind);
+	if (!slot) {
+		slot = sharedSlot<CachedDocument>();
+		coldBuilds.set(kind, slot);
 	}
-	return cold;
+	return sharedRead(slot, () => buildDoc(ctx, kind), { waitMs: DEADLINES.coldBuildWaitMs, anchor: (promise) => after(async () => void (await promise)), label: `building ${kind}` });
 }
 
 /** Rebuild now (admin "Rebuild now"). */

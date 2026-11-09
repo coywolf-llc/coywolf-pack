@@ -13,9 +13,10 @@
  * every cache keyed on settingsEpoch() (see src/core/generation.ts).
  */
 import type { FeatureDef } from "./module.js";
-import { workerEnv } from "../shared.js";
+import { afterResponse, workerEnv } from "../shared.js";
 import { batchedAll } from "./d1-batch.js";
 import { noteReadFailure } from "./read-failures.js";
+import { sharedRead, sharedSlot } from "./single-flight.js";
 
 export const PLUGIN_ID = "coywolf-pack";
 export const FEATURES_SETTING = "features";
@@ -141,8 +142,12 @@ const TTL_MS = FEATURES_TTL_MS;
  * `options` are the raw values of the registered option rows (registerSiteOption).
  */
 let cached: { features: FeatureMap; at: number; settings?: Map<string, unknown>; keys?: Set<string>; options?: Map<string, string> } | null = null;
-/** A D1 read in progress: concurrent cache misses in this isolate share it. */
-let reading: Promise<SiteOptions> | null = null;
+/**
+ * A D1 read in progress: concurrent cache misses in this isolate share it,
+ * for a bounded time (src/core/single-flight.ts: a read whose request was
+ * canceled would otherwise hang every later request of the isolate).
+ */
+const reading = sharedSlot<SiteOptions>();
 /** Bumped by invalidateFeatures, so a read that started before a save isn't cached. */
 let generation = 0;
 
@@ -228,7 +233,7 @@ const settingOption = (key: string) => `plugin:${PLUGIN_ID}:settings:${key}`;
 /** Forget cached switches and registered settings (call after saving them). */
 export function invalidateFeatures(): void {
 	cached = null;
-	reading = null;
+	reading.flight = null;
 	generation++;
 	epoch++;
 }
@@ -261,15 +266,18 @@ interface SiteOptions {
 	ok: boolean;
 }
 
+/**
+ * The switches and registered settings from D1, one read shared by the
+ * isolate's concurrent cache misses. The read is anchored with waitUntil, so
+ * a request that answers before it's done (or is left by its client) still
+ * finishes it; a caller never waits for another request's read longer than
+ * DEADLINES.sharedWaitMs, then reads itself. Every D1 read has its own
+ * deadline too (src/core/d1-batch.ts), so a read that can't finish fails
+ * closed (ok: false) instead of hanging.
+ */
 function readSiteOptions(database: Database): Promise<SiteOptions> {
-	if (!reading) {
-		const read = queryOptions(database).finally(() => {
-			if (reading === read) reading = null;
-		});
-		reading = read;
-	}
-	// Noted for each caller handed a failed read (concurrent requests share one), not once per query.
-	return reading.then((read) => {
+	return sharedRead(reading, () => queryOptions(database), { anchor: afterResponse, label: "the feature switches and settings" }).then((read) => {
+		// Noted for each caller handed a failed read (concurrent requests share one), not once per query.
 		if (!read.ok) noteReadFailure("feature switches and settings");
 		return read;
 	});

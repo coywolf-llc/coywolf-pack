@@ -23,6 +23,7 @@ import { imageCdn } from "../images/lib.js";
 import { markPendingMedia, pendingMediaRenders, renderedPendingMedia, resetPendingMedia, PENDING_MEDIA_LOCAL } from "../images/pending.js";
 import { refreshMediaHost } from "../images/settings.js";
 import { type ImagesBinding, VARIANTS_VERSION, type VariantBucket, generateVariants, variantKey } from "../images/variants.js";
+import { DEADLINES, withDeadline } from "../core/single-flight.js";
 import { afterResponse, workerEnv } from "../shared.js";
 import { POSTER_WIDTHS, posterImage, posterUrl } from "./lib.js";
 
@@ -66,29 +67,47 @@ export async function posterKey(uid: string, source: string): Promise<string> {
 /** "copied": newly put in the bucket; "present": it was already there; false: the copy failed. */
 export type MirrorResult = "copied" | "present" | false;
 
-/** Per-isolate: copies under way or done. A failed copy is forgotten, so it's retried. */
-const mirrored = new Map<string, Promise<MirrorResult>>();
+/**
+ * Per-isolate: copies under way or done, and when each started. A failed copy
+ * is forgotten, so it's retried; so is one that hasn't ended
+ * DEADLINES.posterMirrorMs after it started (it timed out, or its request was
+ * canceled and it never will), so it can't keep the poster from being copied
+ * for the life of the isolate.
+ */
+const mirrored = new Map<string, { copy: Promise<MirrorResult>; startedAt: number; settled: boolean }>();
 /** Per-isolate: keys known to be in the bucket. */
 const present = new Set<string>();
 
-/** Copy `source` into the bucket at `key` unless it's there already. Truthy when the bucket has it. */
+/** A copy of `key` under way (or done) that can still be relied on. */
+function mirrorUnderWay(key: string): boolean {
+	const entry = mirrored.get(key);
+	if (!entry) return false;
+	if (entry.settled || Date.now() - entry.startedAt < DEADLINES.posterMirrorMs) return true;
+	mirrored.delete(key);
+	return false;
+}
+
+/** Copy `source` into the bucket at `key` unless it's there already. Truthy when the bucket has it; false after DEADLINES.posterMirrorMs. */
 export function mirrorPoster(bucket: Bucket, key: string, source: string, fetcher: typeof fetch = fetch): Promise<MirrorResult> {
-	let pending = mirrored.get(key);
-	if (!pending) {
-		pending = (async (): Promise<MirrorResult> => {
-			if (await bucket.head(key)) return "present";
-			const res = await fetcher(source, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-			const type = res.headers.get("content-type") ?? "";
-			if (!res.ok || !type.startsWith("image/")) return false;
-			await bucket.put(key, await res.arrayBuffer(), {
-				httpMetadata: { contentType: type, cacheControl: "public, max-age=31536000, immutable" },
-			});
-			return "copied";
-		})().catch(() => false as const);
-		mirrored.set(key, pending);
-		pending.then((ok) => (ok ? present.add(key) : mirrored.delete(key)));
-	}
-	return pending;
+	if (mirrorUnderWay(key)) return mirrored.get(key)!.copy;
+	const work = (async (): Promise<MirrorResult> => {
+		if (await bucket.head(key)) return "present";
+		const res = await fetcher(source, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+		const type = res.headers.get("content-type") ?? "";
+		if (!res.ok || !type.startsWith("image/")) return false;
+		await bucket.put(key, await res.arrayBuffer(), {
+			httpMetadata: { contentType: type, cacheControl: "public, max-age=31536000, immutable" },
+		});
+		return "copied";
+	})();
+	const entry = { copy: withDeadline(work, DEADLINES.posterMirrorMs, `copying poster ${key}`).catch(() => false as const), startedAt: Date.now(), settled: false };
+	mirrored.set(key, entry);
+	void entry.copy.then((ok) => {
+		entry.settled = true;
+		if (ok) present.add(key);
+		else if (mirrored.get(key) === entry) mirrored.delete(key);
+	});
+	return entry.copy;
 }
 
 /** Request each URL as AVIF and as WebP so the media host resizes and caches them. */
@@ -197,7 +216,7 @@ export async function mediaPoster(uid: string, source: string, deps: PosterDeps)
 	const key = await posterKey(uid, source);
 	if (deps.listed.has(posterEntry(key)) || madeHere.has(posterEntry(key))) return storedPoster(deps.cdn, key);
 	if (deps.listed.has(key) || madeHere.has(key)) return resizedPoster(deps.cdn, key);
-	if (!mirrored.has(key)) {
+	if (!mirrorUnderWay(key)) {
 		deps.defer(
 			mirrorPoster(deps.bucket, key, source, deps.fetcher).then(async (result) => {
 				if (!result) return;

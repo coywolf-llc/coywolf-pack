@@ -8,6 +8,7 @@
  */
 
 import { batchedAll } from "../core/d1-batch.js";
+import { sharedRead, sharedSlot } from "../core/single-flight.js";
 
 export const REDIRECT_TYPES = [301, 302, 307, 308, 410] as const;
 export type RedirectType = (typeof REDIRECT_TYPES)[number];
@@ -133,15 +134,18 @@ export function validate(input: RedirectInput): Omit<RedirectInput, "type"> & { 
 	};
 }
 
-/** The table is created once per isolate; concurrent first callers share the one batch. */
-let tableReady: Promise<void> | null = null;
+/**
+ * The table is created once per isolate; concurrent first callers share the
+ * one batch, for a bounded time (src/core/single-flight.ts), so a first
+ * caller whose request was canceled can't hang the admin's later requests.
+ */
+let tableReady = false;
+const creatingTable = sharedSlot<void>();
 
-function ensureTableOnce(db: D1Database): Promise<void> {
-	tableReady ??= ensureTable(db).catch((error) => {
-		tableReady = null;
-		throw error;
-	});
-	return tableReady;
+async function ensureTableOnce(db: D1Database): Promise<void> {
+	if (tableReady) return;
+	await sharedRead(creatingTable, () => ensureTable(db), { label: "creating the redirects table" });
+	tableReady = true;
 }
 
 export async function listRules(db: D1Database): Promise<RedirectRule[]> {
@@ -153,7 +157,7 @@ export async function listRules(db: D1Database): Promise<RedirectRule[]> {
 	} catch (error) {
 		// A restore can drop the table after this isolate created it; recreate and retry once.
 		if (!isMissingTable(error)) throw error;
-		tableReady = null;
+		tableReady = false;
 		await ensureTableOnce(db);
 		({ results } = await read());
 	}

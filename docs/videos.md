@@ -22,7 +22,7 @@ EmDash 1.2.0 added its own **Video** block (`video`): a media-library video in t
 | `videos.sitemap` | off | A Google video sitemap at `/coywolf-video-sitemap.xml` for published entries (cached 10 minutes; rebuilt when content changes) |
 | `videos.engagement` | off | Plays (counted once per browser session after 2 seconds of playback, not for autoplaying videos) and likes (one per visitor per day, using a daily-salted hash of the IP address; no cookies, nothing personal stored) |
 | `videos.captions` | off | Upload WebVTT, generate captions with Stream, delete; ready tracks are copied to the site and served at `/coywolf-video-captions/<id>/<lang>.vtt` |
-| `videos.webhook` | off | A Stream webhook (HMAC-verified) that refreshes a video's details as soon as Stream finishes processing it; **Subscribe** on the Videos page |
+| `videos.webhook` | off | A Stream webhook (HMAC-verified) that refreshes a video's details as soon as Stream finishes processing it, then clears the cached pages that embed that video (by path, up to 30; never the home page or every page); **Subscribe** on the Videos page |
 
 ## Setup
 
@@ -43,6 +43,7 @@ Use the block from theme code too: `import { CoywolfVideo } from "@coywolf/emdas
 
 - Stream lists up to 1,000 videos per call; the library is cached for 5 minutes (plugin KV and isolate memory). **Refresh** reloads it.
 - Page views make no Stream API calls: player sizes, names and counts come from the site's own copy, filled when the library loads, when an entry with a new video is saved, and by the webhook.
+- The webhook isn't a settings save: Stream calls it whenever a video changes state (several times within seconds while videos process), so it records no settings change and starts no cache warming. Before 0.35.16 each call cleared every cached page, cleared them again five minutes later and restarted warming. A video embedded in more than 30 published pages, or on the home page, leaves those pages to refresh at their normal lifetime (**Clear pages and images** on the Performance page clears them now).
 - Plays aren't counted for autoplaying videos (including the GIF style), so muted previews don't inflate them.
 - Plays and likes count per IP address (not per browser), and only for videos embedded in published entries: drafts' videos get no public data. Each address may send 10 plays and 20 likes a minute and add 100 likes a day; over that the routes answer 429. Likes must come from the Coywolf Video script (it sends an `X-Coywolf-Video: 1` header), so other sites can't like on a visitor's behalf; plays without the header still count, since pages cached before the header was added don't send it. People sharing an address (an office, a mobile carrier) share one like per video. Requests without an address (EmDash reads it from Cloudflare's request data, missing in local dev or behind some proxies) count no plays or likes, rather than all counting as one visitor. Visitors who block `embed.cloudflarestream.com` (the player SDK, loaded only where plays are counted) aren't counted.
 - Signed URLs (`requireSignedURLs`) aren't supported.
