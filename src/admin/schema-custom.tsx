@@ -161,7 +161,8 @@ export function MarkupEditor(props: {
 			{preview && (
 				<div>
 					<h3 className="mb-1 text-sm font-medium">On the page</h3>
-					<pre className="max-h-[28rem] cw-overflow-auto rounded bg-kumo-tint p-3 text-xs">{preview}</pre>
+					{/* Wrapped: a long line would widen the dialog (Kumo sizes it to its content) to the whole window. */}
+					<pre className="max-h-[28rem] cw-overflow-auto cw-pre-wrap rounded bg-kumo-tint p-3 text-xs">{preview}</pre>
 					<p className="mt-1 text-xs text-kumo-subtle">
 						EmDash adds it to the page head as its own JSON-LD (id {props.contributionId}). The Preview tab shows a page's full output.
 					</p>
