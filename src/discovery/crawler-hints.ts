@@ -45,6 +45,8 @@ export interface CrawlerHintsZone {
 export type CrawlerHintsProblem =
 	/** No token to read with. */
 	| "no-token"
+	/** Cloudflare doesn't accept the token at all (mistyped, deleted, expired). */
+	| "bad-token"
 	/** The token sees no zone for the site's host (it lacks Zone → Zone → Read, or the zone is in another account). */
 	| "no-zone"
 	/** The token sees the zone but Cloudflare won't show it the setting. */
@@ -77,16 +79,36 @@ class CloudflareApiError extends Error {
 /** One Cloudflare API call with its own deadline; the token never appears in an error. */
 async function api<T>(doFetch: Fetch, token: string, path: string): Promise<T> {
 	const response = await withDeadline(doFetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` } }), DEADLINES.cloudflareReadMs, "Cloudflare's API");
-	const body = (await response.json().catch(() => ({}))) as { success?: boolean; result?: T; errors?: Array<{ code?: number; message?: string }> | null };
+	type ApiError = { code?: number; message?: string; error_chain?: ApiError[] | null };
+	const body = (await response.json().catch(() => ({}))) as { success?: boolean; result?: T; errors?: ApiError[] | null };
 	if (!response.ok || body.success === false) {
 		const errors = Array.isArray(body.errors) ? body.errors : [];
-		const detail = errors.map((e) => (e.code ? `${e.message ?? "error"} (code ${e.code})` : e.message)).filter(Boolean).join("; ");
-		throw new CloudflareApiError(response.status, errors.map((e) => Number(e.code)).filter(Number.isFinite), `HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+		// The most specific reason is at the end of an error's chain (6003 "Invalid request headers" → 6111 "Invalid format for Authorization header").
+		const flat = errors.flatMap((e) => [e, ...(Array.isArray(e.error_chain) ? e.error_chain : [])]);
+		const detail = errors
+			.map((e) => {
+				const last = Array.isArray(e.error_chain) && e.error_chain.length ? e.error_chain[e.error_chain.length - 1] : e;
+				return last.code ? `${last.message ?? "error"} (code ${last.code})` : last.message;
+			})
+			.filter(Boolean)
+			.join("; ");
+		throw new CloudflareApiError(response.status, flat.map((e) => Number(e.code)).filter(Number.isFinite), `HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
 	}
 	return body.result as T;
 }
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error)).replaceAll(/Bearer\s+\S+/g, "Bearer …").slice(0, 300);
+
+/**
+ * Cloudflare's answer for a token it doesn't accept at all: a malformed one (6003 → 6111 "Invalid format for
+ * Authorization header"), or one that doesn't exist, was deleted or expired (9109 "Invalid access token",
+ * 1000 "Invalid API Token"). 9109 also means "Unauthorized to access requested resource", hence the message test.
+ */
+const badToken = (error: unknown) =>
+	error instanceof CloudflareApiError && (error.codes.some((c) => c === 6111 || c === 1000) || /invalid (access|api) token|authorization header/i.test(error.message));
+
+const badTokenMessage = (error: unknown) =>
+	`Cloudflare doesn't accept the API token (${describe(error)}): it may be mistyped, deleted or expired. Check the token saved as Cloudflare usage on the plugin's Settings page, or the USAGE_API_TOKEN Worker secret.`;
 
 /** Cloudflare's answer for a token that may not do this (HTTP 401/403, or its authentication and permission codes). */
 const refused = (error: unknown) =>
@@ -129,6 +151,7 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 				}
 			}
 		} catch (error) {
+			if (badToken(error)) return { ...base, problem: { kind: "bad-token", message: badTokenMessage(error) } };
 			return refused(error)
 				? { ...base, problem: { kind: "no-zone", message: `The Cloudflare API token can't list zones (${describe(error)}). Add Zone → Zone → Read to it.` } }
 				: { ...base, problem: { kind: "error", message: `Couldn't reach Cloudflare's API: ${describe(error)}` } };
@@ -153,6 +176,7 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 		}
 		return { ...withZone, enabled: value };
 	} catch (error) {
+		if (badToken(error)) return { ...withZone, problem: { kind: "bad-token", message: badTokenMessage(error) } };
 		return refused(error)
 			? {
 					...withZone,

@@ -33,7 +33,7 @@ interface CrawlerHints {
 	host: string;
 	zone: { id: string; name: string; accountId: string | null } | null;
 	dashboardUrl: string;
-	problem?: { kind: "no-token" | "no-zone" | "no-access" | "error"; message: string };
+	problem?: { kind: "no-token" | "bad-token" | "no-zone" | "no-access" | "error"; message: string };
 	checkedAt: string;
 }
 
@@ -143,7 +143,7 @@ function CrawlerHintsCard() {
 	const on = data?.enabled === true;
 	const off = data?.enabled === false;
 	const zone = data?.zone?.name;
-	const needsToken = data?.problem && (data.problem.kind === "no-token" || data.problem.kind === "no-zone");
+	const needsToken = data?.problem && (data.problem.kind === "no-token" || data.problem.kind === "bad-token" || data.problem.kind === "no-zone");
 	return (
 		<section className="rounded-lg border border-kumo-line" aria-labelledby="discovery-crawler-hints" aria-busy={loading}>
 			<div className={`flex flex-wrap items-start justify-between gap-4 p-4${data?.problem || error ? " border-b border-kumo-line" : ""}`}>

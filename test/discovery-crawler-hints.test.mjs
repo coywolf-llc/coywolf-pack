@@ -110,6 +110,26 @@ test("a token without Zone Read sees no zone: the card says to add it", async ()
 	assert.match(r.problem.message, /can't list zones \(HTTP 403: Unauthorized to access requested resource \(code 9109\)\)\. Add Zone → Zone → Read/);
 });
 
+test("a token Cloudflare doesn't accept (malformed, deleted, expired) says so, not that a permission is missing", async () => {
+	// Cloudflare's own answers (checked November 2026 with made-up tokens).
+	const malformed = cloudflare({
+		onZones: () =>
+			Response.json({ success: false, errors: [{ code: 6003, message: "Invalid request headers", error_chain: [{ code: 6111, message: "Invalid format for Authorization header" }] }], messages: [], result: null }, { status: 400 }),
+	});
+	const m = await readCrawlerHints("coywolf.com", { token: "not a token", fetch: malformed.fetch });
+	assert.equal(m.problem.kind, "bad-token");
+	assert.match(m.problem.message, /doesn't accept the API token \(HTTP 400: Invalid format for Authorization header \(code 6111\)\)/);
+	const unknown = cloudflare({ onZones: () => fail(403, 9109, "Invalid access token") });
+	const u = await readCrawlerHints("coywolf.com", { token: TOKEN, fetch: unknown.fetch });
+	assert.equal(u.problem.kind, "bad-token");
+	assert.match(u.problem.message, /mistyped, deleted or expired/);
+	assert.ok(!u.problem.message.includes(TOKEN));
+	// A token revoked after its zone was remembered.
+	const later = cloudflare({ onFlags: () => fail(403, 9109, "Invalid access token") });
+	const l = await readCrawlerHints("coywolf.com", { token: TOKEN, fetch: later.fetch, knownZone: { id: "zone-c", name: "coywolf.com", accountId: ACCOUNT } });
+	assert.equal(l.problem.kind, "bad-token");
+});
+
 test("a token that sees the zone but not the setting: the card links to the dashboard instead", async () => {
 	const cf = cloudflare({ zones: { "coywolf.com": "zone-c" }, onFlags: () => fail(403, 10000, "Authentication error") });
 	const status = await readCrawlerHints("coywolf.com", { token: TOKEN, fetch: cf.fetch });
