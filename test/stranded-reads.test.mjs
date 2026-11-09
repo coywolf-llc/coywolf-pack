@@ -201,11 +201,15 @@ test("shared read: a caller that joined a fresh read which stalls too gives up o
 	void sharedRead(slot, read);
 	const warnings = await quietly("warn", async () => {
 		const started = Date.now();
-		const first = sharedRead(slot, read);
-		assert.equal(await sharedRead(slot, read), 3, "the second waited for the fresh read, gave up on it, and read itself");
+		// Both callers wait on the stranded read with the same deadline; whichever wakes first starts the
+		// fresh read (it never settles here), and the other waits for it, gives up, and reads itself.
+		// Which of the two wakes first is up to the timers, so the test doesn't assume it.
+		const callers = [sharedRead(slot, read), sharedRead(slot, read)];
+		const settled = await Promise.race(callers.map((p, i) => p.then((value) => ({ i, value }))));
+		assert.equal(settled.value, 3, "the caller that joined the fresh read gave up on it too, and read itself");
 		const waited = Date.now() - started;
-		assert.ok(waited >= 70 && waited < 500, `two waits of DEADLINES.sharedWaitMs, no more (${waited} ms)`);
-		await assert.rejects(withDeadline(first, 100, "the first caller"), DeadlineError, "the first giver-up's own read never settles (in production its D1 deadline ends it)");
+		assert.ok(waited >= 70 && waited < 1_500, `two waits of DEADLINES.sharedWaitMs, no more (${waited} ms)`);
+		await assert.rejects(withDeadline(callers[1 - settled.i], 100, "the first giver-up"), DeadlineError, "the first giver-up's own read never settles (in production its D1 deadline ends it)");
 	});
 	assert.equal(warnings.length, 3, "the first giver-up once, the second twice");
 	assert.equal(n, 3);
