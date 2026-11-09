@@ -12,6 +12,7 @@ import type { PackModule } from "../core/module.js";
 import { parseInput } from "../shared.js";
 import { invalidateTheme } from "./settings.js";
 import { DEFAULT_THEME, THEME_SETTING, isTheme, themeCss, themeOptions } from "./themes.js";
+import { readOnlyRoute } from "../core/routes.js";
 
 // biome-ignore lint/suspicious/noEmptyInterface: reserved for future options.
 export interface CodeBlocksOptions {}
@@ -88,7 +89,7 @@ export function codeBlocksPack(_options: CodeBlocksOptions): PackModule {
 			}),
 
 			/** Preview markup + CSS for the admin page (same renderer as the site). */
-			"codeBlocks/preview": definePluginRoute({
+			"codeBlocks/preview": readOnlyRoute(definePluginRoute({
 				permission: "plugins:manage",
 				methods: ["POST"],
 				request: { body: "json" },
@@ -104,7 +105,7 @@ export function codeBlocksPack(_options: CodeBlocksOptions): PackModule {
 						html: renderBlock(SAMPLE, { label: input.label, copy: input.copy, lineNumbers: input.lineNumbers }),
 					};
 				},
-			}),
+			})),
 		},
 	};
 }

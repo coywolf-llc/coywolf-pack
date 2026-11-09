@@ -41,6 +41,12 @@ const FEATURES = [
 		description: "Schema.org Person properties per byline (job title, sameAs profiles, image…) used as article authors.",
 		default: false,
 	},
+	{
+		id: "schema.custom",
+		label: "Custom markup",
+		description: "Your own JSON-LD for a page (a path like the home page) or an entry, checked for errors and Google's rich-result rules.",
+		default: false,
+	},
 ];
 registerFeatures(FEATURES);
 

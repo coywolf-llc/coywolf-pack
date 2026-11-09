@@ -31,6 +31,7 @@ import {
 	takeCall,
 } from "./store.js";
 import { applyDescription, applyImageText, targetCollections, tick } from "./worker.js";
+import { readOnlyRoute } from "../core/routes.js";
 
 const asCtx = (ctx: unknown) => ctx as PluginContext;
 /** Model lists per provider, per isolate (keyed to the saved key so a new key refetches). */
@@ -129,7 +130,7 @@ export function aiRoutes(options: AiOptions) {
 		},
 
 		/** One tiny real call with the saved settings. Counts toward the daily limit. */
-		"ai/test": definePluginRoute({
+		"ai/test": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -150,7 +151,7 @@ export function aiRoutes(options: AiOptions) {
 					return { ok: false, error: message, provider: s.provider, model: cfg.model };
 				}
 			},
-		}),
+		})),
 
 		/** Start a bulk run. The cron tick turns it into queue jobs a page at a time. */
 		"ai/bulk": definePluginRoute({
@@ -207,7 +208,7 @@ export function aiRoutes(options: AiOptions) {
 			},
 		}),
 
-		"ai/entries": definePluginRoute({
+		"ai/entries": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -218,7 +219,7 @@ export function aiRoutes(options: AiOptions) {
 				const page = await col<EntryRecord>(ctx, "aiEntries").query({ where, orderBy: { updated: "desc" }, limit: 50, cursor });
 				return { items: page.items.map((i) => i.data), cursor: page.cursor, hasMore: page.hasMore };
 			},
-		}),
+		})),
 
 		"ai/entry/reanalyze": definePluginRoute({
 			permission: "plugins:manage",
@@ -267,7 +268,7 @@ export function aiRoutes(options: AiOptions) {
 			},
 		}),
 
-		"ai/media": definePluginRoute({
+		"ai/media": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -278,7 +279,7 @@ export function aiRoutes(options: AiOptions) {
 				const page = await col<MediaRecord>(ctx, "aiMedia").query({ where, orderBy: { updated: "desc" }, limit: 50, cursor });
 				return { items: page.items.map((i) => i.data), cursor: page.cursor, hasMore: page.hasMore };
 			},
-		}),
+		})),
 
 		"ai/media/generate": definePluginRoute({
 			permission: "plugins:manage",

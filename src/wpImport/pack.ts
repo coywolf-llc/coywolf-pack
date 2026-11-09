@@ -34,6 +34,7 @@ import { type VideoMeta, invalidatePublicConfig, metaStore, SETTINGS as VIDEO_SE
 import { type ConvertOptions, type VideoFact, convertEntryData, mightNeedConversion } from "./convert.js";
 import { type ImportDefaults, defaultsFromWordPress, parseFileRows } from "./sources.js";
 import { findSiteUrls, rewriteSiteUrls, siteUrlPattern } from "./urls.js";
+import { readOnlyRoute } from "../core/routes.js";
 
 export const F = { main: "wpImport" } as const;
 
@@ -373,7 +374,7 @@ export function wpImportPack(): PackModule {
 					return scan(ctx, input.apply, input.state ?? null, urlMap);
 				},
 			}),
-			"wpImport/urls": definePluginRoute({
+			"wpImport/urls": readOnlyRoute(definePluginRoute({
 				permission: "plugins:manage",
 				methods: ["POST"],
 				request: { body: "json" },
@@ -382,7 +383,7 @@ export function wpImportPack(): PackModule {
 					const input = parseInput(findInput, ctx.input ?? {});
 					return findUrls(ctx, input.hosts, input.prefixes ?? [], input.state ?? null);
 				},
-			}),
+			})),
 			"wpImport/files": definePluginRoute({
 				permission: "plugins:manage",
 				methods: ["POST"],

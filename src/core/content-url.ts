@@ -338,7 +338,8 @@ function readHostConfig(): Promise<HostConfig> {
 	return hostConfig;
 }
 
-async function trailingPolicy(source: UrlSource): Promise<TrailingSlash> {
+/** The site's trailing-slash policy: the pack's `trailingSlash` option, else EmDash's (Astro's `trailingSlash`), else "ignore". */
+export async function trailingPolicy(source: UrlSource): Promise<TrailingSlash> {
 	if (config.trailingSlash) return config.trailingSlash;
 	if (!isD1(source) && source.site.trailingSlash) return source.site.trailingSlash;
 	return (await readHostConfig()).trailingSlash ?? "ignore";

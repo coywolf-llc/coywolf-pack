@@ -18,6 +18,7 @@ import {
 	undoRewind,
 } from "./restore.js";
 import { FILE, type Manifest, STAMP, listBackups, makeStamp, mirrorBucket, mirrorMedia, pruneBackups, writeDumpStream, writeManifest } from "./store.js";
+import { readOnlyRoute } from "../core/routes.js";
 
 export interface BackupsOptions {
 	/** D1 binding of the site database. Default "DB". */
@@ -257,7 +258,7 @@ export function backupsModule(options: BackupsOptions) {
 		 * A ten-minute link that streams one backup file (see ./download.ts).
 		 * The file is a gzipped SQL dump that restores into any D1 database.
 		 */
-		"backups/download-link": definePluginRoute({
+		"backups/download-link": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -269,7 +270,7 @@ export function backupsModule(options: BackupsOptions) {
 				ctx.log.info("Backup download link created", { stamp: input.stamp, file: input.file });
 				return link;
 			},
-		}),
+		})),
 	};
 
 	return { routes, daily };

@@ -18,9 +18,11 @@ import { configureContentUrls } from "./core/content-url.js";
 import { PLUGIN_ID, isOn, knownFeatures } from "./core/features.js";
 import { featuresRoutes } from "./core/features-module.js";
 import type { AdminPageDef, PackModule, WidgetDef } from "./core/module.js";
+import { readOnlyRouteNames } from "./core/routes.js";
 import { secretSettingsSchema } from "./core/secrets.js";
 import { MODULES } from "./modules.js";
 import type { CoywolfOptions } from "./options.js";
+import { registerReadOnlyRoutes } from "./pageCache/lib.js";
 import { VERSION } from "./version.js";
 
 export type { BackupsOptions } from "./backups/module.js";
@@ -130,6 +132,9 @@ export function createPlugin(options: CoywolfOptions = {}) {
 	const modules = buildModules(options);
 	const s = surfaces(modules);
 	const { hooks, tasks } = composeHooks(modules, { tasks: [] });
+	const routes: Record<string, unknown> = Object.assign({}, featuresRoutes(modules, tasks), ...modules.map((m) => m.routes ?? {}));
+	// Routes that only read (readOnlyRoute): the page cache middleware leaves the cache and the settings generation alone after them.
+	registerReadOnlyRoutes(readOnlyRouteNames(routes));
 
 	return definePlugin({
 		id: PLUGIN_ID,
@@ -144,7 +149,7 @@ export function createPlugin(options: CoywolfOptions = {}) {
 		}),
 		// biome-ignore lint/suspicious/noExplicitAny: composed handlers match EmDash's hook types at runtime.
 		hooks: hooks as any,
-		routes: Object.assign({}, featuresRoutes(modules, tasks), ...modules.map((m) => m.routes ?? {})),
+		routes: routes as Parameters<typeof definePlugin>[0]["routes"],
 	});
 }
 

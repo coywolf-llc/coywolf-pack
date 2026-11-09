@@ -68,6 +68,7 @@ import {
 } from "./store.js";
 import { FONT_WEIGHTS, normalizeDisplay } from "./render.js";
 import { StreamError } from "./stream.js";
+import { readOnlyRoute } from "../core/routes.js";
 
 export interface VideosOptions {
 	/** Longest upload Stream should accept, in seconds (reserves quota while uploading). Default 3600. */
@@ -556,7 +557,7 @@ export function videosModule(options: VideosOptions) {
 			},
 		}),
 
-		"videos/test": definePluginRoute({
+		"videos/test": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -566,9 +567,9 @@ export function videosModule(options: VideosOptions) {
 				const videos = await stream(() => api.list(1));
 				return { ok: true, message: `Connected to Cloudflare Stream${videos.length ? "" : " (the library is empty)"}.` };
 			},
-		}),
+		})),
 
-		"videos/list": definePluginRoute({
+		"videos/list": readOnlyRoute(definePluginRoute({
 			permission: "media:upload",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -600,10 +601,10 @@ export function videosModule(options: VideosOptions) {
 					}),
 				};
 			},
-		}),
+		})),
 
 		/** Options for the block's video picker ({ items: [{ id, name }] }, newest first). */
-		"videos/options": definePluginRoute({
+		"videos/options": readOnlyRoute(definePluginRoute({
 			permission: "content:edit_own",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -614,9 +615,9 @@ export function videosModule(options: VideosOptions) {
 				const clock = (s: number) => (s > 0 ? ` (${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")})` : "");
 				return { items: items.map((v) => ({ id: v.uid, name: `${v.name}${clock(v.duration)}${v.ready ? "" : " · processing"}` })) };
 			},
-		}),
+		})),
 
-		"videos/detail": definePluginRoute({
+		"videos/detail": readOnlyRoute(definePluginRoute({
 			permission: "media:upload",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -635,7 +636,7 @@ export function videosModule(options: VideosOptions) {
 				}
 				return { meta, download };
 			},
-		}),
+		})),
 
 		"videos/update": definePluginRoute({
 			permission: "media:edit_any",
@@ -790,7 +791,7 @@ export function videosModule(options: VideosOptions) {
 		}),
 
 		/** Minutes stored in Stream and the account's limit (cached for five minutes). */
-		"videos/storage": definePluginRoute({
+		"videos/storage": readOnlyRoute(definePluginRoute({
 			permission: "media:upload",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -804,7 +805,7 @@ export function videosModule(options: VideosOptions) {
 				await ctx.kv.set(STORAGE_KEY, { usage, at: Date.now() });
 				return usage;
 			},
-		}),
+		})),
 
 		/** Rebuild the embed index from all content, one page per call (the admin loops until done). */
 		"videos/reindex": definePluginRoute({
@@ -857,7 +858,7 @@ export function videosModule(options: VideosOptions) {
 			},
 		}),
 
-		"videos/captions/list": definePluginRoute({
+		"videos/captions/list": readOnlyRoute(definePluginRoute({
 			permission: "media:upload",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -867,7 +868,7 @@ export function videosModule(options: VideosOptions) {
 				const api = await requireClient(ctx);
 				return { captions: await stream(() => api.listCaptions(uid)) };
 			},
-		}),
+		})),
 
 		"videos/captions/upload": definePluginRoute({
 			permission: "media:edit_any",

@@ -15,6 +15,7 @@ import { MAX_THROUGH_SITE, type R2Config, S3Error, partSizeFor, r2Client } from 
 import { uploadsBindingName } from "./serve.js";
 import { COLLECTIONS, type UploadDoc, invalidateSiteCache, settingsFrom } from "./site.js";
 import { entryTitle, fileIdsIn } from "./walker.js";
+import { readOnlyRoute } from "../core/routes.js";
 
 export interface FilesOptions {
 	/** R2 binding of the media bucket. Default "MEDIA". */
@@ -267,7 +268,7 @@ export function filesModule(options: FilesOptions) {
 
 	const routes = {
 		/** Options for the block's file picker (Block Kit select with optionsRoute). */
-		"files/options": definePluginRoute({
+		"files/options": readOnlyRoute(definePluginRoute({
 			permission: "content:create",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -288,7 +289,7 @@ export function filesModule(options: FilesOptions) {
 				}
 				return { items };
 			},
-		}),
+		})),
 
 		/** Everything the Files page shows. */
 		"files/list": {

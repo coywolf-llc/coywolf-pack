@@ -1,7 +1,7 @@
 /**
  * Schema admin page: Site Details (publisher), page and article types per
- * collection, author profiles, per-entry overrides, robots / Open Graph
- * settings, and a JSON-LD preview.
+ * collection, author profiles, per-entry overrides, custom markup, robots /
+ * Open Graph settings, and a JSON-LD preview.
  */
 import { Badge, Banner, Button, Checkbox, Dialog, Input, Loader, Select, Switch, Tabs } from "@cloudflare/kumo";
 import { ImageSquare, MagnifyingGlass, PencilSimple, Plus, Trash, TreeStructure } from "@phosphor-icons/react";
@@ -9,7 +9,9 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { SaveBar, isDirty } from "./save-bar.js";
-import { PartSwitches } from "./feature-switches.js";
+import { FEATURES_CHANGED, PartSwitches } from "./feature-switches.js";
+import { type CustomSite, CustomTab, MarkupEditor, WarningList, useMarkupCheck } from "./schema-custom.js";
+import { type CustomMarkup, type LintWarning, entryContributionId } from "../schema/custom.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/schema";
 
@@ -55,6 +57,7 @@ interface Config {
 		inputs: Record<string, PropertyInput>;
 	};
 	keys: { home: string; custom: string };
+	custom: CustomSite;
 }
 interface Byline {
 	id: string;
@@ -71,6 +74,8 @@ interface Override extends TypeChoice {
 	title?: string;
 	/** "byline:<id>" or "publisher". */
 	mainSubject?: string;
+	/** The entry's custom markup. */
+	custom?: CustomMarkup;
 	updatedAt?: string;
 }
 interface EntryHit {
@@ -701,18 +706,30 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 	const [pending, setPending] = React.useState(false);
 	const [error, setError] = React.useState<string>();
 	const [credited, setCredited] = React.useState<string[]>([]);
+	const [entryUrl, setEntryUrl] = React.useState<string | null>(null);
 	React.useEffect(() => {
 		setDraft(props.draft);
 		setError(undefined);
 	}, [props.draft]);
 	const picking = draft !== null && !draft.entryId;
 	const entryKey = draft?.entryId ? `${draft.collection}:${draft.entryId}` : "";
+	const customOn = !!props.config.features["schema.custom"];
+	const graphOn = !!props.config.features["schema.graph"];
+	// Relative @ids and URLs in the entry's markup resolve against its page, as on the page itself (the site root until the URL has loaded).
+	const entryPage = entryUrl ?? `${props.config.custom.origin}/`;
+	const customCheck = useMarkupCheck(draft?.custom ?? { markup: "", enabled: false }, props.config.custom, graphOn, entryPage);
+	const customBlocked = Boolean(customOn && draft?.custom && customCheck.errors.length);
 	React.useEffect(() => {
 		setCredited([]);
+		setEntryUrl(null);
 		if (!draft?.entryId) return;
 		let live = true;
-		post<{ ids: string[] }>("entries/bylines", { collection: draft.collection, entryId: draft.entryId })
-			.then((result) => live && setCredited(result.ids))
+		post<{ ids: string[]; url?: string | null }>("entries/bylines", { collection: draft.collection, entryId: draft.entryId })
+			.then((result) => {
+				if (!live) return;
+				setCredited(result.ids);
+				setEntryUrl(result.url ?? null);
+			})
 			.catch(() => {});
 		return () => {
 			live = false;
@@ -726,7 +743,9 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 		setPending(true);
 		setError(undefined);
 		try {
-			await post("entries/save", draft);
+			// With Custom markup off, the entry's markup is left as it is (not sent).
+			const { custom, ...rest } = draft;
+			await post("entries/save", customOn ? { ...rest, custom: custom ?? null } : rest);
 			props.onSaved();
 		} catch (cause) {
 			setError(errorText(cause, "Could not save the override"));
@@ -742,7 +761,8 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
 					{picking ? "Pick the entry to override." : (draft?.title ?? draft?.entryId)}
 				</Dialog.Description>
-				<div className="mt-4 space-y-4">
+				{/* Kumo's dialog doesn't scroll, and the custom markup editor is taller than many screens. */}
+				<div className="cw-dialog-scroll mt-4 space-y-4">
 					{picking ? (
 						<EntryPicker
 							collections={props.config.collections}
@@ -776,6 +796,48 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 										Profile page type and no Article.
 									</p>
 								</div>
+								{customOn ? (
+									<div className="space-y-3 border-t border-kumo-line pt-4">
+										<div className="flex items-start justify-between gap-2">
+											<div>
+												<h3 className="text-sm font-medium">Custom markup</h3>
+												<p className="text-xs text-kumo-subtle">
+													Your own JSON-LD for this entry's page, added as its own JSON-LD. It follows the entry if its slug changes, and
+													replaces custom markup set for the same path on the Custom tab.
+												</p>
+											</div>
+											{draft.custom ? (
+												<Button variant="ghost" onClick={() => setDraft({ ...draft, custom: undefined })}>
+													Remove
+												</Button>
+											) : (
+												<Button
+													variant="secondary"
+													icon={<Plus aria-hidden="true" />}
+													onClick={() => setDraft({ ...draft, custom: { markup: "", enabled: true, mainEntity: false } })}
+												>
+													Add markup
+												</Button>
+											)}
+										</div>
+										{draft.custom && (
+											<MarkupEditor
+												value={draft.custom}
+												onChange={(custom) => setDraft({ ...draft, custom })}
+												site={props.config.custom}
+												graphOn={graphOn}
+												pageUrl={entryPage}
+												contributionId={entryContributionId(draft.collection, draft.entryId)}
+											/>
+										)}
+									</div>
+								) : (
+									draft.custom && (
+										<p className="text-xs text-kumo-subtle">
+											This entry has custom markup. Turn on Custom markup (Features → Schema & Social) to edit it or add it to the page.
+										</p>
+									)
+								)}
 							</>
 						)
 					)}
@@ -785,7 +847,7 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 							Cancel
 						</Button>
 						{!picking && (
-							<Button variant="primary" disabled={pending} onClick={() => void save()}>
+							<Button variant="primary" disabled={pending || customBlocked} onClick={() => void save()}>
 								{pending ? "Saving…" : "Save override"}
 							</Button>
 						)}
@@ -833,7 +895,7 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) 
 	return (
 		<Section
 			title="Per-entry overrides"
-			description="Give a single entry a different page or article type than its collection, or say who or what it's about (its main subject)."
+			description="Give a single entry a different page or article type than its collection, say who or what it's about (its main subject), or add your own JSON-LD."
 		>
 			<div className="flex justify-end">
 				<Button variant="primary" icon={<Plus aria-hidden="true" />} onClick={() => setEditing({ collection: "", entryId: "" })}>
@@ -858,6 +920,7 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) 
 								{item.pageType && <Badge variant="secondary">{labels[item.pageType] ?? item.pageType}</Badge>}
 								{item.articleType && <Badge variant="outline">{labels[item.articleType] ?? item.articleType}</Badge>}
 								{item.mainSubject && <Badge variant="outline">{subjectLabel(item.mainSubject)}</Badge>}
+								{item.custom && <Badge variant="outline">{item.custom.enabled ? "Custom markup" : "Custom markup (off)"}</Badge>}
 							</div>
 							<Button
 								variant="ghost"
@@ -1002,8 +1065,16 @@ interface Contribution {
 }
 
 function PreviewTab(props: { config: Config }) {
-	const [target, setTarget] = React.useState<"home" | "entry">("home");
-	const [result, setResult] = React.useState<{ page: { url: string; pageType: string }; contributions: Contribution[] }>();
+	const [target, setTarget] = React.useState<"home" | "path" | "entry">("home");
+	const [path, setPath] = React.useState("/");
+	const [result, setResult] = React.useState<{
+		page: { url: string; pageType: string };
+		/** For a path that is a published entry's page: the preview shows that page (its override and markup, not a path rule). */
+		entry?: { collection: string; id: string } | null;
+		contributions: Contribution[];
+		/** The custom markup on the page, with its rich-result checks. */
+		custom?: { id: string; label: string; warnings: LintWarning[] } | null;
+	}>();
 	const [pending, setPending] = React.useState(false);
 	const [error, setError] = React.useState<string>();
 
@@ -1032,15 +1103,21 @@ function PreviewTab(props: { config: Config }) {
 					<Select
 						label="Page"
 						value={target}
-						onValueChange={(value: string | null) => setTarget(value === "entry" ? "entry" : "home")}
+						onValueChange={(value: string | null) => setTarget(value === "entry" ? "entry" : value === "path" ? "path" : "home")}
 						items={[
 							{ value: "home", label: "Home page" },
+							{ value: "path", label: "A path" },
 							{ value: "entry", label: "An entry" },
 						]}
 					/>
 				</div>
-				{target === "home" && (
-					<Button variant="primary" disabled={pending} onClick={() => void run({ target: "home" })}>
+				{target === "path" && (
+					<div className="flex-1">
+						<Input label="Path" placeholder="/pricing/" value={path} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPath(e.target.value)} />
+					</div>
+				)}
+				{target !== "entry" && (
+					<Button variant="primary" disabled={pending} onClick={() => void run(target === "path" ? { target: "path", path } : { target: "home" })}>
 						Preview
 					</Button>
 				)}
@@ -1056,6 +1133,13 @@ function PreviewTab(props: { config: Config }) {
 						<p className="text-sm text-kumo-subtle">
 							{result.page.url} · page type “{result.page.pageType}”
 						</p>
+						{result.entry && (
+							<Banner
+								variant="default"
+								role="status"
+								description={`This path is an entry's page (${result.entry.collection}): shown as the live page is, with the entry's override and custom markup. A path rule on it doesn't apply.`}
+							/>
+						)}
 						{result.contributions.length === 0 && <p className="text-sm">Nothing: every Schema & Social feature is off.</p>}
 						{tags.length > 0 && (
 							<pre className="overflow-x-auto rounded bg-kumo-tint p-3 text-xs">
@@ -1068,10 +1152,13 @@ function PreviewTab(props: { config: Config }) {
 						)}
 						{jsonld.map((j) => (
 							<div key={j.id ?? "jsonld"}>
-								<h3 className="mb-1 text-sm font-medium">JSON-LD ({j.id === "primary" ? "replaces EmDash's" : j.id})</h3>
+								<h3 className="mb-1 text-sm font-medium">
+									JSON-LD ({j.id === "primary" ? "replaces EmDash's" : result.custom && j.id === result.custom.id ? `custom markup: ${result.custom.label}` : j.id})
+								</h3>
 								<pre className="max-h-[28rem] cw-overflow-auto rounded bg-kumo-tint p-3 text-xs">{JSON.stringify(j.graph, null, 2)}</pre>
 							</div>
 						))}
+						{result.custom && <WarningList warnings={result.custom.warnings} />}
 						{jsonld.length > 0 && (
 							<p className="text-xs text-kumo-subtle">
 								Check the live page with Google's Rich Results Test or the Schema.org validator after publishing changes.
@@ -1092,6 +1179,7 @@ const FEATURE_LABELS: Record<string, string> = {
 	"schema.robots": "Robots directives",
 	"schema.openGraph": "Open Graph extras",
 	"schema.authors": "Author profiles",
+	"schema.custom": "Custom markup",
 };
 
 /**
@@ -1105,6 +1193,7 @@ const SCHEMA_TABS = [
 	{ value: "types", label: "Types" },
 	{ value: "authors", label: "Authors" },
 	{ value: "overrides", label: "Overrides" },
+	{ value: "custom", label: "Custom" },
 	{ value: "settings", label: "Robots & social" },
 	{ value: "preview", label: "Preview" },
 ].map((t) => ({
@@ -1139,6 +1228,19 @@ export function SchemaPage() {
 			}
 		})();
 	}, [loadAuthors]);
+
+	// A part switched on this page (Custom markup, Author profiles…) applies to the tabs at once.
+	React.useEffect(() => {
+		const update = (event: Event) => {
+			const detail = (event as CustomEvent<Record<string, boolean> | undefined>).detail;
+			if (!detail) return;
+			setConfig((current) =>
+				current ? { ...current, features: Object.fromEntries(Object.entries(current.features).map(([id, on]) => [id, id in detail ? !!detail[id] : on])) } : current,
+			);
+		};
+		window.addEventListener(FEATURES_CHANGED, update);
+		return () => window.removeEventListener(FEATURES_CHANGED, update);
+	}, []);
 
 	const off = config ? Object.entries(FEATURE_LABELS).filter(([id]) => !config.features[id]) : [];
 
@@ -1177,6 +1279,14 @@ export function SchemaPage() {
 						{tab === "types" && <TypesTab config={config} onSaved={(types) => setConfig({ ...config, types })} />}
 						{tab === "authors" && <AuthorsTab config={config} bylines={bylines} authorsOn={authorsOn} reload={() => void loadAuthors()} />}
 						{tab === "overrides" && <OverridesTab config={config} bylines={bylines} />}
+						{tab === "custom" && (
+							<CustomTab
+								site={config.custom}
+								graphOn={!!config.features["schema.graph"]}
+								customOn={!!config.features["schema.custom"]}
+								onSaved={(rules) => setConfig({ ...config, custom: { ...config.custom, rules } })}
+							/>
+						)}
 						{tab === "settings" && <SettingsTab config={config} onSaved={(settings) => setConfig({ ...config, settings })} />}
 						{tab === "preview" && <PreviewTab config={config} />}
 					</div>

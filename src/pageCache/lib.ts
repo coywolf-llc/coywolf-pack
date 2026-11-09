@@ -31,9 +31,26 @@ const PACK_API = "/_emdash/api/plugins/coywolf-pack/";
 /** Admin writes that change nothing a page or a cache shows: no purge and no new settings generation. */
 const NO_SETTINGS_CHANGE = /^\/_emdash\/api\/plugins\/coywolf-pack\/updates\//;
 
+/**
+ * Routes declared read-only where they're defined (readOnlyRoute in
+ * src/core/routes.ts: previews, pickers' lists, connection tests…), by name.
+ * createPlugin() registers them as the isolate starts. A successful POST to
+ * one clears nothing and records no settings change, like the updates routes.
+ */
+const readOnlyRoutes = new Set<string>();
+
+export function registerReadOnlyRoutes(names: Iterable<string>): void {
+	for (const name of names) readOnlyRoutes.add(name);
+}
+
+/** True when a POST to this pack route is a read (declared with readOnlyRoute), not an admin save. */
+export function isReadOnlyRoutePath(pathname: string): boolean {
+	return pathname.startsWith(PACK_API) && readOnlyRoutes.has(pathname.slice(PACK_API.length));
+}
+
 /** True when a request is a pack admin write whose success should purge the cache. */
 export function purgesAfter(method: string, pathname: string): boolean {
-	return method === "POST" && pathname.startsWith(PACK_API) && !PUBLIC_ROUTE.test(pathname) && !NO_SETTINGS_CHANGE.test(pathname);
+	return method === "POST" && pathname.startsWith(PACK_API) && !PUBLIC_ROUTE.test(pathname) && !NO_SETTINGS_CHANGE.test(pathname) && !isReadOnlyRoutePath(pathname);
 }
 
 /** What one cache.purge() call clears: everything, or any mix of path prefixes and cache tags (Workers Cache takes both in one call). */
@@ -83,9 +100,9 @@ export function purgeScope(pathname: string): PurgeScope | null {
 	if (/^(redirects|backups|links|updates)\//.test(route) || /^cache\/(media|warm|purge)(\/|$)/.test(route)) return null;
 	// Stored image sizes: new uploads and crops are picked up after a short stopgap lifetime; a backfill run clears the cache itself once when it is done.
 	if (/^images\/variants\/(settings|run|bulk|estimate)$/.test(route)) return null;
-	// Videos admin reads (library, details, status, storage, settings, captions list) change nothing, nor does
-	// (un)subscribing the Stream webhook (its secret is on no page).
-	if (/^videos\/(list|status|detail|options|storage|test|settings|captions\/list|webhook\/(subscribe|unsubscribe))$/.test(route)) return null;
+	// (Un)subscribing the Stream webhook changes no page (its secret is on no page). The videos admin reads
+	// (library, details, storage, captions list…) are declared read-only where they're defined (readOnlyRoute) and never get here.
+	if (/^videos\/(status|settings|webhook\/(subscribe|unsubscribe))$/.test(route)) return null;
 	if (/^robots\//.test(route)) return { pathPrefixes: ["/robots.txt"] };
 	return { purgeEverything: true };
 }

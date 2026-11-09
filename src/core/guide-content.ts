@@ -9,7 +9,7 @@
  * Kept free of imports so tests can load it directly.
  */
 
-export type GuideId = "anthropic" | "openai" | "gemini" | "workers-ai" | "r2" | "stream" | "radar" | "media-host" | "images-token";
+export type GuideId = "anthropic" | "openai" | "gemini" | "workers-ai" | "r2" | "stream" | "radar" | "media-host" | "images-token" | "bing";
 
 export interface Guide {
 	summary: string;
@@ -102,6 +102,18 @@ export const GUIDES: Record<GuideId, Guide> = {
 		steps: [...cloudflareTokenSteps(b("Account → Radar → Read")), "Paste the token into Cloudflare Radar API token and save. It's stored encrypted."],
 		note: `Radar's API is free. Or set the token as a Worker secret instead: ${code("npx wrangler secret put RADAR_API_TOKEN")}.`,
 	},
+	bing: {
+		summary: "How to get a Bing Webmaster API key",
+		steps: [
+			`Sign in to ${link("https://www.bing.com/webmasters", "Bing Webmaster Tools")} with a Microsoft, Google or Facebook account.`,
+			"Add and verify this site, if it isn't there yet. The key works only for sites verified in the same account.",
+			`Select ${b("Settings")} (top right), then ${b("API access")}.`,
+			`The first time, read and accept the terms, then select ${b("API Key")}.`,
+			`Select ${b("Generate API Key")} and copy the key. Each account has one key, and it works for all of the account's verified sites.`,
+			`Paste it into Bing Webmaster API key and select ${b("Save key")}. It's stored encrypted, and Check key shows the site's quota.`,
+		],
+		note: `Bing allows a set number of URL submissions per site each day (Check key shows what's left). Anyone with the key can submit URLs for all your verified sites, so keep it private; to replace it, delete it in Bing Webmaster Tools and generate a new one. ${link("https://learn.microsoft.com/en-us/bingwebmaster/getting-access", "Microsoft's guide")}.`,
+	},
 	"media-host": {
 		summary: "How to set up a media host by hand in the Cloudflare dashboard",
 		steps: [
@@ -150,6 +162,10 @@ export const SETTINGS_PAGE_GUIDES: Record<string, { intro: string; guides: Guide
 	imagesApiToken: {
 		intro: "Optional. Only for Set up media host on the Clean Image URLs page. Or set the IMAGES_API_TOKEN Worker secret.",
 		guides: ["images-token"],
+	},
+	discoveryBingApiKey: {
+		intro: "Optional. Sends changed URLs to Bing's URL Submission API, alongside IndexNow. Check key is on the Discovery page → IndexNow.",
+		guides: ["bing"],
 	},
 	robotsRadarToken: {
 		intro: "Optional. Keeps the crawler list current from Cloudflare Radar each week. Or set the RADAR_API_TOKEN Worker secret.",
