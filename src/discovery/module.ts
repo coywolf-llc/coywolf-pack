@@ -11,13 +11,13 @@ import { z } from "zod";
 import { siteName } from "../core/site.js";
 import { cachedCtxFeatures, ctxFeatures, invalidateFeatures, isOn, readSiteSetting, registerSiteSetting, requireFeature } from "../core/features.js";
 import type { TaskDef } from "../core/module.js";
-import { parseInput, workerEnv } from "../shared.js";
+import { afterResponse, parseInput, workerEnv } from "../shared.js";
 import { LLMS_CACHE, NEWS_CACHE, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
-import { type CrawlerHintsZone, readCrawlerHints } from "./crawler-hints.js";
+import { type CrawlerHintsZone, crawlerHintsDashboardUrl, readCrawlerHints } from "./crawler-hints.js";
 import { buildFeed } from "./feed-build.js";
 import { FEED_PATH, FEED_TAG } from "./feed.js";
 import { purgePageCache } from "../pageCache/lib.js";
-import { cloudflareReadToken } from "../pageCache/usage.js";
+import { readCloudflareToken } from "../pageCache/usage.js";
 import { markdownUrl } from "./markdown.js";
 import { RETIRED_SETTINGS, SETTINGS_KEY, type DiscoverySettings, loadSettings, selected, settingsSchema } from "./settings.js";
 import { siteOrigin } from "./urls.js";
@@ -46,11 +46,13 @@ const RETIRED_MARKER = "state:discovery:indexnowRetired";
 /** KV state of IndexNow and Bing submission: the log, Bing's quota and queue, and each entry's last submitted URL. */
 const RETIRED_KV = ["state:discovery:indexnowLog", "state:discovery:bingQuota", "state:discovery:bingPending"];
 const RETIRED_URL_PREFIX = "state:discovery:url:";
+const RETIRED_DELETE_BATCH = 25;
 
 /**
  * Delete what IndexNow and Bing submission left behind: the IndexNow key, the encrypted Bing Webmaster
  * API key, the submission log, Bing's quota and queue, the remembered entry URLs, and the daily task.
- * Runs once per site (a KV marker), from the retired task, Discovery's admin page and plugin:activate.
+ * Runs once per site (a KV marker), from the retired task, Discovery's admin page (after its response)
+ * and plugin:activate.
  * Never throws: a step that fails is logged and the rest still runs; the marker is set only when every
  * step worked, so a failed step is tried again next time.
  */
@@ -71,8 +73,10 @@ export async function retireIndexNow(ctx: PluginContext): Promise<void> {
 	};
 	for (const key of RETIRED_SETTINGS) await step(`setting ${key}`, () => ctx.settings.delete(key));
 	for (const key of RETIRED_KV) await step(`state ${key}`, () => ctx.kv.delete(key));
+	// One row per entry submitted while IndexNow was on: deleted RETIRED_DELETE_BATCH at a time.
 	await step("entry URLs", async () => {
-		for (const row of await ctx.kv.list(RETIRED_URL_PREFIX)) await ctx.kv.delete(row.key);
+		const keys = (await ctx.kv.list(RETIRED_URL_PREFIX)).map((row) => row.key);
+		for (let i = 0; i < keys.length; i += RETIRED_DELETE_BATCH) await Promise.all(keys.slice(i, i + RETIRED_DELETE_BATCH).map((key) => ctx.kv.delete(key)));
 	});
 	// Without cron access here (a route's context may have none), the task cancels itself when it next fires.
 	const cron = ctx.cron;
@@ -91,12 +95,33 @@ const ZONE_KEY = "state:discovery:crawlerHintsZone";
 async function crawlerHintsStatus(ctx: PluginContext) {
 	const host = new URL(siteOrigin(ctx)).host;
 	const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
-	const token = await cloudflareReadToken(ctx, env);
-	const known = await ctx.kv.get<{ host: string; zone: CrawlerHintsZone }>(ZONE_KEY).catch(() => null);
+	const { token, unreadable } = await readCloudflareToken(ctx, env);
+	if (!token && unreadable) {
+		return {
+			enabled: null,
+			host,
+			zone: null,
+			dashboardUrl: crawlerHintsDashboardUrl(null),
+			problem: {
+				kind: "bad-token" as const,
+				message:
+					"The saved Cloudflare usage token can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed. Save the token again (Cloudflare usage on the plugin's Settings page), or set the USAGE_API_TOKEN Worker secret.",
+			},
+			checkedAt: new Date().toISOString(),
+		};
+	}
+	const stored = await ctx.kv.get<{ host: string; zone: CrawlerHintsZone }>(ZONE_KEY).catch(() => null);
+	const known = stored?.host === host ? stored.zone : null;
 	const doFetch = (ctx.http ? ctx.http.fetch.bind(ctx.http) : fetch) as (url: string, init?: RequestInit) => Promise<Response>;
-	const status = await readCrawlerHints(host, { token, fetch: doFetch, knownZone: known?.host === host ? known.zone : null });
+	let status = await readCrawlerHints(host, { token, fetch: doFetch, knownZone: known });
+	// The remembered zone stopped working (the zone was deleted and added again, or moved to another account):
+	// forget it and look the zone up again, once.
+	if (known && status.enabled === null && status.problem?.kind !== "bad-token") {
+		await ctx.kv.delete(ZONE_KEY).catch(() => undefined);
+		status = await readCrawlerHints(host, { token, fetch: doFetch, knownZone: null });
+	}
 	// Keep the zone only when its setting could be read with it (a zone the token can't use is looked up again).
-	if (status.zone && status.enabled !== null && !(known?.host === host && known.zone.id === status.zone.id)) {
+	if (status.zone && status.enabled !== null && !(known && known.id === status.zone.id)) {
 		await ctx.kv.set(ZONE_KEY, { host, zone: status.zone }).catch(() => undefined);
 	}
 	return status;
@@ -217,8 +242,9 @@ export function discoveryModule(options: DiscoveryOptions) {
 		"discovery/status": {
 			permission: "plugins:manage" as const,
 			handler: async (ctx: PluginContext) => {
-				// IndexNow and Bing submission's leftovers, the first time Discovery is opened after the update.
-				await retireIndexNow(ctx);
+				// IndexNow and Bing submission's leftovers, the first time Discovery is opened after the update. After the
+				// response: a site may have a row per entry to delete, and the page shouldn't wait for them.
+				afterResponse(retireIndexNow(ctx));
 				const features = await ctxFeatures(ctx);
 				const settings = await loadSettings(ctx);
 				const collections = ((await ctx.schema?.listCollections()) ?? [])

@@ -151,10 +151,21 @@ test("Cloudflare unreachable or stalled: an error on the card, never a hang, nev
 	DEADLINES.cloudflareReadMs = 20;
 	try {
 		const started = Date.now();
-		const stalled = await readCrawlerHints("coywolf.com", { token: TOKEN, fetch: () => new Promise(() => {}) });
+		let signal;
+		const stalled = await readCrawlerHints("coywolf.com", {
+			token: TOKEN,
+			fetch: (_url, init) => {
+				signal = init.signal;
+				return new Promise(() => {});
+			},
+		});
 		assert.equal(stalled.problem.kind, "error");
 		assert.match(stalled.problem.message, /took longer than 20 ms/);
 		assert.ok(Date.now() - started < 1000);
+		assert.equal(signal.aborted, true, "the stalled call is aborted");
+		// A body that never finishes counts too.
+		const slowBody = await readCrawlerHints("coywolf.com", { token: TOKEN, fetch: async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) }) });
+		assert.match(slowBody.problem.message, /took longer than 20 ms/);
 	} finally {
 		DEADLINES.cloudflareReadMs = before;
 	}
@@ -162,7 +173,7 @@ test("Cloudflare unreachable or stalled: an error on the card, never a hang, nev
 
 // ── The module: route, pack, cleanup ─────────────────────────────
 
-function fakeCtx({ features = { discovery: true }, settings: initial = {}, kv: initialKv = {}, fetch, failDelete } = {}) {
+function fakeCtx({ features = { discovery: true }, settings: initial = {}, kv: initialKv = {}, fetch, failDelete, unreadable } = {}) {
 	const settings = new Map([["features", features], ...Object.entries(initial)]);
 	const kv = new Map(Object.entries(initialKv));
 	const cancelled = [];
@@ -171,7 +182,10 @@ function fakeCtx({ features = { discovery: true }, settings: initial = {}, kv: i
 	return {
 		site: { url: "https://coywolf.com/", name: "Coywolf" },
 		settings: {
-			get: async (k) => settings.get(k) ?? null,
+			get: async (k) => {
+				if (unreadable === k) throw Object.assign(new Error("Plugin secret setting was encrypted with an unavailable key"), { name: "PluginSettingEncryptionError" });
+				return settings.get(k) ?? null;
+			},
 			set: async (k, v) => void settings.set(k, v),
 			delete: async (k) => {
 				if (failDelete === k) throw new Error("D1 busy");
@@ -225,6 +239,28 @@ test("the route reads Crawler Hints with the Performance page's token, and remem
 	assert.deepEqual(cf.calls.slice(2).map((c) => c.url), [`${API}/zones/zone-c/flags`]);
 });
 
+test("a remembered zone that stopped working is looked up again, once, and replaced", async () => {
+	// The zone was deleted and added again in Cloudflare: a new id for the same name.
+	const cf = cloudflare({ zones: { "coywolf.com": "zone-new" }, onFlags: (id) => (id === "zone-new" ? ok({ cache: { crawlhints_enabled: true } }) : fail(404, 7003, "Could not route to /zones/zone-old/flags")) });
+	const ctx = fakeCtx({ settings: { usageApiToken: TOKEN }, fetch: cf.fetch, kv: { "state:discovery:crawlerHintsZone": { host: "coywolf.com", zone: { id: "zone-old", name: "coywolf.com", accountId: ACCOUNT } } } });
+	const status = await pack.routes["discovery/crawler-hints"].handler(ctx);
+	assert.equal(status.enabled, true);
+	assert.deepEqual(cf.calls.map((c) => c.url), [`${API}/zones/zone-old/flags`, `${API}/zones?name=coywolf.com&per_page=5`, `${API}/zones/zone-new/flags`]);
+	assert.equal(ctx.kvMap.get("state:discovery:crawlerHintsZone").zone.id, "zone-new");
+	// A token Cloudflare rejects isn't a stale zone: no second lookup.
+	const revoked = cloudflare({ onFlags: () => fail(403, 9109, "Invalid access token") });
+	const r = fakeCtx({ settings: { usageApiToken: TOKEN }, fetch: revoked.fetch, kv: { "state:discovery:crawlerHintsZone": { host: "coywolf.com", zone: { id: "zone-c", name: "coywolf.com", accountId: ACCOUNT } } } });
+	assert.equal((await pack.routes["discovery/crawler-hints"].handler(r)).problem.kind, "bad-token");
+	assert.equal(revoked.calls.length, 1);
+});
+
+test("a saved token that can't be decrypted says so, instead of asking for a token", async () => {
+	const ctx = fakeCtx({ unreadable: "usageApiToken", fetch: async () => assert.fail("nothing is fetched") });
+	const status = await pack.routes["discovery/crawler-hints"].handler(ctx);
+	assert.equal(status.problem.kind, "bad-token");
+	assert.match(status.problem.message, /can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed/);
+});
+
 test("the route without a token, and with Discovery off", async () => {
 	const ctx = fakeCtx({ fetch: async () => assert.fail("nothing is fetched") });
 	const status = await pack.routes["discovery/crawler-hints"].handler(ctx);
@@ -259,6 +295,24 @@ test("the cleanup deletes IndexNow and Bing's settings, state and task once, and
 	assert.deepEqual(ctx.cancelled, [RETIRED_BING_TASK]);
 });
 
+test("many remembered entry URLs are all deleted, in batches", async () => {
+	const kv = Object.fromEntries(Array.from({ length: 130 }, (_, i) => [`state:discovery:url:posts:${i}`, `https://coywolf.com/p/${i}/`]));
+	const ctx = fakeCtx({ kv: { ...kv, "cache:discovery:llms": { count: 1 } } });
+	let inFlight = 0;
+	let peak = 0;
+	const del = ctx.kv.delete;
+	ctx.kv.delete = async (k) => {
+		inFlight++;
+		peak = Math.max(peak, inFlight);
+		await new Promise((r) => setTimeout(r, 1));
+		inFlight--;
+		return del(k);
+	};
+	await retireIndexNow(ctx);
+	assert.deepEqual([...ctx.kvMap.keys()].sort(), ["cache:discovery:llms", "state:discovery:indexnowRetired"]);
+	assert.ok(peak > 1 && peak <= 25, `deleted up to 25 at a time (${peak})`);
+});
+
 test("a cleanup step that fails is logged, the rest still runs, and it's tried again next time", async () => {
 	const ctx = fakeCtx({ ...leftovers(), failDelete: "discoveryBingApiKey" });
 	await retireIndexNow(ctx);
@@ -290,9 +344,18 @@ test("the old daily task runs the cleanup when it fires, whatever the switches s
 	await hooks.cron.handler({ name: RETIRED_BING_TASK }, earlier);
 	assert.deepEqual(earlier.cancelled, [RETIRED_BING_TASK]);
 
+	// Opening Discovery: the page answers first, and the cleanup runs after the response.
 	const opened = fakeCtx(leftovers());
+	let release;
+	const held = new Promise((resolve) => (release = resolve));
+	const slowList = opened.kv.list;
+	opened.kv.list = async (prefix) => (await held, slowList(prefix));
 	const status = await pack.routes["discovery/status"].handler(opened);
+	assert.equal(opened.kvMap.has("state:discovery:url:posts:1"), true, "the page didn't wait for the cleanup");
+	release();
+	for (let i = 0; i < 50 && !opened.kvMap.get("state:discovery:indexnowRetired"); i++) await new Promise((r) => setTimeout(r, 2));
 	assert.equal(opened.settingsMap.has("discoveryBingApiKey"), false);
+	assert.equal(opened.kvMap.has("state:discovery:url:posts:1"), false);
 	assert.deepEqual(Object.keys(status).sort(), ["cache", "collections", "features", "settings", "urls"]);
 	assert.equal(status.settings.indexnow, undefined, "the old settings part is dropped");
 	assert.deepEqual(status.features, { news: false, llms: false, feed: false });

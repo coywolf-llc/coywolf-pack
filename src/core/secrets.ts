@@ -8,9 +8,13 @@
  * stays declared here whatever the feature switches or module options say,
  * and the keys never change (stored values must keep working). A secret is
  * removed only with its feature, and only once nothing reads it: its stored
- * value is deleted (as discoveryBingApiKey is by retireIndexNow), and no code
- * lists all of the plugin's settings (EmDash's Settings page reads only the
- * declared keys).
+ * value is deleted (as discoveryBingApiKey is by retireIndexNow), and no
+ * schema-checked read covers its key until then. ctx.settings.get/list decode
+ * against this schema and throw on an undeclared encrypted value; the pack
+ * lists settings only under prefixes that don't cover a removed key
+ * (settings.list("schema")). EmDash's Settings page reads only the declared
+ * keys, and its getPluginSettings decrypts any stored envelope without the
+ * schema, so neither throws.
  *
  * Every other setting is plain JSON, edited on its module's own admin page
  * (ctx.settings.get/set work for keys that aren't in the schema).

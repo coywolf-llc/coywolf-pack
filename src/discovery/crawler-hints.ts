@@ -78,9 +78,25 @@ class CloudflareApiError extends Error {
 
 /** One Cloudflare API call with its own deadline; the token never appears in an error. */
 async function api<T>(doFetch: Fetch, token: string, path: string): Promise<T> {
-	const response = await withDeadline(doFetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` } }), DEADLINES.cloudflareReadMs, "Cloudflare's API");
 	type ApiError = { code?: number; message?: string; error_chain?: ApiError[] | null };
-	const body = (await response.json().catch(() => ({}))) as { success?: boolean; result?: T; errors?: ApiError[] | null };
+	type Body = { success?: boolean; result?: T; errors?: ApiError[] | null };
+	// The deadline covers the answer's body too, and a call past it is aborted.
+	const controller = new AbortController();
+	let response: Response;
+	let body: Body;
+	try {
+		({ response, body } = await withDeadline(
+			(async () => {
+				const r = await doFetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
+				return { response: r, body: (await r.json().catch(() => ({}))) as Body };
+			})(),
+			DEADLINES.cloudflareReadMs,
+			"Cloudflare's API",
+		));
+	} catch (error) {
+		controller.abort();
+		throw error;
+	}
 	if (!response.ok || body.success === false) {
 		const errors = Array.isArray(body.errors) ? body.errors : [];
 		// The most specific reason is at the end of an error's chain (6003 "Invalid request headers" → 6111 "Invalid format for Authorization header").

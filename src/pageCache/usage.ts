@@ -79,8 +79,19 @@ async function api<T>(doFetch: Fetch, token: string, path: string, init: Request
  * Worker secret. Also used by Discovery to read Crawler Hints (with Zone → Zone → Read added to it).
  */
 export async function cloudflareReadToken(ctx: Pick<PluginContext, "settings">, env: Record<string, unknown>): Promise<string | null> {
-	const saved = await ctx.settings.get<string>(USAGE_TOKEN_SETTING).catch(() => null);
-	return (typeof saved === "string" && saved.trim()) || secret(env, "USAGE_API_TOKEN") || null;
+	return (await readCloudflareToken(ctx, env)).token;
+}
+
+/** The same, and whether a saved token couldn't be read (decrypted: EMDASH_ENCRYPTION_KEY missing or changed). */
+export async function readCloudflareToken(ctx: Pick<PluginContext, "settings">, env: Record<string, unknown>): Promise<{ token: string | null; unreadable: boolean }> {
+	let saved: unknown = null;
+	let unreadable = false;
+	try {
+		saved = await ctx.settings.get<string>(USAGE_TOKEN_SETTING);
+	} catch {
+		unreadable = true;
+	}
+	return { token: (typeof saved === "string" && saved.trim()) || secret(env, "USAGE_API_TOKEN") || null, unreadable };
 }
 
 async function access(ctx: PluginContext, env: Record<string, unknown>): Promise<{ token: string; accountId: string | null; doFetch: Fetch } | { reason: string }> {
