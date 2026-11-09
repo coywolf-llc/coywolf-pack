@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import { parseInput, workerEnv } from "../shared.js";
 import { invalidateRedirectCache } from "./middleware.js";
+import { readOnlyRoute } from "../core/routes.js";
 import {
 	REDIRECT_TYPES,
 	RedirectValidationError,
@@ -107,7 +108,7 @@ export function redirectsModule(options: RedirectsOptions) {
 		}),
 
 		/** Which rule (if any) a URL would hit. */
-		"redirects/test": definePluginRoute({
+		"redirects/test": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -117,7 +118,7 @@ export function redirectsModule(options: RedirectsOptions) {
 				const found = match(compile(await listRules(await db())), parsed.pathname, parsed.search);
 				return found ? { matched: true, rule: found.rule, location: found.location } : { matched: false };
 			},
-		}),
+		})),
 	};
 
 	return { routes };

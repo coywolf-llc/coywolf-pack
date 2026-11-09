@@ -10,6 +10,7 @@ import { parseInput, workerEnv } from "../shared.js";
 import { BudgetExhausted, type Budget, checkUrl } from "./check.js";
 import { type IgnoreRule, IgnoreRuleError, type LinkStatus, nextCheckAt, normalizeIgnore } from "./classify.js";
 import { type LinkEdit, isAllowedTarget, transformEntry } from "./pt.js";
+import { readOnlyRoute } from "../core/routes.js";
 import {
 	IDLE_SCAN,
 	IGNORES_KEY,
@@ -438,7 +439,7 @@ export function linksModule() {
 	const guard = (ctx: PluginContext, feature = "links") => requireFeature(ctx, feature);
 
 	const routes = {
-		"links/list": definePluginRoute({
+		"links/list": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -454,7 +455,7 @@ export function linksModule() {
 					ignores: await getIgnores(ctx),
 				};
 			},
-		}),
+		})),
 
 		/** Link checking settings (the page's Settings dialog). */
 		"links/settings": {

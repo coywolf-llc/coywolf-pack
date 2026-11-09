@@ -268,20 +268,36 @@ test("scriptJson escapes like EmDash's safeJsonLdSerialize", () => {
 
 // ── The page hook ────────────────────────────────────────────────
 
-/** An in-memory plugin storage collection. */
+/** An in-memory plugin storage collection, with EmDash's versioned pair (getVersioned / compareAndSet) and a count of its writes. */
 function memoryStore(rows = {}) {
 	const data = new Map(Object.entries(rows));
+	const revisions = new Map();
+	let writes = 0;
+	const write = (id, value) => {
+		data.set(id, structuredClone(value));
+		revisions.set(id, String(++writes));
+	};
 	return {
 		data,
+		get writes() {
+			return writes;
+		},
 		get: async (id) => data.get(id) ?? null,
 		getMany: async (ids) => new Map(ids.filter((id) => data.has(id)).map((id) => [id, data.get(id)])),
-		put: async (id, value) => void data.set(id, structuredClone(value)),
+		put: async (id, value) => void write(id, value),
 		delete: async (id) => data.delete(id),
 		query: async () => ({ items: [...data].map(([id, value]) => ({ id, data: value })), hasMore: false }),
+		getVersioned: async (id) => (data.has(id) ? { value: data.get(id), revision: revisions.get(id) ?? "0" } : null),
+		compareAndSet: async (id, expected, value) => {
+			const current = data.has(id) ? (revisions.get(id) ?? "0") : null;
+			if (current !== expected) return { applied: false };
+			write(id, value);
+			return { applied: true, revision: revisions.get(id) };
+		},
 	};
 }
 
-function fakeCtx({ docs = {}, entries = {}, features = {}, site = {} } = {}) {
+function fakeCtx({ docs = {}, entries = {}, features = {}, site = {}, bylines = null, credits = {} } = {}) {
 	const storage = { schemaDocs: memoryStore(docs), schemaEntries: memoryStore(entries), schemaAuthors: memoryStore() };
 	const log = [];
 	return {
@@ -293,6 +309,18 @@ function fakeCtx({ docs = {}, entries = {}, features = {}, site = {} } = {}) {
 		content: {
 			get: async (collection, id) => (id === "e1" ? { id, slug: "my-post", data: { title: "My post" }, status: "published" } : null),
 		},
+		schema: {
+			getCollection: async (slug) => ({ slug, label: slug, routable: true, urlPattern: null, titleField: "title" }),
+			listCollections: async () => [{ slug: "posts", label: "Posts", routable: true, dateField: "publishedAt" }],
+		},
+		...(bylines
+			? {
+					bylines: {
+						get: async (id) => bylines.find((b) => b.id === id) ?? null,
+						getEntriesBylines: async (collection, ids) => ids.map((entryId) => ({ entryId, bylines: (credits[entryId] ?? []).map((id) => ({ byline: bylines.find((b) => b.id === id) })) })),
+					},
+				}
+			: {}),
 	};
 }
 
@@ -496,4 +524,191 @@ test("references to the pack's site-level ids point at the site root on any page
 	assert.deepEqual(off.isPartOf, { "@id": `${ORIGIN}/#website` });
 	// Other #names belong to the page.
 	assert.equal(off["@id"], `${ORIGIN}/pricing/#service`);
+});
+
+// ── Review fixes ─────────────────────────────────────────────────
+
+test("a __proto__ key can't give a node a @type (or set any prototype): it's an error, and the node has no @type", () => {
+	const parsed = custom.parseMarkup('{"__proto__":{"@type":"Service"},"name":"x"}');
+	assert.ok(parsed.errors.some((e) => e.includes("`__proto__` isn't a schema.org property")), parsed.errors.join(" | "));
+	assert.ok(parsed.errors.some((e) => e.includes("needs a @type")), parsed.errors.join(" | "));
+	assert.equal(parsed.nodes[0]["@type"], undefined);
+	assert.equal(Object.getPrototypeOf(parsed.nodes[0]), Object.prototype);
+	assert.ok(!Object.keys(parsed.nodes[0]).includes("__proto__"));
+	// Nested too, and the other prototype keys.
+	for (const key of ["__proto__", "constructor", "prototype"]) {
+		const nested = custom.checkMarkup(`{"@type":"Service","offers":{"${key}":{"@type":"Offer"},"price":"1"}}`);
+		assert.ok(nested.errors.some((e) => e.includes(`\`${key}\` isn't a schema.org property`)), key);
+	}
+	// Such markup never reaches a page: a rule that doesn't parse cleanly is skipped (also when the doc was written around the save route).
+	const compiled = custom.compilePathRules({ rules: [{ id: "r", label: "r", path: "/", enabled: true, markup: '{"__proto__":{"@type":"Service"},"name":"x"}' }] });
+	assert.equal(compiled.size, 0);
+	// A clean node copied for output keeps a plain prototype and nothing extra.
+	const out = custom.customOutput(rule(custom.parseMarkup('{"@type":"Service","name":"x","url":"/a/"}').nodes), { pageUrl: `${ORIGIN}/`, graph: null }).contribution.graph;
+	assert.equal(Object.getPrototypeOf(out), Object.prototype);
+	assert.deepEqual(Object.keys(out), ["@context", "@type", "name", "url"]);
+});
+
+test("root-relative URLs are the origin plus the path as written: a urlTemplate keeps its placeholders, paths aren't re-encoded", () => {
+	assert.equal(custom.resolveIri("/search/{q}/", `${ORIGIN}/pricing/`), `${ORIGIN}/search/{q}/`);
+	assert.equal(custom.resolveIri("/caf%C3%A9/", `${ORIGIN}/`), `${ORIGIN}/caf%C3%A9/`);
+	assert.equal(custom.resolveIri("#service", `${ORIGIN}/pricing/`), `${ORIGIN}/pricing/#service`);
+	assert.equal(custom.resolveIri("../up/", `${ORIGIN}/a/b/`), `${ORIGIN}/a/up/`);
+	assert.equal(custom.resolveIri("https://other.test/x/{y}", `${ORIGIN}/`), "https://other.test/x/{y}");
+	assert.equal(custom.resolveIri("//cdn.test/x", `${ORIGIN}/`), "https://cdn.test/x");
+	const nodes = custom.parseMarkup(
+		JSON.stringify({
+			"@type": "Service",
+			url: "/pricing/",
+			potentialAction: { "@type": "SearchAction", target: { "@type": "EntryPoint", urlTemplate: "/search/{search_term_string}/" }, "query-input": "required name=search_term_string" },
+		}),
+	).nodes;
+	const out = custom.customOutput(rule(nodes), { pageUrl: `${ORIGIN}/`, graph: null }).contribution.graph;
+	assert.equal(out.url, `${ORIGIN}/pricing/`);
+	assert.equal(out.potentialAction.target.urlTemplate, `${ORIGIN}/search/{search_term_string}/`);
+});
+
+test("templates start without rich-result warnings about their placeholder values (only the parts to fill in)", () => {
+	for (const key of Object.keys(MARKUP_TEMPLATES)) {
+		const check = custom.checkMarkup(templateText(key), { graph: true });
+		assert.deepEqual(check.errors, [], key);
+		const about = (text) => check.warnings.filter((w) => !w.note && w.message.includes(text));
+		assert.deepEqual(about("price"), [], `${key}: ${JSON.stringify(about("price"))}`);
+		assert.deepEqual(about("priceCurrency"), [], key);
+	}
+	const service = JSON.parse(templateText("Service"));
+	assert.deepEqual(
+		service.offers.map((o) => o.price),
+		["0", "9.99"],
+	);
+});
+
+const BYLINES = [
+	{ id: "b1", slug: "jon", displayName: "Jon Henshaw", bio: null, websiteUrl: null, avatarMediaId: null, locale: "en-US" },
+	{ id: "b2", slug: "amy", displayName: "Amy Author", bio: null, websiteUrl: null, avatarMediaId: null, locale: "en-US" },
+];
+const entryPage = { ...homePage, url: `${ORIGIN}/my-post/`, path: "/my-post/", canonical: `${ORIGIN}/my-post/`, kind: "content", pageType: "article", content: { collection: "posts", id: "e1", slug: "my-post" } };
+const SERVICE = '{"@type":"Service","@id":"#service","name":"Recollect"}';
+const people = (graph) => graph.filter((n) => n["@type"] === "Person").map((n) => n.name);
+
+test("a custom main entity replaces the override's main subject, whose Person leaves the graph unless it's referenced (the author, the publisher)", async () => {
+	const run = async (mainSubject, mainEntity = true) => {
+		invalidateSchemaConfig();
+		const ctx = fakeCtx({
+			docs: { site: RECOLLECT_ORG },
+			entries: { "posts:e1": { collection: "posts", entryId: "e1", mainSubject, custom: { markup: SERVICE, enabled: true, mainEntity } } },
+			bylines: BYLINES,
+			credits: { e1: ["b1"] },
+		});
+		const out = await schemaContributions(ctx, entryPage, {}, GRAPH);
+		assert.deepEqual(ctx.logged, []);
+		const graph = out.find((c) => c.id === "primary").graph["@graph"];
+		return { graph, webpage: graph.find((n) => n["@id"] === `${ORIGIN}/my-post/#webpage`), article: graph.find((n) => n["@id"] === `${ORIGIN}/my-post/#article`) };
+	};
+	// The subject isn't the author: the rule's node is the main entity and the subject's Person is gone.
+	let r = await run("byline:b2");
+	assert.deepEqual(r.webpage.mainEntity, { "@id": `${ORIGIN}/my-post/#service` });
+	assert.deepEqual(people(r.graph), ["Jon Henshaw"]);
+	assert.ok(!JSON.stringify(r.graph).includes("#person-amy"));
+	// The subject is also the author: kept, as the author.
+	r = await run("byline:b1");
+	assert.deepEqual(r.webpage.mainEntity, { "@id": `${ORIGIN}/my-post/#service` });
+	assert.deepEqual(people(r.graph), ["Jon Henshaw"]);
+	assert.equal(r.article.author["@id"], r.graph.find((n) => n["@type"] === "Person")["@id"]);
+	// The subject is the publisher: the Organization stays (the WebSite points at it).
+	r = await run("publisher");
+	assert.deepEqual(r.webpage.mainEntity, { "@id": `${ORIGIN}/my-post/#service` });
+	assert.ok(r.graph.some((n) => n["@id"] === `${ORIGIN}/#organization`));
+	// Without Main entity on the rule, the override's subject is the main entity as before.
+	r = await run("byline:b2", false);
+	assert.deepEqual(r.webpage.mainEntity, { "@id": `${ORIGIN}/#person-amy` });
+	assert.deepEqual(people(r.graph).sort(), ["Amy Author", "Jon Henshaw"]);
+});
+
+test("path-rule saves are conditional writes: a save that raced another is retried on the other's result, and neither rule is lost", async () => {
+	invalidateSchemaConfig();
+	const ctx = fakeCtx({ features: ON, docs: { site: RECOLLECT_ORG } });
+	const store = ctx.storage.schemaDocs;
+	const first = await call("schema/custom/save", ctx, { rule: { id: "one", path: "/one/", markup: '{"@type":"Service","name":"One"}' } });
+	assert.deepEqual(first.rules.map((r) => r.id), ["one"]);
+	// Another admin saves between this save's read and its write.
+	const compareAndSet = store.compareAndSet;
+	let raced = 0;
+	store.compareAndSet = async (id, expected, value) => {
+		if (raced++ === 0) {
+			await store.put(id, { rules: [...store.data.get(id).rules, { id: "theirs", label: "Theirs", path: "/theirs/", enabled: true, mainEntity: false, markup: '{"@type":"Service","name":"Theirs"}' }] });
+			return { applied: false };
+		}
+		return compareAndSet(id, expected, value);
+	};
+	const second = await call("schema/custom/save", ctx, { rule: { id: "two", path: "/two/", markup: '{"@type":"Service","name":"Two"}' } });
+	assert.equal(raced, 2);
+	assert.deepEqual(second.rules.map((r) => r.id), ["one", "theirs", "two"]);
+	assert.deepEqual(store.data.get("custom").rules.map((r) => r.id), ["one", "theirs", "two"]);
+	// A delete is written the same way; deleting what isn't there writes nothing.
+	const writes = store.writes;
+	const deleted = await call("schema/custom/delete", ctx, { id: "theirs" });
+	assert.deepEqual(deleted, { deleted: true, rules: store.data.get("custom").rules });
+	assert.deepEqual(deleted.rules.map((r) => r.id), ["one", "two"]);
+	assert.equal(store.writes, writes + 1);
+	assert.deepEqual((await call("schema/custom/delete", ctx, { id: "nope" })).deleted, false);
+	assert.equal(store.writes, writes + 1);
+	// A write that keeps losing gives up with a conflict error (409), not a silent overwrite.
+	store.compareAndSet = async () => ({ applied: false });
+	await assert.rejects(call("schema/custom/save", ctx, { rule: { id: "three", path: "/three/", markup: '{"@type":"Service"}' } }), /saved by someone else/);
+	assert.deepEqual(store.data.get("custom").rules.map((r) => r.id), ["one", "two"]);
+	// A store without the versioned pair (an older EmDash) is written with put.
+	invalidateSchemaConfig();
+	const plain = fakeCtx({ features: ON });
+	delete plain.storage.schemaDocs.getVersioned;
+	delete plain.storage.schemaDocs.compareAndSet;
+	const saved = await call("schema/custom/save", plain, { rule: { id: "p", path: "/", markup: '{"@type":"Service"}' } });
+	assert.deepEqual(saved.rules.map((r) => r.id), ["p"]);
+});
+
+test("the override editor gets the entry's page URL with its credited bylines, so relative @ids resolve as on the page", async () => {
+	const ctx = fakeCtx({ features: ON, bylines: BYLINES, credits: { e1: ["b1"] } });
+	assert.deepEqual(await call("schema/entries/bylines", ctx, { collection: "posts", entryId: "e1" }), { ids: ["b1"], url: `${ORIGIN}/posts/my-post` });
+	assert.deepEqual(await call("schema/entries/bylines", ctx, { collection: "posts", entryId: "missing" }), { ids: [], url: null });
+	// No bylines service: still the URL.
+	assert.deepEqual(await call("schema/entries/bylines", fakeCtx({ features: ON }), { collection: "posts", entryId: "e1" }), { ids: [], url: `${ORIGIN}/posts/my-post` });
+});
+
+test("preview: the home page and other paths show the path rule; a path says whether it was an entry's page (matched live through EmDash's routing)", async () => {
+	invalidateSchemaConfig();
+	const docs = {
+		site: RECOLLECT_ORG,
+		custom: {
+			rules: [
+				{ id: "home", label: "Home", path: "/", enabled: true, mainEntity: true, markup: WEB_APPLICATION },
+				{ id: "post-path", label: "Post path", path: "/posts/my-post", enabled: true, markup: '{"@type":"Service","name":"From the path"}' },
+			],
+		},
+	};
+	const entries = { "posts:e1": { collection: "posts", entryId: "e1", custom: { markup: '{"@type":"Service","name":"From the entry"}', enabled: true, mainEntity: true } } };
+	const ctx = fakeCtx({ features: ON, docs, entries });
+	const home = await call("schema/preview", ctx, { target: "home" });
+	assert.equal(home.entry, null);
+	assert.equal(home.custom.id, "coywolf-custom:home");
+	const asPath = await call("schema/preview", ctx, { target: "path", path: "/" });
+	assert.equal(asPath.entry, null);
+	assert.equal(asPath.custom.id, "coywolf-custom:home");
+	// Whether a path is an entry's page is decided by EmDash's routing (matchEntryPath), which needs the EmDash runtime: outside it
+	// (here), no path matches, so the path rule shows. On a site, /posts/my-post previews entry e1's page, its markup and `entry: { collection, id }`.
+	const post = await call("schema/preview", ctx, { target: "path", path: "/posts/my-post" });
+	assert.equal(post.entry, null);
+	assert.equal(post.custom.id, "coywolf-custom:post-path");
+	// An entry previewed as itself: its own markup wins, and the entry is named.
+	const asEntry = await call("schema/preview", ctx, { target: "entry", collection: "posts", entryId: "e1" });
+	assert.equal(asEntry.entry, null);
+	assert.equal(asEntry.page.url, `${ORIGIN}/posts/my-post`);
+	assert.equal(asEntry.custom.id, "coywolf-custom:entry:posts:e1");
+	assert.deepEqual(
+		asEntry.contributions.filter((c) => String(c.id).startsWith("coywolf-custom:")).map((c) => c.graph.name),
+		["From the entry"],
+	);
+	// A path that's no entry's and has no rule: nothing custom.
+	const other = await call("schema/preview", ctx, { target: "path", path: "/pricing/" });
+	assert.equal(other.entry, null);
+	assert.equal(other.custom, null);
 });

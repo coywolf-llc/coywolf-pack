@@ -2,6 +2,10 @@
 // Run: node --test src/pageCache/lib.test.mjs   (Node 22.6+ strips the types from lib.ts)
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+
+const require = createRequire(import.meta.url);
 
 const { purgesAfter, watchInvalidation } = await import("./lib.ts");
 const api = "/_emdash/api/plugins/coywolf-pack/";
@@ -237,4 +241,77 @@ test("no failed read: a cacheable page keeps its lifetime, and an uncached route
 	const untouched = html();
 	assert.equal(await settlePage(undefined, untouched, { failed: () => assert.fail("asked") }), untouched, "no route cache (dev)");
 	assert.equal(await settlePage({ enabled: false, set: () => assert.fail("set") }, untouched, { failed: () => assert.fail("asked") }), untouched);
+});
+
+const { registerReadOnlyRoutes, isReadOnlyRoutePath, purgeScope } = await import("./lib.ts");
+const { readOnlyRoute, isReadOnlyRoute, readOnlyRouteNames } = await import("../core/routes.ts");
+
+/** Every route declared read-only where it's defined (`"name": readOnlyRoute(definePluginRoute({`). Adding one is a deliberate change: list it here. */
+const READ_ONLY_ROUTES = [
+	"ai/entries",
+	"ai/media",
+	"ai/test",
+	"backups/download-link",
+	"codeBlocks/preview",
+	"files/options",
+	"images/check",
+	"images/setup/plan",
+	"links/list",
+	"redirects/test",
+	"schema/entries/bylines",
+	"schema/entries/find",
+	"schema/media",
+	"schema/preview",
+	"videos/captions/list",
+	"videos/detail",
+	"videos/list",
+	"videos/options",
+	"videos/storage",
+	"videos/test",
+	"wpImport/urls",
+];
+
+function sourceRoutes(marker) {
+	const { readFileSync, readdirSync, statSync } = require("node:fs");
+	const { join } = require("node:path");
+	const files = (dir) => readdirSync(dir).flatMap((f) => (statSync(join(dir, f)).isDirectory() ? files(join(dir, f)) : f.endsWith(".ts") && !f.endsWith(".test.ts") ? [join(dir, f)] : []));
+	const names = [];
+	for (const file of files("src")) for (const m of readFileSync(file, "utf8").matchAll(marker)) names.push(m[1]);
+	return names.sort();
+}
+
+test("the read-only routes are exactly the ones declared with readOnlyRoute, and createPlugin registers them", () => {
+	assert.deepEqual(sourceRoutes(/"([a-z][\w/-]*)":\s*readOnlyRoute\(/g), READ_ONLY_ROUTES);
+	// Every other POST route is a write (or public): none of them is in the list by accident.
+	const writes = ["schema/custom/save", "schema/custom/delete", "schema/entries/save", "schema/entries/delete", "schema/site/save", "features/save", "videos/update", "wpImport/scan", "links/scan", "ai/run", "images/setup/apply"];
+	for (const route of writes) assert.ok(!READ_ONLY_ROUTES.includes(route), route);
+	const index = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+	assert.ok(index.includes("registerReadOnlyRoutes(readOnlyRouteNames(routes))"), "createPlugin registers the marked routes with the page cache");
+});
+
+test("a POST to a read-only route purges nothing and records no settings change; a real save still purges everything", () => {
+	// The marker is a WeakSet membership: the route object is unchanged (EmDash sees a plain route definition).
+	const route = { permission: "plugins:manage", methods: ["POST"], handler: async () => ({}) };
+	const before = JSON.stringify(route);
+	assert.equal(readOnlyRoute(route), route);
+	assert.equal(JSON.stringify(route), before);
+	assert.equal(isReadOnlyRoute(route), true);
+	assert.equal(isReadOnlyRoute({ ...route }), false);
+	assert.deepEqual(readOnlyRouteNames({ "x/read": route, "x/save": { ...route } }), ["x/read"]);
+	// Until registered, a route is a write: the safe default.
+	assert.equal(purgesAfter("POST", api + "schema/preview"), true);
+	registerReadOnlyRoutes(READ_ONLY_ROUTES);
+	for (const name of READ_ONLY_ROUTES) {
+		assert.equal(isReadOnlyRoutePath(api + name), true, name);
+		assert.equal(purgesAfter("POST", api + name), false, name);
+	}
+	// purgesAfter false means the middleware runs none of: purge, invalidateFeatures, recordSettingsChange, startWarming (src/middleware.ts).
+	assert.equal(isReadOnlyRoutePath("/_emdash/api/plugins/other-plugin/schema/preview"), false);
+	for (const route of ["schema/custom/save", "schema/custom/delete", "schema/entries/save", "schema/site/save", "features/save", "videos/update"]) {
+		assert.equal(purgesAfter("POST", api + route), true, route);
+		assert.deepEqual(purgeScope(api + route), { purgeEverything: true }, route);
+	}
+	// (Un)subscribing the Stream webhook still changes no page but does record a settings change.
+	assert.equal(purgesAfter("POST", api + "videos/webhook/subscribe"), true);
+	assert.equal(purgeScope(api + "videos/webhook/subscribe"), null);
 });

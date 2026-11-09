@@ -17,7 +17,7 @@ import type { PageMetadataContribution, PluginContext, PublicPageContext } from 
 import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
-import { absoluteUrl, entryUrl, trailingPolicy } from "../core/content-url.js";
+import { absoluteUrl, entryUrl, matchEntryPath, trailingPolicy } from "../core/content-url.js";
 import {
 	type FeatureMap,
 	cachedCtxFeatures,
@@ -88,6 +88,7 @@ import {
 	pathRuleConflicts,
 } from "./custom.js";
 import { lintNodes } from "./custom-lint.js";
+import { readOnlyRoute } from "../core/routes.js";
 
 export interface SchemaOptions {
 	/** D1 binding of the site database (for media dimension lookups). Default "DB". */
@@ -635,7 +636,13 @@ async function customContributions(
 		if (!output) return [];
 		if (output.mainEntityId && pack.graph) {
 			const webpage = pack.graph.find((n) => n["@id"] === `${url}#webpage`);
-			if (webpage) webpage.mainEntity = { "@id": output.mainEntityId };
+			if (webpage) {
+				// The rule's node replaces an override's main subject: the subject's node leaves the graph too,
+				// unless something else there still points at it (the article's author, the publisher).
+				const subject = (webpage.mainEntity as Node | undefined)?.["@id"];
+				webpage.mainEntity = { "@id": output.mainEntityId };
+				if (typeof subject === "string" && subject !== output.mainEntityId) dropUnreferenced(pack.graph, subject);
+			}
 		}
 		if (pack.cleanImages && imageCdn()) rewriteMediaUrls(output.contribution.graph);
 		return [output.contribution];
@@ -643,6 +650,21 @@ async function customContributions(
 		ctx.log.warn("schema: could not add custom markup", { error: String(error) });
 		return [];
 	}
+}
+
+/** Take the node with this @id out of the graph when no other node references it. */
+function dropUnreferenced(graph: Node[], id: string): void {
+	const at = graph.findIndex((n) => n["@id"] === id);
+	if (at === -1) return;
+	const references = (value: unknown, depth: number): boolean => {
+		if (depth > 24 || !value || typeof value !== "object") return false;
+		if (Array.isArray(value)) return value.some((v) => references(v, depth + 1));
+		const node = value as Node;
+		if (node["@id"] === id) return true;
+		return Object.values(node).some((v) => references(v, depth + 1));
+	};
+	if (graph.some((n, i) => i !== at && references(n, 0))) return;
+	graph.splice(at, 1);
 }
 
 /**
@@ -888,9 +910,39 @@ async function checkedMarkup(ctx: PluginContext, options: SchemaOptions, markup:
 	return { text, warnings: check.warnings };
 }
 
-async function savedPathRules(ctx: PluginContext): Promise<PathRule[]> {
-	const doc = (await docs(ctx).get(CUSTOM_DOC_ID)) as CustomDoc | null;
-	return Array.isArray(doc?.rules) ? doc.rules : [];
+/** The storage calls a path-rule write uses (EmDash 1.2+ has the versioned pair; a store without it is written with put). */
+interface RulesStore {
+	get(id: string): Promise<unknown>;
+	put(id: string, data: unknown): Promise<void>;
+	getVersioned?(id: string): Promise<{ value: unknown; revision: string } | null>;
+	compareAndSet?(id: string, expectedRevision: string | null, data: unknown): Promise<{ applied: boolean }>;
+}
+
+const rulesOf = (doc: unknown): PathRule[] => (Array.isArray((doc as CustomDoc | null)?.rules) ? (doc as CustomDoc).rules : []);
+const WRITE_ATTEMPTS = 4;
+
+/**
+ * Change the saved path rules: `change` gets the rules as stored and returns
+ * the new list (or null to keep them). Two admins saving at the same time
+ * can't lose each other's rule: the doc is written only if it's still the
+ * version that was read (compareAndSet), else it's read and changed again.
+ */
+async function writePathRules(ctx: PluginContext, change: (rules: PathRule[]) => PathRule[] | null): Promise<PathRule[]> {
+	const store = docs(ctx) as RulesStore;
+	const versioned = typeof store.getVersioned === "function" && typeof store.compareAndSet === "function";
+	for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
+		const current = versioned ? await store.getVersioned!(CUSTOM_DOC_ID) : { value: await store.get(CUSTOM_DOC_ID), revision: null };
+		const rules = rulesOf(current?.value);
+		const next = change(rules);
+		if (!next) return rules;
+		const doc = { rules: next, updatedAt: new Date().toISOString() } satisfies CustomDoc;
+		if (!versioned) {
+			await store.put(CUSTOM_DOC_ID, doc);
+			return next;
+		}
+		if ((await store.compareAndSet!(CUSTOM_DOC_ID, current?.revision ?? null, doc)).applied) return next;
+	}
+	throw PluginRouteError.conflict("The custom markup was saved by someone else at the same time. Reload the page and try again.");
 }
 
 function newRuleId(rules: PathRule[]): string {
@@ -1078,22 +1130,30 @@ export function schemaModule(options: SchemaOptions) {
 			},
 		},
 
-		/** An entry's credited byline ids, so the main-subject picker can list them first. */
-		"schema/entries/bylines": definePluginRoute({
+		/**
+		 * What the override editor needs about an entry: its credited byline ids
+		 * (the main-subject picker lists them first) and its page URL (relative
+		 * @ids in its custom markup resolve against it, as they will on the page).
+		 */
+		"schema/entries/bylines": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
 			handler: async (ctx) => {
 				await requireFeature(ctx, MAIN);
 				const { collection, entryId } = parseInput(z.object({ collection: z.string().min(1).max(100), entryId: z.string().min(1).max(100) }), ctx.input);
-				if (!ctx.bylines) return { ids: [] };
-				const [credits] = await ctx.bylines.getEntriesBylines(collection, [entryId]).catch(() => []);
-				return { ids: credits?.bylines.map((c) => c.byline.id) ?? [] };
+				const siteUrl = originOf(ctx.site.url);
+				const [credits, item] = await Promise.all([
+					ctx.bylines ? ctx.bylines.getEntriesBylines(collection, [entryId]).then((r) => r[0]).catch(() => undefined) : undefined,
+					ctx.content?.get(collection, entryId).catch(() => null) ?? null,
+				]);
+				const path = item ? await entryUrl(ctx, collection, item).catch(() => null) : null;
+				return { ids: credits?.bylines.map((c) => c.byline.id) ?? [], url: path ? absoluteUrl(path, siteUrl) : null };
 			},
-		}),
+		})),
 
 		/** Recent entries of a collection, for picking one to override or preview. */
-		"schema/entries/find": definePluginRoute({
+		"schema/entries/find": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -1110,7 +1170,7 @@ export function schemaModule(options: SchemaOptions) {
 					.filter((i) => !q || i.title.toLowerCase().includes(q) || (i.slug ?? "").toLowerCase().includes(q));
 				return { items: items.slice(0, 50) };
 			},
-		}),
+		})),
 
 		"schema/entries/save": definePluginRoute({
 			permission: "plugins:manage",
@@ -1213,24 +1273,26 @@ export function schemaModule(options: SchemaOptions) {
 				const normalized = normalizeRulePath(input.path, await trailingPolicy(ctx).catch(() => "ignore" as const));
 				if ("error" in normalized) throw PluginRouteError.badRequest(normalized.error);
 				const checked = await checkedMarkup(ctx, options, input.markup, `${originOf(ctx.site.url)}${normalized.path}`);
-				const rules = await savedPathRules(ctx);
-				const id = input.id ?? newRuleId(rules);
-				const now = new Date().toISOString();
-				const rule: PathRule = {
-					id,
-					label: input.label?.trim() || normalized.path,
-					path: normalized.path,
-					enabled: input.enabled ?? true,
-					mainEntity: input.mainEntity ?? false,
-					markup: checked.text,
-					updatedAt: now,
-				};
-				const at = rules.findIndex((r) => r.id === id);
-				const next = at === -1 ? [...rules, rule] : rules.map((r, i) => (i === at ? rule : r));
-				if (next.length > MAX_PATH_RULES) throw PluginRouteError.badRequest(`A site can have at most ${MAX_PATH_RULES} path rules.`);
-				const conflicts = pathRuleConflicts(next);
-				if (conflicts.length) throw PluginRouteError.badRequest(conflicts[0]);
-				await docs(ctx).put(CUSTOM_DOC_ID, { rules: next, updatedAt: now } satisfies CustomDoc);
+				let rule: PathRule | undefined;
+				const next = await writePathRules(ctx, (rules) => {
+					const id = input.id ?? newRuleId(rules);
+					const saved: PathRule = {
+						id,
+						label: input.label?.trim() || normalized.path,
+						path: normalized.path,
+						enabled: input.enabled ?? true,
+						mainEntity: input.mainEntity ?? false,
+						markup: checked.text,
+						updatedAt: new Date().toISOString(),
+					};
+					rule = saved;
+					const at = rules.findIndex((r) => r.id === id);
+					const all = at === -1 ? [...rules, saved] : rules.map((r, i) => (i === at ? saved : r));
+					if (all.length > MAX_PATH_RULES) throw PluginRouteError.badRequest(`A site can have at most ${MAX_PATH_RULES} path rules.`);
+					const conflicts = pathRuleConflicts(all);
+					if (conflicts.length) throw PluginRouteError.badRequest(conflicts[0]);
+					return all;
+				});
 				invalidateSchemaConfig();
 				return { rule, rules: next, warnings: checked.warnings };
 			},
@@ -1243,18 +1305,19 @@ export function schemaModule(options: SchemaOptions) {
 			handler: async (ctx) => {
 				await requireFeature(ctx, MAIN);
 				const { id } = parseInput(z.object({ id: z.string().min(1).max(40) }), ctx.input);
-				const rules = await savedPathRules(ctx);
-				const next = rules.filter((r) => r.id !== id);
-				if (next.length !== rules.length) {
-					await docs(ctx).put(CUSTOM_DOC_ID, { rules: next, updatedAt: new Date().toISOString() } satisfies CustomDoc);
-					invalidateSchemaConfig();
-				}
-				return { deleted: next.length !== rules.length, rules: next };
+				let deleted = false;
+				const next = await writePathRules(ctx, (rules) => {
+					const kept = rules.filter((r) => r.id !== id);
+					deleted = kept.length !== rules.length;
+					return deleted ? kept : null;
+				});
+				if (deleted) invalidateSchemaConfig();
+				return { deleted, rules: next };
 			},
 		}),
 
 		/** Images from the media library, for the logo/image pickers. */
-		"schema/media": definePluginRoute({
+		"schema/media": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -1269,10 +1332,10 @@ export function schemaModule(options: SchemaOptions) {
 					hasMore: result.hasMore,
 				};
 			},
-		}),
+		})),
 
 		/** What this module would add to the head of the home page or an entry. */
-		"schema/preview": definePluginRoute({
+		"schema/preview": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -1292,26 +1355,17 @@ export function schemaModule(options: SchemaOptions) {
 				const config = await loadConfig(ctx, options.database, true);
 				const siteUrl = originOf(ctx.site.url);
 				const name = await siteName(ctx);
-				let page: PublicPageContext;
-				if (input.target === "home") {
-					page = { url: `${siteUrl}/`, path: "/", locale: null, kind: "custom", pageType: "website", title: name, pageTitle: name, description: null, canonical: `${siteUrl}/`, image: null, siteName: name };
-				} else if (input.target === "path") {
-					// A page from the site's code (EmDash's kind: "custom"), as a path rule sees it. The live page passes its own title.
-					const normalized = normalizeRulePath(input.path, await trailingPolicy(ctx).catch(() => "ignore" as const));
-					if ("error" in normalized) throw PluginRouteError.badRequest(normalized.error);
-					const url = `${siteUrl}${normalized.path}`;
-					const home = pathKey(normalized.path) === "/";
-					page = { url, path: normalized.path, locale: null, kind: "custom", pageType: "website", title: home ? name : null, pageTitle: home ? name : null, description: null, canonical: url, image: null, siteName: name };
-				} else {
-					if (!input.collection || !input.entryId || !ctx.content) throw PluginRouteError.badRequest("Choose an entry.");
-					const [item, info] = await Promise.all([ctx.content.get(input.collection, input.entryId), ctx.schema?.getCollection(input.collection)]);
+				/** An entry's page from its stored fields (the live page may pass the theme's own title, breadcrumbs or page type). */
+				const entryPage = async (collection: string, entryId: string): Promise<PublicPageContext> => {
+					if (!ctx.content) throw PluginRouteError.badRequest("Content access is unavailable.");
+					const [item, info] = await Promise.all([ctx.content.get(collection, entryId), ctx.schema?.getCollection(collection)]);
 					if (!item) throw PluginRouteError.notFound("Entry not found.");
-					const publicPath = await entryUrl(ctx, input.collection, item).catch(() => null);
+					const publicPath = await entryUrl(ctx, collection, item).catch(() => null);
 					const publicUrl = publicPath ? absoluteUrl(publicPath, siteUrl) : `${siteUrl}/${item.slug ?? item.id}/`;
 					const url = absolute(publicUrl, siteUrl) ?? publicUrl;
 					const title = item.seo?.title || entryTitle(item.data, info?.titleField) || item.slug || item.id;
 					const image = item.seo?.image ? (item.seo.image.startsWith("/") || /^https?:/i.test(item.seo.image) ? item.seo.image : `/_emdash/api/media/file/${item.seo.image}`) : null;
-					page = {
+					return {
 						url,
 						path: URL.canParse(url) ? new URL(url).pathname : "/",
 						locale: item.locale,
@@ -1322,11 +1376,33 @@ export function schemaModule(options: SchemaOptions) {
 						description: item.seo?.description || (typeof item.data.excerpt === "string" ? item.data.excerpt : null),
 						canonical: item.seo?.canonical ? (absolute(item.seo.canonical, siteUrl) ?? url) : url,
 						image,
-						content: { collection: input.collection, id: item.id, slug: item.slug },
+						content: { collection, id: item.id, slug: item.slug },
 						seo: { robots: item.seo?.noIndex ? "noindex, nofollow" : null },
 						articleMeta: { publishedTime: item.publishedAt, modifiedTime: item.updatedAt },
 						siteName: name,
 					};
+				};
+				let page: PublicPageContext;
+				/** Set when the previewed path is a published entry's page: that page is shown (its override and markup win over a path rule there). */
+				let entry: { collection: string; id: string } | null = null;
+				if (input.target === "home") {
+					page = { url: `${siteUrl}/`, path: "/", locale: null, kind: "custom", pageType: "website", title: name, pageTitle: name, description: null, canonical: `${siteUrl}/`, image: null, siteName: name };
+				} else if (input.target === "path") {
+					const normalized = normalizeRulePath(input.path, await trailingPolicy(ctx).catch(() => "ignore" as const));
+					if ("error" in normalized) throw PluginRouteError.badRequest(normalized.error);
+					const home = pathKey(normalized.path) === "/";
+					const matched = home ? null : await matchEntryPath(ctx, normalized.path).catch(() => null);
+					if (matched) {
+						entry = { collection: matched.collection, id: matched.id };
+						page = await entryPage(matched.collection, matched.id);
+					} else {
+						// A page from the site's code (EmDash's kind: "custom"), as a path rule sees it. The live page passes its own title.
+						const url = `${siteUrl}${normalized.path}`;
+						page = { url, path: normalized.path, locale: null, kind: "custom", pageType: "website", title: home ? name : null, pageTitle: home ? name : null, description: null, canonical: url, image: null, siteName: name };
+					}
+				} else {
+					if (!input.collection || !input.entryId) throw PluginRouteError.badRequest("Choose an entry.");
+					page = await entryPage(input.collection, input.entryId);
 				}
 				const features = await ctxFeatures(ctx);
 				const contributions = await schemaContributions(ctx, page, options, features);
@@ -1337,9 +1413,9 @@ export function schemaModule(options: SchemaOptions) {
 					const rule = pageRule(page, config.custom.byPath, page.content ? compileEntryRule(page.content.collection, page.content.id, override?.custom) : null);
 					if (rule) custom = { id: rule.contributionId, label: rule.label, warnings: lintNodes(rule.nodes, { graph: isOn(features, SCHEMA_FEATURES.graph) }) };
 				}
-				return { page: { url: pageUrl(page), pageType: page.pageType }, contributions, custom };
+				return { page: { url: pageUrl(page), pageType: page.pageType }, entry, contributions, custom };
 			},
-		}),
+		})),
 	};
 
 	return { routes };

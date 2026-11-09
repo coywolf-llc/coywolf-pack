@@ -13,6 +13,7 @@ export interface MarkupTemplate {
 	node: Record<string, unknown>;
 }
 
+/** An offer with placeholder values the lint accepts (a price is a plain number): change them, don't leave them. */
 const offer = (extra: Record<string, unknown> = {}) => ({ "@type": "Offer", name: "", price: "0", priceCurrency: "USD", ...extra });
 
 export const MARKUP_TEMPLATES: Record<string, MarkupTemplate> = {
@@ -29,7 +30,7 @@ export const MARKUP_TEMPLATES: Record<string, MarkupTemplate> = {
 			provider: { "@id": "#organization" },
 			areaServed: "Worldwide",
 			availableChannel: { "@type": "ServiceChannel", serviceUrl: "" },
-			offers: [offer(), offer({ price: "" })],
+			offers: [offer({ name: "Free" }), offer({ name: "Premium", price: "9.99" })],
 		},
 	},
 	WebApplication: {

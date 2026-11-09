@@ -706,6 +706,7 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 	const [pending, setPending] = React.useState(false);
 	const [error, setError] = React.useState<string>();
 	const [credited, setCredited] = React.useState<string[]>([]);
+	const [entryUrl, setEntryUrl] = React.useState<string | null>(null);
 	React.useEffect(() => {
 		setDraft(props.draft);
 		setError(undefined);
@@ -714,16 +715,21 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 	const entryKey = draft?.entryId ? `${draft.collection}:${draft.entryId}` : "";
 	const customOn = !!props.config.features["schema.custom"];
 	const graphOn = !!props.config.features["schema.graph"];
-	// The entry's URL isn't known here: the editor resolves relative @ids against the site root (the save uses the entry's).
-	const entryPage = `${props.config.custom.origin}/`;
+	// Relative @ids and URLs in the entry's markup resolve against its page, as on the page itself (the site root until the URL has loaded).
+	const entryPage = entryUrl ?? `${props.config.custom.origin}/`;
 	const customCheck = useMarkupCheck(draft?.custom ?? { markup: "", enabled: false }, props.config.custom, graphOn, entryPage);
 	const customBlocked = Boolean(customOn && draft?.custom && customCheck.errors.length);
 	React.useEffect(() => {
 		setCredited([]);
+		setEntryUrl(null);
 		if (!draft?.entryId) return;
 		let live = true;
-		post<{ ids: string[] }>("entries/bylines", { collection: draft.collection, entryId: draft.entryId })
-			.then((result) => live && setCredited(result.ids))
+		post<{ ids: string[]; url?: string | null }>("entries/bylines", { collection: draft.collection, entryId: draft.entryId })
+			.then((result) => {
+				if (!live) return;
+				setCredited(result.ids);
+				setEntryUrl(result.url ?? null);
+			})
 			.catch(() => {});
 		return () => {
 			live = false;
@@ -1063,6 +1069,8 @@ function PreviewTab(props: { config: Config }) {
 	const [path, setPath] = React.useState("/");
 	const [result, setResult] = React.useState<{
 		page: { url: string; pageType: string };
+		/** For a path that is a published entry's page: the preview shows that page (its override and markup, not a path rule). */
+		entry?: { collection: string; id: string } | null;
 		contributions: Contribution[];
 		/** The custom markup on the page, with its rich-result checks. */
 		custom?: { id: string; label: string; warnings: LintWarning[] } | null;
@@ -1125,6 +1133,13 @@ function PreviewTab(props: { config: Config }) {
 						<p className="text-sm text-kumo-subtle">
 							{result.page.url} · page type “{result.page.pageType}”
 						</p>
+						{result.entry && (
+							<Banner
+								variant="default"
+								role="status"
+								description={`This path is an entry's page (${result.entry.collection}): shown as the live page is, with the entry's override and custom markup. A path rule on it doesn't apply.`}
+							/>
+						)}
 						{result.contributions.length === 0 && <p className="text-sm">Nothing: every Schema & Social feature is off.</p>}
 						{tags.length > 0 && (
 							<pre className="overflow-x-auto rounded bg-kumo-tint p-3 text-xs">

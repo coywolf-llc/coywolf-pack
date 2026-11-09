@@ -20,6 +20,7 @@ import { IMAGES_SETTINGS, invalidateMediaHost, refreshMediaHost } from "./settin
 import { type BackfillDeps, type VariantsState, estimateRows, publicState, publishedCount, readVariantsState, startVariantsRun, variantCounts } from "./variants-store.js";
 import { summarizeLibrary } from "./variants-estimate.js";
 import { imageCrops } from "./variants.js";
+import { readOnlyRoute } from "../core/routes.js";
 
 const F = "images";
 
@@ -255,7 +256,7 @@ export function imagesModule(options: { database?: string; variants: VariantsHoo
 				},
 			}),
 
-			"images/check": definePluginRoute({
+			"images/check": readOnlyRoute(definePluginRoute({
 				permission: "plugins:manage",
 				methods: ["POST"],
 				request: { body: "json" },
@@ -267,7 +268,7 @@ export function imagesModule(options: { database?: string; variants: VariantsHoo
 					if (!target) throw PluginRouteError.badRequest("Enter a media host to check.");
 					return runCheck(target, database);
 				},
-			}),
+			})),
 
 			"images/variants/settings": {
 				permission: "plugins:manage" as const,
@@ -332,7 +333,7 @@ export function imagesModule(options: { database?: string; variants: VariantsHoo
 				},
 			}),
 
-			"images/setup/plan": definePluginRoute({
+			"images/setup/plan": readOnlyRoute(definePluginRoute({
 				permission: "plugins:manage",
 				methods: ["POST"],
 				request: { body: "json" },
@@ -346,7 +347,7 @@ export function imagesModule(options: { database?: string; variants: VariantsHoo
 						apiError(error);
 					}
 				},
-			}),
+			})),
 
 			"images/setup/apply": definePluginRoute({
 				permission: "plugins:manage",

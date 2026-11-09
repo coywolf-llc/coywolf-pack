@@ -65,6 +65,15 @@ export const entryContributionId = (collection: string, entryId: string) => `${C
 const isObj = (v: unknown): v is Node => Boolean(v) && typeof v === "object" && !Array.isArray(v);
 const code = (s: string) => `\`${s}\``;
 
+/**
+ * Keys that would set an object's prototype (or look like they do) when the
+ * parsed JSON is copied key by key: `{"__proto__": {"@type": "Service"}}`
+ * would give a node a @type it doesn't have. None is a schema.org property;
+ * they're dropped with an error wherever markup is copied.
+ */
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+export const isUnsafeKey = (key: string) => UNSAFE_KEYS.has(key);
+
 // ── Parsing ──────────────────────────────────────────────────────
 
 const SCHEMA_CONTEXTS = new Set(["https://schema.org", "https://schema.org/", "http://schema.org", "http://schema.org/"]);
@@ -110,7 +119,8 @@ export function parseMarkup(source: unknown): ParsedMarkup {
 		if (isObj(v)) {
 			const out: Node = {};
 			for (const [key, x] of Object.entries(v)) {
-				if (key === "@context") context(x);
+				if (isUnsafeKey(key)) errors.add(`${code(key)} isn't a schema.org property: take it out.`);
+				else if (key === "@context") context(x);
 				else if (x !== null) {
 					const c = clean(x, depth + 1);
 					if (c !== undefined) out[key] = c;
@@ -160,10 +170,23 @@ export const PACK_FRAGMENTS = ["website", "organization", "publisher", "person",
 const PACK_PREFIXES = /^(person|video)-/;
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 
-/** Resolve a relative IRI against a base (the page URL), as a JSON-LD processor would. */
+/**
+ * Resolve a relative IRI against a base (the page URL), as a JSON-LD
+ * processor would. A root-relative path is the site's origin plus the path as
+ * written: the URL parser would percent-encode it (`/search/{q}/` →
+ * `/search/%7Bq%7D/`), which breaks a urlTemplate's placeholders and changes
+ * paths the editor wrote on purpose.
+ */
 export function resolveIri(value: string, base: string): string {
 	const v = value.trim();
 	if (SCHEME.test(v)) return v;
+	if (v.startsWith("/") && !v.startsWith("//")) {
+		try {
+			return `${new URL(base).origin}${v}`;
+		} catch {
+			return v;
+		}
+	}
 	try {
 		return new URL(v, base).href;
 	} catch {
@@ -435,7 +458,8 @@ export function customOutput(rule: CompiledRule, options: RenderOptions): Custom
 		if (Array.isArray(value)) return value.map((v) => resolve(v, key, depth + 1));
 		if (!isObj(value)) return value;
 		const out: Node = {};
-		for (const [k, v] of Object.entries(value)) out[k] = resolve(v, k, depth + 1);
+		// (Parsed markup has no unsafe keys; nodes from elsewhere are copied the same way.)
+		for (const [k, v] of Object.entries(value)) if (!isUnsafeKey(k)) out[k] = resolve(v, k, depth + 1);
 		// A nested copy of one of the pack's nodes: a reference to it.
 		if (depth > 0 && typeof out["@id"] === "string" && packIds.has(out["@id"])) return { "@id": out["@id"] };
 		return out;

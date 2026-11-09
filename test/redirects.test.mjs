@@ -288,7 +288,7 @@ test("serving from a database without the table: no rules, no error, no CREATE",
 // ── Edge caching (Workers Cache through Astro's route caching) ──
 
 const { serveCachedRedirect, REDIRECT_EDGE_MAX_AGE } = await import("../src/redirects/middleware.ts");
-const { REDIRECTS_TAG, purgeScope, purgePageCache, isRedirectSave, redirectPagesScope } = await import("../src/pageCache/lib.ts");
+const { REDIRECTS_TAG, purgeScope, purgePageCache, purgesAfter, registerReadOnlyRoutes, isRedirectSave, redirectPagesScope } = await import("../src/pageCache/lib.ts");
 const { redirectsMiddleware } = await import("../src/redirects/pack.ts");
 
 /** Astro's per-request cache, recording what's set. */
@@ -351,7 +351,11 @@ test("redirect changes purge the redirects tag; lookups purge nothing", async ()
 		assert.deepEqual(purgeScope(API + route), { tags: [REDIRECTS_TAG] }, route);
 	}
 	for (const route of ["redirects/list", "redirects/test", "redirects/removed", "backups/run"]) assert.equal(purgeScope(API + route), null, route);
-	for (const route of ["videos/list", "videos/detail", "videos/status", "videos/storage", "videos/settings", "videos/captions/list"]) assert.equal(purgeScope(API + route), null, route);
+	for (const route of ["videos/status", "videos/settings", "videos/webhook/subscribe"]) assert.equal(purgeScope(API + route), null, route);
+	// The videos admin reads (list, detail, storage, captions list…) are read-only routes: purgesAfter is false for them once
+	// createPlugin has registered them (src/pageCache/lib.test.mjs), so purgeScope is never asked.
+	registerReadOnlyRoutes(["videos/list", "videos/detail", "videos/storage", "videos/captions/list"]);
+	for (const route of ["videos/list", "videos/detail", "videos/storage", "videos/captions/list"]) assert.equal(purgesAfter("POST", API + route), false, route);
 	for (const route of ["videos/settings/save", "videos/update", "videos/delete"]) assert.deepEqual(purgeScope(API + route), { purgeEverything: true }, route);
 	const purged = [];
 	globalThis.__purge = (options) => (purged.push(options), Promise.resolve({ success: true }));
