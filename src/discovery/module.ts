@@ -33,6 +33,7 @@ import {
 	settingsSchema,
 } from "./settings.js";
 import { siteOrigin } from "./urls.js";
+import { readOnlyRoute } from "../core/routes.js";
 
 export const FEATURE = {
 	main: "discovery",
@@ -426,7 +427,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 		}),
 
 		/** Submit URLs now (for checking the setup). Defaults to the home page. */
-		"discovery/submit": definePluginRoute({
+		"discovery/submit": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -444,7 +445,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 				// The first entry's fields too, for an admin page loaded before this version.
 				return { ...entries[0], entries };
 			},
-		}),
+		})),
 
 		/**
 		 * Save or remove the Bing Webmaster API key. It's a secret setting (src/core/secrets.ts), so EmDash
@@ -488,7 +489,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 		}),
 
 		/** Check the saved Bing Webmaster API key: the site's URL submission quota, or Bing's error. */
-		"discovery/bing-check": definePluginRoute({
+		"discovery/bing-check": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -497,7 +498,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 				const apiKey = await requireBingKey(ctx);
 				return checkQuota(bingDeps(ctx), bingSiteUrl(siteOrigin(ctx)), apiKey);
 			},
-		}),
+		})),
 
 		/** Build llms.txt and the news sitemap again now (replacing the stored copies). */
 		"discovery/rebuild": definePluginRoute({

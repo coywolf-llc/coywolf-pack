@@ -253,6 +253,8 @@ const READ_ONLY_ROUTES = [
 	"ai/test",
 	"backups/download-link",
 	"codeBlocks/preview",
+	"discovery/bing-check",
+	"discovery/submit",
 	"files/options",
 	"images/check",
 	"images/setup/plan",
