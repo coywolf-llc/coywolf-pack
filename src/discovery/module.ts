@@ -4,15 +4,16 @@
  * Markdown. Site URLs are answered by the middleware in ./middleware.ts,
  * which calls the public routes here.
  */
-import { type PluginContext, PluginRouteError, after, definePluginRoute } from "emdash";
+import { type PluginContext, PluginRouteError, PluginSettingEncryptionError, after, definePluginRoute } from "emdash";
 import { z } from "zod";
 
 import { absoluteUrl, entryUrl } from "../core/content-url.js";
 import { siteInStaging, siteName } from "../core/site.js";
 import { cachedCtxFeatures, ctxFeatures, invalidateFeatures, isOn, readSiteSetting, registerSiteSetting, requireFeature } from "../core/features.js";
+import type { TaskDef } from "../core/module.js";
 import { parseInput } from "../shared.js";
 import { LLMS_CACHE, NEWS_CACHE, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
-import { type BingDeps, type BingQuota, BING_DOCS_URL, BING_ENDPOINT, bingSiteUrl, checkQuota, submitToBing } from "./bing.js";
+import { type BingDeps, type BingQuota, type QuotaCheck, BING_DOCS_URL, BING_ENDPOINT, bingSiteUrl, checkQuota, submitToBing } from "./bing.js";
 import { type Fetch, type PingLogEntry, IndexNowBatcher, buildPayload, generateKey, sendIndexNow } from "./indexnow.js";
 import { buildFeed } from "./feed-build.js";
 import { FEED_PATH, FEED_TAG } from "./feed.js";
@@ -52,24 +53,68 @@ const LOG_KEY = "state:discovery:indexnowLog";
 const LOG_LIMIT = 25;
 /** The Bing Webmaster API quota last read for the site, counted down as batches go out (BingQuota). */
 const BING_QUOTA_KEY = "state:discovery:bingQuota";
+/** URLs waiting for Bing (over the quota, out of time, Bing unreachable), oldest first (string[]). */
+const BING_PENDING_KEY = "state:discovery:bingPending";
+/** Sends Bing's queue once a day, so URLs over one day's quota go out the next even when nothing changes. */
+export const BING_DRAIN_TASK = "discovery-bing-drain";
+/** Compare-and-set tries before the write falls back to last-write-wins. */
+const CAS_ATTEMPTS = 3;
 const urlKey = (collection: string, id: string) => `state:discovery:url:${collection}:${id}`;
 
 export type { PingLogEntry };
 
 /** Submissions wait this long for more changes, then go out as one request. */
 const BATCH_WINDOW_MS = 3000;
-const batcher = new IndexNowBatcher({ windowMs: BATCH_WINDOW_MS, defer: (task) => after(task) });
+/** Node's timers would otherwise keep a test process alive for the window; on Workers unref doesn't exist. */
+const sleep = (ms: number) => new Promise<void>((resolve) => void (setTimeout(resolve, ms) as unknown as { unref?: () => void }).unref?.());
+/** Exported for tests, which flush it by hand instead of waiting out the window. */
+export const submissionBatcher = new IndexNowBatcher({ windowMs: BATCH_WINDOW_MS, defer: (task) => after(task), sleep });
 
 /** The plugin's fetch: EmDash checks each host against allowedHosts (pack.ts). */
 const httpFetch = (ctx: PluginContext): Fetch | null => (ctx.http ? (ctx.http.fetch.bind(ctx.http) as Fetch) : null);
+
+type KV = PluginContext["kv"];
+
+/**
+ * Store `change(stored value)` under `key`. With EmDash's compare-and-set (KVAccess.getVersioned/compareAndSet),
+ * a write that lost a race to another isolate is tried again on the newer value, CAS_ATTEMPTS times; without
+ * it (an older EmDash), or after that many lost races, the plain write goes through: last write wins, as before.
+ * A null result removes the key.
+ */
+async function updateKv<T>(kv: KV, key: string, change: (current: T | null) => T | null): Promise<void> {
+	if (typeof kv.getVersioned === "function" && typeof kv.compareAndSet === "function" && typeof kv.compareAndDelete === "function") {
+		for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
+			const current = await kv.getVersioned<T>(key);
+			const next = change(current?.value ?? null);
+			if (next === null) {
+				if (!current || (await kv.compareAndDelete(key, current.revision)).applied) return;
+				continue;
+			}
+			if ((await kv.compareAndSet(key, current?.revision ?? null, next)).applied) return;
+		}
+	}
+	const next = change((await kv.get<T>(key)) ?? null);
+	if (next === null) await kv.delete(key);
+	else await kv.set(key, next);
+}
+
+const asUrlList = (value: unknown): string[] => (Array.isArray(value) ? value.filter((url): url is string => typeof url === "string") : []);
 
 function bingDeps(ctx: PluginContext): BingDeps {
 	return {
 		fetch: httpFetch(ctx),
 		readQuota: async () => (await ctx.kv.get<BingQuota>(BING_QUOTA_KEY)) ?? null,
-		writeQuota: (quota) => ctx.kv.set(BING_QUOTA_KEY, quota),
+		updateQuota: (change) => updateKv<BingQuota>(ctx.kv, BING_QUOTA_KEY, change),
+		readPending: async () => asUrlList(await ctx.kv.get<unknown>(BING_PENDING_KEY)),
+		updatePending: (change) =>
+			updateKv<string[]>(ctx.kv, BING_PENDING_KEY, (current) => {
+				const next = change(asUrlList(current));
+				return next.length ? next : null;
+			}),
 	};
 }
+
+const isEncryptionError = (error: unknown): boolean => error instanceof PluginSettingEncryptionError || (error as { name?: unknown } | null)?.name === "PluginSettingEncryptionError";
 
 /** The saved Bing Webmaster API key, or null (also when it can't be decrypted: logged; IndexNow still goes out). */
 async function bingKey(ctx: PluginContext): Promise<string | null> {
@@ -79,6 +124,33 @@ async function bingKey(ctx: PluginContext): Promise<string | null> {
 		ctx.log.warn("Discovery: the Bing Webmaster API key can't be read; save it again", { error: String(error).slice(0, 200) });
 		return null;
 	}
+}
+
+/** For the admin routes: the saved key, or why there's none to use. */
+async function requireBingKey(ctx: PluginContext): Promise<string> {
+	let apiKey: string | null;
+	try {
+		apiKey = await readBingApiKey(ctx);
+	} catch (error) {
+		if (isEncryptionError(error)) throw PluginRouteError.badRequest("The saved Bing Webmaster API key can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed. Save the key again.");
+		throw error;
+	}
+	if (!apiKey) throw PluginRouteError.badRequest("Save a Bing Webmaster API key first.");
+	return apiKey;
+}
+
+/** Log each entry and keep the newest LOG_LIMIT in Recent submissions. */
+async function recordEntries(ctx: PluginContext, entries: PingLogEntry[]): Promise<void> {
+	for (const entry of entries) {
+		const name = entry.endpoint === BING_ENDPOINT ? "Bing Webmaster API" : "IndexNow";
+		const data = { endpoint: entry.endpoint, count: entry.count, status: entry.status, ...(entry.error ? { error: entry.error } : {}) };
+		if (entry.ok) ctx.log.info(`${name} submitted`, data);
+		else if (entry.queued) ctx.log.info(`${name} submission queued`, data);
+		else ctx.log.warn(`${name} submission failed`, data);
+	}
+	if (!entries.length) return;
+	const log = (await ctx.kv.get<PingLogEntry[]>(LOG_KEY)) ?? [];
+	await ctx.kv.set(LOG_KEY, [...entries, ...log].slice(0, LOG_LIMIT));
 }
 
 /**
@@ -99,15 +171,34 @@ async function submit(ctx: PluginContext, urls: string[], trigger: PingLogEntry[
 		sendIndexNow(httpFetch(ctx), settings.indexnow.endpoint, payload, trigger),
 	]);
 	const entries = [...bing, indexnow];
-	for (const entry of entries) {
-		const name = entry.endpoint === BING_ENDPOINT ? "Bing Webmaster API" : "IndexNow";
-		const data = { endpoint: entry.endpoint, count: entry.count, status: entry.status, ...(entry.error ? { error: entry.error } : {}) };
-		if (entry.ok) ctx.log.info(`${name} submitted`, data);
-		else ctx.log.warn(`${name} submission failed`, data);
-	}
-	const log = (await ctx.kv.get<PingLogEntry[]>(LOG_KEY)) ?? [];
-	await ctx.kv.set(LOG_KEY, [...entries, ...log].slice(0, LOG_LIMIT));
+	await recordEntries(ctx, entries);
 	return entries;
+}
+
+/**
+ * The daily task: send what waits in Bing's queue (nothing goes to IndexNow,
+ * which had these URLs when they changed). Nothing to do without a key, with
+ * an empty queue, or while the site is in staging.
+ */
+export async function drainBingQueue(ctx: PluginContext): Promise<PingLogEntry[]> {
+	if (await siteInStaging()) return [];
+	const apiKey = await bingKey(ctx);
+	if (!apiKey) return [];
+	if (!asUrlList(await ctx.kv.get<unknown>(BING_PENDING_KEY)).length) return [];
+	const entries = await submitToBing(bingDeps(ctx), bingSiteUrl(siteOrigin(ctx)), apiKey, [], "queue");
+	await recordEntries(ctx, entries);
+	return entries;
+}
+
+const ENCRYPTION_MESSAGE = "Couldn't store the Bing Webmaster API key. Secret plugin settings need the EMDASH_ENCRYPTION_KEY Worker secret.";
+
+/** The message the Discovery page shows after Save key. */
+function saveMessage(check: QuotaCheck): string {
+	if (check.ok) return `Key saved. Bing accepts it: ${check.quota.daily} URL submission${check.quota.daily === 1 ? "" : "s"} left today, ${check.quota.monthly} this month.`;
+	if (check.permanent) return `Key not saved: ${check.error}`;
+	// Status 0 (no answer) or 5xx: Bing itself couldn't tell us anything.
+	if (check.status === 0 || check.status >= 500) return `Key saved; Bing couldn't be reached to check it (${check.error}). Check key tries again.`;
+	return `Key saved, but Bing didn't accept the check (HTTP ${check.status}): ${check.error}`;
 }
 
 type ChangeKind = "publish" | "update" | "unpublish" | "delete";
@@ -131,7 +222,7 @@ async function queueIndexNow(ctx: PluginContext, settings: DiscoverySettings, co
 		if (known) urls.push(known);
 		if (known && (kind === "unpublish" || permanent)) await ctx.kv.delete(urlKey(collection, id));
 	}
-	if (urls.length) batcher.add(urls, (batch) => submit(ctx, batch, "content").then(() => undefined));
+	if (urls.length) submissionBatcher.add(urls, (batch) => submit(ctx, batch, "content").then(() => undefined));
 }
 
 async function onContentChange(ctx: PluginContext, collection: string, id: string | undefined, kind: ChangeKind, permanent = false) {
@@ -284,7 +375,12 @@ export function discoveryModule(options: DiscoveryOptions) {
 					collections,
 					key,
 					// Whether a Bing Webmaster API key is saved, never the key itself.
-					bing: { keySaved: Boolean(await bingKey(ctx)), quota: (await ctx.kv.get<BingQuota>(BING_QUOTA_KEY)) ?? null, docs: BING_DOCS_URL },
+					bing: {
+						keySaved: Boolean(await bingKey(ctx)),
+						quota: (await ctx.kv.get<BingQuota>(BING_QUOTA_KEY)) ?? null,
+						pending: asUrlList(await ctx.kv.get<unknown>(BING_PENDING_KEY)).length,
+						docs: BING_DOCS_URL,
+					},
 					urls: {
 						keyFile: key ? `${origin}/${key}.txt` : null,
 						news: `${origin}/news-sitemap.xml`,
@@ -352,7 +448,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 
 		/**
 		 * Save or remove the Bing Webmaster API key. It's a secret setting (src/core/secrets.ts), so EmDash
-		 * stores it encrypted; it's never sent back. Saving checks it right away (the site's quota).
+		 * stores it encrypted; it's never sent back. Saving checks it right away (the site's quota): a key Bing
+		 * rejects for good is removed again (keySaved: false); one Bing couldn't check stays saved.
 		 */
 		"discovery/bing-key": definePluginRoute({
 			permission: "plugins:manage",
@@ -364,16 +461,29 @@ export function discoveryModule(options: DiscoveryOptions) {
 				if (input.clear) {
 					await ctx.settings.delete(BING_KEY_SETTING);
 					await ctx.kv.delete(BING_QUOTA_KEY);
+					await ctx.kv.delete(BING_PENDING_KEY);
 					ctx.log.info("Discovery: Bing Webmaster API key removed");
-					return { keySaved: false, check: null };
+					return { keySaved: false, check: null, message: "Key removed. Changed URLs go to IndexNow only." };
 				}
 				if (!input.key) throw PluginRouteError.badRequest("Enter a Bing Webmaster API key.");
 				if (!BING_KEY_PATTERN.test(input.key)) throw PluginRouteError.badRequest("That doesn't look like a Bing Webmaster API key. Copy it again from Bing Webmaster Tools → Settings → API access.");
-				await ctx.settings.set(BING_KEY_SETTING, input.key);
+				try {
+					await ctx.settings.set(BING_KEY_SETTING, input.key);
+				} catch (error) {
+					if (isEncryptionError(error)) throw PluginRouteError.badRequest(ENCRYPTION_MESSAGE);
+					throw error;
+				}
 				// A new key can belong to another account: its quota is read again.
 				await ctx.kv.delete(BING_QUOTA_KEY);
-				ctx.log.info("Discovery: Bing Webmaster API key saved");
-				return { keySaved: true, check: await checkQuota(bingDeps(ctx), bingSiteUrl(siteOrigin(ctx)), input.key) };
+				const check = await checkQuota(bingDeps(ctx), bingSiteUrl(siteOrigin(ctx)), input.key);
+				if (!check.ok && check.permanent) {
+					// Bing's answer is final (InvalidApiKey, a blocked or unknown account): don't keep a key that can't work.
+					await ctx.settings.delete(BING_KEY_SETTING);
+					ctx.log.warn("Discovery: Bing rejected the Bing Webmaster API key; not saved", { status: check.status, error: check.error });
+					return { keySaved: false, check, message: saveMessage(check) };
+				}
+				ctx.log.info("Discovery: Bing Webmaster API key saved", check.ok ? {} : { check: check.error });
+				return { keySaved: true, check, message: saveMessage(check) };
 			},
 		}),
 
@@ -384,8 +494,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 			request: { body: "json" },
 			handler: async (ctx) => {
 				await requireFeature(ctx, FEATURE.indexnow);
-				const apiKey = await bingKey(ctx);
-				if (!apiKey) throw PluginRouteError.badRequest("Save a Bing Webmaster API key first.");
+				const apiKey = await requireBingKey(ctx);
 				return checkQuota(bingDeps(ctx), bingSiteUrl(siteOrigin(ctx)), apiKey);
 			},
 		}),
@@ -405,5 +514,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 		}),
 	};
 
-	return { routes, hooks };
+	/** Bing's quota resets daily: send what waited, even on a day nothing changes. Runs only with IndexNow on. */
+	const tasks: TaskDef[] = [{ name: BING_DRAIN_TASK, schedule: "@daily", feature: FEATURE.indexnow, handler: async (ctx) => void (await drainBingQueue(ctx)) }];
+
+	return { routes, hooks, tasks };
 }

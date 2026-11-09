@@ -29,9 +29,11 @@ interface PingLogEntry {
 	status: number;
 	ok: boolean;
 	error?: string;
-	trigger: "content" | "manual";
+	trigger: "content" | "manual" | "queue";
 	/** Bing Webmaster API: URLs the site's daily quota still allows, when known. */
 	quotaLeft?: number;
+	/** Bing Webmaster API: these URLs wait in the queue for the next submission. */
+	queued?: boolean;
 }
 
 interface BingQuota {
@@ -49,8 +51,8 @@ interface Status {
 	settings: Settings;
 	collections: { slug: string; label: string; hidden: boolean; hasSeo: boolean }[];
 	key: string | null;
-	/** Whether a Bing Webmaster API key is saved (the key itself never comes back) and the quota last read. */
-	bing?: { keySaved: boolean; quota: BingQuota | null; docs: string };
+	/** Whether a Bing Webmaster API key is saved (the key itself never comes back), the quota last read, and how many URLs wait in the queue. */
+	bing?: { keySaved: boolean; quota: BingQuota | null; pending?: number; docs: string };
 	urls: { keyFile: string | null; news: string; llms: string; feed: string };
 	log: PingLogEntry[];
 	cache: { llms: { count: number; builtAt: string } | null; news: { count: number; builtAt: string } | null };
@@ -171,9 +173,11 @@ function BingKey(props: { bing: NonNullable<Status["bing"]>; disabled: boolean; 
 		const key = value.trim();
 		if (!key || busy) return;
 		void act("save", async () => {
-			const out = await post<{ keySaved: boolean; check: QuotaCheck | null }>("bing-key", { key });
-			setValue("");
-			return out.check ? { ok: out.check.ok, text: `Key saved. ${checkText(out.check)}` } : { ok: true, text: "Key saved." };
+			const out = await post<{ keySaved: boolean; check: QuotaCheck | null; message?: string }>("bing-key", { key });
+			// A key Bing rejects for good isn't kept (keySaved false); keep the typed key so it can be corrected.
+			if (out.keySaved) setValue("");
+			const fallback = out.check ? `Key saved. ${checkText(out.check)}` : "Key saved.";
+			return { ok: out.keySaved && (out.check?.ok ?? true), text: out.message ?? fallback };
 		});
 	};
 	const remove = () => {
@@ -242,11 +246,20 @@ function BingKey(props: { bing: NonNullable<Status["bing"]>; disabled: boolean; 
 				{result ? (
 					<Banner variant={result.ok ? "default" : "error"} description={result.text} />
 				) : (
-					saved &&
-					props.bing.quota && (
-						<p className="text-sm text-kumo-subtle">
-							Bing's quota for this site: {quotaText(props.bing.quota)} (read {when(props.bing.quota.checkedAt)}, counted down as URLs are sent).
-						</p>
+					saved && (
+						<div className="space-y-1 text-sm text-kumo-subtle">
+							{props.bing.quota && (
+								<p>
+									Bing's quota for this site: {quotaText(props.bing.quota)} (read {when(props.bing.quota.checkedAt)}, counted down as URLs are sent).
+								</p>
+							)}
+							{(props.bing.pending ?? 0) > 0 && (
+								<p>
+									{props.bing.pending} URL{props.bing.pending === 1 ? "" : "s"} waiting for Bing (over the quota, or Bing couldn't be reached): sent first with the next
+									submission, and once a day.
+								</p>
+							)}
+						</div>
 					)
 				)}
 			</div>
@@ -444,7 +457,9 @@ export function DiscoveryPage() {
 												<td className="whitespace-nowrap py-2 pr-4">{when(entry.at)}</td>
 												<td className="whitespace-nowrap py-2 pr-4">{endpointLabel(entry.endpoint)}</td>
 												<td className="py-2 pr-4">
-													<Badge variant={entry.ok ? "primary" : "destructive"}>{entry.ok ? `OK ${entry.status}` : entry.status ? `Error ${entry.status}` : "Error"}</Badge>
+													<Badge variant={entry.ok ? "primary" : entry.queued ? "secondary" : "destructive"}>
+													{entry.ok ? `OK ${entry.status}` : entry.queued ? "Queued" : entry.status ? `Error ${entry.status}` : "Error"}
+												</Badge>
 													{entry.error && <div className="mt-1 max-w-xs break-words text-kumo-subtle">{entry.error}</div>}
 													{entry.quotaLeft !== undefined && <div className="mt-1 text-kumo-subtle">{entry.quotaLeft} left today</div>}
 												</td>

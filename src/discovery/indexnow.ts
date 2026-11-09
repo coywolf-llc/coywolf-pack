@@ -75,9 +75,12 @@ export interface PingLogEntry {
 	status: number;
 	ok: boolean;
 	error?: string;
-	trigger: "content" | "manual";
+	/** What started it: a content change, Submit home page, or the daily drain of Bing's queue. */
+	trigger: "content" | "manual" | "queue";
 	/** Bing Webmaster API: URLs the site's daily quota still allows after this attempt, when known. */
 	quotaLeft?: number;
+	/** Bing Webmaster API: these URLs weren't sent now and wait in the queue for the next submission. */
+	queued?: boolean;
 }
 
 export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;

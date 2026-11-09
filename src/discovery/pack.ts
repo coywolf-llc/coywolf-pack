@@ -41,13 +41,14 @@ registerFeatures(FEATURES);
 export type { DiscoveryOptions } from "./module.js";
 
 export function discoveryPack(options: DiscoveryOptions): PackModule {
-	const { routes, hooks } = discoveryModule(options);
+	const { routes, hooks, tasks } = discoveryModule(options);
 	return {
 		id: "discovery",
 		label: "Discovery",
 		features: FEATURES,
 		routes,
 		hooks,
+		tasks,
 		// page:fragments adds the feed link and the Markdown link, each checked against its own switch.
 		hookFeature: { "page:fragments": FEATURE.main },
 		adminPages: [{ path: "/discovery", label: "Discovery", icon: "compass" }],
