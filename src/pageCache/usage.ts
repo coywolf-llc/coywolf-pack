@@ -74,9 +74,17 @@ async function api<T>(doFetch: Fetch, token: string, path: string, init: Request
 	return (path === "/graphql" ? body : body.result) as T;
 }
 
-async function access(ctx: PluginContext, env: Record<string, unknown>): Promise<{ token: string; accountId: string | null; doFetch: Fetch } | { reason: string }> {
+/**
+ * The read-only Cloudflare API token: Cloudflare usage on the plugin's Settings page, else the USAGE_API_TOKEN
+ * Worker secret. Also used by Discovery to read Crawler Hints (with Zone → Zone → Read added to it).
+ */
+export async function cloudflareReadToken(ctx: Pick<PluginContext, "settings">, env: Record<string, unknown>): Promise<string | null> {
 	const saved = await ctx.settings.get<string>(USAGE_TOKEN_SETTING).catch(() => null);
-	const token = saved?.trim() || secret(env, "USAGE_API_TOKEN");
+	return (typeof saved === "string" && saved.trim()) || secret(env, "USAGE_API_TOKEN") || null;
+}
+
+async function access(ctx: PluginContext, env: Record<string, unknown>): Promise<{ token: string; accountId: string | null; doFetch: Fetch } | { reason: string }> {
+	const token = await cloudflareReadToken(ctx, env);
 	if (!token) return { reason: "Add a read-only Cloudflare API token to see usage: the USAGE_API_TOKEN Worker secret, or Cloudflare usage on the plugin's Settings page. The steps are below." };
 	const accountId = secret(env, "CF_ACCOUNT_ID") || secret(env, "CLOUDFLARE_ACCOUNT_ID") || (await ctx.settings.get<string>(IMAGES_SETTINGS.accountId).catch(() => null))?.trim() || null;
 	const doFetch = (ctx.http ? ctx.http.fetch.bind(ctx.http) : fetch) as Fetch;

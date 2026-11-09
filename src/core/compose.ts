@@ -212,7 +212,12 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 		timeout: CRON_TIMEOUT_MS,
 		handler: async (event: { name: string }, ctx) => {
 			const task = tasks.find((t) => t.name === event.name);
-			if (!task) return;
+			if (!task) {
+				// A task an earlier version scheduled: its module cleans up and cancels it.
+				const retired = modules.find((m) => m.retiredTasks?.[event.name])?.retiredTasks?.[event.name];
+				if (retired) await retired(ctx);
+				return;
+			}
 			const features: FeatureMap = await ctxFeatures(ctx);
 			if (task.feature && !isOn(features, task.feature)) return;
 			await task.handler(ctx);

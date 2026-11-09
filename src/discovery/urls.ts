@@ -1,6 +1,6 @@
 /**
  * Public URLs of content entries for discovery (llms.txt, the news sitemap,
- * IndexNow), from the pack-wide resolver in core/content-url.ts: the site's
+ * the RSS feed), from the pack-wide resolver in core/content-url.ts: the site's
  * `urls` overrides when configured, otherwise EmDash's own resolution
  * (getPublicUrl, verified once per collection and locale against local
  * url_pattern interpolation so long lists don't cost two queries an entry).

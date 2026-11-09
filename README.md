@@ -21,7 +21,7 @@ Every module starts off. Turn on only the ones you want under **Plugins → Coyw
 | [Backups](docs/backups.md) | Backups of the D1 database and R2 media, rewind with undo, restore to a new database |
 | [Redirects](docs/redirects.md) | External, file-path and regex redirects, bulk import and export, and automatic redirects for slug changes and removed content |
 | [Schema & Social](docs/schema.md) | One Schema.org graph per page (publisher, articles, authors), breadcrumbs, robots directives, Open Graph, custom JSON-LD |
-| [Discovery](docs/discovery.md) | IndexNow, an RSS feed, a Google News sitemap, and llms.txt with Markdown versions of entries |
+| [Discovery](docs/discovery.md) | An RSS feed, a Google News sitemap, llms.txt with Markdown versions of entries, and whether Cloudflare's Crawler Hints is on |
 | [Robots.txt Rules](docs/robots.md) | Plain-English robots.txt rules with a guided editor, a verified crawler directory, history and a URL tester |
 | [Search](docs/search.md) | Fast as-you-type results on EmDash's full-text search, a search box, and rate limiting |
 | [Link Manager](docs/links.md) | Every link in your content with its status, and bulk replace, unlink and ignore |
@@ -145,7 +145,7 @@ A good first set for most sites:
 | **Clean Image URLs** | Images from a `media.` subdomain, resized and cached | Run **Set up media host** on its page (see [Setting up a media host](docs/images.md#setting-up-a-media-host)) |
 | **Schema & Social** | Schema.org markup and Open Graph tags | Review the publisher on the Schema page |
 | **Redirects** | Redirects EmDash's own can't handle, plus slug-change and removed-content redirects | Import old redirects on the Redirects page |
-| **Discovery** | IndexNow, an RSS feed, a news sitemap, llms.txt | Turn on the parts you want on the Discovery page |
+| **Discovery** | An RSS feed, a news sitemap, llms.txt; Crawler Hints status | Turn on the parts you want on the Discovery page |
 | **Backups** | Backups of the database and media, on demand or daily | Add `backups: { name: "coywolf" }` (step 2) and the `BACKUPS` bucket, then turn on the daily backup (see [Backups](docs/backups.md)) |
 
 ### Using the admin

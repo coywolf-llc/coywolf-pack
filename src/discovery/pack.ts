@@ -1,6 +1,6 @@
 import { registerFeatures } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
-import { BING_API_HOST } from "./bing.js";
+import { CLOUDFLARE_API_HOST } from "../images/cloudflare.js";
 import { discoveryMiddleware } from "./middleware.js";
 import { type DiscoveryOptions, FEATURE, discoveryModule } from "./module.js";
 
@@ -8,13 +8,7 @@ const FEATURES = [
 	{
 		id: FEATURE.main,
 		label: "Discovery",
-		description: "Help search engines, feed readers and AI agents find your content: IndexNow, a Google News sitemap, an RSS feed, and llms.txt with Markdown versions of entries.",
-		default: false,
-	},
-	{
-		id: FEATURE.indexnow,
-		label: "IndexNow",
-		description: "Tell Bing, Yandex, Seznam, Naver and other IndexNow engines when entries are published, updated, unpublished, or deleted (and Bing's URL Submission API too, with a Bing Webmaster API key).",
+		description: "Help search engines, feed readers and AI agents find your content: a Google News sitemap, an RSS feed, llms.txt with Markdown versions of entries, and whether Cloudflare's Crawler Hints tells IndexNow engines about changes.",
 		default: false,
 	},
 	{
@@ -41,7 +35,7 @@ registerFeatures(FEATURES);
 export type { DiscoveryOptions } from "./module.js";
 
 export function discoveryPack(options: DiscoveryOptions): PackModule {
-	const { routes, hooks, tasks } = discoveryModule(options);
+	const { routes, hooks, tasks, retiredTasks } = discoveryModule(options);
 	return {
 		id: "discovery",
 		label: "Discovery",
@@ -49,11 +43,13 @@ export function discoveryPack(options: DiscoveryOptions): PackModule {
 		routes,
 		hooks,
 		tasks,
+		retiredTasks,
 		// page:fragments adds the feed link and the Markdown link, each checked against its own switch.
 		hookFeature: { "page:fragments": FEATURE.main },
 		adminPages: [{ path: "/discovery", label: "Discovery", icon: "compass" }],
 		capabilities: ["content:read", "schema:read", "bylines:read", "network:request", "hooks.page-fragments:register"],
-		allowedHosts: ["api.indexnow.org", "www.bing.com", BING_API_HOST],
+		// Crawler Hints is read from Cloudflare's API (the read-only token).
+		allowedHosts: [CLOUDFLARE_API_HOST],
 	};
 }
 

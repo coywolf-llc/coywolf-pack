@@ -36,7 +36,8 @@ test("no public pack route (anyone can call it: a webhook, a visitor) counts as 
 		// "name": definePluginRoute({ public: true, …  or  "name": { public: true, …
 		for (const m of src.matchAll(/"([a-z][\w/-]*)":\s*(?:definePluginRoute\()?\{\s*public:\s*true/g)) routes.push(m[1]);
 	}
-	assert.ok(routes.length >= 14, `found ${routes.length} public routes`);
+	// 13 since 0.35.18 removed the IndexNow key file route.
+	assert.ok(routes.length >= 13, `found ${routes.length} public routes`);
 	assert.ok(routes.includes("videos/webhook"));
 	for (const route of routes) assert.equal(purgesAfter("POST", api + route), false, route);
 });
@@ -253,8 +254,6 @@ const READ_ONLY_ROUTES = [
 	"ai/test",
 	"backups/download-link",
 	"codeBlocks/preview",
-	"discovery/bing-check",
-	"discovery/submit",
 	"files/options",
 	"images/check",
 	"images/setup/plan",

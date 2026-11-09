@@ -1,35 +1,24 @@
 /**
  * Discovery settings: one plugin setting ("discoverySettings") edited on the
- * Discovery admin page, plus the IndexNow key ("discoveryIndexnowKey") and
- * the Bing Webmaster API key ("discoveryBingApiKey", a secret setting).
+ * Discovery admin page.
  */
 import { z } from "zod";
 
 import type { SettingsReader } from "../shared.js";
 import { FEED_DEFAULT_ITEMS, FEED_MAX_ITEMS } from "./feed.js";
 import { DEFAULT_MAX_ENTRIES } from "./llms.js";
-import { INDEXNOW_ENDPOINTS, KEY_PATTERN, generateKey } from "./indexnow.js";
 
 export const SETTINGS_KEY = "discoverySettings";
-export const INDEXNOW_KEY_SETTING = "discoveryIndexnowKey";
-/**
- * The Bing Webmaster API key. Declared `type: "secret"` in src/core/secrets.ts,
- * so EmDash stores it encrypted (EMDASH_ENCRYPTION_KEY). Never sent to the browser.
- */
-export const BING_KEY_SETTING = "discoveryBingApiKey";
-/** Printable ASCII without spaces (Bing's keys are 32 hex characters; this doesn't assume it). */
-export const BING_KEY_PATTERN = /^[!-~]{8,200}$/;
 
-const endpoints = Object.keys(INDEXNOW_ENDPOINTS) as [keyof typeof INDEXNOW_ENDPOINTS, ...(keyof typeof INDEXNOW_ENDPOINTS)[]];
+/**
+ * Settings of IndexNow and Bing submission, which 0.35.18 removed (Crawler Hints took their place):
+ * the IndexNow key and the Bing Webmaster API key (stored encrypted). Deleted by retireIndexNow
+ * (module.ts); nothing reads them. The old `indexnow` part of discoverySettings is dropped by the
+ * schema below when it's parsed, and from the stored value at the next save.
+ */
+export const RETIRED_SETTINGS = ["discoveryIndexnowKey", "discoveryBingApiKey"] as const;
 
 export const settingsSchema = z.object({
-	indexnow: z
-		.object({
-			endpoint: z.enum(endpoints).default("api.indexnow.org"),
-			/** Collections whose changes are submitted; empty = every routable collection. */
-			collections: z.array(z.string().max(100)).max(200).default([]),
-		})
-		.default({ endpoint: "api.indexnow.org", collections: [] }),
 	news: z
 		.object({
 			/** Collections listed in the news sitemap (Coywolf SEO's default: posts only). */
@@ -73,30 +62,6 @@ export async function loadSettings(ctx: SettingsReader): Promise<DiscoverySettin
 	const stored = await ctx.settings.get<unknown>(SETTINGS_KEY);
 	const parsed = settingsSchema.safeParse(stored ?? {});
 	return parsed.success ? parsed.data : settingsSchema.parse({});
-}
-
-interface SettingsWriter extends SettingsReader {
-	settings: SettingsReader["settings"] & { set(key: string, value: unknown): Promise<void> };
-}
-
-/** The IndexNow key, generating and storing one the first time. */
-export async function ensureIndexNowKey(ctx: SettingsWriter): Promise<string> {
-	const existing = await ctx.settings.get<string>(INDEXNOW_KEY_SETTING);
-	if (typeof existing === "string" && KEY_PATTERN.test(existing)) return existing;
-	const key = generateKey();
-	await ctx.settings.set(INDEXNOW_KEY_SETTING, key);
-	return key;
-}
-
-export async function readIndexNowKey(ctx: SettingsReader): Promise<string | null> {
-	const key = await ctx.settings.get<string>(INDEXNOW_KEY_SETTING);
-	return typeof key === "string" && KEY_PATTERN.test(key) ? key : null;
-}
-
-/** The saved Bing Webmaster API key, or null. Throws when it can't be read (decrypted). */
-export async function readBingApiKey(ctx: SettingsReader): Promise<string | null> {
-	const key = await ctx.settings.get<string>(BING_KEY_SETTING);
-	return typeof key === "string" && key.trim() ? key.trim() : null;
 }
 
 /** Whether a collection is selected, where an empty selection means "all". */

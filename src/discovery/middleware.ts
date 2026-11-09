@@ -1,7 +1,6 @@
 /**
  * Site URLs for the Discovery module, served through the pack middleware:
  *
- * - `/<key>.txt`                       IndexNow key file
  * - `/news-sitemap.xml`                Google News sitemap (also `/coywolf-news-sitemap.xml`, Coywolf SEO's name)
  * - `/feed/`, `<term archive>/feed/`  RSS feeds
  * - `/llms.txt`                        llms.txt
@@ -22,7 +21,6 @@ import { PLUGIN_ID } from "../core/features.js";
 import { noteReadFailure, routeFailed } from "../core/read-failures.js";
 import type { PackMiddleware } from "../core/module.js";
 import { FEED_EDGE_MAX_AGE, parseFeedPath } from "./feed.js";
-import { keyFromPath } from "./indexnow.js";
 import { pagePathFromMarkdownPath } from "./markdown.js";
 import { MemoryCache } from "./memory-cache.js";
 import { FEATURE } from "./module.js";
@@ -69,25 +67,6 @@ const isRead = (context: Context) => context.request.method === "GET" || context
 function respond(context: Context, body: string, headers: Record<string, string>): Response {
 	return new Response(context.request.method === "HEAD" ? null : body, { status: 200, headers });
 }
-
-// ── IndexNow key file ────────────────────────────────────────────
-
-export const indexNowKeyMiddleware: PackMiddleware = {
-	module: "discovery",
-	feature: FEATURE.indexnow,
-	handle: async (context) => {
-		if (!isRead(context)) return undefined;
-		const requested = keyFromPath(context.url.pathname);
-		if (!requested) return undefined;
-		const result = await callRoute<{ key: string | null }>(context, "discovery/public/key");
-		if (!result?.key || result.key !== requested) return undefined;
-		return respond(context, result.key, {
-			"Content-Type": "text/plain; charset=utf-8",
-			"Cache-Control": "no-cache",
-			"X-Robots-Tag": "noindex",
-		});
-	},
-};
 
 // ── News sitemap ─────────────────────────────────────────────────
 
@@ -183,4 +162,4 @@ export const llmsMiddleware: PackMiddleware = {
 	},
 };
 
-export const discoveryMiddleware: PackMiddleware[] = [indexNowKeyMiddleware, newsSitemapMiddleware, feedMiddleware, llmsMiddleware];
+export const discoveryMiddleware: PackMiddleware[] = [newsSitemapMiddleware, feedMiddleware, llmsMiddleware];

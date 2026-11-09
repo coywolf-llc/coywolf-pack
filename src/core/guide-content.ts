@@ -9,7 +9,7 @@
  * Kept free of imports so tests can load it directly.
  */
 
-export type GuideId = "anthropic" | "openai" | "gemini" | "workers-ai" | "r2" | "stream" | "radar" | "media-host" | "images-token" | "bing";
+export type GuideId = "anthropic" | "openai" | "gemini" | "workers-ai" | "r2" | "stream" | "radar" | "media-host" | "images-token" | "crawler-hints-token";
 
 export interface Guide {
 	summary: string;
@@ -102,17 +102,17 @@ export const GUIDES: Record<GuideId, Guide> = {
 		steps: [...cloudflareTokenSteps(b("Account → Radar → Read")), "Paste the token into Cloudflare Radar API token and save. It's stored encrypted."],
 		note: `Radar's API is free. Or set the token as a Worker secret instead: ${code("npx wrangler secret put RADAR_API_TOKEN")}.`,
 	},
-	bing: {
-		summary: "How to get a Bing Webmaster API key",
+	"crawler-hints-token": {
+		summary: "How to let the pack read Crawler Hints",
 		steps: [
-			`Sign in to ${link("https://www.bing.com/webmasters", "Bing Webmaster Tools")} with a Microsoft, Google or Facebook account.`,
-			"Add and verify this site, if it isn't there yet. The key works only for sites verified in the same account.",
-			`Select ${b("Settings")} (top right), then ${b("API access")}.`,
-			`The first time, read and accept the terms, then select ${b("API Key")}.`,
-			`Select ${b("Generate API Key")} and copy the key. Each account has one key, and it works for all of the account's verified sites.`,
-			`Paste it into Bing Webmaster API key and select ${b("Save key")}. It's stored encrypted, and Check key shows the site's quota.`,
+			`If the Performance page already shows Cloudflare usage, add one permission to that token: ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}, wherever you created it), then ${b("⋯ → Edit")} next to the token.`,
+			`Select ${b("+ Add more")} and choose ${b("Zone → Zone → Read")}. Under Zone Resources, choose ${b("Include → All zones from an account → your account")} (or ${b("Specific zone → your site's domain")}).`,
+			`Select ${b("Continue to summary")}, then ${b("Update token")}. The token itself doesn't change, so there's nothing to paste again.`,
+			`No token yet? Create one with ${link("https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%5D&name=Coywolf%20Pack%20read-only", "this pre-filled form")}: it should show the name ${b("Coywolf Pack read-only")} and the permission ${b("Zone → Zone → Read")}. Choose your zones, create it, and copy the token (it's shown once).`,
+			`Set it as the ${code("USAGE_API_TOKEN")} Worker secret (${code("npx wrangler secret put USAGE_API_TOKEN")}; one token works for every site in the account), or paste it in ${b("Cloudflare usage")} on the plugin's Settings page. The Performance page's usage figures need three more read permissions, listed there.`,
+			"Come back to this page: the Crawler Hints card shows On or Off.",
 		],
-		note: `Bing allows a set number of URL submissions per site each day (Check key shows what's left). Anyone with the key can submit URLs for all your verified sites, so keep it private; to replace it, delete it in Bing Webmaster Tools and generate a new one. ${link("https://learn.microsoft.com/en-us/bingwebmaster/getting-access", "Microsoft's guide")}.`,
+		note: "The token only reads. Cloudflare doesn't let API tokens change Crawler Hints, so the switch itself is always in the Cloudflare dashboard (Turn on in Cloudflare).",
 	},
 	"media-host": {
 		summary: "How to set up a media host by hand in the Cloudflare dashboard",
@@ -162,10 +162,6 @@ export const SETTINGS_PAGE_GUIDES: Record<string, { intro: string; guides: Guide
 	imagesApiToken: {
 		intro: "Optional. Only for Set up media host on the Clean Image URLs page. Or set the IMAGES_API_TOKEN Worker secret.",
 		guides: ["images-token"],
-	},
-	discoveryBingApiKey: {
-		intro: "Optional. Sends changed URLs to Bing's URL Submission API, alongside IndexNow. Check key is on the Discovery page → IndexNow.",
-		guides: ["bing"],
 	},
 	robotsRadarToken: {
 		intro: "Optional. Keeps the crawler list current from Cloudflare Radar each week. Or set the RADAR_API_TOKEN Worker secret.",

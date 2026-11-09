@@ -5,8 +5,12 @@
  * the same schema to decide which settings are encrypted: a key declared
  * `type: "secret"` is encrypted on write and decrypted on read, and reading
  * an encrypted value whose key isn't declared secret throws. So every secret
- * stays declared here permanently, whatever the feature switches or module
- * options say, and the keys never change (stored values must keep working).
+ * stays declared here whatever the feature switches or module options say,
+ * and the keys never change (stored values must keep working). A secret is
+ * removed only with its feature, and only once nothing reads it: its stored
+ * value is deleted (as discoveryBingApiKey is by retireIndexNow), and no code
+ * lists all of the plugin's settings (EmDash's Settings page reads only the
+ * declared keys).
  *
  * Every other setting is plain JSON, edited on its module's own admin page
  * (ctx.settings.get/set work for keys that aren't in the schema).
@@ -54,13 +58,7 @@ export const SECRET_SETTINGS = {
 		type: "secret",
 		label: "Cloudflare usage — read-only API token",
 		description:
-			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) add the permissions Account → Account Analytics → Read, Workers → Metadata Read-Only (All Workers; finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account → Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account).",
-	},
-	discoveryBingApiKey: {
-		type: "secret",
-		label: "Discovery — Bing Webmaster API key",
-		description:
-			"Optional. Sends changed URLs to Bing's URL Submission API, which Bing doesn't throttle the way it throttles IndexNow pings from Cloudflare Workers. To get one: (1) sign in to Bing Webmaster Tools (bing.com/webmasters) and add and verify this site; (2) select Settings → API access → API Key (accept the terms the first time); (3) select Generate API Key and copy it; (4) paste it here and save. Check key and the full step-by-step guide are on the Discovery page → IndexNow.",
+			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) add the permissions Account → Account Analytics → Read, Workers → Metadata Read-Only (All Workers; finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account → Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account). With Zone → Zone → Read added too (all zones, or this site's), the Discovery page shows whether Cloudflare's Crawler Hints is on.",
 	},
 	robotsRadarToken: {
 		type: "secret",
