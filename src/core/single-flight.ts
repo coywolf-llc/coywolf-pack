@@ -40,7 +40,8 @@ export const DEADLINES = {
 	 * when that read started), before reading itself. A healthy read of the
 	 * pack's option rows takes 5–50 ms (a cold D1 up to about a second), so
 	 * 2.5 s almost never duplicates a live read, and a stranded one costs one
-	 * visitor 2.5 s instead of a 524 at 100 s.
+	 * visitor 2.5 s instead of a 524 at 100 s (when D1 itself has stopped
+	 * answering, 2.5 s and then its own read's d1ReadMs).
 	 */
 	sharedWaitMs: 2_500,
 	/** How often a waiting caller checks whether the shared read has settled (a healthy read settles in tens of ms). */
@@ -54,11 +55,14 @@ export const DEADLINES = {
 	/**
 	 * A pack D1 read (src/core/d1-batch.ts) that hasn't answered by then
 	 * fails; its callers fail closed (features at their defaults, the page
-	 * kept out of the edge cache). Its reads are small indexed SELECTs (tens of
-	 * milliseconds); 10 s is far past any healthy answer and well inside the
-	 * 100 s wall.
+	 * kept out of the edge cache). Its reads are small indexed SELECTs (5–50 ms,
+	 * a cold D1 about a second), so 5 s is far past any healthy answer. It also
+	 * sets the cost of a D1 that stops answering: a request that waited
+	 * sharedWaitMs for another's read and then reads itself fails after about
+	 * 7.5 s in all (2.5 s + 5 s), not the 100 s wall. Lower would cut off a cold
+	 * D1's slowest answers.
 	 */
-	d1ReadMs: 10_000,
+	d1ReadMs: 5_000,
 	/**
 	 * A D1 batch flush (a zero-delay timer) that hasn't run by then had its
 	 * timer dropped by a canceled request: the next read takes its queue over.
@@ -199,19 +203,29 @@ function startFlight<T>(slot: SharedSlot<T>, read: () => Promise<T>, options: Sh
  * awaited past its deadline (see the top of this file). A read that rejects
  * in time rejects for every caller waiting for it, as before; it isn't kept,
  * so the next caller reads again.
+ *
+ * Several callers can give up on the same stalled read in the same moment.
+ * The first to wake starts its own read and puts it in the slot; the others
+ * find that fresh read there and wait for it instead of each running a read
+ * of their own, under the same rules (`waitMs` from its start, on their own
+ * timers). A caller waits on at most two reads in a row, then reads itself.
  */
 export async function sharedRead<T>(slot: SharedSlot<T>, read: () => Promise<T>, options: SharedReadOptions = {}): Promise<T> {
-	const current = slot.flight;
-	if (!current) return startFlight(slot, read, options, true);
 	const waitMs = options.waitMs ?? DEADLINES.sharedWaitMs;
-	if (await pollUntil(() => current.outcome !== undefined, current.startedAt + waitMs)) {
-		const outcome = current.outcome!;
-		if ("value" in outcome) return outcome.value;
-		throw outcome.error;
+	let current = slot.flight;
+	for (let waited = 0; current && waited < 2; waited++) {
+		const flight = current;
+		if (await pollUntil(() => flight.outcome !== undefined, flight.startedAt + waitMs)) {
+			const outcome = flight.outcome!;
+			if ("value" in outcome) return outcome.value;
+			throw outcome.error;
+		}
+		// Not settled in time: its request was canceled (or it's very slow). Nobody else gets it from here on.
+		if (slot.flight === flight) slot.flight = null;
+		console.warn(`coywolf-pack: shared read stalled: ${options.label ?? "a read"} didn't settle within ${waitMs} ms; reading again`);
+		// Another caller that gave up at the same moment may already have put a fresh read in place: wait for that one.
+		current = slot.flight;
 	}
-	// Not settled in time: its request was canceled (or it's very slow). Nobody else gets it from here on.
-	if (slot.flight === current) slot.flight = null;
-	console.warn(`coywolf-pack: shared read stalled: ${options.label ?? "a read"} didn't settle within ${waitMs} ms; reading again`);
 	// This caller's own read; shared from now on unless another caller already put a fresh one in place.
 	return startFlight(slot, read, options, slot.flight === null);
 }

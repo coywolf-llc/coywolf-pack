@@ -36,7 +36,8 @@ export function purgesAfter(method: string, pathname: string): boolean {
 	return method === "POST" && pathname.startsWith(PACK_API) && !PUBLIC_ROUTE.test(pathname) && !NO_SETTINGS_CHANGE.test(pathname);
 }
 
-export type PurgeScope = { purgeEverything: true } | { pathPrefixes: string[] } | { tags: string[] };
+/** What one cache.purge() call clears: everything, or any mix of path prefixes and cache tags (Workers Cache takes both in one call). */
+export type PurgeScope = { purgeEverything: true } | { pathPrefixes: string[] } | { tags: string[] } | { pathPrefixes: string[]; tags: string[] };
 
 /** Cache tag on every redirect the pack serves from the edge cache (src/redirects/middleware.ts). */
 export const REDIRECTS_TAG = "coywolf-redirects";

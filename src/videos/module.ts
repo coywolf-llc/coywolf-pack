@@ -10,7 +10,7 @@ import { z } from "zod";
 import { absoluteUrl, entryUrl } from "../core/content-url.js";
 import { ctxFeatures, invalidateFeatures, isOn, requireCachedFeature, requireFeature, cachedCtxFeatures } from "../core/features.js";
 import { DEADLINES, withDeadline } from "../core/single-flight.js";
-import { purgePageCache } from "../pageCache/lib.js";
+import { type PurgeScope, purgePageCache } from "../pageCache/lib.js";
 import { afterResponse, parseInput } from "../shared.js";
 import { ENGAGEMENT_HEADER, ENGAGEMENT_LIMITS, EngagementLimiter, LIKES_BY_PREFIX, hasEngagementHeader, likeAction, likesByKey, staleLikesByKey } from "./engagement.js";
 import {
@@ -29,6 +29,7 @@ import {
 	posterUrl,
 	sha256Hex,
 	MAX_CAPTION_BYTES,
+	MAX_WEBHOOK_PAGES,
 	utf8Bytes,
 	verifyWebhookSignature,
 	videoPagesScope,
@@ -240,14 +241,25 @@ async function unindexEntry(ctx: Ctx, collection: string, id: string): Promise<v
 
 /**
  * After a Stream webhook call: clear the cached pages that embed the video
- * (videoPagesScope), within DEADLINES.purgeMs. Never fails the webhook.
+ * (videoPagesScope: by path, the home page by its entry's tag, at most
+ * MAX_WEBHOOK_PAGES paths), within DEADLINES.purgeMs. Never fails the webhook.
  */
 async function clearVideoPages(ctx: Ctx, uid: string): Promise<void> {
 	try {
-		const scope = videoPagesScope(await allEmbeds(ctx), uid);
-		if (!scope) return;
+		const pages = videoPagesScope(await allEmbeds(ctx), uid);
+		if (!pages) return;
+		if (pages.skipped) {
+			ctx.log.warn("Videos: the video is on more pages than one webhook call clears; the newest were cleared, the rest refresh at their normal lifetime", {
+				uid,
+				cleared: pages.pathPrefixes.length,
+				skipped: pages.skipped,
+				max: MAX_WEBHOOK_PAGES,
+			});
+		}
+		const scope: PurgeScope =
+			pages.pathPrefixes.length && pages.tags.length ? { pathPrefixes: pages.pathPrefixes, tags: pages.tags } : pages.tags.length ? { tags: pages.tags } : { pathPrefixes: pages.pathPrefixes };
 		if (await withDeadline(purgePageCache(scope), DEADLINES.purgeMs, "clearing the pages that show a video")) {
-			ctx.log.info("Videos: cleared the pages that show the video", { uid, pages: scope.pathPrefixes.length });
+			ctx.log.info("Videos: cleared the pages that show the video", { uid, pages: pages.pathPrefixes.length, homePage: pages.tags.length > 0 });
 		}
 	} catch (error) {
 		ctx.log.warn("Videos: couldn't clear the pages that show the video", { uid, error: String(error) });

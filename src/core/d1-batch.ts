@@ -12,11 +12,15 @@
  *
  * Cancellation-safe (the hazard EmDash fixed as #1927): the flush runs on the
  * timer of whichever read queued first, and a request canceled after queueing
- * drops its timers. A queue whose flush hasn't run DEADLINES.d1FlushReclaimMs
- * after it was scheduled is taken over by the next read, which schedules a
- * flush of its own for both. And every read has its own deadline
- * (DEADLINES.d1ReadMs, on the caller's own timer): a batch that never answers
- * fails its callers, who fail closed, instead of hanging them.
+ * drops its timers. What protects every caller is its own deadline
+ * (DEADLINES.d1ReadMs, on the caller's own timer): a read whose flush never
+ * ran, or whose batch never answers, fails by then, and its callers fail
+ * closed instead of hanging. The takeover below is a smaller thing: queues are
+ * keyed by request context (requestStore(), or OUTSIDE for reads made outside
+ * one), so a queue whose flush is DEADLINES.d1FlushReclaimMs overdue is only
+ * ever found by a later read of the same context, which then schedules a flush
+ * for both. A canceled request makes no more reads, so that mostly covers reads
+ * outside a request context; it never reaches another request's queue.
  */
 import { requestStore } from "./request-memo.js";
 import { DEADLINES, withDeadline } from "./single-flight.js";

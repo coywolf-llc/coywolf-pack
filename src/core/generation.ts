@@ -37,9 +37,11 @@ export function parseGeneration(raw: string | null | undefined): GenerationRow |
 	}
 }
 
-/** Both purges in one: every path prefix (or tag) of both, or everything when either clears everything or they're of different kinds. */
+/** Both purges in one: every path prefix (or tag) of both, or everything when either clears everything, mixes the two, or they're of different kinds. */
 export function mergeScopes(a: PurgeScope | null | undefined, b: PurgeScope | null | undefined): PurgeScope | null {
 	if (!a || !b) return a ?? b ?? null;
+	const mixed = (s: PurgeScope) => "pathPrefixes" in s && "tags" in s;
+	if (mixed(a) || mixed(b)) return { purgeEverything: true };
 	if ("pathPrefixes" in a && "pathPrefixes" in b) return { pathPrefixes: [...new Set([...a.pathPrefixes, ...b.pathPrefixes])] };
 	if ("tags" in a && "tags" in b) return { tags: [...new Set([...a.tags, ...b.tags])] };
 	return { purgeEverything: true };

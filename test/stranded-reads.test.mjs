@@ -171,7 +171,7 @@ test("shared read: once a read is past its deadline, the next caller doesn't wai
 	assert.ok(Date.now() - started < 20, "no wait for a read already known to be stale");
 });
 
-test("shared read: of two callers giving up at once, the first one's read is shared and the second doesn't replace it", LIMIT, async () => {
+test("shared read: of two callers giving up at once, the first one's read is shared and the second waits for it instead of reading too", LIMIT, async () => {
 	const slot = sharedSlot();
 	let n = 0;
 	let open;
@@ -179,18 +179,37 @@ test("shared read: of two callers giving up at once, the first one's read is sha
 	const read = () => (++n === 1 ? never() : gate.then(() => "fresh"));
 	void sharedRead(slot, read);
 	const stranded = slot.flight;
-	await quietly("warn", async () => {
+	const warnings = await quietly("warn", async () => {
 		const both = Promise.all([sharedRead(slot, read), sharedRead(slot, read)]);
 		await sleep(60);
-		assert.equal(n, 3, "each read for itself (neither waits past its deadline)");
+		assert.equal(n, 2, "one fresh read: the second giver-up joined the first one's");
 		const installed = slot.flight;
 		assert.ok(installed && installed !== stranded);
 		const later = sharedRead(slot, read);
 		assert.equal(slot.flight, installed, "still the first one's read");
 		open();
 		assert.deepEqual([...(await both), await later], ["fresh", "fresh", "fresh"]);
-		assert.equal(n, 3, "the later caller shared it");
+		assert.equal(n, 2, "the later caller shared it too");
 	});
+	assert.equal(warnings.length, 2, "each giver-up logs the stall once");
+});
+
+test("shared read: a caller that joined a fresh read which stalls too gives up on that one as well, then reads itself", LIMIT, async () => {
+	const slot = sharedSlot();
+	let n = 0;
+	const read = () => (++n <= 2 ? never() : Promise.resolve(n)); // The stranded read and the first giver-up's fresh read both never settle.
+	void sharedRead(slot, read);
+	const warnings = await quietly("warn", async () => {
+		const started = Date.now();
+		const first = sharedRead(slot, read);
+		assert.equal(await sharedRead(slot, read), 3, "the second waited for the fresh read, gave up on it, and read itself");
+		const waited = Date.now() - started;
+		assert.ok(waited >= 70 && waited < 500, `two waits of DEADLINES.sharedWaitMs, no more (${waited} ms)`);
+		await assert.rejects(withDeadline(first, 100, "the first caller"), DeadlineError, "the first giver-up's own read never settles (in production its D1 deadline ends it)");
+	});
+	assert.equal(warnings.length, 3, "the first giver-up once, the second twice");
+	assert.equal(n, 3);
+	assert.equal(slot.flight, null, "the settled read isn't kept");
 });
 
 test("shared read: a failure in time fails every caller waiting for it, and isn't kept", async () => {
@@ -477,18 +496,26 @@ test("warmer: a sitemap read that times out leaves the collect step to be tried 
 
 // ── The Stream webhook (src/videos/module.ts) ───────────────────
 
-test("Stream webhook: clears only the pages that show the video (no full purge), and never everything", LIMIT, async () => {
-	const { videoPagesScope, hmacHex } = await import("../src/videos/lib.ts");
+test("Stream webhook: clears only the pages that show the video (no full purge), the home page by its entry's tag, and never everything", LIMIT, async () => {
+	const { videoPagesScope, hmacHex, MAX_WEBHOOK_PAGES } = await import("../src/videos/lib.ts");
 	const UID = "a67dcf0925d0747f8c5419df6400c2b5";
 	const OTHER = "b67dcf0925d0747f8c5419df6400c2b5";
-	const entry = (url, uids = [UID], status = "published") => ({ uids, status, url });
+	let ids = 0;
+	const entry = (url, uids = [UID], status = "published", publishedAt = null) => ({ uids, status, url, entryId: `e${++ids}`, publishedAt });
 	assert.deepEqual(
 		videoPagesScope([entry("https://x.com/news/a/"), entry("https://x.com/news/b"), entry("https://x.com/draft/", [UID], "draft"), entry("https://x.com/other/", [OTHER]), entry(null)], UID),
-		{ pathPrefixes: ["/news/a", "/news/b"] },
+		{ pathPrefixes: ["/news/a", "/news/b"], tags: [], skipped: 0 },
 	);
 	assert.equal(videoPagesScope([entry("https://x.com/other/", [OTHER])], UID), null, "no page shows it: nothing to clear");
-	assert.equal(videoPagesScope([entry("https://x.com/"), entry("https://x.com/a/")], UID), null, "the home page: never a '/' prefix (everything)");
-	assert.equal(videoPagesScope(Array.from({ length: 31 }, (_, i) => entry(`https://x.com/p${i}/`)), UID), null, "more than the cap: left to expire");
+	const home = entry("https://x.com/");
+	assert.deepEqual(videoPagesScope([home, entry("https://x.com/a/")], UID), { pathPrefixes: ["/a"], tags: [home.entryId], skipped: 0 }, "the home page: never a '/' prefix (everything); its entry's tag, and the other pages still by path");
+	assert.deepEqual(videoPagesScope([home], UID), { pathPrefixes: [], tags: [home.entryId], skipped: 0 }, "only the home page: only its tag");
+	const many = Array.from({ length: 31 }, (_, i) => entry(`https://x.com/p${i}/`, [UID], "published", `2026-01-${String(i + 1).padStart(2, "0")}`));
+	const capped = videoPagesScope(many, UID);
+	assert.equal(MAX_WEBHOOK_PAGES, 30);
+	assert.deepEqual([capped.pathPrefixes.length, capped.skipped, capped.tags], [30, 1, []], "more than the cap: the newest 30 are cleared, the rest counted");
+	assert.deepEqual([capped.pathPrefixes[0], capped.pathPrefixes.at(-1)], ["/p30", "/p1"], "newest first; the oldest is the one left out");
+	assert.deepEqual(videoPagesScope([entry("https://x.com/same/"), entry("https://x.com/same")], UID).pathPrefixes, ["/same"], "one path from two entries counts once");
 
 	// The route itself: refreshes the video, then clears its pages after the response.
 	const { invalidateFeatures } = await import("../src/core/features.ts");
@@ -511,7 +538,11 @@ test("Stream webhook: clears only the pages that show the video (no full purge),
 		settings: { get: async (key) => settings[key] ?? null },
 		kv: { get: async () => null, set: async () => undefined, delete: async () => undefined },
 		storage: {
-			videosEmbeds: collection([{ id: "posts:1", data: entry("https://x.com/news/a/") }, { id: "posts:2", data: entry("https://x.com/news/other/", [OTHER]) }]),
+			videosEmbeds: collection([
+				{ id: "posts:1", data: { ...entry("https://x.com/news/a/"), entryId: "1" } },
+				{ id: "posts:2", data: entry("https://x.com/news/other/", [OTHER]) },
+				{ id: "pages:home", data: { ...entry("https://x.com/"), entryId: "home" } },
+			]),
 			videosMeta: collection(),
 		},
 		log: { info() {}, warn: (msg, data) => assert.fail(`${msg} ${JSON.stringify(data)}`), error() {} },
@@ -530,7 +561,7 @@ test("Stream webhook: clears only the pages that show the video (no full purge),
 		globalThis.fetch = realFetch;
 	}
 	assert.equal(docs.get(UID)?.duration, 12, "the video's details were refreshed");
-	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/news/a"] }], "only the page that shows it");
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/news/a"], tags: ["home"] }], "only the page that shows it, and the home page by its entry's tag, in one call");
 });
 
 // ── Off the request path: crops and posters (src/images/pack.ts, src/videos/poster.ts) ──
