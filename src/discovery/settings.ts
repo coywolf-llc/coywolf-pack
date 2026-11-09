@@ -1,6 +1,7 @@
 /**
  * Discovery settings: one plugin setting ("discoverySettings") edited on the
- * Discovery admin page, plus the IndexNow key ("discoveryIndexnowKey").
+ * Discovery admin page, plus the IndexNow key ("discoveryIndexnowKey") and
+ * the Bing Webmaster API key ("discoveryBingApiKey", a secret setting).
  */
 import { z } from "zod";
 
@@ -11,6 +12,13 @@ import { INDEXNOW_ENDPOINTS, KEY_PATTERN, generateKey } from "./indexnow.js";
 
 export const SETTINGS_KEY = "discoverySettings";
 export const INDEXNOW_KEY_SETTING = "discoveryIndexnowKey";
+/**
+ * The Bing Webmaster API key. Declared `type: "secret"` in src/core/secrets.ts,
+ * so EmDash stores it encrypted (EMDASH_ENCRYPTION_KEY). Never sent to the browser.
+ */
+export const BING_KEY_SETTING = "discoveryBingApiKey";
+/** Printable ASCII without spaces (Bing's keys are 32 hex characters; this doesn't assume it). */
+export const BING_KEY_PATTERN = /^[!-~]{8,200}$/;
 
 const endpoints = Object.keys(INDEXNOW_ENDPOINTS) as [keyof typeof INDEXNOW_ENDPOINTS, ...(keyof typeof INDEXNOW_ENDPOINTS)[]];
 
@@ -83,6 +91,12 @@ export async function ensureIndexNowKey(ctx: SettingsWriter): Promise<string> {
 export async function readIndexNowKey(ctx: SettingsReader): Promise<string | null> {
 	const key = await ctx.settings.get<string>(INDEXNOW_KEY_SETTING);
 	return typeof key === "string" && KEY_PATTERN.test(key) ? key : null;
+}
+
+/** The saved Bing Webmaster API key, or null. Throws when it can't be read (decrypted). */
+export async function readBingApiKey(ctx: SettingsReader): Promise<string | null> {
+	const key = await ctx.settings.get<string>(BING_KEY_SETTING);
+	return typeof key === "string" && key.trim() ? key.trim() : null;
 }
 
 /** Whether a collection is selected, where an empty selection means "all". */

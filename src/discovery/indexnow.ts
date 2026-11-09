@@ -1,12 +1,15 @@
 /**
- * IndexNow (pure part): key handling, the submission payload, and a batcher
- * that collects changed URLs for a short window, dedupes them, and submits
- * them in one request.
+ * IndexNow (pure part): key handling, the submission payload, sending one
+ * ping within a deadline, and a batcher that collects changed URLs for a
+ * short window, dedupes them, and submits them in one request.
  *
  * Coywolf SEO pinged Bing once per URL; here several changes in quick
  * succession (a save followed by a publish, a bulk edit) go out as one POST,
  * which every IndexNow endpoint accepts (up to 10,000 URLs).
+ *
+ * No EmDash imports, so tests can load it.
  */
+import { DEADLINES, withDeadline } from "../core/single-flight.js";
 
 export const INDEXNOW_ENDPOINTS = {
 	"api.indexnow.org": "https://api.indexnow.org/indexnow",
@@ -58,6 +61,89 @@ export function buildPayload(siteUrl: string, key: string, urls: string[]): Inde
 		keyLocation: `${site.origin}/${key}.txt`,
 		urlList: urlList.slice(0, MAX_URLS_PER_REQUEST),
 	};
+}
+
+/** One attempt in the Recent submissions log (`state:discovery:indexnowLog`). */
+export interface PingLogEntry {
+	at: string;
+	/** An IndexNow endpoint (INDEXNOW_ENDPOINTS' keys) or "bing-api" (the Bing Webmaster API). */
+	endpoint: string;
+	count: number;
+	/** The first 10 URLs. */
+	urls: string[];
+	/** HTTP status; 0 when no answer came (or nothing was sent). */
+	status: number;
+	ok: boolean;
+	error?: string;
+	/** What started it: a content change, Submit home page, or the daily drain of Bing's queue. */
+	trigger: "content" | "manual" | "queue";
+	/** Bing Webmaster API: URLs the site's daily quota still allows after this attempt, when known. */
+	quotaLeft?: number;
+	/** Bing Webmaster API: these URLs weren't sent now and wait in the queue for the next submission. */
+	queued?: boolean;
+}
+
+export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
+
+export interface FetchResult {
+	status: number;
+	ok: boolean;
+	statusText: string;
+	text: string;
+}
+
+/**
+ * `fetch` and its body within `ms`: an AbortSignal on the request and a
+ * deadline of the caller's own, in case the fetch ignores the signal.
+ * Rejects with a DeadlineError (or the fetch's error).
+ */
+export function fetchWithin(fetch: Fetch, url: string, init: RequestInit, ms: number, what: string): Promise<FetchResult> {
+	const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined;
+	return withDeadline(
+		fetch(url, { ...init, ...(signal ? { signal } : {}) }).then(async (response) => ({
+			status: response.status,
+			ok: response.ok,
+			statusText: response.statusText,
+			text: await response.text().catch(() => ""),
+		})),
+		ms,
+		what,
+	);
+}
+
+/** POST one IndexNow payload. Never throws: the outcome is the returned log entry. */
+export async function sendIndexNow(
+	fetch: Fetch | null,
+	endpoint: IndexNowEndpoint,
+	payload: IndexNowPayload,
+	trigger: PingLogEntry["trigger"],
+	timeoutMs: number = DEADLINES.searchPingMs,
+): Promise<PingLogEntry> {
+	const entry: PingLogEntry = {
+		at: new Date().toISOString(),
+		endpoint,
+		count: payload.urlList.length,
+		urls: payload.urlList.slice(0, 10),
+		status: 0,
+		ok: false,
+		trigger,
+	};
+	try {
+		if (!fetch) throw new Error("network:request capability missing");
+		const response = await fetchWithin(
+			fetch,
+			INDEXNOW_ENDPOINTS[endpoint],
+			{ method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify(payload) },
+			timeoutMs,
+			`IndexNow ping to ${endpoint}`,
+		);
+		entry.status = response.status;
+		entry.ok = response.ok;
+		if (!response.ok) entry.error = response.text.slice(0, 300) || response.statusText;
+	} catch (error) {
+		entry.error = String(error).slice(0, 300);
+	}
+	return entry;
 }
 
 export interface BatcherOptions {
