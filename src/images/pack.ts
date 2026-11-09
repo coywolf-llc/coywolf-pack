@@ -22,6 +22,7 @@
 import type { PluginContext } from "emdash";
 
 import { batchedAll } from "../core/d1-batch.js";
+import { DEADLINES, pollUntil, withDeadline } from "../core/single-flight.js";
 import { isCurrent, registerFeatures, registerSiteOption, rememberSiteOption, settingsEpoch, siteFeatureOn, siteOption, siteSetting } from "../core/features.js";
 import { purgePageCache } from "../pageCache/lib.js";
 import { WARMER_AGENT, WARM_SETTING, WARM_STATE_OPTION, startWarm } from "../pageCache/warm.js";
@@ -626,10 +627,25 @@ export async function responsiveImage(src: string | null | undefined, options: {
 const cropJobs = new Map<string, { until: number; failed?: boolean }>();
 const CROP_JOB_MS = 10 * 60_000;
 const CROP_RETRY_MS = 60 * 60_000;
-/** Images whose crops are queued in this isolate, made one at a time (each holds its original in memory). */
-let cropQueue: Promise<void> = Promise.resolve();
-let queuedImages = 0;
+/**
+ * Images whose crops are queued in this isolate, made one at a time (each
+ * holds its original in memory): the last job queued, and the time by which
+ * it ends whatever happens. Each job waits for the one ahead at most until
+ * that one's end, then runs for DEADLINES.cropJobMs at most. A job whose
+ * request was canceled never settles, so it can't be waited for without a
+ * bound: chaining on it would stop every crop after it in this isolate.
+ */
+let cropTail: { done: Promise<void>; endsBy: number; settled: boolean } = { done: Promise.resolve(), endsBy: 0, settled: true };
+/** How often a queued crop job checks whether the one ahead is done. */
+const CROP_POLL_MS = 250;
+/** Jobs queued and not yet ended, by the time each ends at the latest (counted out even when one never settles). */
+const cropJobsBusy = new Map<object, number>();
 const MAX_QUEUED_IMAGES = 6;
+
+function queuedImages(now: number): number {
+	for (const [job, endsBy] of cropJobsBusy) if (endsBy <= now) cropJobsBusy.delete(job);
+	return cropJobsBusy.size;
+}
 
 /** Make the given crops of one image and add them to its record (after the response). */
 async function makeCrops(id: string, names: string[]): Promise<void> {
@@ -661,31 +677,43 @@ function queueCrops(id: string, names: string[], now = Date.now()): boolean {
 	const jobs = names.map((name) => cropJobs.get(`${id}:${name}`));
 	if (jobs.some((job) => job?.failed && job.until > now)) return false;
 	const fresh = names.filter((_, i) => !jobs[i] || jobs[i].until <= now);
-	if (!fresh.length || queuedImages >= MAX_QUEUED_IMAGES) return true;
+	if (!fresh.length || queuedImages(now) >= MAX_QUEUED_IMAGES) return true;
 	if (cropJobs.size > 5000) cropJobs.clear();
 	for (const name of fresh) cropJobs.set(`${id}:${name}`, { until: now + CROP_JOB_MS });
-	queuedImages++;
-	cropQueue = cropQueue
-		.then(() => makeCrops(id, fresh))
+	const ahead = cropTail;
+	const startBy = Math.max(now, ahead.endsBy);
+	const job = {};
+	const endsBy = startBy + DEADLINES.cropJobMs;
+	cropJobsBusy.set(job, endsBy);
+	const tail = { done: Promise.resolve(), endsBy, settled: false };
+	tail.done = (async () => {
+		// One image at a time, but never waiting past the end of the job ahead (checked on this request's own timers).
+		if (startBy > now) await pollUntil(() => ahead.settled, startBy, CROP_POLL_MS);
+		await withDeadline(makeCrops(id, fresh), DEADLINES.cropJobMs, `making crops ${fresh.join(", ")} of ${id}`);
+	})()
 		.catch((error) => {
 			console.error(`coywolf-pack images: couldn't make crops ${fresh.join(", ")} of ${id}`, error);
 			for (const name of fresh) cropJobs.set(`${id}:${name}`, { until: Date.now() + CROP_RETRY_MS, failed: true });
 		})
 		.finally(() => {
-			queuedImages--;
+			tail.settled = true;
+			cropJobsBusy.delete(job);
 		});
-	void afterResponse(cropQueue);
+	cropTail = tail;
+	void afterResponse(tail.done);
 	return true;
 }
 
 /** Wait for this isolate's queued crops (tests). */
 export function cropsIdle(): Promise<void> {
-	return cropQueue;
+	return cropTail.done;
 }
 
 /** Forget queued and failed crops (tests). */
 export function resetCropJobs(): void {
 	cropJobs.clear();
+	cropJobsBusy.clear();
+	cropTail = { done: Promise.resolve(), endsBy: 0, settled: true };
 }
 
 /**

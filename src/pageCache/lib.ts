@@ -14,12 +14,19 @@
 export const VERSION_OPTION = "plugin:coywolf-pack:pageCache:version";
 
 /**
- * Pack routes anyone can call (search, discovery files, video player actions).
- * Everything else under the pack's API is an admin action, so a successful POST
- * there purges the cache. The Stream webhook isn't listed: it changes video
- * details that pages show.
+ * Pack routes anyone can call (search, discovery files, video player actions)
+ * and the signed Stream webhook. Everything else under the pack's API is an
+ * admin action, so a successful POST there purges the cache.
+ *
+ * The webhook isn't an admin save: Stream calls it whenever a video's state
+ * changes (several calls within seconds while videos process), and counting
+ * each call as one purged every cached page, recorded a new settings
+ * generation (a settling purge 5 minutes later, every isolate's caches
+ * dropped) and restarted warming: on November 9, 2026 ten calls in an hour
+ * made twelve full re-warms. It clears only the pages that embed that video
+ * itself (src/videos/module.ts), and changes no settings.
  */
-const PUBLIC_ROUTE = /^\/_emdash\/api\/plugins\/coywolf-pack\/(search\/|discovery\/public\/|videos\/(like|play|caption|embed|sitemap)(\/|$))/;
+const PUBLIC_ROUTE = /^\/_emdash\/api\/plugins\/coywolf-pack\/(search\/|discovery\/public\/|videos\/((like|play|caption|embed|sitemap)(\/|$)|webhook$))/;
 const PACK_API = "/_emdash/api/plugins/coywolf-pack/";
 /** Admin writes that change nothing a page or a cache shows: no purge and no new settings generation. */
 const NO_SETTINGS_CHANGE = /^\/_emdash\/api\/plugins\/coywolf-pack\/updates\//;
@@ -29,7 +36,8 @@ export function purgesAfter(method: string, pathname: string): boolean {
 	return method === "POST" && pathname.startsWith(PACK_API) && !PUBLIC_ROUTE.test(pathname) && !NO_SETTINGS_CHANGE.test(pathname);
 }
 
-export type PurgeScope = { purgeEverything: true } | { pathPrefixes: string[] } | { tags: string[] };
+/** What one cache.purge() call clears: everything, or any mix of path prefixes and cache tags (Workers Cache takes both in one call). */
+export type PurgeScope = { purgeEverything: true } | { pathPrefixes: string[] } | { tags: string[] } | { pathPrefixes: string[]; tags: string[] };
 
 /** Cache tag on every redirect the pack serves from the edge cache (src/redirects/middleware.ts). */
 export const REDIRECTS_TAG = "coywolf-redirects";
@@ -75,8 +83,9 @@ export function purgeScope(pathname: string): PurgeScope | null {
 	if (/^(redirects|backups|links|updates)\//.test(route) || /^cache\/(media|warm|purge)(\/|$)/.test(route)) return null;
 	// Stored image sizes: new uploads and crops are picked up after a short stopgap lifetime; a backfill run clears the cache itself once when it is done.
 	if (/^images\/variants\/(settings|run|bulk|estimate)$/.test(route)) return null;
-	// Videos admin reads (library, details, status, storage, settings, captions list) change nothing.
-	if (/^videos\/(list|status|detail|options|storage|test|settings|captions\/list)$/.test(route)) return null;
+	// Videos admin reads (library, details, status, storage, settings, captions list) change nothing, nor does
+	// (un)subscribing the Stream webhook (its secret is on no page).
+	if (/^videos\/(list|status|detail|options|storage|test|settings|captions\/list|webhook\/(subscribe|unsubscribe))$/.test(route)) return null;
 	if (/^robots\//.test(route)) return { pathPrefixes: ["/robots.txt"] };
 	return { purgeEverything: true };
 }

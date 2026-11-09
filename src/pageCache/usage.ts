@@ -14,7 +14,8 @@ import type { PluginContext } from "emdash";
 
 import { CLOUDFLARE_API_HOST } from "../images/cloudflare.js";
 import { IMAGES_SETTINGS } from "../images/settings.js";
-import { secret, workerEnv } from "../shared.js";
+import { DEADLINES, sharedRead, sharedSlot } from "../core/single-flight.js";
+import { afterResponse, secret, workerEnv } from "../shared.js";
 import { versionId } from "./lib.js";
 import {
 	type Bill,
@@ -219,7 +220,8 @@ async function readUsage(ctx: PluginContext, a: { token: string; doFetch: Fetch 
 	return { plan, planSource, worker: target.worker, databaseId: target.databaseId, periods, storage: { siteBytes, accountBytes }, bill: estimateBill(periods.month.account, accountBytes), warming };
 }
 
-let reading: Promise<UsageResult> | null = null;
+/** A reading under way: concurrent page loads share it, for a bounded time (DEADLINES.usageWaitMs, src/core/single-flight.ts). */
+const reading = sharedSlot<UsageResult>();
 
 /**
  * The last reading (under an hour old), or a new one. `refresh` reads again unless the last one is under a minute old.
@@ -229,34 +231,35 @@ export async function usageReport(ctx: PluginContext, refresh = false, bindings?
 	const cached = await ctx.kv.get<UsageReport>(CACHE_KEY);
 	const age = cached ? Date.now() - Date.parse(cached.at) : Number.POSITIVE_INFINITY;
 	if (cached && age < (refresh ? REFRESH_MIN_MS : TTL_MS)) return { configured: true, ...cached };
-	if (reading) return reading;
+	const read = () => sharedRead(reading, () => readNow(ctx, cached, bindings), { waitMs: DEADLINES.usageWaitMs, anchor: afterResponse, label: "the Cloudflare usage reading" });
+	if (reading.flight) return read();
 	const failed = await ctx.kv.get<{ at: string; message: string }>(FAILED_KEY);
 	if (failed && Date.now() - Date.parse(failed.at) < RETRY_AFTER_MS) {
 		const wait = `Couldn't read usage: ${failed.message} Trying again after ${new Date(Date.parse(failed.at) + RETRY_AFTER_MS).toISOString().slice(11, 16)} UTC.`;
 		return cached ? { configured: true, ...cached, notes: [...cached.notes, wait] } : { configured: false, reason: wait };
 	}
-	reading = (async (): Promise<UsageResult> => {
-		const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
-		const a = await access(ctx, env);
-		if ("reason" in a) return { configured: false, reason: a.reason };
-		const notes: string[] = [];
-		try {
-			const target = await findTarget(ctx, env, a, notes);
-			const report: UsageReport = { at: new Date().toISOString(), ...(await readUsage(ctx, a, target, notes)), notes };
-			await ctx.kv.set(CACHE_KEY, report);
-			await ctx.kv.delete?.(FAILED_KEY);
-			return { configured: true, ...report };
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			ctx.log.warn("Cloudflare usage: read failed", { error: message });
-			await ctx.kv.set(FAILED_KEY, { at: new Date().toISOString(), message });
-			// The last good reading, if any, with what went wrong.
-			if (cached) return { configured: true, ...cached, notes: [...cached.notes, `Couldn't refresh: ${message}`] };
-			return { configured: false, reason: message };
-		}
-	})().finally(() => {
-		reading = null;
-	});
-	return reading;
+	return read();
+}
+
+/** A new reading (stored in KV), or the last good one with what went wrong. */
+async function readNow(ctx: PluginContext, cached: UsageReport | null | undefined, bindings?: Record<string, unknown>): Promise<UsageResult> {
+	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
+	const a = await access(ctx, env);
+	if ("reason" in a) return { configured: false, reason: a.reason };
+	const notes: string[] = [];
+	try {
+		const target = await findTarget(ctx, env, a, notes);
+		const report: UsageReport = { at: new Date().toISOString(), ...(await readUsage(ctx, a, target, notes)), notes };
+		await ctx.kv.set(CACHE_KEY, report);
+		await ctx.kv.delete?.(FAILED_KEY);
+		return { configured: true, ...report };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		ctx.log.warn("Cloudflare usage: read failed", { error: message });
+		await ctx.kv.set(FAILED_KEY, { at: new Date().toISOString(), message });
+		// The last good reading, if any, with what went wrong.
+		if (cached) return { configured: true, ...cached, notes: [...cached.notes, `Couldn't refresh: ${message}`] };
+		return { configured: false, reason: message };
+	}
 }
 

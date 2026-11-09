@@ -200,6 +200,8 @@ test("EmDash 1.2's pipeline registers the hook for the config plugin, dispatches
 	assert.equal(pipeline.hasHooks("media:afterUpload"), true, "registered (EmDash skips hooks whose capability is missing)");
 	// The pack middleware read the switches earlier in the request (per-isolate cache), as in production.
 	await siteFeatures("DB");
+	// That read was anchored with waitUntil too (src/core/single-flight.ts) and is done: count from here.
+	globalThis.__waited = [];
 	// emdash-runtime handleMediaCreate: not awaited, not attached to anything; the response goes out next.
 	const dispatched = pipeline.runMediaAfterUpload(structuredClone(upload));
 	assert.equal(globalThis.__waited.length, 1, "registered before EmDash's dispatch yields");

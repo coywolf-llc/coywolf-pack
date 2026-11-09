@@ -10,6 +10,8 @@
  * keeps it current; the pack pages' notice also checks when it's a day old.
  */
 import { isOn, knownFeatures, knownSiteSetting, registerSiteSetting, rememberSiteSetting } from "../core/features.js";
+import { DEADLINES, sharedRead, sharedSlot } from "../core/single-flight.js";
+import { afterResponse } from "../shared.js";
 import { VERSION } from "../version.js";
 import { DIST_TAGS_URL, RELEASES_URL, UPDATE_COMMAND, isNewer, parseVersion } from "./core.js";
 
@@ -79,34 +81,34 @@ async function askNpm(ctx: Ctx): Promise<string> {
 	return String(tags.latest).trim();
 }
 
-let checking: Promise<UpdateState> | null = null;
+/** A check under way: concurrent admin page loads share it, for a bounded time (DEADLINES.updateCheckWaitMs, src/core/single-flight.ts). */
+const checking = sharedSlot<UpdateState>();
 
 /** The saved answer, or a new one when it's a day old (or six hours after a failure). */
 export async function checkForUpdate(ctx: Ctx, now = Date.now()): Promise<UpdateState> {
 	const saved = await readState(ctx);
 	if (age(saved.checkedAt, now) < CHECK_EVERY_MS || age(saved.failedAt, now) < RETRY_AFTER_MS) return saved;
-	if (checking) return checking;
-	checking = (async () => {
-		let latest: string;
-		try {
-			latest = await askNpm(ctx);
-		} catch (error) {
-			ctx.log.warn("Update check: couldn't ask npm", { error: error instanceof Error ? error.message : String(error) });
-			// Keep the last answer (re-read, so a dismissal made meanwhile isn't lost); try again later.
-			const current = await readState(ctx);
-			const state: UpdateState = { ...current, failedAt: new Date(now).toISOString() };
-			await writeState(ctx, state).catch(() => undefined);
-			return state;
-		}
-		// Re-read before writing, so a dismissal made while npm answered isn't lost.
+	return sharedRead(checking, () => askAndSave(ctx, now), { waitMs: DEADLINES.updateCheckWaitMs, anchor: afterResponse, label: "the update check" });
+}
+
+/** Ask npm, and save the answer (or the failure). */
+async function askAndSave(ctx: Ctx, now: number): Promise<UpdateState> {
+	let latest: string;
+	try {
+		latest = await askNpm(ctx);
+	} catch (error) {
+		ctx.log.warn("Update check: couldn't ask npm", { error: error instanceof Error ? error.message : String(error) });
+		// Keep the last answer (re-read, so a dismissal made meanwhile isn't lost); try again later.
 		const current = await readState(ctx);
-		const state: UpdateState = { ...current, checkedAt: new Date(now).toISOString(), latest, failedAt: null };
-		await writeState(ctx, state);
+		const state: UpdateState = { ...current, failedAt: new Date(now).toISOString() };
+		await writeState(ctx, state).catch(() => undefined);
 		return state;
-	})().finally(() => {
-		checking = null;
-	});
-	return checking;
+	}
+	// Re-read before writing, so a dismissal made while npm answered isn't lost.
+	const current = await readState(ctx);
+	const state: UpdateState = { ...current, checkedAt: new Date(now).toISOString(), latest, failedAt: null };
+	await writeState(ctx, state);
+	return state;
 }
 
 /** Whether a newer Coywolf Pack is on npm. Nothing is asked while the check is off. */

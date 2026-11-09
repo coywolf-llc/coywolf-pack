@@ -188,6 +188,7 @@ export default defineConfig({
 - **Redirects, `/robots.txt` rules, the feed or downloads don't answer.** The middleware isn't running: check step 3, and that `coywolfPack()` comes before your own middleware in `sequence()`.
 - **A feature shows a setup card instead of its settings.** It needs a binding, an API key or `EMDASH_ENCRYPTION_KEY`; the card says which.
 - **Pages don't change after an edit.** EmDash and the pack clear cached pages on edits and deploys; **Plugins → Coywolf Pack → Performance → Clear pages and images** clears everything now. Cloudflare's zone **Purge Everything** doesn't reach the Worker's page cache.
+- **Pages time out (524) after 100 seconds, with almost no CPU time in Workers Logs.** A Worker isolate is stuck: before 0.35.16, a request canceled in the middle of a read the pack shares could leave every later request of that isolate waiting forever. Update to 0.35.16 or later, which puts a deadline on every shared wait (see [Shared reads have deadlines](docs/internals.md#shared-reads-have-deadlines)). Until then, re-running the deploy clears it at once: a new Worker version replaces every isolate.
 
 ## Documentation
 
@@ -197,7 +198,7 @@ Each module has its own page in [docs](docs/README.md), with its setup, settings
 - [Content URLs](docs/content-urls.md): telling the pack how your theme routes entries
 - Modules: [Clean Image URLs](docs/images.md) · [Backups](docs/backups.md) · [Redirects](docs/redirects.md) · [Schema & Social](docs/schema.md) · [Discovery](docs/discovery.md) · [Robots.txt Rules](docs/robots.md) · [Search](docs/search.md) · [Link Manager](docs/links.md) · [Headings & TOC](docs/headings.md) · [Breadcrumb Nav](docs/breadcrumbs.md) · [Code Blocks](docs/code-blocks.md) · [File Downloads](docs/files.md) · [Private form uploads](docs/form-uploads.md) · [Videos](docs/videos.md) · [Reviews](docs/reviews.md) · [Custom Blocks](docs/custom-blocks.md) · [AI Enrichment](docs/ai.md)
 - [Migrating from WordPress](docs/wordpress-import.md)
-- [Internals](docs/internals.md): how the pack keeps database reads low
+- [Internals](docs/internals.md): how the pack keeps database reads low, and the deadlines on shared reads
 
 ## Development
 

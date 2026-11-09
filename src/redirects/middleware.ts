@@ -17,7 +17,9 @@ import type { MiddlewareHandler } from "astro";
 
 import { isCurrent, settingsEpoch } from "../core/features.js";
 import { noteReadFailure } from "../core/read-failures.js";
+import { sharedRead, sharedSlot } from "../core/single-flight.js";
 import { REDIRECTS_TAG } from "../pageCache/lib.js";
+import { afterResponse } from "../shared.js";
 import { type CompiledRules, compile, findExactRule, loadPatternRules, match, recordHit } from "./rules.js";
 
 export interface CoywolfRedirectsOptions {
@@ -30,31 +32,38 @@ export interface CoywolfRedirectsOptions {
 type Patterns = CompiledRules["patterns"];
 
 let cache: { patterns: Patterns; at: number; epoch: number } | null = null;
-/** A load in progress: concurrent requests of a cold isolate share it. */
-let loading: Promise<Patterns> | null = null;
+/**
+ * A load in progress: concurrent requests of a cold isolate share it, for a
+ * bounded time, and it's anchored with waitUntil (src/core/single-flight.ts).
+ * prefetchRedirects starts it from requests that may answer before the
+ * redirect handler runs (robots.txt, /media/, downloads) and never wait for it.
+ */
+const loading = sharedSlot<Patterns>();
+/** Bumped by invalidateRedirectCache, so a load that started before an edit isn't cached. */
+let edits = 0;
 
 /** Drop the in-memory pattern rules so the next request reloads them (called after admin edits). */
 export function invalidateRedirectCache(): void {
 	cache = null;
-	loading = null;
+	loading.flight = null;
+	edits++;
 }
 
 function patterns(db: D1Database, ttl: number): Promise<Patterns> {
 	if (cache && isCurrent(cache, ttl)) return Promise.resolve(cache.patterns);
-	if (!loading) {
-		const epoch = settingsEpoch();
-		const load = loadPatternRules(db)
-			.then((list) => {
+	return sharedRead(
+		loading,
+		() => {
+			const epoch = settingsEpoch();
+			const seen = edits;
+			return loadPatternRules(db).then((list) => {
 				const compiled = compile(list).patterns;
-				if (loading === load && epoch === settingsEpoch()) cache = { patterns: compiled, at: Date.now(), epoch };
+				if (seen === edits && epoch === settingsEpoch()) cache = { patterns: compiled, at: Date.now(), epoch };
 				return compiled;
-			})
-			.finally(() => {
-				if (loading === load) loading = null;
 			});
-		loading = load;
-	}
-	return loading;
+		},
+		{ anchor: afterResponse, label: "the redirect patterns" },
+	);
 }
 
 /** The rules that can match a request (its exact rule and the patterns), read once per request URL. */

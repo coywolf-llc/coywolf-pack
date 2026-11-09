@@ -10,6 +10,8 @@
  */
 import { PLUGIN_ID, siteFeatures } from "../core/features.js";
 import { noteReadFailure } from "../core/read-failures.js";
+import { sharedRead, sharedSlot } from "../core/single-flight.js";
+import { afterResponse } from "../shared.js";
 import { emdashRobots, importRobots } from "./importer.js";
 import { type RobotsConfig, automaticFrom, generate, normalizeConfig } from "./rules.js";
 
@@ -18,7 +20,8 @@ export const CONFIG_OPTION = `plugin:${PLUGIN_ID}:settings:${CONFIG_SETTING}`;
 const TTL_MS = 60_000;
 
 let cache: { config: RobotsConfig | null; siteUrl: string | null; aiTraining: boolean; at: number } | null = null;
-let importing: Promise<RobotsConfig | null> | null = null;
+/** The import under way, shared by concurrent first requests for a bounded time (src/core/single-flight.ts). */
+const importing = sharedSlot<RobotsConfig | null>();
 
 /** Drop the cached rules so the next request reloads them (called after saving). */
 export function invalidateRobotsCache(): void {
@@ -67,10 +70,11 @@ async function insertIfAbsent(db: D1Database, config: RobotsConfig): Promise<Rob
 	return stored ? normalizeConfig(stored) : config;
 }
 
-/** Import EmDash's robots.txt once (per isolate, and atomically in D1). */
+/** Import EmDash's robots.txt once (per isolate, and atomically in D1: a second import inserts nothing). */
 async function importOnce(db: D1Database, siteUrl: string): Promise<RobotsConfig | null> {
-	if (!importing) {
-		importing = (async () => {
+	return sharedRead(
+		importing,
+		async () => {
 			let custom: string | null;
 			try {
 				custom = await readEmdashCustomRobots(db);
@@ -88,11 +92,9 @@ async function importOnce(db: D1Database, siteUrl: string): Promise<RobotsConfig
 				noteReadFailure("robots.txt import");
 				return null;
 			}
-		})().finally(() => {
-			importing = null;
-		});
-	}
-	return importing;
+		},
+		{ anchor: afterResponse, label: "importing EmDash's robots.txt" },
+	);
 }
 
 export async function serveRobots(url: URL, method: string, env: Record<string, unknown>, database = "DB"): Promise<Response | undefined> {

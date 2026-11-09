@@ -44,7 +44,17 @@
  * which the isolate's copy of the progress row already has, so requests in
  * between still skip the warm step without a query. WARM_DAILY_SETTING turns
  * it off (`daily: false`).
+ *
+ * Deadlines (src/core/single-flight.ts DEADLINES): every visit (the SELF
+ * fetch and reading its body) is cut off after DEADLINES.warmVisitMs and
+ * counts as failed, logged once with its URL ("coywolf-pack: warm visit timed
+ * out"); a render that hangs can't hold the step. A step ends by
+ * DEADLINES.warmStepMs whatever happens (it runs under waitUntil, which
+ * Cloudflare cuts off 30 s after the response), and stops claiming work early
+ * enough that its last visits finish and are recorded before then. A batch
+ * that's claimed and never recorded counts as failed after BATCH_STALE_MS.
  */
+import { DEADLINES, DeadlineError, withDeadline } from "../core/single-flight.js";
 
 /** Option rows: the switch, and the job's progress (its URLs are in WARM_QUEUE_PREFIX rows). */
 export const WARM_SETTING = "pageCacheWarm";
@@ -199,12 +209,39 @@ interface Fetcher {
 	fetch(request: Request): Promise<Response>;
 }
 
-/** Read the sitemap (following a sitemap index one level) into the warm order. */
-export async function collectUrls(self: Fetcher, origin: string): Promise<string[]> {
-	const read = async (url: string) => {
-		const res = await self.fetch(new Request(url, { headers: { "User-Agent": WARMER_AGENT } }));
-		return res.ok ? res.text() : "";
-	};
+/** Prefix of the log line for a warmer visit cut off at its deadline (alerts can key on it). */
+export const VISIT_TIMEOUT_LOG = "coywolf-pack: warm visit timed out";
+
+/**
+ * Fetch `url` through the Worker as the warmer and read its body, within
+ * `timeoutMs`: an AbortSignal on the request (it also ends the body read) and
+ * a deadline of the caller's own, in case the binding ignores the signal.
+ * Throws DeadlineError when cut off, after logging it once with the URL.
+ */
+async function fetchWithin<T>(self: Fetcher, url: string, timeoutMs: number, read: (res: Response) => Promise<T>): Promise<T> {
+	const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
+	try {
+		return await withDeadline(
+			self.fetch(new Request(url, { headers: { "User-Agent": WARMER_AGENT }, ...(signal ? { signal } : {}) })).then(read),
+			timeoutMs,
+			`warm visit of ${url}`,
+		);
+	} catch (error) {
+		if (error instanceof DeadlineError || signal?.aborted) {
+			console.warn(`${VISIT_TIMEOUT_LOG} after ${timeoutMs} ms: ${url}`);
+			throw error instanceof DeadlineError ? error : new DeadlineError(`warm visit of ${url}`, timeoutMs);
+		}
+		throw error;
+	}
+}
+
+/**
+ * Read the sitemap (following a sitemap index one level) into the warm order.
+ * A read cut off at its deadline throws DeadlineError (the collect step is
+ * then tried again later, instead of the run failing for a slow render).
+ */
+export async function collectUrls(self: Fetcher, origin: string, timeoutMs = DEADLINES.warmVisitMs): Promise<string[]> {
+	const read = (url: string) => fetchWithin(self, url, timeoutMs, (res) => (res.ok ? res.text() : Promise.resolve("")));
 	// Pages the home page links to (menus, section pages) come right after it.
 	const linked = homeLinks(await read(`${origin}/`), origin);
 	const root = sitemapLocs(await read(`${origin}/sitemap.xml`));
@@ -662,14 +699,19 @@ async function recordProgress(db: D1Database, generation: string, now: number, u
 	}
 }
 
-/** Visit URLs through the Worker's own service binding (which shares its cache). */
-export async function visit(self: Fetcher, urls: string[]): Promise<{ warmed: number; failed: number; results: Visited[] }> {
+/**
+ * Visit URLs through the Worker's own service binding (which shares its
+ * cache). Each visit, its body included, gets `timeoutMs`; one cut off counts
+ * as failed (and is logged once with its URL).
+ */
+export async function visit(self: Fetcher, urls: string[], timeoutMs = DEADLINES.warmVisitMs): Promise<{ warmed: number; failed: number; results: Visited[] }> {
 	const results = await Promise.all(
 		urls.map(async (url): Promise<Visited> => {
 			try {
-				const res = await self.fetch(new Request(url, { headers: { "User-Agent": WARMER_AGENT } }));
-				await res.arrayBuffer();
-				return { url, ok: res.ok || (res.status >= 300 && res.status < 400), stopgap: res.headers.get(STOPGAP_HEADER) === "1" };
+				return await fetchWithin(self, url, timeoutMs, async (res) => {
+					await res.arrayBuffer();
+					return { url, ok: res.ok || (res.status >= 300 && res.status < 400), stopgap: res.headers.get(STOPGAP_HEADER) === "1" };
+				});
 			} catch {
 				return { url, ok: false, stopgap: false };
 			}
@@ -688,19 +730,51 @@ const sameOrigin = (url: string, origin: string) => {
 
 export const WARMER_AGENT = "CoywolfPack-CacheWarmer";
 
+export interface WarmStepOptions {
+	/** Claim new work only for this long (ms); the step's hard deadline may stop claims sooner. */
+	budgetMs: number;
+	batchSize: number;
+	now?: () => number;
+	daily?: boolean;
+	/** Hard limit on the whole step (default DEADLINES.warmStepMs). */
+	deadlineMs?: number;
+	/** Limit on each visit (default DEADLINES.warmVisitMs). */
+	visitTimeoutMs?: number;
+}
+
+/** Prefix of the log line for a warm step cut off at its hard deadline. */
+export const STEP_TIMEOUT_LOG = "coywolf-pack: warm step timed out";
+
 /**
  * One step of warming, run in the background of a page request: claim a piece
- * of work and do it, within a time budget. Returns what it did (for tests/logs).
+ * of work and do it, within a time budget, and never past the step's hard
+ * deadline (see the top of this file). Returns what it did (for tests/logs).
  */
-export async function warmStep(db: D1Database, self: Fetcher, origin: string, options: { budgetMs: number; batchSize: number; now?: () => number; daily?: boolean }): Promise<string> {
+export async function warmStep(db: D1Database, self: Fetcher, origin: string, options: WarmStepOptions): Promise<string> {
+	const deadlineMs = options.deadlineMs ?? DEADLINES.warmStepMs;
+	try {
+		return await withDeadline(warmWork(db, self, origin, options, deadlineMs), deadlineMs, "warm step");
+	} catch (error) {
+		if (!(error instanceof DeadlineError)) throw error;
+		// Its claimed batch, if any, counts as failed once it's BATCH_STALE_MS old.
+		console.warn(`${STEP_TIMEOUT_LOG} after ${deadlineMs} ms`);
+		return "timed out";
+	}
+}
+
+async function warmWork(db: D1Database, self: Fetcher, origin: string, options: WarmStepOptions, deadlineMs: number): Promise<string> {
 	const now = options.now ?? Date.now;
-	const deadline = now() + options.budgetMs;
+	const visitMs = options.visitTimeoutMs ?? DEADLINES.warmVisitMs;
+	// A claim made after this could still be visiting (and not yet recorded) when the hard deadline comes.
+	const deadline = now() + Math.max(0, Math.min(options.budgetMs, deadlineMs - visitMs - DEADLINES.warmRecordMarginMs));
 	let did = "idle";
 	while (now() < deadline) {
 		const claim = await claimWork(db, options.batchSize, now(), options.daily ?? true);
 		if (!claim) return did;
 		if (claim.kind === "collect") {
-			const urls = await collectUrls(self, origin).catch(() => []);
+			const urls = await collectUrls(self, origin, visitMs).catch((error: unknown) => (error instanceof DeadlineError ? null : []));
+			// A read that timed out: leave the collect step to be taken again (COLLECT_STALE_MS) rather than fail the run.
+			if (!urls) return "collect timed out";
 			await finishCollect(db, claim.state.generation, urls, origin);
 			did = "collected";
 			continue;
@@ -708,12 +782,12 @@ export async function warmStep(db: D1Database, self: Fetcher, origin: string, op
 		// Revisits wait for the posters' copies: later steps (driven by traffic) check again.
 		if (claim.kind === "wait") return did === "idle" ? "waiting" : did;
 		if (claim.kind === "revisit") {
-			const { results } = await visit(self, claim.pages.map(([url]) => url));
+			const { results } = await visit(self, claim.pages.map(([url]) => url), visitMs);
 			await recordRevisit(db, claim.state.generation, results.map((r, i) => ({ ...r, round: claim.pages[i][1] })), now());
 			did = "revisited";
 			continue;
 		}
-		const { warmed, failed, results } = await visit(self, claim.urls);
+		const { warmed, failed, results } = await visit(self, claim.urls, visitMs);
 		const stopgap = results.filter((r) => r.ok && r.stopgap && sameOrigin(r.url, origin)).map((r) => r.url);
 		await recordBatch(db, claim.state.generation, warmed, failed, now(), stopgap);
 		did = "warmed";

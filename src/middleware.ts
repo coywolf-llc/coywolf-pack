@@ -22,6 +22,7 @@ import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOpti
 import { claimSettle, recordSettingsChange } from "./core/generation.js";
 import { invalidateRobotsCache } from "./robots/middleware.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
+import { DEADLINES } from "./core/single-flight.js";
 import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
 import { MIDDLEWARE } from "./modules.js";
@@ -65,7 +66,12 @@ async function startWarming(db: D1Database, reason: string): Promise<void> {
 /** Per isolate: when this isolate last started a warming step (one at a time, at most every few seconds). */
 let warmingUntil = 0;
 const WARM_EVERY_MS = 5_000;
-const WARM_BUDGET_MS = 20_000;
+/**
+ * New claims for this long; a step ends by DEADLINES.warmStepMs whatever
+ * happens (src/pageCache/warm.ts), which also caps this so its last visits
+ * finish in time.
+ */
+const WARM_BUDGET_MS = 14_000;
 
 export interface CoywolfPackMiddlewareOptions {
 	/** D1 binding of the site database. Default "DB". */
@@ -230,7 +236,8 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		) {
 			const self = env.SELF as { fetch(request: Request): Promise<Response> } | undefined;
 			if (db && self) {
-				warmingUntil = Date.now() + WARM_BUDGET_MS + WARM_EVERY_MS;
+				// A step whose finally never runs (its request was cut off) still frees the next one after its hard deadline.
+				warmingUntil = Date.now() + DEADLINES.warmStepMs + WARM_EVERY_MS;
 				const origin = (context.site ?? context.url).origin;
 				waitUntil(
 					warmStep(db, self, origin, { budgetMs: WARM_BUDGET_MS, batchSize: 4, daily: await warmDaily(options.database) })

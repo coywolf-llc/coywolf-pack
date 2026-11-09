@@ -677,3 +677,59 @@ export class RecentKeys {
 		return this.map.size;
 	}
 }
+
+// ── Webhook: pages to clear ──────────────────────────────────────
+
+/** Most pages one webhook call clears by path; the newest are cleared, the rest left to expire on their own. */
+export const MAX_WEBHOOK_PAGES = 30;
+
+/** What a Stream webhook call clears (see videoPagesScope). */
+export interface VideoPagesScope {
+	/** The pages that embed the video, as path prefixes (each covers its trailing-slash form and query strings). */
+	pathPrefixes: string[];
+	/** Cache tags for the home page: the id of the entry it's built from (EmDash tags every cached page that renders an entry with the entry's id). */
+	tags: string[];
+	/** Pages over the cap, not cleared (they refresh at their normal lifetime). */
+	skipped: number;
+}
+
+/**
+ * The cached pages a Stream webhook call for `uid` has to clear: the
+ * published entries that embed the video (from the embed index). Never
+ * everything:
+ * - Each page goes by its path, as a prefix. Pages aren't cache-tagged per
+ *   video, and Workers Cache has no exact-URL purge, so paths are how to
+ *   reach just these.
+ * - The home page can't go by path: a "/" prefix is every page. It goes by
+ *   its entry's cache tag instead, the id EmDash puts on every cached page
+ *   that renders the entry (the tag it clears itself when the entry is
+ *   edited), which reaches exactly the pages built from that entry.
+ * - Over MAX_WEBHOOK_PAGES pages, the newest `max` (by publication date) are
+ *   cleared and the rest counted in `skipped`, for the caller to log.
+ *
+ * null when no page shows the video.
+ */
+export function videoPagesScope(
+	entries: Array<{ uids: string[]; status: string; url: string | null; entryId: string; publishedAt?: string | null }>,
+	uid: string,
+	max = MAX_WEBHOOK_PAGES,
+): VideoPagesScope | null {
+	const tags = new Set<string>();
+	const pages: Array<{ path: string; publishedAt: string }> = [];
+	for (const entry of entries) {
+		if (entry.status !== "published" || !entry.url || !entry.uids.includes(uid)) continue;
+		let path: string;
+		try {
+			path = new URL(entry.url).pathname.replace(/\/+$/, "") || "/";
+		} catch {
+			continue;
+		}
+		if (path === "/") tags.add(entry.entryId);
+		else pages.push({ path, publishedAt: entry.publishedAt ?? "" });
+	}
+	// Newest first; the same path from two entries (a locale, a reindex) counts once.
+	pages.sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : a.publishedAt > b.publishedAt ? -1 : 0));
+	const paths = [...new Set(pages.map((p) => p.path))];
+	if (!paths.length && !tags.size) return null;
+	return { pathPrefixes: paths.slice(0, max), tags: [...tags], skipped: Math.max(0, paths.length - max) };
+}
