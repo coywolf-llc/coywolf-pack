@@ -9,7 +9,7 @@ EmDash's built-in Redirects (**Manage → Redirects**) handle site-relative page
 | External destinations (affiliate links such as `/visit/partner`, articles that moved to another site) | No: destinations must be site paths | Yes |
 | File paths (old WordPress `/wp-content/uploads/` image URLs, `/file.pdf`) | No: its middleware skips any path with a file extension | Yes |
 | Patterns | Whole-segment placeholders only (`/old/[slug]`, `/docs/[...rest]`) | Regular expressions with `$1`–`$9` substitution |
-| Query strings | Dropped | Passed on to the destination (unless it has its own) |
+| Query strings | Dropped | Passed on to the destination (unless it has its own), before any `#anchor`: `/pricing/?x=1` → `/?x=1#pricing` |
 | Bulk import and export | No (only seed files and full-site transfers) | Paste or upload JSON, CSV or TSV (a Coywolf SEO export from WordPress works as is); export as CSV or JSON |
 | URL tester | No | Yes |
 | Notes | A group label | A note per rule |

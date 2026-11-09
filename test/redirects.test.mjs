@@ -81,6 +81,48 @@ test("ordinary rules are unchanged", () => {
 	assert.equal(match(compiled, "/gone", "?x").location, "");
 });
 
+test("a redirect to an anchor keeps the request's query string before the fragment", () => {
+	const compiled = compile([
+		rule("/pricing", "/#pricing-h", { isRegex: false }),
+		rule("/plans", "/?ref=plans#pricing-h", { isRegex: false }),
+		rule("/faq", "/help#a?b", { isRegex: false }),
+		rule("^/docs/(.*)$", "/guide/$1#top"),
+		rule("^/ext/(.*)$", "https://example.com/$1#section"),
+	]);
+	// recollect.fyi: /pricing/?x=1 went to /#pricing-h?x=1 (the query lost inside the anchor).
+	assert.equal(match(compiled, "/pricing/", "?x=1").location, "/?x=1#pricing-h");
+	assert.equal(match(compiled, "/pricing/", "").location, "/#pricing-h");
+	// The target's own query wins; the request's isn't added.
+	assert.equal(match(compiled, "/plans", "?x=1").location, "/?ref=plans#pricing-h");
+	// A "?" inside the fragment isn't a query.
+	assert.equal(match(compiled, "/faq", "?x=1").location, "/help?x=1#a?b");
+	// Patterns with a capture and a fragment.
+	assert.equal(match(compiled, "/docs/setup", "?x=1").location, "/guide/setup?x=1#top");
+	assert.equal(match(compiled, "/docs/setup", "").location, "/guide/setup#top");
+	assert.equal(match(compiled, "/ext/a/b", "?utm=1").location, "https://example.com/a/b?utm=1#section");
+	// What a browser ends up on.
+	assert.equal(follow(compiled, "https://recollect.fyi/pricing/?x=1"), "https://recollect.fyi/?x=1#pricing-h");
+});
+
+test("middleware puts the request's query before the target's fragment (edge and origin responses)", async () => {
+	invalidateRedirectCache();
+	const rows = [
+		{ id: "1", source: "^/pricing/?$", target: "/#pricing-h", type: 301, is_regex: 1, enabled: 1, hits: 0, last_hit: null, note: null, created_at: "", updated_at: "" },
+	];
+	const statement = (sql) => ({
+		sql,
+		bind: () => statement(sql),
+		run: async () => ({ meta: { changes: 1 } }),
+		all: async () => ({ results: /is_regex = 1/.test(sql) ? rows : [] }),
+	});
+	const db = { prepare: statement, batch: (statements) => Promise.all(statements.map((s) => s.all())) };
+	const origin = await serveRedirect(new URL("https://recollect.fyi/pricing/?x=1"), { DB: db }, () => {});
+	assert.equal(origin.headers.get("Location"), "https://recollect.fyi/?x=1#pricing-h");
+	const edge = await serveRedirect(new URL("https://recollect.fyi/pricing/?x=1"), { DB: db }, () => {}, {}, true);
+	assert.equal(edge.headers.get("Location"), "/?x=1#pricing-h");
+	invalidateRedirectCache();
+});
+
 test("middleware never answers with an off-site Location for a site path", async () => {
 	invalidateRedirectCache();
 	const rows = [

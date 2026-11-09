@@ -347,8 +347,22 @@ export function match(compiled: CompiledRules, pathname: string, search: string)
 		}
 	}
 	if (!rule) return null;
-	if (rule.type !== 410 && search && !location.includes("?")) location += search;
+	if (rule.type !== 410 && search) location = withQuery(location, search);
 	return { rule, location };
+}
+
+/**
+ * The request's query string on a redirect target: before the target's
+ * fragment (`/#pricing` + `?x=1` → `/?x=1#pricing`, not `/#pricing?x=1`,
+ * which loses the query into the anchor), and only when the target has no
+ * query of its own. A `?` inside the fragment doesn't count as one.
+ */
+export function withQuery(location: string, search: string): string {
+	const hashAt = location.indexOf("#");
+	const base = hashAt === -1 ? location : location.slice(0, hashAt);
+	const hash = hashAt === -1 ? "" : location.slice(hashAt);
+	if (!search || base.includes("?")) return location;
+	return `${base}${search.startsWith("?") ? search : `?${search}`}${hash}`;
 }
 
 export async function recordHit(db: D1Database, id: string): Promise<void> {
