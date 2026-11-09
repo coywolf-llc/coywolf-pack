@@ -3,12 +3,14 @@
  * and status.
  */
 import { Badge, Banner, Button, Checkbox, Input, InputArea, Loader, Select } from "@cloudflare/kumo";
-import { ArrowClockwise, ArrowSquareOut, Key, PaperPlaneTilt } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowSquareOut, CheckCircle, Key, PaperPlaneTilt } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { FEATURES_CHANGED, PartSwitch, useParts } from "./feature-switches.js";
+import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
+import { SecretField } from "./settings-ui.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/discovery";
 
@@ -28,7 +30,17 @@ interface PingLogEntry {
 	ok: boolean;
 	error?: string;
 	trigger: "content" | "manual";
+	/** Bing Webmaster API: URLs the site's daily quota still allows, when known. */
+	quotaLeft?: number;
 }
+
+interface BingQuota {
+	daily: number;
+	monthly: number;
+	checkedAt: string;
+}
+
+type QuotaCheck = { ok: true; quota: BingQuota } | { ok: false; status: number; error: string };
 
 interface Status {
 	/** EmDash's staging mode: the site is hidden from search engines, so IndexNow sends nothing. */
@@ -37,6 +49,8 @@ interface Status {
 	settings: Settings;
 	collections: { slug: string; label: string; hidden: boolean; hasSeo: boolean }[];
 	key: string | null;
+	/** Whether a Bing Webmaster API key is saved (the key itself never comes back) and the quota last read. */
+	bing?: { keySaved: boolean; quota: BingQuota | null; docs: string };
 	urls: { keyFile: string | null; news: string; llms: string; feed: string };
 	log: PingLogEntry[];
 	cache: { llms: { count: number; builtAt: string } | null; news: { count: number; builtAt: string } | null };
@@ -120,6 +134,126 @@ function CollectionPicker(props: {
 
 const when = (iso: string | undefined) => (iso ? dateTime.format(new Date(iso)) : "never");
 
+/** Where a log entry went: Bing's URL Submission API, or an IndexNow endpoint. */
+const endpointLabel = (endpoint: string) => (endpoint === "bing-api" ? "Bing Webmaster API" : `IndexNow (${endpoint})`);
+
+const quotaText = (quota: BingQuota) => `${quota.daily} URL submission${quota.daily === 1 ? "" : "s"} left today, ${quota.monthly} this month`;
+
+const checkText = (check: QuotaCheck) =>
+	check.ok ? `Bing accepts the key: ${quotaText(check.quota)}.` : `Bing didn't accept the check${check.status ? ` (HTTP ${check.status})` : ""}: ${check.error}`;
+
+const BING_DOCS = "https://learn.microsoft.com/en-us/bingwebmaster/getting-access";
+
+/**
+ * The Bing Webmaster API key: saved encrypted on the server, never shown again (only "saved"), with Check key
+ * (the site's quota) and Remove. It sits inside the settings form, so Enter here saves the key, not the form.
+ */
+function BingKey(props: { bing: NonNullable<Status["bing"]>; disabled: boolean; onChanged: () => Promise<void> }) {
+	const [value, setValue] = React.useState("");
+	const [pending, setPending] = React.useState<"save" | "clear" | "check">();
+	const [result, setResult] = React.useState<{ ok: boolean; text: string }>();
+	const saved = props.bing.keySaved;
+	const busy = props.disabled || pending !== undefined;
+
+	async function act(kind: "save" | "clear" | "check", task: () => Promise<{ ok: boolean; text: string }>) {
+		setPending(kind);
+		setResult(undefined);
+		try {
+			setResult(await task());
+			await props.onChanged();
+		} catch (cause) {
+			setResult({ ok: false, text: errorText(cause, "Something went wrong") });
+		} finally {
+			setPending(undefined);
+		}
+	}
+	const save = () => {
+		const key = value.trim();
+		if (!key || busy) return;
+		void act("save", async () => {
+			const out = await post<{ keySaved: boolean; check: QuotaCheck | null }>("bing-key", { key });
+			setValue("");
+			return out.check ? { ok: out.check.ok, text: `Key saved. ${checkText(out.check)}` } : { ok: true, text: "Key saved." };
+		});
+	};
+	const remove = () => {
+		if (!window.confirm("Remove the Bing Webmaster API key? Changed URLs then go to IndexNow only.")) return;
+		void act("clear", async () => {
+			await post("bing-key", { clear: true });
+			return { ok: true, text: "Key removed. Changed URLs go to IndexNow only." };
+		});
+	};
+	const check = () =>
+		void act("check", async () => {
+			const out = await post<QuotaCheck>("bing-check", {});
+			return { ok: out.ok, text: checkText(out) };
+		});
+
+	return (
+		<div className="space-y-3">
+			<div>
+				<h3 className="text-sm font-medium">Bing Webmaster API key</h3>
+				<p className="mt-1 text-sm text-kumo-subtle">
+					Bing throttles IndexNow pings sent from Cloudflare Workers' shared IP addresses (HTTP 429), so with your Bing Webmaster Tools API key, changed URLs also go
+					straight to Bing's URL Submission API, within the site's daily quota. IndexNow still goes out for the other engines. Get the key in Bing Webmaster Tools →
+					Settings → API access → API key; see{" "}
+					<a className="text-kumo-link underline" href={props.bing.docs || BING_DOCS} target="_blank" rel="noreferrer">
+						Microsoft's guide
+					</a>
+					.
+				</p>
+			</div>
+			<div
+				className="sm:max-w-md"
+				onKeyDown={(e: React.KeyboardEvent<HTMLDivElement>) => {
+					if (e.key !== "Enter" || e.nativeEvent.isComposing || e.keyCode === 229 || !(e.target instanceof HTMLInputElement)) return;
+					e.preventDefault();
+					save();
+				}}
+			>
+				<SecretField
+					label="Bing Webmaster API key"
+					saved={saved}
+					value={value}
+					onChange={setValue}
+					description="Bing Webmaster Tools → Settings → API access → API key. Stored encrypted; the site must be verified in the same account."
+					disabled={busy}
+				/>
+			</div>
+			<div className="sm:max-w-md">
+				<CredentialGuide id="bing" />
+			</div>
+			<div className="flex flex-wrap gap-2">
+				<Button type="button" variant="primary" icon={<Key />} disabled={busy || !value.trim()} onClick={save}>
+					{pending === "save" ? "Saving…" : saved ? "Replace key" : "Save key"}
+				</Button>
+				{saved && (
+					<>
+						<Button type="button" variant="secondary" icon={<CheckCircle />} disabled={busy} onClick={check}>
+							{pending === "check" ? "Checking…" : "Check key"}
+						</Button>
+						<Button type="button" variant="ghost" disabled={busy} onClick={remove}>
+							{pending === "clear" ? "Removing…" : "Remove key"}
+						</Button>
+					</>
+				)}
+			</div>
+			<div aria-live="polite">
+				{result ? (
+					<Banner variant={result.ok ? "default" : "error"} description={result.text} />
+				) : (
+					saved &&
+					props.bing.quota && (
+						<p className="text-sm text-kumo-subtle">
+							Bing's quota for this site: {quotaText(props.bing.quota)} (read {when(props.bing.quota.checkedAt)}, counted down as URLs are sent).
+						</p>
+					)
+				)}
+			</div>
+		</div>
+	);
+}
+
 export function DiscoveryPage() {
 	const [status, setStatus] = React.useState<Status>();
 	const [draft, setDraft] = React.useState<Settings>();
@@ -127,6 +261,16 @@ export function DiscoveryPage() {
 	const [notice, setNotice] = React.useState<string>();
 	const [busy, setBusy] = React.useState<string | null>(null);
 	const parts = useParts("discovery");
+
+	/** The status only (the draft is kept). */
+	const refresh = React.useCallback(
+		() =>
+			apiFetch(`${API}/status`)
+				.then((response) => parseApiResponse<Status>(response, "Couldn't load Discovery"))
+				.then(setStatus)
+				.catch(() => undefined),
+		[],
+	);
 
 	const load = React.useCallback(async () => {
 		try {
@@ -143,14 +287,10 @@ export function DiscoveryPage() {
 
 	// A part switched on this page: its status (key file, stored copies) may have changed. The draft is kept.
 	React.useEffect(() => {
-		const reload = () =>
-			void apiFetch(`${API}/status`)
-				.then((response) => parseApiResponse<Status>(response, "Couldn't load Discovery"))
-				.then(setStatus)
-				.catch(() => undefined);
+		const reload = () => void refresh();
 		window.addEventListener(FEATURES_CHANGED, reload);
 		return () => window.removeEventListener(FEATURES_CHANGED, reload);
-	}, []);
+	}, [refresh]);
 
 	async function run(name: string, task: () => Promise<string>) {
 		setBusy(name);
@@ -179,8 +319,11 @@ export function DiscoveryPage() {
 		});
 	const submitHome = () =>
 		run("submit", async () => {
-			const entry = await post<PingLogEntry>("submit", {});
-			return entry.ok ? `Submitted the home page to ${entry.endpoint} (HTTP ${entry.status}).` : `The submission failed: ${entry.error ?? `HTTP ${entry.status}`}`;
+			const out = await post<PingLogEntry & { entries?: PingLogEntry[] }>("submit", {});
+			const results = (out.entries ?? [out]).map((e) =>
+				e.ok ? `${endpointLabel(e.endpoint)}: OK (HTTP ${e.status}).` : `${endpointLabel(e.endpoint)}: failed (${e.error ?? `HTTP ${e.status}`}).`,
+			);
+			return `Submitted the home page. ${results.join(" ")}`;
 		});
 	const regenerate = () => {
 		if (!window.confirm("Create a new IndexNow key? The old key file stops working.")) return;
@@ -271,6 +414,7 @@ export function DiscoveryPage() {
 							{ value: "www.bing.com", label: "www.bing.com" },
 						]}
 					/>
+					{status.bing && <BingKey bing={status.bing} disabled={busy !== null} onChanged={refresh} />}
 					<CollectionPicker
 						legend="Collections"
 						hint="Leave all unchecked to submit every collection with public URLs."
@@ -288,17 +432,21 @@ export function DiscoveryPage() {
 									<thead className="text-kumo-subtle">
 										<tr>
 											<th scope="col" className="py-1 pr-4 font-medium">When</th>
+											<th scope="col" className="py-1 pr-4 font-medium">Sent to</th>
 											<th scope="col" className="py-1 pr-4 font-medium">Result</th>
 											<th scope="col" className="py-1 pr-4 font-medium">URLs</th>
 										</tr>
 									</thead>
 									<tbody className="divide-y divide-kumo-line">
-										{status.log.map((entry) => (
-											<tr key={`${entry.at}-${entry.urls[0] ?? ""}`} className="align-top">
+										{status.log.map((entry, i) => (
+											// One submission logs an entry per endpoint, at the same moment and with the same URLs.
+											<tr key={`${entry.at}-${entry.endpoint}-${i}`} className="align-top">
 												<td className="whitespace-nowrap py-2 pr-4">{when(entry.at)}</td>
+												<td className="whitespace-nowrap py-2 pr-4">{endpointLabel(entry.endpoint)}</td>
 												<td className="py-2 pr-4">
 													<Badge variant={entry.ok ? "primary" : "destructive"}>{entry.ok ? `OK ${entry.status}` : entry.status ? `Error ${entry.status}` : "Error"}</Badge>
 													{entry.error && <div className="mt-1 max-w-xs break-words text-kumo-subtle">{entry.error}</div>}
+													{entry.quotaLeft !== undefined && <div className="mt-1 text-kumo-subtle">{entry.quotaLeft} left today</div>}
 												</td>
 												<td className="py-2 pr-4">
 													<div className="break-all">{entry.urls[0]}</div>

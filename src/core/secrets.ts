@@ -56,6 +56,12 @@ export const SECRET_SETTINGS = {
 		description:
 			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) add the permissions Account → Account Analytics → Read, Workers → Metadata Read-Only (All Workers; finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account → Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account).",
 	},
+	discoveryBingApiKey: {
+		type: "secret",
+		label: "Discovery — Bing Webmaster API key",
+		description:
+			"Optional. Sends changed URLs to Bing's URL Submission API, which Bing doesn't throttle the way it throttles IndexNow pings from Cloudflare Workers. To get one: (1) sign in to Bing Webmaster Tools (bing.com/webmasters) and add and verify this site; (2) select Settings → API access → API Key (accept the terms the first time); (3) select Generate API Key and copy it; (4) paste it here and save. Check key and the full step-by-step guide are on the Discovery page → IndexNow.",
+	},
 	robotsRadarToken: {
 		type: "secret",
 		label: "Robots.txt Rules — Cloudflare Radar API token",

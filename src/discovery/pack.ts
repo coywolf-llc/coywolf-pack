@@ -1,5 +1,6 @@
 import { registerFeatures } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
+import { BING_API_HOST } from "./bing.js";
 import { discoveryMiddleware } from "./middleware.js";
 import { type DiscoveryOptions, FEATURE, discoveryModule } from "./module.js";
 
@@ -13,7 +14,7 @@ const FEATURES = [
 	{
 		id: FEATURE.indexnow,
 		label: "IndexNow",
-		description: "Tell Bing, Yandex, Seznam, Naver and other IndexNow engines when entries are published, updated, unpublished, or deleted.",
+		description: "Tell Bing, Yandex, Seznam, Naver and other IndexNow engines when entries are published, updated, unpublished, or deleted (and Bing's URL Submission API too, with a Bing Webmaster API key).",
 		default: false,
 	},
 	{
@@ -51,7 +52,7 @@ export function discoveryPack(options: DiscoveryOptions): PackModule {
 		hookFeature: { "page:fragments": FEATURE.main },
 		adminPages: [{ path: "/discovery", label: "Discovery", icon: "compass" }],
 		capabilities: ["content:read", "schema:read", "bylines:read", "network:request", "hooks.page-fragments:register"],
-		allowedHosts: ["api.indexnow.org", "www.bing.com"],
+		allowedHosts: ["api.indexnow.org", "www.bing.com", BING_API_HOST],
 	};
 }
 

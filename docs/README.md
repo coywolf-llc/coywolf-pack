@@ -22,7 +22,7 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 - [Backups](backups.md)
 - [Redirects](redirects.md)
 - [Schema & Social](schema.md)
-- [Discovery](discovery.md): IndexNow, RSS feed, news sitemap, llms.txt
+- [Discovery](discovery.md): IndexNow and Bing Webmaster API submissions, RSS feed, news sitemap, llms.txt
 - [Robots.txt Rules](robots.md)
 - [Search](search.md)
 - [Link Manager](links.md)

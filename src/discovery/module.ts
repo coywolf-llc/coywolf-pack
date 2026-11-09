@@ -1,7 +1,8 @@
 /**
- * Discovery module: routes and hooks for IndexNow, the news sitemap,
- * llms.txt and per-entry Markdown. Site URLs are answered by the middleware
- * in ./middleware.ts, which calls the public routes here.
+ * Discovery module: routes and hooks for IndexNow (and Bing Webmaster API
+ * submissions, with a key), the news sitemap, llms.txt and per-entry
+ * Markdown. Site URLs are answered by the middleware in ./middleware.ts,
+ * which calls the public routes here.
  */
 import { type PluginContext, PluginRouteError, after, definePluginRoute } from "emdash";
 import { z } from "zod";
@@ -11,17 +12,21 @@ import { siteInStaging, siteName } from "../core/site.js";
 import { cachedCtxFeatures, ctxFeatures, invalidateFeatures, isOn, readSiteSetting, registerSiteSetting, requireFeature } from "../core/features.js";
 import { parseInput } from "../shared.js";
 import { LLMS_CACHE, NEWS_CACHE, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
-import { INDEXNOW_ENDPOINTS, IndexNowBatcher, buildPayload, generateKey } from "./indexnow.js";
+import { type BingDeps, type BingQuota, BING_DOCS_URL, BING_ENDPOINT, bingSiteUrl, checkQuota, submitToBing } from "./bing.js";
+import { type Fetch, type PingLogEntry, IndexNowBatcher, buildPayload, generateKey, sendIndexNow } from "./indexnow.js";
 import { buildFeed } from "./feed-build.js";
 import { FEED_PATH, FEED_TAG } from "./feed.js";
 import { purgePageCache } from "../pageCache/lib.js";
 import { markdownUrl } from "./markdown.js";
 import {
+	BING_KEY_PATTERN,
+	BING_KEY_SETTING,
 	INDEXNOW_KEY_SETTING,
 	SETTINGS_KEY,
 	type DiscoverySettings,
 	ensureIndexNowKey,
 	loadSettings,
+	readBingApiKey,
 	readIndexNowKey,
 	selected,
 	settingsSchema,
@@ -45,56 +50,64 @@ export interface DiscoveryOptions {
 
 const LOG_KEY = "state:discovery:indexnowLog";
 const LOG_LIMIT = 25;
+/** The Bing Webmaster API quota last read for the site, counted down as batches go out (BingQuota). */
+const BING_QUOTA_KEY = "state:discovery:bingQuota";
 const urlKey = (collection: string, id: string) => `state:discovery:url:${collection}:${id}`;
 
-export interface PingLogEntry {
-	at: string;
-	endpoint: string;
-	count: number;
-	urls: string[];
-	status: number;
-	ok: boolean;
-	error?: string;
-	trigger: "content" | "manual";
-}
+export type { PingLogEntry };
 
 /** Submissions wait this long for more changes, then go out as one request. */
 const BATCH_WINDOW_MS = 3000;
 const batcher = new IndexNowBatcher({ windowMs: BATCH_WINDOW_MS, defer: (task) => after(task) });
 
-async function submit(ctx: PluginContext, urls: string[], trigger: PingLogEntry["trigger"]): Promise<PingLogEntry | null> {
+/** The plugin's fetch: EmDash checks each host against allowedHosts (pack.ts). */
+const httpFetch = (ctx: PluginContext): Fetch | null => (ctx.http ? (ctx.http.fetch.bind(ctx.http) as Fetch) : null);
+
+function bingDeps(ctx: PluginContext): BingDeps {
+	return {
+		fetch: httpFetch(ctx),
+		readQuota: async () => (await ctx.kv.get<BingQuota>(BING_QUOTA_KEY)) ?? null,
+		writeQuota: (quota) => ctx.kv.set(BING_QUOTA_KEY, quota),
+	};
+}
+
+/** The saved Bing Webmaster API key, or null (also when it can't be decrypted: logged; IndexNow still goes out). */
+async function bingKey(ctx: PluginContext): Promise<string | null> {
+	try {
+		return await readBingApiKey(ctx);
+	} catch (error) {
+		ctx.log.warn("Discovery: the Bing Webmaster API key can't be read; save it again", { error: String(error).slice(0, 200) });
+		return null;
+	}
+}
+
+/**
+ * Send `urls` to IndexNow and, with a Bing Webmaster API key saved, to Bing's
+ * URL Submission API, at the same time. Each call has its own deadline and
+ * its own log entries, so IndexNow's 429s never hide Bing's result. Returns
+ * the new log entries (Bing's first), or none when no URL is on the site.
+ */
+async function submit(ctx: PluginContext, urls: string[], trigger: PingLogEntry["trigger"]): Promise<PingLogEntry[]> {
 	const key = await ensureIndexNowKey(ctx);
 	const settings = await loadSettings(ctx);
-	const payload = buildPayload(siteOrigin(ctx), key, urls);
-	if (!payload) return null;
-	const endpoint = INDEXNOW_ENDPOINTS[settings.indexnow.endpoint];
-	const entry: PingLogEntry = {
-		at: new Date().toISOString(),
-		endpoint: settings.indexnow.endpoint,
-		count: payload.urlList.length,
-		urls: payload.urlList.slice(0, 10),
-		status: 0,
-		ok: false,
-		trigger,
-	};
-	try {
-		if (!ctx.http) throw new Error("network:request capability missing");
-		const response = await ctx.http.fetch(endpoint, {
-			method: "POST",
-			headers: { "Content-Type": "application/json; charset=utf-8" },
-			body: JSON.stringify(payload),
-		});
-		entry.status = response.status;
-		entry.ok = response.ok;
-		if (!response.ok) entry.error = (await response.text().catch(() => "")).slice(0, 300) || response.statusText;
-	} catch (error) {
-		entry.error = String(error).slice(0, 300);
+	const origin = siteOrigin(ctx);
+	const payload = buildPayload(origin, key, urls);
+	if (!payload) return [];
+	const apiKey = await bingKey(ctx);
+	const [bing, indexnow] = await Promise.all([
+		apiKey ? submitToBing(bingDeps(ctx), bingSiteUrl(origin), apiKey, payload.urlList, trigger) : Promise.resolve([]),
+		sendIndexNow(httpFetch(ctx), settings.indexnow.endpoint, payload, trigger),
+	]);
+	const entries = [...bing, indexnow];
+	for (const entry of entries) {
+		const name = entry.endpoint === BING_ENDPOINT ? "Bing Webmaster API" : "IndexNow";
+		const data = { endpoint: entry.endpoint, count: entry.count, status: entry.status, ...(entry.error ? { error: entry.error } : {}) };
+		if (entry.ok) ctx.log.info(`${name} submitted`, data);
+		else ctx.log.warn(`${name} submission failed`, data);
 	}
-	if (entry.ok) ctx.log.info("IndexNow submitted", { count: entry.count, status: entry.status });
-	else ctx.log.warn("IndexNow submission failed", { count: entry.count, status: entry.status, error: entry.error });
 	const log = (await ctx.kv.get<PingLogEntry[]>(LOG_KEY)) ?? [];
-	await ctx.kv.set(LOG_KEY, [entry, ...log].slice(0, LOG_LIMIT));
-	return entry;
+	await ctx.kv.set(LOG_KEY, [...entries, ...log].slice(0, LOG_LIMIT));
+	return entries;
 }
 
 type ChangeKind = "publish" | "update" | "unpublish" | "delete";
@@ -270,6 +283,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 					settings,
 					collections,
 					key,
+					// Whether a Bing Webmaster API key is saved, never the key itself.
+					bing: { keySaved: Boolean(await bingKey(ctx)), quota: (await ctx.kv.get<BingQuota>(BING_QUOTA_KEY)) ?? null, docs: BING_DOCS_URL },
 					urls: {
 						keyFile: key ? `${origin}/${key}.txt` : null,
 						news: `${origin}/news-sitemap.xml`,
@@ -328,9 +343,50 @@ export function discoveryModule(options: DiscoveryOptions) {
 				const list = urls?.length ? urls : [`${origin}/`];
 				const foreign = list.filter((u) => new URL(u).host !== new URL(origin).host);
 				if (foreign.length) throw PluginRouteError.badRequest(`Only URLs on ${new URL(origin).host} can be submitted.`);
-				const entry = await submit(ctx, list, "manual");
-				if (!entry) throw PluginRouteError.badRequest("Nothing to submit.");
-				return entry;
+				const entries = await submit(ctx, list, "manual");
+				if (!entries.length) throw PluginRouteError.badRequest("Nothing to submit.");
+				// The first entry's fields too, for an admin page loaded before this version.
+				return { ...entries[0], entries };
+			},
+		}),
+
+		/**
+		 * Save or remove the Bing Webmaster API key. It's a secret setting (src/core/secrets.ts), so EmDash
+		 * stores it encrypted; it's never sent back. Saving checks it right away (the site's quota).
+		 */
+		"discovery/bing-key": definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await requireFeature(ctx, FEATURE.indexnow);
+				const input = parseInput(z.object({ key: z.string().trim().max(500).optional(), clear: z.boolean().optional() }), ctx.input ?? {});
+				if (input.clear) {
+					await ctx.settings.delete(BING_KEY_SETTING);
+					await ctx.kv.delete(BING_QUOTA_KEY);
+					ctx.log.info("Discovery: Bing Webmaster API key removed");
+					return { keySaved: false, check: null };
+				}
+				if (!input.key) throw PluginRouteError.badRequest("Enter a Bing Webmaster API key.");
+				if (!BING_KEY_PATTERN.test(input.key)) throw PluginRouteError.badRequest("That doesn't look like a Bing Webmaster API key. Copy it again from Bing Webmaster Tools → Settings → API access.");
+				await ctx.settings.set(BING_KEY_SETTING, input.key);
+				// A new key can belong to another account: its quota is read again.
+				await ctx.kv.delete(BING_QUOTA_KEY);
+				ctx.log.info("Discovery: Bing Webmaster API key saved");
+				return { keySaved: true, check: await checkQuota(bingDeps(ctx), bingSiteUrl(siteOrigin(ctx)), input.key) };
+			},
+		}),
+
+		/** Check the saved Bing Webmaster API key: the site's URL submission quota, or Bing's error. */
+		"discovery/bing-check": definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await requireFeature(ctx, FEATURE.indexnow);
+				const apiKey = await bingKey(ctx);
+				if (!apiKey) throw PluginRouteError.badRequest("Save a Bing Webmaster API key first.");
+				return checkQuota(bingDeps(ctx), bingSiteUrl(siteOrigin(ctx)), apiKey);
 			},
 		}),
 
