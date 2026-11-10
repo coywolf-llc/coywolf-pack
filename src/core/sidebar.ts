@@ -20,7 +20,7 @@ export interface SidebarPage {
 
 /** The folders, in order, and their pages, in order. A page that isn't listed goes at the end of the first folder. */
 export const SIDEBAR_FOLDERS: ReadonlyArray<{ group: string; pages: readonly string[] }> = [
-	{ group: "Coywolf Pack", pages: ["/features", "/performance", "/backups", "/wordpress-import"] },
+	{ group: "Coywolf Pack", pages: ["/features", "/performance", "/cloudflare", "/backups", "/wordpress-import"] },
 	{ group: "SEO", pages: ["/schema", "/discovery", "/robots", "/redirects", "/links", "/breadcrumbs"] },
 	{ group: "Content Tools", pages: ["/headings", "/code-blocks", "/custom-blocks", "/reviews", "/ai", "/search"] },
 	{ group: "Media Tools", pages: ["/images", "/videos", "/files", "/form-uploads"] },

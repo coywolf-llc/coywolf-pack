@@ -181,6 +181,7 @@ export async function serveRedirect(
 	waitUntil: (p: Promise<unknown>) => void,
 	options: CoywolfRedirectsOptions = {},
 	edge = false,
+	countHit = true,
 ): Promise<Response | undefined> {
 	const { pathname, search } = url;
 	if (SKIP.test(pathname)) return undefined;
@@ -197,13 +198,31 @@ export async function serveRedirect(
 		return undefined;
 	}
 
-	return redirectFor(url, db, compiled, waitUntil, edge);
+	return redirectFor(url, db, compiled, waitUntil, edge, countHit);
 }
 
-/** The response for the rule that matches `url`, if any (its hit counted). */
-function redirectFor(url: URL, db: D1Database, compiled: CompiledRules, waitUntil: (p: Promise<unknown>) => void, edge: boolean): Response | undefined {
+/**
+ * A browser fetching the page ahead of a click (Speculation Rules, link prefetch): `Sec-Purpose: prefetch`
+ * (or `prefetch;prerender`), or the older `Purpose: prefetch`. Not a visit, so it isn't a redirect hit.
+ */
+export function isSpeculative(request: Request): boolean {
+	return /\bprefetch\b/i.test(request.headers.get("Sec-Purpose") ?? "") || /\bprefetch\b/i.test(request.headers.get("Purpose") ?? "");
+}
+
+/**
+ * The answer to a prefetch of a redirect source: declined (503, never stored), as Cloudflare's Speed Brain
+ * declines prefetches it won't serve. A browser drops a prefetch that doesn't end in a 2xx, so the click
+ * itself then reaches the site and counts as the hit, once. Serving the redirect to the prefetch instead
+ * would count a hover that may never become a click, and a click on it would then reuse the prefetched
+ * redirect without reaching the site at all.
+ */
+const declinedPrefetch = () => new Response(null, { status: 503, headers: { "Cache-Control": "no-store" } });
+
+/** The response for the rule that matches `url`, if any (its hit counted; a prefetch, `countHit` false, is declined). */
+function redirectFor(url: URL, db: D1Database, compiled: CompiledRules, waitUntil: (p: Promise<unknown>) => void, edge: boolean, countHit = true): Response | undefined {
 	const found = match(compiled, url.pathname, url.search);
 	if (!found) return undefined;
+	if (!countHit) return declinedPrefetch();
 
 	hits.count(db as unknown as Parameters<typeof hits.count>[0], found.rule.id, waitUntil);
 
@@ -249,8 +268,10 @@ export async function serveCachedRedirect(
 	const cache = (context as unknown as { cache?: RouteCache }).cache;
 	const method = context.request.method;
 	const edge = Boolean(cache?.enabled) && (method === "GET" || method === "HEAD");
-	const response = await serveRedirect(context.url, env, waitUntil, {}, edge);
-	if (response && edge) keepRedirectAtEdge(cache!);
+	const speculative = isSpeculative(context.request);
+	const response = await serveRedirect(context.url, env, waitUntil, {}, edge && !speculative, !speculative);
+	if (response && speculative) cache?.set(false);
+	else if (response && edge) keepRedirectAtEdge(cache!);
 	return response;
 }
 
@@ -280,7 +301,9 @@ export async function serveLateRedirect(
 	const cache = (context as unknown as { cache?: RouteCache }).cache;
 	const method = context.request.method;
 	const edge = Boolean(cache?.enabled) && (method === "GET" || method === "HEAD");
-	const response = redirectFor(context.url, db, { exact: exactMap(rule), patterns: [] }, waitUntil, edge);
-	if (response && edge) keepRedirectAtEdge(cache!);
+	const speculative = isSpeculative(context.request);
+	const response = redirectFor(context.url, db, { exact: exactMap(rule), patterns: [] }, waitUntil, edge && !speculative, !speculative);
+	if (response && speculative) cache?.set(false);
+	else if (response && edge) keepRedirectAtEdge(cache!);
 	return response;
 }

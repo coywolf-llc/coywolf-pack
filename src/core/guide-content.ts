@@ -9,7 +9,22 @@
  * Kept free of imports so tests can load it directly.
  */
 
-export type GuideId = "anthropic" | "openai" | "gemini" | "workers-ai" | "r2" | "stream" | "radar" | "media-host" | "images-token" | "crawler-hints-token" | "backups-token" | "backups-retention";
+export type GuideId =
+	| "anthropic"
+	| "openai"
+	| "gemini"
+	| "workers-ai"
+	| "r2"
+	| "stream"
+	| "radar"
+	| "media-host"
+	| "images-token"
+	| "crawler-hints-token"
+	| "checkup-read-token"
+	| "checkup-setup-token"
+	| "tracking-params"
+	| "backups-token"
+	| "backups-retention";
 
 export interface Guide {
 	summary: string;
@@ -144,6 +159,49 @@ export const GUIDES: Record<GuideId, Guide> = {
 		],
 		note: "The token only reads. Cloudflare doesn't let API tokens change Crawler Hints, so the switch itself is always in the Cloudflare dashboard (Turn on in Cloudflare).",
 	},
+	"checkup-read-token": {
+		summary: "How to let the pack read the zone's settings",
+		steps: [
+			`The checkup reads with the Performance page's read-only token (Cloudflare usage). Open ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}, wherever you created it), then select ${b("⋯ → Edit")} next to that token.`,
+			`Under Permission policies, find the policy scoped to ${b("All Domains")} or ${b("Specified Domains")} (the one with ${b("Zone → Read")}, if you added it for Crawler Hints), or select ${b("+ Add policy")} and set its scope to one of those: zone permissions only show in a policy scoped to domains.`,
+			`In that policy, tick ${b("Read")} on these rows (search for each): ${b("Zone")}, ${b("Zone Settings")}, ${b("DNS")} (lists the zone's other hostnames) and ${b("Bot Management")} (the bot rows). In Cloudflare's older token editor: ${b("+ Add more → Zone → Zone Settings → Read")}, and the same for the others.`,
+			`Save the token (${b("Update token")} or ${b("Save")} at the bottom). The token itself doesn't change, so there's nothing to paste again.`,
+			`No token yet? Create one with ${link(tokenFormUrl("Coywolf Pack read-only", [{ key: "zone", type: "read" }, { key: "zone_settings", type: "read" }, { key: "dns", type: "read" }]), "this pre-filled form")}: it should show the name ${b("Coywolf Pack read-only")} and, in a policy scoped to domains, ${b("Zone → Read")}, ${b("Zone Settings → Read")} and ${b("DNS → Read")}. Add ${b("Bot Management → Read")} in the same policy (search for ${code("bot")}), choose your zones, create it, and copy the token (it's shown once).`,
+			`Set it as the ${code("USAGE_API_TOKEN")} Worker secret (${code("npx wrangler secret put USAGE_API_TOKEN")}; one token works for every site in the account), or paste it in ${b("Cloudflare usage")} on the plugin's Settings page. The Performance page's usage figures need three account permissions too, listed there.`,
+			`Come back to this page and select ${b("Check again")}.`,
+		],
+		note: "This token only reads. The one-click fixes use a separate setup token, so the read-only token can stay read-only.",
+	},
+	"checkup-setup-token": {
+		summary: "How to get the setup token for the one-click fixes",
+		steps: [
+			...cloudflareTokenSteps({
+				permissions: `${b("Zone → Zone → Read")} and ${b("Zone → Zone Settings → Edit")}, for this site's domain only`,
+				prefill: {
+					name: "Coywolf Pack Cloudflare setup",
+					keys: [
+						{ key: "zone", type: "read" },
+						{ key: "zone_settings", type: "edit" },
+					],
+					shows: `one policy scoped to domains, with ${b("Zone → Read")} and ${b("Zone Settings → Edit")}`,
+				},
+				zone: true,
+			}),
+			`Paste it into ${b("Setup token")} on this page. Save it to keep it (stored encrypted), or leave it unsaved to use it just for the next fix.`,
+		],
+		note: "Each fix changes one zone setting, and only when it isn't already set. You can delete the token in Cloudflare once you're done.",
+	},
+	"tracking-params": {
+		summary: "How to serve links with tracking parameters from the cache",
+		steps: [
+			`Open the site's ${code("src/worker.ts")}. On the Coywolf sites it exports ${code("default")} as ${code("{ ...handler, async fetch(…) { return emdashUncachedByDefault(…) }, scheduled: createScheduledHandler() }")}.`,
+			`Add ${code('import { stripTrackingParams } from "@coywolf/emdash/worker";')} at the top.`,
+			`Wrap that whole object, changing nothing inside it: ${code("export default stripTrackingParams({ …the same object… } satisfies ExportedHandler);")}. Keep the ${code("fetch")} with ${code("emdashUncachedByDefault")}: it keeps the admin's login redirect out of the cache. The docs have the full file.`,
+			`Check the compatibility date in ${code("wrangler.jsonc")}: 2025-11-17 or later (or the ${code("enable_ctx_exports")} flag), so the Worker can call itself through its cache. A ${code("SELF")} service binding works too.`,
+			`Deploy, then request a page twice with a tracking parameter: ${code("curl -sI 'https://your-site/?utm_source=test' | grep -i coywolf-tracking")} prints ${code("coywolf-tracking-params: removed")}. Then come back here: the row says ${b("Removed before the cache")} once a tracked visit was answered from the cache. Try one site first (the docs' first rollout step).`,
+		],
+		note: "Only links with tracking parameters run the Worker (once, without rendering); every other request is served from the cache as before. Analytics in the browser still see the parameters. Each such request is billed twice: the request and the call through the cache.",
+	},
 	"media-host": {
 		summary: "How to set up a media host by hand in the Cloudflare dashboard",
 		steps: [
@@ -243,6 +301,10 @@ export const SETTINGS_PAGE_GUIDES: Record<string, { intro: string; guides: Guide
 	robotsRadarToken: {
 		intro: "Optional. Keeps the crawler list current from Cloudflare Radar each week. Or set the RADAR_API_TOKEN Worker secret.",
 		guides: ["radar"],
+	},
+	cloudflareSetupToken: {
+		intro: "Optional. Only for the one-click fixes on the Cloudflare Checkup page; reading the checkup uses the Cloudflare usage token.",
+		guides: ["checkup-setup-token"],
 	},
 };
 

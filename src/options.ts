@@ -42,6 +42,10 @@ export interface CoywolfOptions {
 	images?: import("./images/pack.js").ImagesOptions | false;
 	/** Page cache upkeep for Cloudflare Workers Cache (see docs/performance.md). `false` leaves the module out. */
 	pageCache?: import("./pageCache/pack.js").PageCacheOptions | false;
+	/** Speculation Rules: prefetch (and optionally prerender) the next page (settings on the Performance page; no options here). `false` leaves the module out. */
+	speculation?: Record<string, never> | false;
+	/** Cloudflare Checkup: the zone settings that matter, with one-click fixes (no options here). `false` leaves the module out. */
+	cloudflare?: Record<string, never> | false;
 	/** The daily check for a newer Coywolf Pack on npm (off until turned on on the Features page). `false` leaves the module out. */
 	updates?: Record<string, never> | false;
 	/** @deprecated Until 0.12.0 the Custom Blocks module was called Content Blocks; `contentBlocks: false` still leaves it out. */

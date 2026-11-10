@@ -1,6 +1,6 @@
 /**
  * Discovery module: routes and hooks for the news sitemap, the RSS feed,
- * llms.txt and per-entry Markdown, and the Crawler Hints card (Cloudflare's
+ * llms.txt and per-entry Markdown, security.txt, and the Crawler Hints card (Cloudflare's
  * own IndexNow integration, read from the site's zone). Site URLs are
  * answered by the middleware in ./middleware.ts, which calls the public
  * routes here.
@@ -19,6 +19,7 @@ import { FEED_PATH, FEED_TAG } from "./feed.js";
 import { purgePageCache } from "../pageCache/lib.js";
 import { readCloudflareToken } from "../pageCache/usage.js";
 import { markdownUrl } from "./markdown.js";
+import { SECURITY_TXT_PATH, SECURITY_TXT_TAG, securityTxtProblems } from "./security-txt.js";
 import { RETIRED_SETTINGS, SETTINGS_KEY, type DiscoverySettings, loadSettings, selected, settingsSchema } from "./settings.js";
 import { siteOrigin } from "./urls.js";
 
@@ -27,6 +28,7 @@ export const FEATURE = {
 	news: "discovery.newsSitemap",
 	llms: "discovery.llms",
 	feed: "discovery.feed",
+	securityTxt: "discovery.securityTxt",
 } as const;
 
 export interface DiscoveryOptions {
@@ -264,13 +266,15 @@ export function discoveryModule(options: DiscoveryOptions) {
 					return d ? { count: d.count, builtAt: d.builtAt } : null;
 				};
 				return {
-					features: { news: isOn(features, FEATURE.news), llms: isOn(features, FEATURE.llms), feed: isOn(features, FEATURE.feed) },
+					features: { news: isOn(features, FEATURE.news), llms: isOn(features, FEATURE.llms), feed: isOn(features, FEATURE.feed), securityTxt: isOn(features, FEATURE.securityTxt) },
 					settings,
 					collections,
+					origin,
 					urls: {
 						news: `${origin}/news-sitemap.xml`,
 						llms: `${origin}/llms.txt`,
 						feed: `${origin}${FEED_PATH}`,
+						securityTxt: `${origin}${SECURITY_TXT_PATH}`,
 					},
 					cache: { llms: await doc(LLMS_CACHE), news: await doc(NEWS_CACHE) },
 				};
@@ -296,6 +300,10 @@ export function discoveryModule(options: DiscoveryOptions) {
 			request: { body: "json" },
 			handler: async (ctx) => {
 				const settings = parseInput(settingsSchema, ctx.input);
+				// One contact per line in the admin: blank lines and spaces aren't kept.
+				settings.securityTxt.contacts = settings.securityTxt.contacts.map((c) => c.trim()).filter(Boolean);
+				const problems = securityTxtProblems(settings.securityTxt);
+				if (problems.length) throw PluginRouteError.badRequest(`security.txt: ${problems.join(" ")}`);
 				await ctx.settings.set(SETTINGS_KEY, settings);
 				settingsMemo = null;
 				// Read with the feature switches: drop that cache too.
@@ -304,8 +312,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 				const features = await ctxFeatures(ctx);
 				const kinds: DocKind[] = [...(isOn(features, FEATURE.llms) ? (["llms"] as const) : []), ...(isOn(features, FEATURE.news) ? (["news"] as const) : [])];
 				if (kinds.length) scheduleRebuild(ctx, kinds, 0);
-				// Feeds in the edge cache were built with the old settings.
-				await purgePageCache({ tags: [FEED_TAG] }).catch((error: unknown) => ctx.log.warn("Discovery: clearing cached feeds failed", { error: String(error) }));
+				// Feeds and security.txt in the edge cache were built with the old settings.
+				await purgePageCache({ tags: [FEED_TAG, SECURITY_TXT_TAG] }).catch((error: unknown) => ctx.log.warn("Discovery: clearing cached feeds failed", { error: String(error) }));
 				return { settings };
 			},
 		}),

@@ -62,7 +62,13 @@ export const SECRET_SETTINGS = {
 		type: "secret",
 		label: "Cloudflare usage — read-only API token",
 		description:
-			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Account Analytics → Read, Workers → Metadata Read-Only (finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. The Performance page has a pre-filled form. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account). With Zone → Read added too, in a policy scoped to All Domains or this site's domain, the Discovery page shows whether Cloudflare's Crawler Hints is on.",
+			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Account Analytics → Read, Workers → Metadata Read-Only (finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. The Performance page has a pre-filled form. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account). With Zone → Read added too, in a policy scoped to All Domains or this site's domain, the Discovery page shows whether Cloudflare's Crawler Hints is on; with Zone Settings → Read, Bot Management → Read and DNS → Read as well, the Cloudflare Checkup page reads the zone's settings.",
+	},
+	cloudflareSetupToken: {
+		type: "secret",
+		label: "Cloudflare Checkup — setup token",
+		description:
+			"Optional. Only for the one-click fixes on the Cloudflare Checkup page (Speed Brain off, Always Use HTTPS on, minimum TLS 1.2); reading the checkup uses the read-only Cloudflare usage token. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Specified Domains → this site's domain, add Zone → Read and Zone Settings → Edit; (3) create it, copy the token (shown once), paste it here and save. The Cloudflare Checkup page has a pre-filled form.",
 	},
 	backupsCloudflareToken: {
 		type: "secret",
