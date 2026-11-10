@@ -105,19 +105,27 @@ export async function generatedImage(ctx: PluginContext, content: { collection: 
 	return { url: socialImageUrl(doc.key, origin), width: WIDTH, height: HEIGHT, alt: doc.title, mimeType: "image/png" };
 }
 
-/** Queue an entry for an image (kept as it is when it's already pending). */
-export async function markPending(ctx: PluginContext, collection: string, id: string, title = ""): Promise<void> {
+/**
+ * Queue an entry for an image (left as it is when it's already pending). The
+ * record keeps its current image and that image's title (its alt) until the
+ * new one is made from the live entry; nothing from the save that queued it
+ * (which may be a draft) is stored. Compare-and-set: a render that finished
+ * meanwhile isn't overwritten.
+ */
+export async function markPending(ctx: PluginContext, collection: string, id: string, note: string | null = null): Promise<void> {
 	const store = socialImages(ctx);
-	const existing = await store.get(docId(collection, id));
+	const read = await store.getVersioned(docId(collection, id));
+	const existing = read?.value ?? null;
 	if (existing?.status === "pending") return;
-	await store.put(docId(collection, id), {
+	await store.compareAndSet(docId(collection, id), read?.revision ?? null, {
 		collection,
 		id,
-		title: title || existing?.title || "",
+		title: existing?.title ?? "",
 		key: existing?.key ?? null,
 		hash: existing?.hash ?? null,
+		previousKey: existing?.previousKey ?? null,
 		status: "pending",
-		note: null,
+		note,
 		attempts: 0,
 		updatedAt: new Date().toISOString(),
 		renderedAt: existing?.renderedAt ?? null,

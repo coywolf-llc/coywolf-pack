@@ -11,6 +11,7 @@ import { z } from "zod";
 import { ctxFeatures, isOn, registerFeatures, requireFeature } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
 import { readOnlyRoute } from "../core/routes.js";
+import { knownPlan } from "../core/plan.js";
 import { Ops } from "../links/store.js";
 import { parseInput } from "../shared.js";
 import { CHECKS, CHECK_INFO, type CheckId, normalizeAuditSettings } from "./checks.js";
@@ -32,9 +33,20 @@ registerFeatures(FEATURES);
 export const AUDIT_WEEKLY_TASK = "audit-weekly";
 export const AUDIT_CONTINUE_TASK = "audit-continue";
 
-/** A scheduled step: statements and wall time (Workers Free allows 50 D1 queries per invocation, shared with other jobs). */
-const CRON_OPS = 40;
+/**
+ * When the weekly run starts: Wednesday 04:00 UTC, away from Sunday 00:00, where @weekly, @daily and @hourly
+ * tasks all fall due at once. (The sites' Cron Trigger runs hourly at minute 0, so the minute changes nothing.)
+ */
+export const AUDIT_WEEKLY_SCHEDULE = "0 4 * * 3";
+
+/**
+ * A scheduled step's D1 statements. EmDash runs every due task in one invocation, and Workers Free allows 50
+ * D1 queries per invocation for all of them, so a step stays at 20 (about 100 entries) unless the usage card
+ * has seen the Paid plan (1,000 per invocation). At least FINISH_RESERVE + 4, or the last step couldn't run.
+ */
+const CRON_OPS = { free: 20, paid: 150 } as const;
 const CRON_MS = 60_000;
+const cronOps = async (ctx: PluginContext) => new Ops((await knownPlan(ctx.kv)) === "paid" ? CRON_OPS.paid : CRON_OPS.free, Date.now() + CRON_MS);
 /** An admin step (Run now, while the page is open). */
 const REQUEST_OPS = 120;
 const REQUEST_MS = 20_000;
@@ -146,21 +158,24 @@ export function auditPack(): PackModule {
 		features: FEATURES,
 		routes,
 		tasks: [
+			// Both are scheduled only while Content Audit is on (cancelled while it's off).
 			{
 				name: AUDIT_WEEKLY_TASK,
-				schedule: "@weekly",
+				schedule: AUDIT_WEEKLY_SCHEDULE,
+				onlyWhileOn: true,
 				handler: async (ctx: PluginContext) => {
 					await startRun(ctx, "scheduled");
-					await auditStep(ctx, new Ops(CRON_OPS, Date.now() + CRON_MS), await stepOptions(ctx));
+					await auditStep(ctx, await cronOps(ctx), await stepOptions(ctx));
 				},
 			},
 			{
 				name: AUDIT_CONTINUE_TASK,
 				schedule: "@hourly",
+				onlyWhileOn: true,
 				// One KV read an hour while no run is under way.
 				handler: async (ctx: PluginContext) => {
 					if ((await getRun(ctx)).status !== "running") return;
-					await auditStep(ctx, new Ops(CRON_OPS, Date.now() + CRON_MS), await stepOptions(ctx));
+					await auditStep(ctx, await cronOps(ctx), await stepOptions(ctx));
 				},
 			},
 		],

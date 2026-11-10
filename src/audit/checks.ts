@@ -120,6 +120,11 @@ export function wordCount(value: unknown): number {
 	return words;
 }
 
+/** Words in a plain string. */
+export function plainWords(value: unknown): number {
+	return typeof value === "string" ? (value.match(/[\p{L}\p{N}][\p{L}\p{N}'’.-]*/gu)?.length ?? 0) : 0;
+}
+
 /** Images in Portable Text without alt text (an image block's or its asset's, the way EmDash renders them), gallery images included. */
 export function imagesWithoutAlt(value: unknown): number {
 	let missing = 0;
@@ -160,7 +165,8 @@ export function headingProblems(levels: number[], titleIsH1: boolean): string[] 
 
 /** Whether a media field value has an image, and whether it has alt text. */
 function mediaValue(value: unknown): { set: boolean; alt: boolean } {
-	if (nonEmpty(value)) return { set: true, alt: false };
+	// A bare URL (an older or imported value): it has an image, and no alt to check, so it isn't reported as missing one.
+	if (nonEmpty(value)) return { set: true, alt: true };
 	if (!isObj(value)) return { set: false, alt: false };
 	const set = nonEmpty(value.id) || nonEmpty(value.src) || nonEmpty(value.url);
 	return { set, alt: nonEmpty(value.alt) };
@@ -231,7 +237,9 @@ export function checkEntry(entry: AuditEntry, shape: CollectionShape, settings: 
 	}
 
 	if (on("thin") && settings.thinWords > 0 && portable.length) {
-		const words = portable.reduce((n, f) => n + wordCount(entry.data[f.slug]), 0);
+		// The text readers see: Portable Text, plus long text and string fields (not the title, which isn't body text).
+		const texts = shape.fields.filter((f) => (f.type === "text" || f.type === "string") && f.slug !== (shape.titleField ?? "title"));
+		const words = portable.reduce((n, f) => n + wordCount(entry.data[f.slug]), 0) + texts.reduce((n, f) => n + plainWords(entry.data[f.slug]), 0);
 		if (words < settings.thinWords) issues.push(["thin", plural(words, "word")]);
 	}
 
@@ -242,9 +250,13 @@ export function checkEntry(entry: AuditEntry, shape: CollectionShape, settings: 
 	}
 
 	if (on("headings") && portable.length) {
-		const levels = portable.flatMap((f) => headingLevels(entry.data[f.slug]));
-		const problems = headingProblems(levels, settings.titleIsH1);
-		if (problems.length) issues.push(["headings", problems.join("; ")]);
+		// Each field on its own (a theme may show them in different places); H1s count across the page.
+		const perField = portable.map((f) => headingLevels(entry.data[f.slug]));
+		const h1s = perField.flat().filter((l) => l === 1).length + (settings.titleIsH1 ? 1 : 0);
+		const problems = new Set<string>();
+		if (h1s > 1) problems.add(settings.titleIsH1 ? `${h1s} H1s (the title and ${h1s - 1} in the content)` : `${h1s} H1s`);
+		for (const levels of perField) for (const p of headingProblems(levels, settings.titleIsH1)) if (!/H1s/.test(p)) problems.add(p);
+		if (problems.size) issues.push(["headings", [...problems].slice(0, 6).join("; ")]);
 	}
 	return issues;
 }

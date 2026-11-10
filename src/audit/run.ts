@@ -17,7 +17,7 @@
 import type { CollectionSchemaInfo, PluginContext, StorageCollection } from "emdash";
 
 import { getManyBatched } from "../core/storage.js";
-import { Ops, chunked, queryAll, queryIn, refs, urls } from "../links/store.js";
+import { Ops, type RefRow, chunked, queryAll, refs, urls } from "../links/store.js";
 import { AUDIT_DEFAULTS, type AuditSettings, CHECKS, type CheckId, type CollectionShape, type Issue, checkEntry, checkOn, duplicateGroups, effectiveTitle, normalizeAuditSettings, textKey } from "./checks.js";
 
 export const RUN_KEY = "audit:run";
@@ -34,6 +34,20 @@ export const AUDIT_STORAGE = { [CHUNKS]: { indexes: ["runId"] } };
 const PAGE = 50;
 /** Statements one page may take (the list, the social image lookup, the chunk write, the state write). */
 const PAGE_RESERVE = 8;
+/**
+ * Statements the finish step may take: the chunks (one read per 100), broken
+ * links (at most BROKEN_MAX of them and REFS_MAX references), the extra chunk
+ * and the report. Steps must allow at least this (src/audit/pack.ts).
+ */
+export const FINISH_RESERVE = 16;
+const BROKEN_MAX = 180;
+const REFS_MAX = 500;
+/** Old chunks deleted per pass. */
+const CLEANUP_PAGE = 90;
+/** Failed steps in a row before a run is stopped. */
+const MAX_FAILURES = 3;
+/** Largest extra chunk written (D1 rows are limited to 2 MB). */
+const EXTRA_MAX_BYTES = 1_500_000;
 
 export interface ChunkItem {
 	c: string;
@@ -58,13 +72,16 @@ export interface RunState {
 	source: "scheduled" | "admin" | null;
 	startedAt: string | null;
 	finishedAt: string | null;
-	phase: "entries" | "finish";
+	/** "cleanup": the report is written; the older runs' chunks are being dropped. */
+	phase: "entries" | "finish" | "cleanup";
 	collections: string[];
 	index: number;
 	cursor: string | null;
 	/** The next chunk's number. */
 	chunk: number;
 	processed: number;
+	/** Failed steps in a row (the run stops at MAX_FAILURES). */
+	failures: number;
 	settings: AuditSettings;
 	error?: string;
 }
@@ -81,6 +98,7 @@ export const IDLE_RUN: RunState = {
 	cursor: null,
 	chunk: 0,
 	processed: 0,
+	failures: 0,
 	settings: AUDIT_DEFAULTS,
 };
 
@@ -242,27 +260,53 @@ export async function auditStep(ctx: PluginContext, ops: Ops, options: StepOptio
 			};
 			if (chunk.items.length) {
 				ops.spend(1);
+				// The chunk's id is its number: a page redone after a step was cut off overwrites it.
 				await chunks(ctx).put(`${state.runId}:${String(state.chunk).padStart(5, "0")}`, chunk);
 				state.chunk++;
 			}
 			state.processed += chunk.items.length;
 			if (page.hasMore && page.cursor) state.cursor = page.cursor;
 			else Object.assign(state, { index: state.index + 1, cursor: null });
+			// Progress is saved after every page, so a step that's cut off loses at most the page it was on.
+			state.failures = 0;
+			ops.spend(1);
+			await ctx.kv.set(RUN_KEY, state);
 		}
 		if (state.phase === "entries" && state.index >= state.collections.length) state.phase = "finish";
 
 		let report: AuditReport | undefined;
-		if (state.phase === "finish" && ops.has(PAGE_RESERVE)) {
+		if (state.phase === "finish" && ops.has(FINISH_RESERVE)) {
 			report = await finishRun(ctx, state, ops, options);
-			Object.assign(state, { status: "idle", phase: "entries", finishedAt: report.finishedAt, cursor: null });
+			state.phase = "cleanup";
 			ctx.log.info("audit: run finished", { entries: report.entries, withIssues: report.entriesWithIssues });
 		}
+		if (state.phase === "cleanup") {
+			// The runs before this one: their chunks are no longer read. A page of them per pass, within the step's budget.
+			let done = false;
+			while (!done && ops.has(3)) {
+				ops.spend(1);
+				const page = await chunks(ctx).query({ where: { runId: { lt: state.runId } }, limit: CLEANUP_PAGE });
+				if (page.items.length) {
+					ops.spend(1);
+					await chunks(ctx).deleteMany(page.items.map((r) => r.id));
+				}
+				done = !page.hasMore;
+			}
+			if (done) Object.assign(state, { status: "idle", phase: "entries", finishedAt: report?.finishedAt ?? (await getReport(ctx))?.finishedAt ?? new Date().toISOString(), cursor: null });
+		}
+		state.failures = 0;
 		ops.spend(1);
 		await ctx.kv.set(RUN_KEY, state);
 		return report ? { ...state, report } : state;
 	} catch (error) {
+		// A step that keeps failing (the same page, again and again) stops the run, with the error to show.
 		const state = await getRun(ctx);
+		state.failures = (state.failures ?? 0) + 1;
 		state.error = String(error).slice(0, 300);
+		if (state.failures >= MAX_FAILURES) {
+			Object.assign(state, { status: "idle", phase: "entries", cursor: null, error: `The audit stopped after ${MAX_FAILURES} failed steps in a row: ${state.error}` });
+			ctx.log.error("audit: run stopped after repeated failures", { error: state.error });
+		}
 		await ctx.kv.set(RUN_KEY, state);
 		throw error;
 	} finally {
@@ -311,8 +355,13 @@ async function finishRun(ctx: PluginContext, state: RunState, ops: Ops, options:
 	let linksChecked = false;
 	if (options.links && checkOn(state.settings, "brokenLinks")) {
 		try {
-			const broken = await queryAll(urls(ctx), { status: "broken", internal: true, ignored: false }, { ops, max: 2_000 });
-			const usage = broken.length ? await queryIn(refs(ctx), "urlId", broken.map((b) => b.id), ops) : [];
+			const broken = (await queryAll(urls(ctx), { status: "broken", internal: true, ignored: false }, { ops, max: BROKEN_MAX })).slice(0, BROKEN_MAX);
+			// Bounded: two lists of 90 ids, at most REFS_MAX references in all.
+			const usage: Array<{ id: string; data: RefRow }> = [];
+			for (const part of chunked(broken.map((b) => b.id))) {
+				if (usage.length >= REFS_MAX) break;
+				usage.push(...(await queryAll(refs(ctx), { urlId: { in: part } }, { ops, max: REFS_MAX - usage.length })));
+			}
 			const href = new Map(broken.map((b) => [b.id, b.data.url]));
 			const perEntry = new Map<string, string[]>();
 			for (const { data } of usage) {
@@ -330,7 +379,17 @@ async function finishRun(ctx: PluginContext, state: RunState, ops: Ops, options:
 			ctx.log.warn("audit: couldn't read Link Manager's broken links", { error: String(error) });
 		}
 	}
-	const extraItems = [...extra.values()].slice(0, 5_000);
+	// Capped by size (a D1 row holds at most 2 MB): the counts below cover only what's stored, so the report and the list agree.
+	const extraItems: ChunkItem[] = [];
+	let bytes = 0;
+	for (const item of extra.values()) {
+		bytes += JSON.stringify(item).length + 1;
+		if (bytes > EXTRA_MAX_BYTES) {
+			ctx.log.warn("audit: too many site-wide findings to store; the rest are left out", { stored: extraItems.length, found: extra.size });
+			break;
+		}
+		extraItems.push(item);
+	}
 	ops.spend(1);
 	await chunks(ctx).put(extraId(runId), { runId, n: -1, items: extraItems });
 
@@ -359,17 +418,7 @@ async function finishRun(ctx: PluginContext, state: RunState, ops: Ops, options:
 	};
 	ops.spend(1);
 	await ctx.kv.set(REPORT_KEY, report);
-
-	// The runs before this one: their chunks are no longer read.
-	try {
-		const old = await queryAll(chunks(ctx), { runId: { lt: runId } }, { ops, max: 10_000 });
-		for (const part of chunked(old.map((r) => r.id))) {
-			ops.spend(1);
-			await chunks(ctx).deleteMany(part);
-		}
-	} catch (error) {
-		ctx.log.warn("audit: couldn't drop the previous run's results; the next run tries again", { error: String(error) });
-	}
+	// The older runs' chunks are dropped in the "cleanup" phase that follows, in bounded passes.
 	return report;
 }
 

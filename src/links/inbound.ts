@@ -59,6 +59,7 @@ interface CollectionRow {
 	url_pattern: string | null;
 	title_field: string | null;
 	routable: number | null;
+	hidden: number | null;
 }
 
 /** Collections' `title` and `name` fields, for those without a title field set (EmDash then shows `title`, else `name`). */
@@ -66,14 +67,14 @@ export const titleFieldsSql = `SELECT c.slug AS collection, f.slug AS field FROM
 
 /** Collections that have public pages (routable), from EmDash's collections table, with the field their titles are in. One batch. */
 export async function pageCollections(db: D1Database): Promise<PageCollection[]> {
-	const [collections, fields] = (await db.batch([db.prepare("SELECT slug, label, label_singular, url_pattern, title_field, routable FROM _emdash_collections ORDER BY slug"), db.prepare(titleFieldsSql)])) as unknown as [
+	const [collections, fields] = (await db.batch([db.prepare("SELECT slug, label, label_singular, url_pattern, title_field, routable, hidden FROM _emdash_collections ORDER BY slug"), db.prepare(titleFieldsSql)])) as unknown as [
 		{ results?: CollectionRow[] },
 		{ results?: Array<{ collection: string; field: string }> },
 	];
 	const named = new Map<string, Set<string>>();
 	for (const f of fields.results ?? []) named.set(f.collection, (named.get(f.collection) ?? new Set()).add(f.field));
 	return (collections.results ?? [])
-		.filter((r) => COLLECTION_SLUG.test(r.slug) && r.routable !== 0)
+		.filter((r) => COLLECTION_SLUG.test(r.slug) && r.routable !== 0 && r.hidden !== 1)
 		.map((r) => {
 			const has = named.get(r.slug);
 			const titleField = r.title_field ?? (has?.has("title") ? "title" : has?.has("name") ? "name" : null);
@@ -159,8 +160,10 @@ export function countInbound(
 		else unmatched++;
 	}
 	const sources = new Map<string, Set<string>>();
+	const published = new Set(entries.map((e) => `${e.collection}/${e.id}`));
 	for (const r of refs) {
-		if (r.entryStatus && r.entryStatus !== "published") continue;
+		// Published when the reference says so; a reference without a status counts only when its entry is in the published list.
+		if (r.entryStatus ? r.entryStatus !== "published" : !published.has(r.entryKey)) continue;
 		const to = target.get(r.urlId);
 		if (!to || to === r.entryKey) continue;
 		const set = sources.get(to) ?? new Set<string>();

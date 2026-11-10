@@ -67,3 +67,7 @@ Redirect Manager, its Slug changes part and Backups were on by default until 0.3
 - Everywhere else (`plugin:activate`, the Features page's list, a save of the switches), and on any doubt (stored switches, any pack data, a read that fails): it's an existing site, so `legacyDefault` is stored for each of those features the site hadn't chosen, then the marker.
 
 A new feature that starts off needs none of this. Use `legacyDefault` only when changing a default an existing feature already had.
+
+## Scheduled tasks
+
+EmDash runs every scheduled task that's due in one invocation (`plugins/cron.ts`, up to 10 a tick), and the sites' Cron Trigger fires hourly at minute 0, so on Workers Free all the due tasks share one 50-query D1 budget. Each task's handler first reads the feature switches and returns when its feature is off. A task marked `onlyWhileOn` (`TaskDef` in `src/core/module.ts`) goes further: it's scheduled only while its feature is on. The Features page's list and save, and `plugin:activate`, schedule or cancel it to match the switches (`ensureTasks` in `src/core/compose.ts`), and if it fires while its feature is off it cancels itself. Content Audit, Alerts & Digest and Social Images use it, and their weekly tasks run at quiet hours (Wednesday 04:00 and Monday 13:00 UTC), not at Sunday midnight when `@weekly`, `@daily` and `@hourly` tasks all fall due. Their steps size themselves for Workers Free (20 D1 statements for an audit step, 4 images an hour) unless the Cloudflare usage card has seen the Paid plan (`src/core/plan.ts`).

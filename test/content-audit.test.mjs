@@ -152,7 +152,8 @@ test("a run pages through every entry in bounded steps, one chunk per page, then
 	let steps = 0;
 	let state = { status: "running" };
 	while (state.status === "running" && steps < 50) {
-		state = await run.auditStep(ctx, new Ops(12), { socialImages: false, links: false, now: NOW });
+		// The smallest scheduled step (Workers Free): 20 statements.
+		state = await run.auditStep(ctx, new Ops(20), { socialImages: false, links: false, now: NOW });
 		steps++;
 	}
 	assert.equal(state.status, "idle");
@@ -230,4 +231,34 @@ test("only the chosen collections are audited, and a run can be cancelled", asyn
 	await run.startRun(ctx, "admin");
 	await runToEnd(ctx);
 	assert.deepEqual([...new Set(ctx.lists)], ["pages"]);
+});
+
+test("progress is saved after every page, and a run that keeps failing stops with the error", async () => {
+	resetSchema();
+	const ctx = fakeCtx(many(120));
+	await run.startRun(ctx, "admin");
+	const put = ctx.storage.audit_chunks.put.bind(ctx.storage.audit_chunks);
+	let puts = 0;
+	ctx.storage.audit_chunks.put = async (id, data) => {
+		if (++puts >= 2) throw new Error("D1 is down");
+		return put(id, data);
+	};
+	await assert.rejects(run.auditStep(ctx, new Ops(40), { socialImages: false, links: false }), /D1 is down/);
+	let state = await run.getRun(ctx);
+	assert.equal(state.processed, 50, "the first page was kept");
+	assert.equal(state.failures, 1);
+	assert.equal(state.status, "running");
+	for (let i = 0; i < 2; i++) await assert.rejects(run.auditStep(ctx, new Ops(40), { socialImages: false, links: false }), /D1 is down/);
+	state = await run.getRun(ctx);
+	assert.equal(state.status, "idle", "stopped after three failed steps in a row");
+	assert.match(state.error, /stopped after 3 failed steps in a row: Error: D1 is down/);
+});
+
+test("text fields count toward words, headings are checked per field, a bare URL image isn't missing alt", () => {
+	const shape = { ...SHAPE, fields: [...SHAPE.fields, { slug: "intro", type: "text" }, { slug: "sidebar", type: "portableText" }] };
+	const e = entry({ data: { title: "A good title for this post", body: [h(2, "a"), text("p", words(200))], sidebar: [h(3, "b")], intro: words(150), cover: "https://cdn.example/cover.jpg" } });
+	const found = Object.fromEntries(checks.checkEntry(e, shape, checks.AUDIT_DEFAULTS, { now: NOW }));
+	assert.equal(found.thin, undefined, "200 + 150 words, plus headings");
+	assert.equal(found.altMissing, undefined);
+	assert.equal(found.headings, "H1 → H3", "the sidebar field starts at H3; the body's H2 doesn't hide it");
 });

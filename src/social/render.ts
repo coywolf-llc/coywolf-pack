@@ -59,11 +59,23 @@ export async function readSocialSettings(ctx: PluginContext): Promise<SocialSett
 
 export class RenderError extends Error {
 	readonly status: number;
-	constructor(message: string, status = 0) {
+	/** For a 429: how long Browser Run asked to wait (its Retry-After), when it said. */
+	readonly retryAfterMs: number | null;
+	constructor(message: string, status = 0, retryAfterMs: number | null = null) {
 		super(message);
 		this.name = "RenderError";
 		this.status = status;
+		this.retryAfterMs = retryAfterMs;
 	}
+}
+
+/** Retry-After in milliseconds (seconds, or an HTTP date), or null. */
+export function retryAfterMs(value: string | null, now = Date.now()): number | null {
+	if (!value) return null;
+	const seconds = Number(value);
+	if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+	const at = Date.parse(value);
+	return Number.isFinite(at) ? Math.max(0, at - now) : null;
 }
 
 interface BrowserBinding {
@@ -122,13 +134,29 @@ async function pngFrom(response: Response, apiToken?: string): Promise<Uint8Arra
 	const body = (await response.json().catch(() => null)) as { errors?: Array<{ message?: string }> } | null;
 	const detail = body?.errors?.map((e) => e.message).filter(Boolean).join("; ") || response.statusText || "error";
 	const hint = response.status === 401 || response.status === 403 ? " The API token needs Account → Browser Run → Edit." : response.status === 429 ? " Browser Run's limit for now is reached; the rest wait for the next run." : "";
-	throw new RenderError(scrubToken(`Browser Run ${response.status}: ${detail}.${hint}`, apiToken), response.status);
+	throw new RenderError(scrubToken(`Browser Run ${response.status}: ${detail}.${hint}`, apiToken), response.status, response.status === 429 ? retryAfterMs(response.headers.get("retry-after")) : null);
 }
+
+/** What the BROWSER binding says when it can't take Quick Actions (a Worker whose compatibility date is before 2026-03-24). */
+const BINDING_UNSUPPORTED = /does not implement|quickAction|not a function|compatibility/i;
 
 /** The template as a PNG. */
 export async function screenshot(r: Exclude<Renderer, { kind: "none" }>, html: string): Promise<Uint8Array> {
 	if (r.kind === "binding") {
-		const response = await withDeadline(r.browser.quickAction("screenshot", { html, ...SCREENSHOT }), RENDER_MS, "Browser Run's screenshot");
+		let response: Response;
+		try {
+			response = await withDeadline(r.browser.quickAction("screenshot", { html, ...SCREENSHOT }), RENDER_MS, "Browser Run's screenshot");
+		} catch (error) {
+			if (error instanceof RenderError) throw error;
+			const message = error instanceof Error ? error.message : String(error);
+			// A setup problem stops the batch and shows once on the page; it isn't counted against each entry.
+			if (BINDING_UNSUPPORTED.test(message))
+				throw new RenderError(
+					`The BROWSER binding can't take screenshots: Browser Run's Quick Actions need compatibility_date 2026-03-24 or later in wrangler.jsonc. Raise it, or remove the binding and use an API token. (${message.slice(0, 160)})`,
+					NOT_SET_UP,
+				);
+			throw new RenderError(`Browser Run: ${message.slice(0, 200)}`);
+		}
 		return pngFrom(response);
 	}
 	const controller = new AbortController();
@@ -191,67 +219,123 @@ export async function siteLogo(bucket: R2Bucket | undefined, origin: string): Pr
 	}
 }
 
+
 /** RenderError's status when Browser Run isn't set up (no binding, token or account): the batch stops, nothing is counted against the entry. */
 export const NOT_SET_UP = -1;
 
-export interface RenderContext {
-	/** How Browser Run is reached, looked up on the first render that needs it (an unchanged image needs none). Throws RenderError(NOT_SET_UP). */
-	renderer: () => Promise<Exclude<Renderer, { kind: "none" }>>;
+/** What an image shows besides the title: the site's name and logo, and the template. */
+export interface TemplateInputs {
 	bucket: R2Bucket;
 	siteName: string;
 	logo: { src: string | null; key: string | null };
 	template: TemplateSettings;
 }
 
-/** What every render in a batch shares: the renderer (looked up when first needed), the bucket, the site's name and logo, the template. */
-export async function renderContext(ctx: PluginContext, settings: SocialSettings, bucketName = "MEDIA"): Promise<RenderContext | { reason: string }> {
-	const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
+export interface RenderContext extends TemplateInputs {
+	/** How Browser Run is reached, looked up on the first render that needs it (an unchanged image needs none). Throws RenderError(NOT_SET_UP). */
+	renderer: () => Promise<Exclude<Renderer, { kind: "none" }>>;
+}
+
+/** The site's name and logo (one R2 read) and the template, or why images can't be stored. */
+export async function templateInputs(ctx: PluginContext, settings: SocialSettings, bucketName = "MEDIA", bindings?: Record<string, unknown>): Promise<TemplateInputs | { reason: string }> {
+	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
 	const bucket = env[bucketName] as R2Bucket | undefined;
 	if (!bucket?.put) return { reason: `The media bucket isn't bound as ${bucketName}.` };
 	const origin = ctx.site?.url ?? "";
+	return { bucket, siteName: (await readSiteName(ctx).catch(() => "")) || ctx.site?.name || "", logo: await siteLogo(bucket, origin), template: settings.template };
+}
+
+/** What every render in a batch shares: the template inputs, and the renderer (looked up when first needed). */
+export async function renderContext(ctx: PluginContext, settings: SocialSettings, bucketName = "MEDIA"): Promise<RenderContext | { reason: string }> {
+	const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
+	const inputs = await templateInputs(ctx, settings, bucketName, env);
+	if ("reason" in inputs) return inputs;
 	let found: Promise<Renderer> | null = null;
 	const get = async () => {
 		const r = await (found ??= renderer(ctx, settings, env));
 		if (r.kind === "none") throw new RenderError(r.reason, NOT_SET_UP);
 		return r;
 	};
-	return { renderer: get, bucket, siteName: (await readSiteName(ctx).catch(() => "")) || ctx.site?.name || "", logo: await siteLogo(bucket, origin), template: settings.template };
+	return { ...inputs, renderer: get };
 }
 
+/** The hash an entry's image would have now (title plus the template inputs). */
+export const hashFor = (inputs: TemplateInputs, title: string) => imageHash({ title, siteName: inputs.siteName, logoKey: inputs.logo.key, settings: inputs.template });
+
 /**
- * Make (or keep) one entry's image. Skips the render when the stored image
- * already shows this title with this template. Returns the new document.
+ * Make (or keep) one entry's image from its live (published) title. Skips the
+ * render when the stored image already shows this title with this template.
+ * Writes are compare-and-set against the record as it was read, so two
+ * renders of one entry at once (a publish fires two hooks; a scheduled run
+ * may overlap) can't leave an older or failed record over a newer ready one.
  */
 export async function renderEntry(ctx: PluginContext, rc: RenderContext, entry: { collection: string; id: string; title: string }): Promise<SocialImageDoc> {
 	const store = socialImages(ctx);
 	const id = docId(entry.collection, entry.id);
-	const existing = await store.get(id);
-	const hash = await imageHash({ title: entry.title, siteName: rc.siteName, logoKey: rc.logo.key, settings: rc.template });
+	const read = await store.getVersioned(id);
+	const existing = read?.value ?? null;
+	const hash = await hashFor(rc, entry.title);
 	const now = new Date().toISOString();
 	if (existing?.key && existing.hash === hash) {
+		if (existing.status === "ready" && existing.title === entry.title) return existing;
 		const doc: SocialImageDoc = { ...existing, title: entry.title, status: "ready", note: null, updatedAt: now };
-		await store.put(id, doc);
-		return doc;
+		const applied = await store.compareAndSet(id, read?.revision ?? null, doc);
+		return applied.applied ? doc : ((await store.get(id)) ?? doc);
 	}
 	const base: SocialImageDoc = existing ?? { collection: entry.collection, id: entry.id, title: entry.title, key: null, hash: null, status: "pending", note: null, attempts: 0, updatedAt: now, renderedAt: null };
+	let png: Uint8Array;
 	try {
-		const png = await screenshot(await rc.renderer(), socialImageHtml({ title: entry.title, siteName: rc.siteName, logo: rc.logo.src, settings: rc.template }));
-		const key = imageKey(entry.collection, entry.id, hash);
-		await rc.bucket.put(key, png, { httpMetadata: { contentType: "image/png", cacheControl: "public, max-age=31536000, immutable" } });
-		const replaced = existing?.key && existing.key !== key ? existing.key : (existing?.previousKey ?? null);
-		const doc: SocialImageDoc = { ...base, title: entry.title, key, hash, previousKey: replaced, status: "ready", note: null, attempts: 0, updatedAt: now, renderedAt: now };
-		await store.put(id, doc);
-		// The image before the one just replaced: no page can point to it any more.
-		const stale = existing?.previousKey;
-		if (stale && stale !== key && stale !== replaced) await rc.bucket.delete(stale).catch(() => undefined);
-		return doc;
+		png = await screenshot(await rc.renderer(), socialImageHtml({ title: entry.title, siteName: rc.siteName, logo: rc.logo.src, settings: rc.template }));
 	} catch (error) {
 		const status = error instanceof RenderError ? error.status : 0;
 		const attempts = base.attempts + 1;
 		// A rate limit, or Browser Run not set up, isn't the entry's fault: it stays pending without counting an attempt.
 		const notCounted = status === 429 || status === NOT_SET_UP;
-		const doc: SocialImageDoc = { ...base, title: entry.title, status: notCounted ? "pending" : attempts >= 3 ? "failed" : "pending", note: (error instanceof Error ? error.message : String(error)).slice(0, 300), attempts: notCounted ? base.attempts : attempts, updatedAt: now };
-		await store.put(id, doc);
+		const doc: SocialImageDoc = {
+			...base,
+			status: notCounted ? "pending" : attempts >= 3 ? "failed" : "pending",
+			note: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+			attempts: notCounted ? base.attempts : attempts,
+			updatedAt: now,
+		};
+		// Only over the record this render read: if another render wrote meanwhile (a ready image), it stays.
+		await store.compareAndSet(id, read?.revision ?? null, doc).catch(() => undefined);
 		throw error;
 	}
+	const key = imageKey(entry.collection, entry.id, hash);
+	await rc.bucket.put(key, png, { httpMetadata: { contentType: "image/png", cacheControl: "public, max-age=31536000, immutable" } });
+	const ready = (over: SocialImageDoc | null): SocialImageDoc => {
+		const replaced = over?.key && over.key !== key ? over.key : (over?.previousKey ?? null);
+		return { ...(over ?? base), title: entry.title, key, hash, previousKey: replaced, status: "ready", note: null, attempts: 0, updatedAt: now, renderedAt: now };
+	};
+	let doc = ready(existing);
+	let written = (await store.compareAndSet(id, read?.revision ?? null, doc)).applied;
+	let over = existing;
+	if (!written) {
+		// Someone else wrote meanwhile. A ready image they made stays (ours is dropped unless it's the same file);
+		// anything else (queued, failed, skipped) is replaced by ours, once, against what's there now.
+		const now2 = await store.getVersioned(id);
+		const current = now2?.value ?? null;
+		if (current?.status === "ready" && current.key) {
+			if (current.key !== key && current.previousKey !== key) await rc.bucket.delete(key).catch(() => undefined);
+			return current;
+		}
+		over = current;
+		doc = ready(current);
+		written = (await store.compareAndSet(id, now2?.revision ?? null, doc)).applied;
+		if (!written) return (await store.get(id)) ?? doc;
+	}
+	// The image before the one just replaced: no page can point to it any more.
+	const stale = over?.previousKey;
+	if (stale && stale !== key && stale !== doc.previousKey) await rc.bucket.delete(stale).catch(() => undefined);
+	return doc;
+}
+
+/** Remove an entry's images and record (the entry was deleted). */
+export async function removeEntryImage(ctx: PluginContext, bucket: R2Bucket | undefined, collection: string, id: string): Promise<void> {
+	const store = socialImages(ctx);
+	const doc = await store.get(docId(collection, id));
+	if (!doc) return;
+	for (const key of [doc.key, doc.previousKey]) if (key && bucket) await bucket.delete(key).catch(() => undefined);
+	await store.delete(docId(collection, id));
 }

@@ -27,18 +27,25 @@ Browser Run renders the same HTML with real fonts, adds nothing to the bundle, a
 
 ### Limits and cost
 
-- **Workers Free:** 10 minutes of browser time a day, and one Quick Action every 10 seconds. That's a few hundred images a day.
-- **Workers Paid:** 10 hours of browser time a month included, then $0.09 an hour; up to 10 requests a second.
-- When Browser Run says no (429), the batch stops and the rest wait for the next run. Other failures are tried again up to three times, then shown as failed on the page.
+Browser Run's own limits, then the pack's (each image takes one Quick Action and about five D1 statements; EmDash runs every due scheduled task in one invocation, which Workers Free limits to 50 D1 queries):
+
+| | Workers Free | Workers Paid |
+| --- | --- | --- |
+| Browser Run | 10 minutes of browser time a day; one Quick Action every 10 seconds | 10 hours a month included, then $0.09 an hour; 10 requests a second |
+| Each publish | its own image, right after the response | the same |
+| Hourly job | 4 images, 10 seconds apart (about 100 a day) | up to 30 |
+| Generate on the page | 2 images per request, 10 seconds apart (about 6 a minute while the page is open) | 4 per request |
+
+The pack treats a site as Paid only when the Cloudflare usage card (Performance page) has seen the Paid plan; otherwise it paces for Free. At one to two seconds of browser time an image, Free's 10 minutes a day cover a few hundred images, so the hourly job, not browser time, is the limit there: a backlog of 1,000 entries takes about ten days by itself, or a few hours with the page open. When Browser Run says no (429), the run waits out its Retry-After if there's time, else stops, and the rest wait for the next run. Other failures are tried again up to three times, then shown as failed on the page. A setup problem (no token, or a `BROWSER` binding on a Worker whose compatibility date is before 2026-03-24) stops the run once, with the message on the page.
 
 ## When images are made
 
-- **On publish**: publishing (or saving a published entry) queues it and starts its image right after the response. An entry with its own image (an SEO image or an image field) is skipped.
-- **Hourly**: the `social-images` task makes up to 10 waiting images per run (5 minutes at most).
-- **Generate for existing entries** on the page: queues every published entry without its own image, then makes their images while the page is open (the hourly task continues if you leave).
-- **Make again** on an image redraws it.
+- **On publish or save**: after the response, the entry is read as published (a save of a draft never changes its image) and compared with its record. A changed title gets a new image right away; an unchanged entry costs a few reads and nothing else. A publish fires two hooks (after save and after publish); one check serves both. An entry with its own image (an SEO image or an image field) is skipped.
+- **Hourly**: the `social-images` task makes waiting images, oldest first (see above). It's scheduled only while Social Images is on.
+- **Generate for existing entries** on the page: queues every published entry without its own image whose image is missing or out of date (a new title, or after a template change), then makes their images while the page is open (the hourly task continues if you leave).
+- **Make again** on an image redraws that entry's image now.
 
-An image is redrawn only when what it shows changes: its file name has a hash of the title, the site's name, the logo and the template. The previous image is kept until the one after it is made (pages still in the edge cache may point to it), then deleted. When an entry gets a new image, its page is cleared from the edge cache.
+An image is redrawn only when what it shows changes: its file name has a hash of the title, the site's name, the logo and the template. The previous image is kept until the one after it is made (pages still in the edge cache may point to it), then deleted. When an entry gets a new image, its page is cleared from the edge cache. The image's alt text is the title it shows. Two renders of one entry at once can't leave an older or failed record over a newer image (records are written by compare-and-set). Deleting an entry deletes its images and record.
 
 ## Template
 
@@ -58,12 +65,13 @@ The title is set in the system font stack (Browser Run's Chromium), 44–84 px d
 
 ## Themes that pass a default image
 
-Many themes give every page a share image: the entry's own when it has one, else a site-wide default, passed to `EmDashHead` as the page's `image` (and sometimes as `seo.ogImage`). Social Images decides by the entry, not the page: an entry with no SEO image and no image field gets its generated image in place of whatever `image` the theme passes. An SEO image the page passes wins, unless it's one of the **Theme default images** in Social Images' settings (URLs or paths, compared by path, so `/theme/images/share.png` matches `https://example.com/theme/images/share.png?v=2`). Saving those settings clears the page cache, as other pack settings saves do.
+The generated image is used only when the page passes no image: no `image` and no `seo.ogImage` to `EmDashHead`. Any image the theme passes wins (a photo from the body, a file or reference field), since Social Images can't tell it from the entry's own.
+
+Many themes pass a site-wide default share image when an entry has none (as `image`, and sometimes as `seo.ogImage`). List it under **Theme default images** in Social Images' settings (URLs or paths, compared by path, so `/theme/images/share.png` matches `https://example.com/theme/images/share.png?v=2`), and pages that pass only that image get their generated one instead. Saving those settings clears the page cache, as other pack settings saves do.
 
 If the theme prints its own `og:image:width`, `og:image:height` or `og:image:alt` for its default image, print them only when the page has an image of its own; otherwise pages carry both sets (the generated image's come first, inside `EmDashHead`).
 
 ## Notes
 
-- The SEO panel's image always wins (unless it's a theme default, above). A theme's site-wide default image is replaced on entries without an image of their own.
-- The tags include the image's size, type and alt (the entry's title), with or without Schema & Social's Open Graph extras; `twitter:card` becomes `summary_large_image`. With the Schema.org graph on, the image is the page's primary image there too.
-- Images aren't removed when an entry is unpublished or deleted; they're small, and backups keep them consistent.
+- The tags include the image's size, type and alt (the title the image shows), with or without Schema & Social's Open Graph extras; `twitter:card` becomes `summary_large_image`. With the Schema.org graph on, the image is the page's primary image there too.
+- An entry that gets an image field later keeps it: its record is marked skipped and its generated image is no longer used.

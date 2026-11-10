@@ -29,9 +29,11 @@ test("counts distinct published entries linking to each entry; itself, drafts an
 		{ urlId: "u-old", entryKey: "posts/a", entryStatus: "published" }, // Through a redirect.
 		{ urlId: "u-www", entryKey: "posts/a", entryStatus: "published" },
 		{ urlId: "u-home", entryKey: "posts/c", entryStatus: "published" },
+		{ urlId: "u-a", entryKey: "posts/gone", entryStatus: null }, // No status, and not a published entry: not counted.
+		{ urlId: "u-old", entryKey: "posts/c", entryStatus: "" }, // No status, but published: counted.
 	];
 	const out = inbound.countInbound(entries, urls, refs, SITE);
-	assert.deepEqual(Object.fromEntries(out.entries.map((x) => [x.id, x.inbound])), { a: 1, b: 1, c: 1, d: 0 });
+	assert.deepEqual(Object.fromEntries(out.entries.map((x) => [x.id, x.inbound])), { a: 1, b: 2, c: 1, d: 0 });
 	assert.equal(out.matched, 4);
 	assert.equal(out.unmatched, 1, "the home page isn't an entry");
 });
@@ -64,7 +66,7 @@ function d1(db) {
 function database() {
 	const db = new DatabaseSync(":memory:");
 	db.exec(`
-		CREATE TABLE _emdash_collections (id TEXT, slug TEXT, label TEXT, label_singular TEXT, url_pattern TEXT, title_field TEXT, routable INTEGER NOT NULL DEFAULT 1);
+		CREATE TABLE _emdash_collections (id TEXT, slug TEXT, label TEXT, label_singular TEXT, url_pattern TEXT, title_field TEXT, routable INTEGER NOT NULL DEFAULT 1, hidden INTEGER NOT NULL DEFAULT 0);
 		CREATE TABLE _emdash_fields (collection_id TEXT, slug TEXT);
 		CREATE TABLE _emdash_seo (collection TEXT, content_id TEXT, seo_no_index INTEGER NOT NULL DEFAULT 0);
 		CREATE TABLE ec_posts (id TEXT, slug TEXT, status TEXT, locale TEXT, published_at TEXT, updated_at TEXT, deleted_at TEXT, translation_group TEXT, title TEXT);
@@ -73,7 +75,7 @@ function database() {
 		CREATE TABLE _plugin_storage (plugin_id TEXT NOT NULL, collection TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (plugin_id, collection, id));
 	`);
 	// No title field set on posts (EmDash then uses its `title` field).
-	db.prepare("INSERT INTO _emdash_collections VALUES ('c1', 'posts', 'Posts', 'Post', '/{slug}/', NULL, 1), ('c2', 'widgets', 'Widgets', 'Widget', NULL, 'title', 0)").run();
+	db.prepare("INSERT INTO _emdash_collections VALUES ('c1', 'posts', 'Posts', 'Post', '/{slug}/', NULL, 1, 0), ('c2', 'widgets', 'Widgets', 'Widget', NULL, 'title', 0, 0), ('c3', 'drafts_area', 'Hidden', 'Hidden', '/{slug}/', 'title', 1, 1)").run();
 	db.prepare("INSERT INTO _emdash_fields VALUES ('c1', 'title'), ('c1', 'body'), ('c2', 'title')").run();
 	const post = db.prepare("INSERT INTO ec_posts VALUES (?, ?, ?, 'en', '2026-01-01', '2026-02-01', ?, ?, ?)");
 	post.run("p1", "one", "published", null, "g1", "Post one");
@@ -97,6 +99,7 @@ function database() {
 
 test("the report: published entries of routable collections, with paths, No index and counts", async () => {
 	const db = d1(database());
+	assert.deepEqual((await inbound.pageCollections(db)).map((c) => [c.slug, c.titleField]), [["posts", "title"]], "not routable or hidden: left out");
 	const report = await inbound.inboundReport(db, SITE);
 	const byId = Object.fromEntries(report.entries.map((x) => [x.id, x]));
 	assert.deepEqual(Object.keys(byId).sort(), ["p1", "p2", "p3", "p6"], "no drafts, trashed entries or unroutable collections");

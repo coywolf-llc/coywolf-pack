@@ -37,7 +37,7 @@ interface RunState {
 	processed: number;
 	collections: string[];
 	index: number;
-	phase: "entries" | "finish";
+	phase: "entries" | "finish" | "cleanup";
 	error?: string;
 	busy?: boolean;
 }
@@ -303,7 +303,7 @@ export function ContentAuditPage() {
 				{runState?.status === "running" && (
 					<Banner
 						variant="default"
-						title={runState.phase === "finish" ? "Finishing the audit…" : "Auditing your content…"}
+						title={runState.phase === "entries" ? "Auditing your content…" : "Finishing the audit…"}
 						description={`${plural(runState.processed, "entry", "entries")} checked so far${runState.collections.length ? ` (collection ${Math.min(runState.index + 1, runState.collections.length)} of ${runState.collections.length})` : ""}. It continues in the background if you leave this page.`}
 					/>
 				)}

@@ -141,6 +141,64 @@ test("render failures: a rate limit keeps it pending without counting; three fai
 	assert.equal(bucket.objects.size, 0);
 });
 
+test("two renders of one entry at once: a failure can't clobber the other's ready image", async () => {
+	const ctx = fakeCtx();
+	const bucket = fakeBucket();
+	let release;
+	const gate = new Promise((resolve) => (release = resolve));
+	// The first render is slow and then fails; the second succeeds meanwhile.
+	const slowFail = rc(bucket, async () => {
+		await gate;
+		return new Response("{}", { status: 500, headers: { "content-type": "application/json" } });
+	});
+	const first = render.renderEntry(ctx, slowFail, { collection: "posts", id: "e1", title: "Title" }).catch((e) => e);
+	await new Promise((r) => setTimeout(r, 5));
+	const ok = await render.renderEntry(ctx, rc(bucket, async () => png()), { collection: "posts", id: "e1", title: "Title" });
+	release();
+	assert.ok((await first) instanceof Error);
+	const doc = await ctx.storage.socialImages.get("posts:e1");
+	assert.equal(doc.status, "ready");
+	assert.equal(doc.key, ok.key);
+});
+
+test("a save reads the entry as published: a draft's title is never stored (and so never becomes the image's alt)", async () => {
+	const { socialImagesPack } = await import("../src/social/pack.ts");
+	const live = { id: "e1", slug: "one", status: "published", data: { title: "Published title" } };
+	const ctx = fakeCtx([live]);
+	await ctx.storage.socialImages.put("posts:e1", { collection: "posts", id: "e1", title: "Published title", key: "coywolf-og/posts/e1-old.png", hash: "old", status: "ready", note: null, attempts: 0, updatedAt: "", renderedAt: "" });
+	const hooks = socialImagesPack().hooks;
+	const draftSave = { collection: "posts", content: { id: "e1", status: "published", data: { title: "Draft title, not published yet" } } };
+	await hooks["content:afterSave"](draftSave, ctx);
+	await hooks["content:afterPublish"](draftSave, ctx);
+	await new Promise((r) => setTimeout(r, 20));
+	const doc = await ctx.storage.socialImages.get("posts:e1");
+	assert.equal(doc.title, "Published title");
+	assert.equal(doc.status, "ready", "the live title didn't change: nothing to do");
+	assert.ok(!JSON.stringify([...ctx.storage.socialImages.rows.values()]).includes("Draft title"));
+});
+
+test("a deleted entry's images and record are removed", async () => {
+	const { socialImagesPack } = await import("../src/social/pack.ts");
+	const ctx = fakeCtx();
+	await ctx.storage.socialImages.put("posts:e1", { collection: "posts", id: "e1", title: "T", key: "k1", previousKey: "k0", hash: "h", status: "ready" });
+	await socialImagesPack().hooks["content:afterDelete"]({ collection: "posts", id: "e1" }, ctx);
+	assert.equal(await ctx.storage.socialImages.get("posts:e1"), null);
+	const bucket = fakeBucket();
+	await bucket.put("k1", PNG);
+	await render.removeEntryImage(ctx, bucket, "posts", "nope");
+	assert.ok(bucket.objects.has("k1"), "nothing to remove for an entry without a record");
+});
+
+test("Retry-After and a BROWSER binding that can't take Quick Actions (an old compatibility date) are told apart", async () => {
+	assert.equal(render.retryAfterMs("12"), 12_000);
+	assert.equal(render.retryAfterMs(new Date(Date.now() + 5_000).toUTCString()) > 0, true);
+	assert.equal(render.retryAfterMs("soon"), null);
+	const limited = async () => new Response("{}", { status: 429, headers: { "content-type": "application/json", "retry-after": "11" } });
+	await assert.rejects(render.screenshot({ kind: "api", token: "t0ken-value-12", accountId: "a".repeat(32), fetch: limited }, "<p>"), (e) => e.status === 429 && e.retryAfterMs === 11_000);
+	const old = { kind: "binding", browser: { quickAction: async () => Promise.reject(new TypeError('The RPC receiver does not implement the method "quickAction".')) } };
+	await assert.rejects(render.screenshot(old, "<p>"), (e) => e.status === render.NOT_SET_UP && /compatibility_date 2026-03-24/.test(e.message));
+});
+
 test("the REST API: the account's screenshot endpoint with the token, the old path on a 404, the token never in errors", async () => {
 	const requests = [];
 	const fetch = async (url, init) => {
@@ -238,9 +296,9 @@ test("og:image: the generated image for an entry without its own, with its size,
 	assert.equal(prop("og:image:alt"), "My Post");
 	assert.equal(out.find((c) => c.name === "twitter:card")?.content, "summary_large_image");
 
-	// A theme's site-wide default (page.image) is replaced: the entry has no image of its own, or it wouldn't have one made.
-	const themed = await schemaContributions(ctx, page({ image: "https://example.com/theme/default-share.png" }), {});
-	assert.equal(themed.find((c) => c.property === "og:image")?.content, prop("og:image"));
+	// An image the theme passes wins (a body image, a file field…), unless it's listed as a theme default (not here).
+	const themed = await schemaContributions(ctx, page({ image: "https://example.com/uploads/body-photo.jpg" }), {});
+	assert.notEqual(themed.find((c) => c.property === "og:image")?.content, prop("og:image"));
 	// The SEO image always wins; an entry that got an image of its own since ("skipped") keeps it; no record, nothing.
 	const seo = await schemaContributions(ctx, page({ seo: { ogImage: "https://example.com/seo.jpg", robots: null } }), {});
 	assert.notEqual(seo.find((c) => c.property === "og:image")?.content, prop("og:image"));

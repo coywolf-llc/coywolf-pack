@@ -57,6 +57,11 @@ export interface TaskDef {
 	 * for tasks that run daily or less often.
 	 */
 	recordOutcome?: boolean;
+	/**
+	 * Scheduled only while `feature` is on: cancelled while it's off (so it costs nothing), and scheduled again
+	 * when the switch is saved on (ensureTasks in src/core/compose.ts, called by the Features routes and plugin:activate).
+	 */
+	onlyWhileOn?: boolean;
 	handler: (ctx: PluginContext) => Promise<void>;
 }
 

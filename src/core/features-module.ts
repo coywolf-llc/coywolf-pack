@@ -16,10 +16,11 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 			permission: "plugins:manage" as const,
 			// any: plugin context.
 			handler: async (ctx: any) => {
-				await ensureTasks(ctx, tasks);
 				// Sites set up before 0.36.0 keep their defaults (src/core/features.ts); a failure leaves them unrecorded, which reads the same.
 				await recordDefaults(ctx).catch((error: unknown) => ctx.log.warn("Could not record the feature defaults", { error: String(error) }));
 				const state = await ctxFeatures(ctx);
+				// Tasks that run only while their feature is on are scheduled or cancelled to match the switches.
+				await ensureTasks(ctx, tasks, state);
 				const known = new Set(featureCatalog().map((f) => f.id));
 				return {
 					modules: modules.map((m) => ({
@@ -46,7 +47,10 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 				await ctx.settings.set(FEATURES_SETTING, stored);
 				invalidateFeatures();
 				ctx.log.info("Features saved", stored);
-				return { features: await ctxFeatures(ctx) };
+				const now = await ctxFeatures(ctx);
+				// A switch turned on schedules its tasks that run only while on; turned off, cancels them.
+				await ensureTasks(ctx, tasks.filter((t) => t.onlyWhileOn), now);
+				return { features: now };
 			},
 		}),
 	};

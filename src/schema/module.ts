@@ -692,14 +692,15 @@ export async function schemaContributions(
 	const ogOn = isOn(on, SCHEMA_FEATURES.openGraph);
 	const cleanImages = isOn(on, "images");
 	const [config, site] = await Promise.all([loadConfig(ctx, options.database), siteFacts(ctx, page), cleanImages ? refreshMediaHost() : undefined]);
-	// Social Images: an entry without an image of its own (no SEO image or image field: Social Images checked when it made
-	// the image) gets its generated one as og:image. It replaces page.image, which themes often set to a site-wide default;
-	// an entry whose image field the theme passes has none (src/social/store.ts generatedImage). An SEO image wins, unless
-	// it's one of the theme's defaults (Social Images → Theme default images; read with the switches, no query of its own).
+	// Social Images: an entry without an image of its own gets its generated one as og:image, only when the page passes no
+	// image (neither page.image nor an SEO image) or only one of the theme's site-wide defaults (Social Images → Theme
+	// default images; read with the switches, no query of its own). Any other image the theme passes (a body image, a
+	// file or reference field) wins. The record is ignored once the entry has an image field set (src/social/store.ts).
 	const socialOn = isOn(on, "socialImages") && Boolean(page.content);
-	const themeDefaults = socialOn && page.seo?.ogImage ? await themeDefaultImages(options.database) : [];
+	const themeDefaults = socialOn && (page.seo?.ogImage || page.image) ? await themeDefaultImages(options.database) : [];
+	const noImage = (url: string | null | undefined) => !url || isThemeDefault(url, themeDefaults);
 	const generatedRead =
-		socialOn && page.content && (!page.seo?.ogImage || isThemeDefault(page.seo.ogImage, themeDefaults))
+		socialOn && page.content && noImage(page.seo?.ogImage) && noImage(page.image)
 			? generatedImage(ctx, page.content, site.origin, options.database).catch(() => null)
 			: Promise.resolve(null);
 	const imageRead =

@@ -18,12 +18,12 @@ import type { PluginContext } from "emdash";
 import { type DigestSection, DIGEST_SOURCE_MS, cleanSection, digestSources } from "../core/digest.js";
 import { type FeatureMap, ctxFeatures, isOn } from "../core/features.js";
 import { siteName as readSiteName } from "../core/site.js";
-import { withDeadline } from "../core/single-flight.js";
+import { DeadlineError, withDeadline } from "../core/single-flight.js";
 import { readTaskOutcome } from "../core/task-health.js";
 import { BACKUPS_TASK } from "../backups/module.js";
 import { CHECK_INFO } from "../audit/checks.js";
 import { getReport, worsened } from "../audit/run.js";
-import { getCounts, queryAll, urls } from "../links/store.js";
+import { type UrlRow, getCounts, urls } from "../links/store.js";
 import { USAGE_CACHE_KEY, type UsageReport, usageReport } from "../pageCache/usage.js";
 import { UPDATE_STATE_SETTING, type UpdateState, showsUpdate } from "../updates/check.js";
 import { UPDATE_COMMAND } from "../updates/core.js";
@@ -81,13 +81,15 @@ export interface SendRecord {
 	subject: string;
 	sent: number;
 	failed: number;
+	/** Sends the provider didn't confirm in time (they may still arrive; not sent again). */
+	unconfirmed?: number;
 	error?: string;
 }
 
 export interface AlertsState {
-	/** Issue key → the UTC day it was last sent. */
+	/** "<issue key>|<recipient>" → the UTC day it was last sent to that recipient. */
 	sent: Record<string, string>;
-	/** Lasting conditions alerted already (cleared when they end). */
+	/** Lasting conditions alerted already, as "<issue key>|<recipient>" (cleared when they end). */
 	active: string[];
 	/** Broken links (ids) seen at the last check; null until the first check, which only records them. */
 	brokenKnown: string[] | null;
@@ -131,22 +133,44 @@ export async function recipients(ctx: PluginContext, settings: AlertsSettings): 
 	return parseRecipients(items.map((u) => u.email)).valid.slice(0, MAX_RECIPIENTS);
 }
 
-/** Send one email to each recipient. Never throws; returns how many went out. */
-export async function sendToAll(ctx: PluginContext, to: string[], email: { subject: string; text: string; html: string }): Promise<{ sent: number; failed: number; error?: string }> {
-	if (!emailConfigured(ctx)) return { sent: 0, failed: to.length, error: "No email provider is set up (Settings → Email)." };
-	let sent = 0;
-	let error: string | undefined;
-	for (const address of to) {
-		try {
-			await withDeadline(ctx.email!.send({ to: address, subject: email.subject, text: email.text, html: email.html }), 20_000, "Sending an email");
-			sent++;
-		} catch (cause) {
-			error = (cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
-			ctx.log.warn("alerts: an email couldn't be sent", { error });
+/** How long a send may take before it's counted as "unconfirmed" (the provider may still deliver it). */
+export const SEND_MS = 20_000;
+
+export type SendOutcome = { outcome: "sent" } | { outcome: "unconfirmed"; error: string } | { outcome: "failed"; error: string };
+
+/**
+ * Send one email. Never throws. A send that runs past SEND_MS isn't cancelled
+ * (it can't be), so it's "unconfirmed": treated as sent, never repeated at once.
+ */
+export async function sendOne(ctx: PluginContext, to: string, email: { subject: string; text: string; html: string }): Promise<SendOutcome> {
+	if (!emailConfigured(ctx)) return { outcome: "failed", error: "No email provider is set up (Settings → Email)." };
+	try {
+		await withDeadline(ctx.email!.send({ to, subject: email.subject, text: email.text, html: email.html }), SEND_MS, "Sending an email");
+		return { outcome: "sent" };
+	} catch (cause) {
+		const error = (cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
+		if (cause instanceof DeadlineError) {
+			ctx.log.warn("alerts: the email provider didn't answer in time; the email may still arrive", { error });
+			return { outcome: "unconfirmed", error: "The email provider didn't answer in time; the email may still arrive." };
 		}
+		ctx.log.warn("alerts: an email couldn't be sent", { error });
+		return { outcome: "failed", error };
 	}
-	return { sent, failed: to.length - sent, ...(error ? { error } : {}) };
 }
+
+/** Send the same email to each recipient (one message each). */
+export async function sendToAll(ctx: PluginContext, to: string[], email: { subject: string; text: string; html: string }): Promise<{ sent: number; failed: number; unconfirmed: number; error?: string }> {
+	const out = { sent: 0, failed: 0, unconfirmed: 0 } as { sent: number; failed: number; unconfirmed: number; error?: string };
+	for (const address of to) {
+		const r = await sendOne(ctx, address, email);
+		out[r.outcome]++;
+		if (r.outcome !== "sent") out.error = r.error;
+	}
+	return out;
+}
+
+/** The key a send is recorded under: the issue, for one recipient. */
+export const sentKey = (issueKey: string, recipient: string) => `${issueKey}|${recipient}`;
 
 async function siteFacts(ctx: PluginContext): Promise<{ name: string; url: string }> {
 	return { name: (await readSiteName(ctx).catch(() => "")) || ctx.site?.name || "", url: ctx.site?.url ?? "" };
@@ -179,6 +203,25 @@ export interface Seen {
 	auditSeen?: string;
 }
 
+/** Most broken links compared between checks. */
+const BROKEN_MAX = 2_000;
+
+/**
+ * Link Manager's broken links (not ignored), most recently checked first, up
+ * to BROKEN_MAX: the same order every check, and a link that just broke (just
+ * checked) is always among them, so a long list can't make an old one look new.
+ */
+async function brokenLinks(ctx: PluginContext): Promise<Array<{ id: string; data: UrlRow }>> {
+	const out: Array<{ id: string; data: UrlRow }> = [];
+	let cursor: string | undefined;
+	do {
+		const page = await urls(ctx).query({ where: { status: "broken", ignored: false }, orderBy: { checkedAt: "desc" }, limit: 100, cursor });
+		out.push(...page.items);
+		cursor = page.hasMore ? page.cursor : undefined;
+	} while (cursor && out.length < BROKEN_MAX);
+	return out.slice(0, BROKEN_MAX);
+}
+
 /** Everything that's wrong right now, as alert issues; `seen` collects what to remember once they're sent. */
 export async function gatherIssues(ctx: PluginContext, settings: AlertsSettings, state: AlertsState, features: FeatureMap, now = Date.now(), seen: Seen = {}): Promise<Issue[]> {
 	const issues: Issue[] = [];
@@ -197,7 +240,7 @@ export async function gatherIssues(ctx: PluginContext, settings: AlertsSettings,
 	}
 
 	if (wants("brokenLinks")) {
-		const broken = await queryAll(urls(ctx), { status: "broken", ignored: false }, { max: 1_000 });
+		const broken = await brokenLinks(ctx);
 		const ids = broken.map((b) => b.id);
 		if (state.brokenKnown) {
 			const known = new Set(state.brokenKnown);
@@ -254,50 +297,88 @@ export async function gatherIssues(ctx: PluginContext, settings: AlertsSettings,
 	return issues;
 }
 
-/** Issues to send now: not sent today, and lasting ones not already alerted while they last. */
-export function dueIssues(issues: Issue[], state: AlertsState, now = Date.now()): Issue[] {
+/** Issues to send a recipient now: not sent to them today, and lasting ones not already alerted to them while they last. */
+export function dueIssues(issues: Issue[], state: AlertsState, now = Date.now(), recipient = ""): Issue[] {
 	const day = today(now);
 	const active = new Set(state.active);
-	return issues.filter((i) => state.sent[i.key] !== day && !(i.lasting && active.has(i.key)));
+	return issues.filter((i) => state.sent[sentKey(i.key, recipient)] !== day && !(i.lasting && active.has(sentKey(i.key, recipient))));
 }
 
-/** The hourly check: gather issues, email what's new, record what was sent. */
-export async function checkAlerts(ctx: PluginContext, now = Date.now()): Promise<{ issues: number; sent: Issue[]; result?: { sent: number; failed: number; error?: string } }> {
+export interface CheckResult {
+	sent: number;
+	failed: number;
+	unconfirmed: number;
+	error?: string;
+}
+
+/**
+ * The hourly check: gather issues, email each recipient what's new for them,
+ * record what was sent. Sends are recorded before they go out (a check cut
+ * off mid-send doesn't send again within the day), and a definite failure
+ * clears its record, so the next check tries again.
+ */
+export async function checkAlerts(ctx: PluginContext, now = Date.now()): Promise<{ issues: number; sent: Issue[]; result?: CheckResult }> {
 	const [settings, state, features] = await Promise.all([readAlertsSettings(ctx), readState(ctx), ctxFeatures(ctx)]);
 	const seen: Seen = {};
 	const issues = await gatherIssues(ctx, settings, state, features, now, seen);
-	const due = dueIssues(issues, state, now);
+	const day = today(now);
 	state.lastCheckAt = new Date(now).toISOString();
-	let result: { sent: number; failed: number; error?: string } | undefined;
-	if (due.length && !emailConfigured(ctx)) {
+	let result: CheckResult | undefined;
+	const dueTypes = new Set<AlertType>();
+	const deliveredTypes = new Set<AlertType>();
+	const delivered = new Map<string, Issue>();
+	if (issues.length && !emailConfigured(ctx)) {
 		// Nothing can go out: the Alerts page says how to set up email. Kept as due, so it's sent once email works.
-		result = { sent: 0, failed: 0, error: "No email provider is set up (Settings → Email)." };
-	} else if (due.length) {
-		const to = await recipients(ctx, settings).catch(() => []);
-		const site = await siteFacts(ctx);
-		const email = buildEmail({
-			siteName: site.name,
-			siteUrl: site.url,
-			subject: due.length === 1 ? due[0].section.title : `${due.length} alerts: ${due.map((i) => i.section.title).join(", ")}`,
-			heading: due.length === 1 ? due[0].section.title : `${due.length} things need a look`,
-			intro: `Coywolf Pack noticed ${due.length === 1 ? "something" : "these"} on ${site.name || site.url || "your site"}.`,
-			sections: due.map((i) => i.section),
-			footer: "Sent by Coywolf Pack's Alerts. Choose which alerts you get, and who gets them, on the Alerts page in the site's admin.",
-		});
-		result = to.length ? await sendToAll(ctx, to, email) : { sent: 0, failed: 0, error: "No recipients: the site has no admins with an email address, or the list is empty." };
-		state.log.push({ at: state.lastCheckAt, kind: "alert", subject: email.subject, sent: result.sent, failed: result.failed, ...(result.error ? { error: result.error } : {}) });
-		// Recorded as sent only when at least one message went out, so a provider outage is retried next hour.
-		if (result.sent) for (const i of due) state.sent[i.key] = today(now);
+		for (const i of dueIssues(issues, state, now)) dueTypes.add(i.type);
+		if (dueTypes.size) result = { sent: 0, failed: 0, unconfirmed: 0, error: "No email provider is set up (Settings → Email)." };
+	} else if (issues.length) {
+		const to = await recipients(ctx, settings).catch(() => [] as string[]);
+		const plan = to.map((address) => ({ address, due: dueIssues(issues, state, now, address) })).filter((p) => p.due.length);
+		for (const p of plan) for (const i of p.due) dueTypes.add(i.type);
+		if (!to.length && dueIssues(issues, state, now).length) result = { sent: 0, failed: 0, unconfirmed: 0, error: "No recipients: the site has no admins with an email address, or the list is empty." };
+		if (plan.length) {
+			for (const p of plan) for (const i of p.due) state.sent[sentKey(i.key, p.address)] = day;
+			await writeState(ctx, state);
+			const site = await siteFacts(ctx);
+			result = { sent: 0, failed: 0, unconfirmed: 0 };
+			let subject = "";
+			for (const p of plan) {
+				const email = buildEmail({
+					siteName: site.name,
+					siteUrl: site.url,
+					subject: p.due.length === 1 ? p.due[0].section.title : `${p.due.length} alerts: ${p.due.map((i) => i.section.title).join(", ")}`,
+					heading: p.due.length === 1 ? p.due[0].section.title : `${p.due.length} things need a look`,
+					intro: `Coywolf Pack noticed ${p.due.length === 1 ? "something" : "these"} on ${site.name || site.url || "your site"}.`,
+					sections: p.due.map((i) => i.section),
+					footer: "Sent by Coywolf Pack's Alerts. Choose which alerts you get, and who gets them, on the Alerts page in the site's admin.",
+				});
+				subject ||= email.subject;
+				const r = await sendOne(ctx, p.address, email);
+				result[r.outcome]++;
+				if (r.outcome === "failed") {
+					result.error = r.error;
+					for (const i of p.due) delete state.sent[sentKey(i.key, p.address)];
+				} else {
+					if (r.outcome === "unconfirmed") result.error = r.error;
+					for (const i of p.due) {
+						deliveredTypes.add(i.type);
+						delivered.set(i.key, i);
+					}
+				}
+			}
+			state.log.push({ at: state.lastCheckAt, kind: "alert", subject, sent: result.sent, failed: result.failed, ...(result.unconfirmed ? { unconfirmed: result.unconfirmed } : {}), ...(result.error ? { error: result.error } : {}) });
+		}
 	}
-	// What was seen is remembered unless an alert about it failed to go out (then the next check tries again).
-	const unsent = (type: AlertType) => !result?.sent && due.some((i) => i.type === type);
+	// What was seen is remembered unless an alert about it was due and reached nobody (then the next check tries again).
+	const unsent = (type: AlertType) => dueTypes.has(type) && !deliveredTypes.has(type);
 	if (seen.brokenKnown && !unsent("brokenLinks")) state.brokenKnown = seen.brokenKnown;
 	if (seen.auditSeen && !unsent("auditWorsened")) state.auditSeen = seen.auditSeen;
-	// Lasting conditions alerted (or already active) stay active while they last.
-	const sentToday = new Set(Object.entries(state.sent).filter(([, d]) => d === today(now)).map(([k]) => k));
-	state.active = issues.filter((i) => i.lasting && (state.active.includes(i.key) || sentToday.has(i.key))).map((i) => i.key);
+	// Lasting conditions alerted to a recipient (or already active for them) stay active while they last.
+	const sentToday = new Set(Object.entries(state.sent).filter(([, d]) => d === day).map(([k]) => k));
+	const active = new Set(state.active);
+	state.active = [...new Set([...active, ...sentToday])].filter((k) => issues.some((i) => i.lasting && k.startsWith(`${i.key}|`)));
 	await writeState(ctx, state);
-	return { issues: issues.length, sent: result?.sent ? due : [], ...(result ? { result } : {}) };
+	return { issues: issues.length, sent: [...delivered.values()], ...(result ? { result } : {}) };
 }
 
 // ── Weekly digest ────────────────────────────────────────────────
@@ -373,8 +454,16 @@ export async function digestSections(ctx: PluginContext, state: AlertsState, fea
 }
 
 /** Build and send the weekly digest (nothing is sent when there's nothing to report). */
-export async function sendDigest(ctx: PluginContext, now = Date.now(), options: { preview?: boolean } = {}): Promise<{ sections: number; email?: { subject: string; text: string; html: string }; result?: { sent: number; failed: number; error?: string } }> {
+/** A digest isn't sent again within this long (a task that fires twice, or one that's retried). */
+export const DIGEST_MIN_GAP_MS = 6 * 86_400_000;
+
+export async function sendDigest(
+	ctx: PluginContext,
+	now = Date.now(),
+	options: { preview?: boolean } = {},
+): Promise<{ sections: number; skipped?: string; email?: { subject: string; text: string; html: string }; result?: { sent: number; failed: number; unconfirmed: number; error?: string } }> {
 	const [settings, state, features] = await Promise.all([readAlertsSettings(ctx), readState(ctx), ctxFeatures(ctx)]);
+	if (!options.preview && state.lastDigestAt && now - Date.parse(state.lastDigestAt) < DIGEST_MIN_GAP_MS) return { sections: 0, skipped: `A digest went out ${state.lastDigestAt}.` };
 	const sections = await digestSections(ctx, state, features, now);
 	if (!sections.length) return { sections: 0 };
 	const site = await siteFacts(ctx);
@@ -388,16 +477,22 @@ export async function sendDigest(ctx: PluginContext, now = Date.now(), options: 
 		footer: "Sent weekly by Coywolf Pack's Alerts. Turn the digest off, or change who gets it, on the Alerts page in the site's admin.",
 	});
 	if (options.preview) return { sections: sections.length, email };
-	const to = await recipients(ctx, settings).catch(() => []);
-	const result = to.length ? await sendToAll(ctx, to, email) : { sent: 0, failed: 0, error: "No recipients." };
+	const to = await recipients(ctx, settings).catch(() => [] as string[]);
+	if (!to.length) return { sections: sections.length, result: { sent: 0, failed: 0, unconfirmed: 0, error: "No recipients." } };
+	// Recorded before sending: a run cut off mid-send, or fired twice, doesn't send the digest again this week.
+	const previous = state.lastDigestAt;
 	state.lastDigestAt = new Date(now).toISOString();
-	state.log.push({ at: state.lastDigestAt, kind: "digest", subject: email.subject, sent: result.sent, failed: result.failed, ...(result.error ? { error: result.error } : {}) });
+	await writeState(ctx, state);
+	const result = await sendToAll(ctx, to, email);
+	// Nobody got it (every send failed outright): the next run may try again.
+	if (!result.sent && !result.unconfirmed) state.lastDigestAt = previous;
+	state.log.push({ at: new Date(now).toISOString(), kind: "digest", subject: email.subject, sent: result.sent, failed: result.failed, ...(result.unconfirmed ? { unconfirmed: result.unconfirmed } : {}), ...(result.error ? { error: result.error } : {}) });
 	await writeState(ctx, state);
 	return { sections: sections.length, result };
 }
 
 /** A test email to the recipients, so a site can see the provider works. */
-export async function sendTest(ctx: PluginContext): Promise<{ to: number; sent: number; failed: number; error?: string }> {
+export async function sendTest(ctx: PluginContext): Promise<{ to: number; sent: number; failed: number; unconfirmed?: number; error?: string }> {
 	const [settings, state] = await Promise.all([readAlertsSettings(ctx), readState(ctx)]);
 	const to = await recipients(ctx, settings);
 	const site = await siteFacts(ctx);

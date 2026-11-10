@@ -179,6 +179,47 @@ test("without an email provider nothing is sent and nothing is marked sent; a fa
 	assert.equal((await alerts.readState(flaky)).log.length, 2);
 });
 
+test("per recipient: one address failing doesn't mark the alert sent for it; it's retried, the others aren't sent twice", async () => {
+	const ctx = fakeCtx({ features: { backups: true }, admins: ["ok@example.com", "flaky@example.com"] });
+	let flaky = 1;
+	ctx.email.send = async (message) => {
+		if (message.to === "flaky@example.com" && flaky-- > 0) throw new Error("Mailbox busy");
+		ctx.sent.push(message);
+	};
+	await health.recordTaskOutcome(ctx.kv, "backups-daily", new Error("x"), new Date(NOW));
+	const first = await alerts.checkAlerts(ctx, NOW);
+	assert.deepEqual(first.result, { sent: 1, failed: 1, unconfirmed: 0, error: "Mailbox busy" });
+	assert.deepEqual(ctx.sent.map((m) => m.to), ["ok@example.com"]);
+	await alerts.checkAlerts(ctx, NOW + 3600_000);
+	assert.deepEqual(ctx.sent.map((m) => m.to), ["ok@example.com", "flaky@example.com"], "only the failed address, the next hour");
+});
+
+test("a send the provider doesn't confirm in time counts as sent (unconfirmed): no resend storm", async () => {
+	const { DeadlineError } = await import("../src/core/single-flight.ts");
+	const ctx = fakeCtx({ features: { backups: true } });
+	let calls = 0;
+	ctx.email.send = async () => {
+		calls++;
+		throw new DeadlineError("Sending an email", 20_000);
+	};
+	await health.recordTaskOutcome(ctx.kv, "backups-daily", new Error("x"), new Date(NOW));
+	const out = await alerts.checkAlerts(ctx, NOW);
+	assert.equal(out.result.unconfirmed, 1);
+	await alerts.checkAlerts(ctx, NOW + 3600_000);
+	assert.equal(calls, 1, "not sent again the same day");
+	assert.equal((await alerts.readState(ctx)).log.at(-1).unconfirmed, 1);
+});
+
+test("the digest isn't sent twice within six days", async () => {
+	const ctx = fakeCtx({ features: { backups: true, "alerts.digest": true } });
+	await health.recordTaskOutcome(ctx.kv, "backups-daily", null, new Date(NOW));
+	assert.equal((await alerts.sendDigest(ctx, NOW)).result.sent, 1);
+	const again = await alerts.sendDigest(ctx, NOW + 3600_000);
+	assert.match(again.skipped, /A digest went out/);
+	assert.equal((await alerts.sendDigest(ctx, NOW + 7 * DAY)).result.sent, 1);
+	assert.equal(ctx.sent.length, 2);
+});
+
 test("a list of addresses replaces the admins", async () => {
 	const ctx = fakeCtx({ settings: { alertsSettings: { recipients: "list", emails: ["ops@example.com"] } } });
 	assert.deepEqual(await alerts.recipients(ctx, await alerts.readAlertsSettings(ctx)), ["ops@example.com"]);

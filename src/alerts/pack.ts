@@ -37,6 +37,8 @@ registerFeatures(FEATURES);
 
 export const ALERTS_CHECK_TASK = "alerts-check";
 export const ALERTS_DIGEST_TASK = "alerts-digest";
+/** Mondays at 13:00 UTC (morning in the US), away from Sunday 00:00, where @weekly, @daily and @hourly tasks all fall due. */
+export const ALERTS_DIGEST_SCHEDULE = "0 13 * * 1";
 
 const settingsInput = z.object({
 	recipients: z.enum(["admins", "list"]),
@@ -139,8 +141,9 @@ export function alertsPack(): PackModule {
 		features: FEATURES,
 		routes,
 		tasks: [
-			{ name: ALERTS_CHECK_TASK, schedule: "@hourly", handler: async (ctx: PluginContext) => void (await checkAlerts(ctx)) },
-			{ name: ALERTS_DIGEST_TASK, schedule: "@weekly", feature: DIGEST_FEATURE, handler: async (ctx: PluginContext) => void (await sendDigest(ctx)) },
+			// Both are scheduled only while their switch is on (cancelled while it's off).
+			{ name: ALERTS_CHECK_TASK, schedule: "@hourly", onlyWhileOn: true, handler: async (ctx: PluginContext) => void (await checkAlerts(ctx)) },
+			{ name: ALERTS_DIGEST_TASK, schedule: ALERTS_DIGEST_SCHEDULE, feature: DIGEST_FEATURE, onlyWhileOn: true, handler: async (ctx: PluginContext) => void (await sendDigest(ctx)) },
 		],
 		adminPages: [{ path: "/alerts", label: "Alerts & Digest", icon: "bell" }],
 		// users:read lists the site's admins (the default recipients); email:send is ctx.email.

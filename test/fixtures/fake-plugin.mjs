@@ -7,6 +7,10 @@ const MAX_PARAMS = 100;
 
 export function fakeCollection() {
 	const rows = new Map();
+	/** id → revision, bumped on every write (getVersioned / compareAndSet). */
+	const revisions = new Map();
+	let rev = 0;
+	const bump = (id) => revisions.set(id, String(++rev));
 	const params = (where = {}) => 2 + Object.values(where).reduce((n, v) => n + (v && typeof v === "object" && "in" in v ? v.in.length : 1), 0);
 	const matches = (data, where = {}) =>
 		Object.entries(where).every(([k, cond]) => {
@@ -31,6 +35,18 @@ export function fakeCollection() {
 		async put(id, data) {
 			this.writes++;
 			rows.set(id, structuredClone(data));
+			bump(id);
+		},
+		async getVersioned(id) {
+			return rows.has(id) ? { value: structuredClone(rows.get(id)), revision: revisions.get(id) } : null;
+		},
+		async compareAndSet(id, expected, data) {
+			const current = rows.has(id) ? revisions.get(id) : null;
+			if (current !== expected) return { applied: false };
+			this.writes++;
+			rows.set(id, structuredClone(data));
+			bump(id);
+			return { applied: true, revision: revisions.get(id) };
 		},
 		async getMany(ids) {
 			check(ids.length + 2);
@@ -38,7 +54,10 @@ export function fakeCollection() {
 		},
 		async putMany(items) {
 			this.writes += items.length;
-			for (const { id, data } of items) rows.set(id, structuredClone(data));
+			for (const { id, data } of items) {
+				rows.set(id, structuredClone(data));
+				bump(id);
+			}
 		},
 		async deleteMany(ids) {
 			check(ids.length + 2);

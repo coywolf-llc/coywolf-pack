@@ -17,7 +17,8 @@ import { readOnlyRoute } from "../core/routes.js";
 import { purgePageCache } from "../pageCache/lib.js";
 import { siteName } from "../core/site.js";
 import { afterResponse, parseInput, workerEnv } from "../shared.js";
-import { NOT_SET_UP, type RenderContext, RenderError, SETTINGS_KEY, TOKEN_SETTING, normalizeSocialSettings, readSocialSettings, renderContext, renderEntry, renderer, screenshot, siteLogo } from "./render.js";
+import { NOT_SET_UP, type RenderContext, RenderError, SETTINGS_KEY, type SocialSettings, TOKEN_SETTING, hashFor, normalizeSocialSettings, readSocialSettings, removeEntryImage, renderContext, renderEntry, renderer, screenshot, siteLogo, templateInputs } from "./render.js";
+import { knownPlan } from "../core/plan.js";
 import { SOCIAL_STORAGE, type SocialImageDoc, counts, docId, markPending, parseDefaultImages, socialImages, socialImageUrl } from "./store.js";
 import { TEMPLATE_DEFAULTS, socialImageHtml } from "./template.js";
 
@@ -34,9 +35,15 @@ const FEATURES = [
 registerFeatures(FEATURES);
 
 export const SOCIAL_TASK = "social-images";
-/** Images per scheduled run, and its time limit (Browser Run on Workers Free takes one request every 10 seconds). */
-const CRON_BATCH = 10;
-const CRON_MS = 5 * 60_000;
+/**
+ * Images per scheduled run. Each takes about five D1 statements, and EmDash runs every due task in one invocation
+ * (Workers Free: 50 D1 queries per invocation for all of them), so a Free site makes 4 an hour; a site the usage
+ * card has seen on Workers Paid makes up to 30.
+ */
+const CRON_BATCH = { free: 4, paid: 30 } as const;
+const CRON_MS = 3 * 60_000;
+/** Browser Run's Quick Actions on Workers Free: one request every 10 seconds. */
+const FREE_SPACING_MS = 10_500;
 const BACKFILL_PAGE = 50;
 const BACKFILL_KEY = "social:backfill";
 
@@ -75,12 +82,44 @@ async function collections(ctx: PluginContext): Promise<CollectionSchemaInfo[]> 
 
 const wanted = (selected: string[], slug: string) => !selected.length || selected.includes(slug);
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+type Outcome = "rendered" | "unchanged" | "skipped";
+
 /**
- * Make images for pending entries, up to `limit`, within `deadline`. An entry
- * that has its own image now, or isn't published, is skipped. Pages of the
- * entries that got a new image are purged from the edge cache, so shares see it.
+ * One entry: read it as published (never the save that queued it, which may
+ * be a draft), skip it when it isn't published, isn't in the chosen
+ * collections or has an image of its own, else make (or keep) its image.
  */
-export async function renderPending(ctx: PluginContext, options: { limit: number; deadline: number; bucket?: string }): Promise<{ rendered: number; skipped: number; failed: number; stopped?: string }> {
+async function renderLive(ctx: PluginContext, rc: RenderContext, settings: SocialSettings, schemas: Map<string, CollectionSchemaInfo>, collection: string, id: string): Promise<{ outcome: Outcome; slug: string | null }> {
+	const schema = schemas.get(collection);
+	const item = (await ctx.content?.get(collection, id).catch(() => null)) as Item | null;
+	if (!schema || !item || item.status !== "published" || !wanted(settings.collections, collection) || hasOwnImage(item, schema)) {
+		const note = !item || item.status !== "published" ? "Not published" : schema && hasOwnImage(item, schema) ? "Has its own image" : "Not in the chosen collections";
+		await skip(ctx, collection, id, note);
+		return { outcome: "skipped", slug: item?.slug ?? null };
+	}
+	const before = (await socialImages(ctx).get(docId(collection, id)))?.key ?? null;
+	const after = await renderEntry(ctx, rc, { collection, id, title: titleOf(schema, item) || id });
+	return { outcome: after.key !== before ? "rendered" : "unchanged", slug: item.slug };
+}
+
+/** Mark a record skipped (it has its own image, isn't published…): its generated image is no longer used. */
+async function skip(ctx: PluginContext, collection: string, id: string, note: string): Promise<void> {
+	const store = socialImages(ctx);
+	const read = await store.getVersioned(docId(collection, id));
+	if (!read?.value || read.value.status === "skipped") return;
+	await store.compareAndSet(docId(collection, id), read.revision, { ...read.value, status: "skipped", note, updatedAt: new Date().toISOString() }).catch(() => undefined);
+}
+
+/**
+ * Make images for pending entries, up to `limit`, within `deadline`, oldest
+ * first. On Workers Free (or an unknown plan) renders are 10 seconds apart,
+ * Browser Run's Quick Actions limit there; a 429 waits out its Retry-After
+ * when the deadline allows, else stops the batch. Pages of the entries that
+ * got a new image are purged from the edge cache, so shares see it.
+ */
+export async function renderPending(ctx: PluginContext, options: { limit: number; deadline: number; bucket?: string; spacingMs?: number }): Promise<{ rendered: number; skipped: number; failed: number; stopped?: string }> {
 	const settings = await readSocialSettings(ctx);
 	const out = { rendered: 0, skipped: 0, failed: 0 } as { rendered: number; skipped: number; failed: number; stopped?: string };
 	const page = await socialImages(ctx).query({ where: { status: "pending" }, orderBy: { updatedAt: "asc" }, limit: Math.min(options.limit, 50) });
@@ -88,33 +127,46 @@ export async function renderPending(ctx: PluginContext, options: { limit: number
 	const rc = await renderContext(ctx, settings, options.bucket);
 	if ("reason" in rc) return { ...out, stopped: rc.reason };
 	const schemas = new Map((await collections(ctx)).map((c) => [c.slug, c]));
+	const spacing = options.spacingMs ?? ((await knownPlan(ctx.kv)) === "paid" ? 0 : FREE_SPACING_MS);
 	const changed: Array<{ collection: string; id: string; slug: string | null }> = [];
+	let lastRender = 0;
 	for (const { data: doc } of page.items) {
-		if (Date.now() >= options.deadline) break;
-		const schema = schemas.get(doc.collection);
-		const item = (await ctx.content?.get(doc.collection, doc.id).catch(() => null)) as Item | null;
-		if (!schema || !item || item.status !== "published" || !wanted(settings.collections, doc.collection) || hasOwnImage(item, schema)) {
-			const note = !item || item.status !== "published" ? "Not published" : schema && hasOwnImage(item, schema) ? "Has its own image" : "Not in the chosen collections";
-			await socialImages(ctx).put(docId(doc.collection, doc.id), { ...doc, status: "skipped", note, updatedAt: new Date().toISOString() });
-			out.skipped++;
-			continue;
-		}
-		try {
-			const before = doc.key;
-			const after = await renderEntry(ctx, rc, { collection: doc.collection, id: doc.id, title: titleOf(schema, item) || doc.title });
-			out.rendered++;
-			if (after.key !== before) changed.push({ collection: doc.collection, id: doc.id, slug: item.slug });
-		} catch (error) {
-			out.failed++;
-			if (error instanceof RenderError && (error.status === 429 || error.status === NOT_SET_UP)) {
-				out.stopped = error.message;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const wait = lastRender ? Math.max(0, lastRender + spacing - Date.now()) : 0;
+			if (Date.now() + wait >= options.deadline) return finish();
+			if (wait) await sleep(wait);
+			try {
+				const result = await renderLive(ctx, rc, settings, schemas, doc.collection, doc.id);
+				if (result.outcome === "skipped") out.skipped++;
+				else {
+					out.rendered++;
+					lastRender = Date.now();
+					if (result.outcome === "rendered") changed.push({ collection: doc.collection, id: doc.id, slug: result.slug });
+				}
+				break;
+			} catch (error) {
+				lastRender = Date.now();
+				const retryAfter = error instanceof RenderError && error.status === 429 ? (error.retryAfterMs ?? spacing) : null;
+				if (retryAfter !== null && attempt === 0 && Date.now() + retryAfter + 5_000 < options.deadline) {
+					await sleep(retryAfter);
+					continue;
+				}
+				out.failed++;
+				if (error instanceof RenderError && (error.status === 429 || error.status === NOT_SET_UP)) {
+					out.stopped = error.message;
+					return finish();
+				}
+				ctx.log.warn("social images: a render failed", { entry: docId(doc.collection, doc.id), error: String(error) });
 				break;
 			}
-			ctx.log.warn("social images: a render failed", { entry: docId(doc.collection, doc.id), error: String(error) });
 		}
 	}
-	await purgeEntries(ctx, changed);
-	return out;
+	return finish();
+
+	async function finish() {
+		await purgeEntries(ctx, changed);
+		return out;
+	}
 }
 
 /** Purge the pages of entries whose image changed (at most 100 paths, Cloudflare's limit per purge). */
@@ -143,9 +195,14 @@ interface BackfillState {
 
 const IDLE_BACKFILL: BackfillState = { status: "idle", collections: [], index: 0, cursor: null, queued: 0, finishedAt: null };
 
-/** One step of queueing existing entries without an image of their own (pages of BACKFILL_PAGE). */
-async function backfillStep(ctx: PluginContext, restart: boolean, deadline: number): Promise<BackfillState> {
+/**
+ * One step of queueing existing entries without an image of their own (pages
+ * of BACKFILL_PAGE): those with no image yet, and those whose image no longer
+ * matches their title or the template (after a template change).
+ */
+async function backfillStep(ctx: PluginContext, restart: boolean, deadline: number, bucket: string): Promise<BackfillState> {
 	const settings = await readSocialSettings(ctx);
+	const inputs = await templateInputs(ctx, settings, bucket);
 	const all = await collections(ctx);
 	let state: BackfillState = { ...IDLE_BACKFILL, ...((await ctx.kv.get<BackfillState>(BACKFILL_KEY)) ?? {}) };
 	if (restart || state.status !== "running") state = { ...IDLE_BACKFILL, status: "running", collections: all.filter((c) => wanted(settings.collections, c.slug)).map((c) => c.slug) };
@@ -161,17 +218,17 @@ async function backfillStep(ctx: PluginContext, restart: boolean, deadline: numb
 		if (need.length) {
 			const existing = await socialImages(ctx).getMany(need.map((i) => docId(schema.slug, i.id)));
 			const now = new Date().toISOString();
-			const fresh = need.filter((i) => {
+			const fresh: SocialImageDoc[] = [];
+			for (const i of need) {
 				const doc = existing.get(docId(schema.slug, i.id));
-				return !doc || doc.status === "skipped" || (doc.status === "failed" && !doc.key);
-			});
+				if (doc?.status === "pending") continue;
+				const stale = !doc || doc.status === "skipped" || !doc.key || ("reason" in inputs ? false : doc.hash !== (await hashFor(inputs, titleOf(schema, i) || i.id)));
+				if (!stale) continue;
+				// Its current image (if any) stays in use until the new one is made.
+				fresh.push({ collection: schema.slug, id: i.id, title: doc?.title ?? "", key: doc?.key ?? null, hash: doc?.hash ?? null, previousKey: doc?.previousKey ?? null, status: "pending", note: null, attempts: 0, updatedAt: now, renderedAt: doc?.renderedAt ?? null });
+			}
 			if (fresh.length) {
-				await socialImages(ctx).putMany(
-					fresh.map((i) => ({
-						id: docId(schema.slug, i.id),
-						data: { collection: schema.slug, id: i.id, title: titleOf(schema, i), key: null, hash: null, status: "pending", note: null, attempts: 0, updatedAt: now, renderedAt: null } satisfies SocialImageDoc,
-					})),
-				);
+				await socialImages(ctx).putMany(fresh.map((d) => ({ id: docId(d.collection, d.id), data: d })));
 				state.queued += fresh.length;
 			}
 		}
@@ -197,16 +254,50 @@ const templateInput = z.object({
 export function socialImagesPack(options: SocialImagesOptions = {}): PackModule {
 	const bucket = options.bucket ?? "MEDIA";
 
-	/** Queue the entry and start its render after the response (the hourly job retries what doesn't finish). */
-	const onPublished = async (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => {
-		const content = event.content as { id?: string; status?: string; slug?: string | null; data?: Record<string, unknown> };
-		if (!content?.id || (content.status && content.status !== "published")) return;
-		const settings = await readSocialSettings(ctx);
-		if (!wanted(settings.collections, event.collection)) return;
-		// The title as saved, for the page's list until the image is made (the render reads the entry again).
-		const title = [content.data?.title, content.data?.name, content.slug].find((v) => nonEmpty(v)) as string | undefined;
-		await markPending(ctx, event.collection, content.id, title?.trim().slice(0, 200) ?? "");
-		afterResponse(renderPending(ctx, { limit: 1, deadline: Date.now() + 25_000, bucket }).catch((error: unknown) => ctx.log.warn("social images: render after publish failed; the hourly job retries", { error: String(error) })));
+	/** Jobs under way in this isolate, by entry: a publish fires content:afterSave and content:afterPublish, one job serves both. */
+	const inFlight = new Set<string>();
+
+	/**
+	 * After a save or publish: compare the entry as published (EmDash hands
+	 * afterSave the draft, which is never used) with its record, and make that
+	 * entry's image after the response when its title changed. An unchanged
+	 * entry (most draft saves) costs a few reads and no writes. What can't be
+	 * made now (a rate limit, Browser Run not set up) is queued for the hourly job.
+	 */
+	const onSaved = async (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => {
+		const id = (event.content as { id?: unknown })?.id;
+		if (typeof id !== "string" || !id) return;
+		const key = docId(event.collection, id);
+		if (inFlight.has(key)) return;
+		inFlight.add(key);
+		const job = (async () => {
+			const settings = await readSocialSettings(ctx);
+			if (!wanted(settings.collections, event.collection)) return;
+			const schema = (await collections(ctx)).find((c) => c.slug === event.collection);
+			const item = (await ctx.content?.get(event.collection, id).catch(() => null)) as Item | null;
+			if (!schema || !item || item.status !== "published") return;
+			if (hasOwnImage(item, schema)) return skip(ctx, event.collection, id, "Has its own image");
+			const doc = await socialImages(ctx).get(key);
+			if (doc?.status === "ready" && doc.title === titleOf(schema, item)) return;
+			const rc = await renderContext(ctx, settings, bucket);
+			if ("reason" in rc) return markPending(ctx, event.collection, id, rc.reason);
+			try {
+				const result = await renderLive(ctx, rc, settings, new Map([[schema.slug, schema]]), event.collection, id);
+				if (result.outcome === "rendered") await purgeEntries(ctx, [{ collection: event.collection, id, slug: result.slug }]);
+			} catch (error) {
+				if (error instanceof RenderError && (error.status === 429 || error.status === NOT_SET_UP)) await markPending(ctx, event.collection, id, error.message);
+				else ctx.log.warn("social images: render after publish failed; the hourly job retries", { entry: key, error: String(error) });
+			}
+		})()
+			.catch((error: unknown) => ctx.log.warn("social images: couldn't check the entry after a save", { entry: key, error: String(error) }))
+			.finally(() => inFlight.delete(key));
+		afterResponse(job);
+	};
+
+	/** A deleted entry's images and record go with it. */
+	const onDeleted = async (event: { id: string; collection: string }, ctx: PluginContext) => {
+		const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
+		await removeEntryImage(ctx, env[bucket] as R2Bucket | undefined, event.collection, event.id);
 	};
 
 	const routes = {
@@ -321,7 +412,7 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 				handler: async (ctx) => {
 					await requireFeature(ctx, SOCIAL_FEATURE);
 					const { restart } = parseInput(z.object({ restart: z.boolean().optional() }), ctx.input ?? {});
-					return backfillStep(ctx, Boolean(restart), Date.now() + 15_000);
+					return backfillStep(ctx, Boolean(restart), Date.now() + 15_000, bucket);
 				},
 			}),
 		),
@@ -334,7 +425,9 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 				request: { body: "json" },
 				handler: async (ctx) => {
 					await requireFeature(ctx, SOCIAL_FEATURE);
-					const result = await renderPending(ctx, { limit: 3, deadline: Date.now() + 20_000, bucket });
+					// Paid: a few at once; Free (or unknown): two, 10 seconds apart (Browser Run's limit there).
+					const paid = (await knownPlan(ctx.kv)) === "paid";
+					const result = await renderPending(ctx, { limit: paid ? 4 : 2, deadline: Date.now() + 25_000, bucket });
 					return { ...result, counts: await counts(ctx) };
 				},
 			}),
@@ -351,10 +444,20 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 					const input = parseInput(z.object({ collection: z.string().regex(/^[a-z][a-z0-9_]*$/), id: z.string().min(1).max(128) }), ctx.input);
 					const store = socialImages(ctx);
 					const doc = await store.get(docId(input.collection, input.id));
-					// A new hash isn't needed: clearing the stored hash makes the next render draw it again.
+					// A new hash isn't needed: clearing the stored hash makes the render draw it again.
 					if (doc) await store.put(docId(input.collection, input.id), { ...doc, hash: null, status: "pending", attempts: 0, note: null, updatedAt: new Date().toISOString() });
 					else await markPending(ctx, input.collection, input.id);
-					return renderPending(ctx, { limit: 1, deadline: Date.now() + 25_000, bucket });
+					// This entry, now (not the oldest one waiting).
+					const settings = await readSocialSettings(ctx);
+					const rc = await renderContext(ctx, settings, bucket);
+					if ("reason" in rc) return { rendered: 0, skipped: 0, failed: 0, stopped: rc.reason };
+					try {
+						const result = await renderLive(ctx, rc, settings, new Map((await collections(ctx)).map((c) => [c.slug, c])), input.collection, input.id);
+						if (result.outcome === "rendered") await purgeEntries(ctx, [{ collection: input.collection, id: input.id, slug: result.slug }]);
+						return { rendered: result.outcome === "skipped" ? 0 : 1, skipped: result.outcome === "skipped" ? 1 : 0, failed: 0 };
+					} catch (error) {
+						return { rendered: 0, skipped: 0, failed: 1, stopped: error instanceof Error ? error.message : String(error) };
+					}
 				},
 			}),
 		),
@@ -365,17 +468,22 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 		label: "Social Images",
 		features: FEATURES,
 		routes,
+		// afterSave covers collections without drafts (a save is the publish); a publish fires both, and one job serves them.
 		hooks: {
-			"content:afterPublish": onPublished,
-			"content:afterSave": onPublished,
+			"content:afterPublish": onSaved,
+			"content:afterSave": onSaved,
+			"content:afterDelete": onDeleted,
+			"content:afterRestore": onSaved,
 		},
 		tasks: [
 			{
 				name: SOCIAL_TASK,
 				schedule: "@hourly",
-				// While nothing is pending: one indexed count-free query an hour.
+				// Scheduled only while Social Images is on. While nothing is pending: one indexed query an hour.
+				onlyWhileOn: true,
 				handler: async (ctx: PluginContext) => {
-					const result = await renderPending(ctx, { limit: CRON_BATCH, deadline: Date.now() + CRON_MS, bucket });
+					const limit = (await knownPlan(ctx.kv)) === "paid" ? CRON_BATCH.paid : CRON_BATCH.free;
+					const result = await renderPending(ctx, { limit, deadline: Date.now() + CRON_MS, bucket });
 					if (result.rendered || result.failed) ctx.log.info("social images: scheduled run", result);
 				},
 			},
