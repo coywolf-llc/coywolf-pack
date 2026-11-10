@@ -169,7 +169,7 @@ async function stream<T>(fn: () => Promise<T>): Promise<T> {
 
 async function requireClient(ctx: Ctx) {
 	const api = await client(ctx);
-	if (!api) throw PluginRouteError.badRequest("Add your Cloudflare account ID and Stream API token on the Videos page → Settings first.");
+	if (!api) throw PluginRouteError.badRequest("Add the Cloudflare API token on the plugin's Settings page first (it needs Stream → Edit). If it sees more than one account, enter the account ID on the Videos page → Settings → Advanced.");
 	return api;
 }
 

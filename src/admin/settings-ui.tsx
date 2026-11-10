@@ -8,6 +8,8 @@ import { Button, Input } from "@cloudflare/kumo";
 import { Key } from "@phosphor-icons/react";
 import * as React from "react";
 
+import { AdminLink } from "./page.js";
+
 export function SettingsSection(props: { id: string; title: string; description?: React.ReactNode; actions?: React.ReactNode; children?: React.ReactNode }) {
 	return (
 		<section className="rounded-lg border border-kumo-line" aria-labelledby={props.id}>
@@ -55,6 +57,44 @@ export function SecretField(props: {
 				<Button type="button" variant="ghost" size="sm" disabled={props.disabled || props.clearing} onClick={props.onClear}>
 					{props.clearing ? "Removing…" : `Remove saved ${props.label.toLowerCase()}`}
 				</Button>
+			)}
+		</div>
+	);
+}
+
+/** The plugin's Settings page, where the Cloudflare API token is saved. */
+export const SETTINGS_PAGE_PATH = "/plugins-manager/coywolf-pack/settings";
+
+/**
+ * In place of a module's own token field when the Cloudflare API token is the one
+ * in use: one line saying so, and `children` (overrides such as an account ID)
+ * under a closed Advanced disclosure.
+ */
+export function SharedTokenNote(props: { env?: boolean; children?: React.ReactNode }) {
+	return (
+		<div className="space-y-3">
+			<p className="text-sm text-kumo-subtle">
+				{props.env ? (
+					<>
+						Uses the Cloudflare API token from the <code>CLOUDFLARE_API_TOKEN</code> Worker secret.
+					</>
+				) : (
+					<>
+						Uses the Cloudflare API token from{" "}
+						<AdminLink to={SETTINGS_PAGE_PATH} className="text-kumo-link underline">
+							Settings
+						</AdminLink>
+						.
+					</>
+				)}
+			</p>
+			{props.children && (
+				<details className="rounded-md border border-kumo-line text-sm">
+					<summary className="cursor-pointer px-3 py-2 font-medium" style={{ display: "list-item" }}>
+						Advanced
+					</summary>
+					<div className="space-y-4 border-t border-kumo-line px-3 py-3">{props.children}</div>
+				</details>
 			)}
 		</div>
 	);

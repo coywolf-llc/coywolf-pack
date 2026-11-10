@@ -1,18 +1,18 @@
 /**
  * Insights' Cloudflare reads (edge errors and crawlers, Core Web Vitals):
- * the read-only API token the Performance page's usage card uses (Cloudflare
- * usage on the plugin's Settings page, or the USAGE_API_TOKEN Worker secret),
- * the site's zone and account, and one call helper over the shared client
- * (src/core/cloudflare-api.ts: deadline, ctx.http, no token in errors).
+ * the Cloudflare API token (src/core/cloudflare-token.ts, as the Performance
+ * page's usage card reads it), the site's zone and account, and one call
+ * helper over the shared client (src/core/cloudflare-api.ts: deadline,
+ * ctx.http, no token in errors).
  */
 import type { PluginContext } from "emdash";
 
 import { CloudflareApiError, type Fetch, cloudflareApi, contextFetch } from "../core/cloudflare-api.js";
 import { zoneCandidates } from "../discovery/crawler-hints.js";
 import { siteOrigin } from "../discovery/urls.js";
-import { IMAGES_SETTINGS } from "../images/settings.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, noAccountMessage, noTokenMessage } from "../core/cloudflare-token.js";
 import { readCloudflareToken } from "../pageCache/usage.js";
-import { secret, workerEnv } from "../shared.js";
+import { workerEnv } from "../shared.js";
 import { INSIGHTS_DEADLINES } from "./keys.js";
 
 export interface CloudflareAccess {
@@ -37,9 +37,7 @@ export async function cloudflareAccess(ctx: Ctx, bindings?: Record<string, unkno
 	const { token, unreadable } = await readCloudflareToken(ctx, env);
 	if (!token) {
 		return {
-			setup: unreadable
-				? "The saved Cloudflare usage token can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed. Save the token again (Cloudflare usage on the plugin's Settings page), or set the USAGE_API_TOKEN Worker secret."
-				: "Add a read-only Cloudflare API token: the USAGE_API_TOKEN Worker secret, or Cloudflare usage on the plugin's Settings page. The steps are below.",
+			setup: unreadable ? UNREADABLE_TOKEN_MESSAGE : `${noTokenMessage("Zone → Read and Analytics → Read (edge errors), and Account Analytics → Read (Core Web Vitals)")} The steps are below.`,
 		};
 	}
 	return { token, fetch: contextFetch(ctx), host: new URL(siteOrigin(ctx)).host.toLowerCase(), env };
@@ -64,7 +62,7 @@ export async function cfCall<T>(a: CloudflareAccess, path: string, options: { bo
 export async function cfGraphql(a: CloudflareAccess, query: string, variables: Record<string, unknown>, permission: string): Promise<{ data: Record<string, unknown> | null; errors: string[] }> {
 	const body = await cfCall<{ data?: Record<string, unknown> | null; errors?: Array<{ message?: string }> | null }>(a, "/graphql", { body: { query, variables }, permission, graphql: true });
 	const errors = (Array.isArray(body?.errors) ? body.errors : []).map((e) => e?.message ?? "error").filter(Boolean);
-	if (!body?.data && errors.length) throw new Error(`Cloudflare analytics: ${errors.join("; ")}. The token needs ${permission}.`);
+	if (!body?.data && errors.length) throw new Error(`Cloudflare analytics: ${errors.join("; ")}. The Cloudflare API token needs ${permission}.`);
 	return { data: body?.data ?? null, errors };
 }
 
@@ -83,7 +81,7 @@ export async function findZone(ctx: Ctx, a: CloudflareAccess): Promise<Zone> {
 			return zone;
 		}
 	}
-	throw new Error(`The Cloudflare API token can't see a zone for ${a.host}. Add Zone → Zone → Read to it (for all domains, or this site's), or check that the zone is in the token's account.`);
+	throw new Error(`The Cloudflare API token can't see a zone for ${a.host}. Add Zone → Zone → Read to it (for this site's domain, or all domains), or check that the zone is in the token's account.`);
 }
 
 /** Forget the remembered zone (it stopped working: deleted and added again, or moved). */
@@ -91,14 +89,11 @@ export async function forgetZone(ctx: Ctx): Promise<void> {
 	await ctx.kv.delete(ZONE_KEY).catch(() => undefined);
 }
 
-/** The account: the CF_ACCOUNT_ID Worker variable, the Clean Image URLs account, the zone's, or the token's only account. */
+/** The account: the CF_ACCOUNT_ID Worker variable, the Clean Image URLs account, the zone's, or the token's only account (src/core/cloudflare-token.ts). */
 export async function findAccountId(ctx: Ctx, a: CloudflareAccess, zone?: Zone | null): Promise<string> {
-	const configured = secret(a.env, "CF_ACCOUNT_ID") || secret(a.env, "CLOUDFLARE_ACCOUNT_ID") || (await ctx.settings.get<string>(IMAGES_SETTINGS.accountId).catch(() => null))?.trim();
-	if (configured) return configured;
-	if (zone?.accountId) return zone.accountId;
-	const accounts = await cfCall<Array<{ id: string }>>(a, "/accounts?per_page=5", { permission: "Account → Account Settings → Read" }).catch(() => []);
-	if (accounts.length === 1 && accounts[0]?.id) return accounts[0].id;
-	throw new Error("Couldn't tell which Cloudflare account to read: limit the token to one account, or set the CF_ACCOUNT_ID Worker variable.");
+	const id = await cloudflareAccountId(ctx, a.env, { token: a.token, fetch: a.fetch }, null, { hint: zone?.accountId });
+	if (id) return id;
+	throw new Error(noAccountMessage());
 }
 
 /** Cloudflare refused the token (401/403, or its authentication and permission codes). */

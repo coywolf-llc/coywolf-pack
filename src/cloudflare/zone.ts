@@ -2,13 +2,13 @@
  * Cloudflare Checkup's calls to Cloudflare's API, through the shared client
  * (src/core/cloudflare-api.ts: deadlines, ctx.http, no token in errors).
  *
- * Reading uses the read-only token the Performance page already has (Zone →
- * Read finds the zone; Zone Settings → Read, Bot Management → Read and DNS →
- * Read are needed for the settings, the bot rows and the zone's other
- * hostnames, and each part that can't be read says which one is missing).
- * The fixes use a separate setup token (Zone Settings → Edit) and change
- * exactly one zone setting each, only when it isn't already set: nothing
- * else in the zone is touched.
+ * Reading uses the Cloudflare API token (src/core/cloudflare-token.ts, as the
+ * Performance page reads it: Zone → Read finds the zone; Zone Settings, Bot
+ * Management and DNS read access are needed for the settings, the bot rows and
+ * the zone's other hostnames, and each part that can't be read says which one
+ * is missing). The fixes use the same token, or the older setup token (Zone
+ * Settings → Edit), and change exactly one zone setting each, only when it
+ * isn't already set: nothing else in the zone is touched.
  */
 import { CloudflareApiError, type Fetch, cloudflareApi } from "../core/cloudflare-api.js";
 import { DEADLINES } from "../core/single-flight.js";
@@ -60,7 +60,7 @@ async function readSettings(deps: { token: string; fetch: Fetch }, zoneId: strin
 		for (const s of Array.isArray(all) ? all : []) if (typeof s?.id === "string") settings.set(s.id, s.value);
 	} catch (error) {
 		if (refused(error)) {
-			return { settings: null, refused: true, problem: "The read-only token can't read this zone's settings. Add Zone → Zone Settings → Read to it (the steps are below)." };
+			return { settings: null, refused: true, problem: "The Cloudflare API token can't read this zone's settings. Add Zone Settings → Edit (or Read) to it (the steps are below)." };
 		}
 		bulkError = error;
 	}
@@ -85,7 +85,7 @@ async function readBots(deps: { token: string; fetch: Fetch }, zoneId: string): 
 	} catch (error) {
 		return {
 			bots: null,
-			problem: refused(error) ? "Add Zone → Bot Management → Read to the read-only token to see the bot settings here." : `Couldn't read the bot settings: ${message(error)}`,
+			problem: refused(error) ? "Add Bot Management → Read to the Cloudflare API token to see the bot settings here." : `Couldn't read the bot settings: ${message(error)}`,
 		};
 	}
 }
@@ -102,7 +102,7 @@ async function readOtherHosts(deps: { token: string; fetch: Fetch }, zoneId: str
 		return {
 			hosts: null,
 			problem: refused(error)
-				? "Add Zone → DNS → Read to the read-only token to list the zone's other hostnames here."
+				? "Add DNS → Edit (or Read) to the Cloudflare API token to list the zone's other hostnames here."
 				: `Couldn't list the zone's hostnames: ${message(error)}`,
 		};
 	}
@@ -125,7 +125,7 @@ export async function readCheckup(host: string, deps: CheckupDeps): Promise<Chec
 				? {
 						kind: "no-token" as const,
 						message:
-							"To read the zone's settings, the pack needs a read-only Cloudflare API token with Zone → Read and Zone Settings → Read. The Performance page's Cloudflare usage token works once those permissions are added to it.",
+							"To read the zone's settings, add the Cloudflare API token on the plugin's Settings page (or the CLOUDFLARE_API_TOKEN Worker secret). Here it needs Zone → Read and Zone Settings → Edit.",
 					}
 				: (hints.problem ?? { kind: "error" as const, message: "Couldn't find the site's zone." });
 		return { host, zone: null, problem, rows, otherHosts: null, checkedAt };
@@ -184,7 +184,7 @@ export interface FixResult {
 export async function applyFix(fix: FixId, zone: CheckupZone, deps: { token: string; fetch: Fetch }): Promise<FixResult> {
 	const def = FIXES[fix];
 	const path = `/zones/${encodeURIComponent(zone.id)}/settings/${def.setting}`;
-	const call = { token: deps.token, fetch: deps.fetch, permission: "Zone → Zone Settings → Edit, for this zone", label: "Cloudflare's API" };
+	const call = { token: deps.token, fetch: deps.fetch, permission: "Zone Settings → Edit, for this site's domain", label: "Cloudflare's API" };
 	const before = (await cloudflareApi<{ value?: unknown } | null>(path, { ...call, deadlineMs: DEADLINES.cloudflareReadMs })).result?.value;
 	if (!def.needed(before)) {
 		return { fix, zone: zone.name, setting: def.setting, changed: false, before, after: before, message: `Nothing to change: ${def.setting} is already ${String(before)} on ${zone.name}.` };

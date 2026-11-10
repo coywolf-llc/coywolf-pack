@@ -247,6 +247,26 @@ test("how Browser Run is reached: a binding first, else a token and account, els
 	assert.equal(api.accountId, "b".repeat(32));
 });
 
+test("the token: the Cloudflare API token wins over the older Social Images token; the older one and its secret still work alone", async () => {
+	const settings = render.normalizeSocialSettings({ accountId: "c".repeat(32) });
+	const tokenOf = async (saved, env = {}) => {
+		const ctx = fakeCtx();
+		for (const [k, v] of Object.entries(saved)) await ctx.settings.set(k, v);
+		const r = await render.renderer(ctx, settings, env);
+		return r.kind === "api" ? r.token : r.kind;
+	};
+	assert.equal(await tokenOf({ cloudflareApiToken: "new-token", socialImagesApiToken: "old-token" }, { BROWSER_RUN_API_TOKEN: "env-token" }), "new-token");
+	assert.equal(await tokenOf({ socialImagesApiToken: "old-token" }, { CLOUDFLARE_API_TOKEN: "shared-env" }), "old-token");
+	assert.equal(await tokenOf({}, { BROWSER_RUN_API_TOKEN: "env-token", CLOUDFLARE_API_TOKEN: "shared-env" }), "env-token");
+	assert.equal(await tokenOf({}, { CLOUDFLARE_API_TOKEN: "shared-env" }), "shared-env");
+	// The account comes from the token when none is set (and is remembered).
+	const ctx = fakeCtx();
+	await ctx.settings.set("cloudflareApiToken", "new-token");
+	ctx.http = { fetch: async (url) => (assert.match(url, /\/accounts\?per_page=5$/), Response.json({ success: true, result: [{ id: "d".repeat(32) }] })) };
+	assert.equal((await render.renderer(ctx, render.normalizeSocialSettings({}), {})).accountId, "d".repeat(32));
+	assert.deepEqual(await render.browserRunToken(ctx, {}).then((r) => [r.sharedToken, r.sharedTokenEnv]), [true, false]);
+});
+
 test("pending entries: published ones without their own image are made; the others are skipped", async () => {
 	const entries = [
 		{ id: "e1", slug: "one", status: "published", data: { title: "One" } },

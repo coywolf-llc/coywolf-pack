@@ -25,7 +25,7 @@ import type { VideoDisplay } from "../videos/render.js";
 import { CredentialGuide } from "./guides.js";
 import { DisplaySettings, fromDisplayDraft, toDisplayDraft } from "./videos-display.js";
 import { SaveBar, isDirty } from "./save-bar.js";
-import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
+import { SecretField, SettingsSection, SetupCard, SharedTokenNote } from "./settings-ui.js";
 import { PartSwitches } from "./feature-switches.js";
 import { useSaveResult } from "./toast.js";
 
@@ -94,6 +94,9 @@ interface VideosSettings {
 	defaultTags: string;
 	envAccountId: boolean;
 	envToken: boolean;
+	/** The Cloudflare API token is the one in use (saved on Settings, or `sharedTokenEnv`: the Worker secret). */
+	sharedToken?: boolean;
+	sharedTokenEnv?: boolean;
 }
 
 interface Meta {
@@ -627,23 +630,41 @@ function ConnectForm(props: { onConnected: () => void }) {
 				void save();
 			}}
 		>
-			<div className="grid gap-4 sm:grid-cols-2">
-				<Input
-					label="Cloudflare account ID"
-					description={settings?.envAccountId ? "Empty uses the CF_ACCOUNT_ID Worker variable." : "Dashboard → any domain → Account ID (32 characters)."}
-					value={accountId}
-					disabled={pending}
-					onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAccountId(e.target.value)}
-				/>
-				<SecretField
-					label="Stream API token"
-					saved={settings?.tokenSet ?? false}
-					value={token}
-					onChange={setToken}
-					description={settings?.envToken ? "Empty uses the CF_STREAM_TOKEN Worker secret." : "An API token with Account → Stream → Edit. Stored encrypted."}
-					disabled={pending}
-				/>
-			</div>
+			{settings?.sharedToken ? (
+				<>
+					<p className="text-sm text-kumo-subtle">
+						The Cloudflare API token is there, but the pack couldn't tell which account to use: it sees more than one. Enter the account that holds your
+						Stream library.
+					</p>
+					<div className="sm:max-w-md">
+						<Input
+							label="Cloudflare account ID"
+							description="Dashboard → any domain → Account ID (32 characters)."
+							value={accountId}
+							disabled={pending}
+							onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAccountId(e.target.value)}
+						/>
+					</div>
+				</>
+			) : (
+				<div className="grid gap-4 sm:grid-cols-2">
+					<Input
+						label="Cloudflare account ID"
+						description={settings?.envAccountId ? "Empty uses the CF_ACCOUNT_ID Worker variable." : "Dashboard → any domain → Account ID (32 characters)."}
+						value={accountId}
+						disabled={pending}
+						onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAccountId(e.target.value)}
+					/>
+					<SecretField
+						label="Stream API token"
+						saved={settings?.tokenSet ?? false}
+						value={token}
+						onChange={setToken}
+						description={settings?.envToken ? "Empty uses the CF_STREAM_TOKEN Worker secret." : "An API token with Account → Stream → Edit. Stored encrypted."}
+						disabled={pending}
+					/>
+				</div>
+			)}
 			<CredentialGuide id="stream" />
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<Button type="submit" variant="primary" disabled={pending || (!accountId.trim() && !token.trim())}>
@@ -728,8 +749,23 @@ function SettingsPanel(props: { onSaved: () => void }) {
 				<SettingsSection
 					id="videos-connection"
 					title="Cloudflare Stream connection"
-					description="The account that holds your Stream library and an API token with Account → Stream → Edit. Empty fields fall back to the CF_ACCOUNT_ID and CF_STREAM_TOKEN Worker variables."
+					description={
+						saved.sharedToken
+							? "The account that holds your Stream library, reached with the Cloudflare API token (Stream → Edit)."
+							: "The account that holds your Stream library and an API token with Account → Stream → Edit. Empty fields fall back to the CF_ACCOUNT_ID and CF_STREAM_TOKEN Worker variables."
+					}
 				>
+					{saved.sharedToken ? (
+						<SharedTokenNote env={saved.sharedTokenEnv}>
+							<div className="sm:max-w-md">
+								<Input
+									label="Cloudflare account ID"
+									description="Only if the token sees more than one account. Empty uses CF_ACCOUNT_ID, or the token's own account."
+									{...text("accountId")}
+								/>
+							</div>
+						</SharedTokenNote>
+					) : (
 					<div className="grid gap-4 sm:grid-cols-2">
 						<Input label="Cloudflare account ID" description={saved.envAccountId ? "CF_ACCOUNT_ID is set; it's used when this is empty." : undefined} {...text("accountId")} />
 						<SecretField
@@ -743,6 +779,7 @@ function SettingsPanel(props: { onSaved: () => void }) {
 							disabled={Boolean(pending)}
 						/>
 					</div>
+					)}
 					<CredentialGuide id="stream" />
 				</SettingsSection>
 				<SettingsSection id="videos-player" title="Player" description="How the Coywolf Video block's player looks and where it loads from.">

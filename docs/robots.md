@@ -72,10 +72,6 @@ RADAR_API_TOKEN=… node scripts/build-bots.mjs
 
 With `robots.radarSync` on and a token set, the `robots-refresh-bots` task runs weekly (and **Refresh from Radar** runs it now). It makes one request, `GET https://api.cloudflare.com/client/v4/radar/bots?limit=1000`, and stores only differences from the bundled list in plugin storage (`robots_bots`), so a quiet week writes nothing. Radar publishes user-agent patterns, not robots.txt tokens, so bots that first appear this way get a token derived from their pattern and stay **unverified** until the bundled list is updated with a source. Bots that leave Radar stay usable and are marked.
 
-Create a Cloudflare API token with **Account → Radar → Read** and either paste it into the setup card on the Robots.txt page's **Bots** tab (stored encrypted; it's also on the plugin's generic Settings page) or set it as a Worker secret:
-
-```bash
-npx wrangler secret put RADAR_API_TOKEN
-```
+It uses the [Cloudflare API token](README.md#the-cloudflare-api-token), which needs **Radar → Read** here (added by hand: Cloudflare's form can't pre-select it). An older Radar token (saved in the setup card on the **Bots** tab, or the `RADAR_API_TOKEN` Worker secret) still works until the Cloudflare API token is saved; `scripts/build-bots.mjs` reads `RADAR_API_TOKEN` as before.
 
 The module declares `network:request` for `api.cloudflare.com` only.

@@ -14,7 +14,10 @@ export type GuideId =
 	| "openai"
 	| "gemini"
 	| "workers-ai"
+	| "cloudflare-token"
+	| "usage-token"
 	| "r2"
+	| "files-token"
 	| "stream"
 	| "radar"
 	| "media-host"
@@ -59,25 +62,97 @@ export function tokenFormUrl(name: string, permissions: TokenPermission[]): stri
 	return `https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=${encodeURIComponent(JSON.stringify(permissions))}&name=${encodeURIComponent(name)}`;
 }
 
+/** The plugin's Settings page, where the Cloudflare API token is saved (a full page load from a guide's static link). */
+const SETTINGS_PAGE = "/_emdash/admin/plugins-manager/coywolf-pack/settings";
+
 /**
- * Creating a Cloudflare API token in Cloudflare's token editor: the steps
- * every token guide shares. In the editor a token has permission policies,
- * each with a scope (Entire Account, All Domains or Specified Domains), and
- * zone permissions are listed only in a policy scoped to domains.
- *
- * `prefill`: the token's name and what the pre-filled form can select, and
- * `shows`, what the form should show then. `add`: what to add by hand (what
- * the form can't pre-select). `zone`: the token needs zone permissions.
+ * A permission of the Cloudflare API token, as Cloudflare's token editor
+ * names it. `form`: its key for the pre-filled form, only where Cloudflare's
+ * permission reference documents one (developers.cloudflare.com/fundamentals/
+ * api/how-to/account-owned-token-template/); the others are added by hand.
+ * `scope`: the policy it goes in (zone permissions are listed only in a
+ * policy scoped to domains). `for`: which features need it.
  */
-const cloudflareTokenSteps = (o: { permissions: string; prefill?: { name: string; keys: TokenPermission[]; shows: string }; add?: string; zone?: boolean }) => [
-	o.prefill
-		? `Open ${link(tokenFormUrl(o.prefill.name, o.prefill.keys), "Cloudflare's token form, pre-filled")} (Cloudflare dashboard → Manage Account → Account API Tokens → Create Token). If you have more than one account, pick the site's. The form should show the name ${b(o.prefill.name)} and ${o.prefill.shows}.`
-		: `Open the ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")}, select ${b("Create Token")}, then ${b("Create Custom Token")} (${b("Get started")}). Name it after this site so you'll recognize it later.`,
-	`The token needs ${o.permissions}.${o.add ? ` ${o.add}` : ""} Under ${b("Permission policies")}, each policy has a scope dropdown: ${b("Entire Account")} lists account permissions; zone permissions show only in a policy set to ${b("All Domains")} or ${b("Specified Domains")} (select ${b("+ Add policy")} for one).`,
-	...(o.zone ? [`Set the zone policy's scope to ${b("Specified Domains")} and pick your site's domain (or ${b("All Domains")}).`] : []),
+export interface CloudflarePermission {
+	name: string;
+	scope: "account" | "zone";
+	form?: TokenPermission;
+	for: string;
+}
+
+/**
+ * Everything the pack's Cloudflare features ask of the one token. D1 → Edit
+ * is never here: restores keep their own token (the BACKUPS_API_TOKEN Worker
+ * secret), so the token saved in the database can't rewrite the database.
+ *
+ * Added by hand although Cloudflare may have a key for them: Workers →
+ * Metadata Read-Only (Cloudflare doesn't document which permission the
+ * `workers_scripts` key selects, and the Workers Logs query needs this one)
+ * and Cache Purge (the `cache` key's "purge" type has no documented example).
+ */
+export const CLOUDFLARE_PERMISSIONS = {
+	accountAnalytics: { name: "Account Analytics → Read", scope: "account", form: { key: "account_analytics", type: "read" }, for: "Cloudflare usage and Insights" },
+	accountSettings: { name: "Account Settings → Read", scope: "account", form: { key: "account_settings", type: "read" }, for: "finding the account and its plan" },
+	r2: { name: "Workers R2 Storage → Edit", scope: "account", form: { key: "workers_r2", type: "edit" }, for: "Set up media host, Backups retention and large uploads" },
+	stream: { name: "Stream → Edit", scope: "account", form: { key: "stream", type: "edit" }, for: "Videos" },
+	workersMetadata: { name: "Workers → Metadata Read-Only", scope: "account", for: "Cloudflare usage (finds this site's Worker and database, and reads Workers Logs)" },
+	rulesets: { name: "Account Rulesets → Read", scope: "account", for: "Set up media host" },
+	browserRun: { name: "Browser Run → Edit", scope: "account", for: "Social Images (called Browser Rendering in some accounts)" },
+	radar: { name: "Radar → Read", scope: "account", for: "the Robots.txt crawler list" },
+	zone: { name: "Zone → Read", scope: "zone", form: { key: "zone", type: "read" }, for: "finding the site's zone" },
+	zoneSettings: { name: "Zone Settings → Edit", scope: "zone", form: { key: "zone_settings", type: "edit" }, for: "Cloudflare Checkup and Set up media host" },
+	dns: { name: "DNS → Edit", scope: "zone", form: { key: "dns", type: "edit" }, for: "Set up media host and Cloudflare Checkup" },
+	analytics: { name: "Analytics → Read", scope: "zone", form: { key: "analytics", type: "read" }, for: "Insights (edge errors and crawlers)" },
+	transformRules: { name: "Transform Rules → Edit", scope: "zone", for: "Set up media host" },
+	cacheRules: { name: "Cache Rules → Edit", scope: "zone", for: "the media host's cache rule (Performance page)" },
+	cachePurge: { name: "Cache Purge → Purge", scope: "zone", for: "clearing the media host's images" },
+	botManagement: { name: "Bot Management → Read", scope: "zone", for: "Cloudflare Checkup's bot rows" },
+} as const satisfies Record<string, CloudflarePermission>;
+
+export type CloudflarePermissionId = keyof typeof CLOUDFLARE_PERMISSIONS;
+
+const PERMISSION_LIST: CloudflarePermission[] = Object.values(CLOUDFLARE_PERMISSIONS);
+/** "A, B and C" */
+const andList = (items: string[]) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`);
+const named = (list: CloudflarePermission[]) => andList(list.map((p) => b(p.name)));
+const pick = (scope: "account" | "zone", prefilled: boolean) => PERMISSION_LIST.filter((p) => p.scope === scope && Boolean(p.form) === prefilled);
+
+/** The Cloudflare API token's pre-filled form: its name, the permissions it pre-selects, what it should show, and what's added by hand. */
+export const CLOUDFLARE_TOKEN_FORM = {
+	name: "Coywolf Pack",
+	keys: PERMISSION_LIST.flatMap((p) => (p.form ? [p.form] : [])),
+	shows: `two policies: one scoped to ${b("Entire Account")} with ${named(pick("account", true))}, and one scoped to domains with ${named(pick("zone", true))}`,
+	add: `Add the rest by hand (search for each name): in the ${b("Entire Account")} policy, ${named(pick("account", false))}; in the domains policy, ${named(pick("zone", false))}. You can skip any whose feature you don't use (the note below says which is which).`,
+};
+
+/** The steps that create the Cloudflare API token with the pre-filled form. */
+const createTokenSteps = [
+	`Open ${link(tokenFormUrl(CLOUDFLARE_TOKEN_FORM.name, CLOUDFLARE_TOKEN_FORM.keys), "Cloudflare's token form, pre-filled")} (Cloudflare dashboard → Manage Account → Account API Tokens → Create Token). If you have more than one account, pick the site's. The form should show the name ${b(CLOUDFLARE_TOKEN_FORM.name)} and ${CLOUDFLARE_TOKEN_FORM.shows}.`,
+	`${CLOUDFLARE_TOKEN_FORM.add} Under ${b("Permission policies")}, each policy has a scope dropdown: ${b("Entire Account")} lists account permissions; zone permissions show only in a policy set to ${b("All Domains")} or ${b("Specified Domains")}.`,
+	`Set the domains policy's scope to ${b("Specified Domains")} and pick this site's domain (recommended: the token can then change only this site). To use one token on every site in the account, choose ${b("All Domains")} instead.`,
 	`Select ${b("Create Token")} at the bottom. (In Cloudflare's older token editor: Permissions, then Account Resources and Zone Resources, then ${b("Continue to summary")} and ${b("Create Token")}.)`,
 	`Copy the token right away. Cloudflare shows it only once. (If Cloudflare later refuses it, an account token may not cover that API yet: create the same token under ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")} instead.)`,
 ];
+
+/**
+ * A module page's guide: the feature uses the Cloudflare API token, which
+ * needs `needs` here; where to create the token, and how to add a missing
+ * permission. `before`: the feature's own steps first (a bucket name).
+ */
+function featureGuide(o: { summary: string; needs: CloudflarePermissionId[]; before?: string[]; note?: string }): Guide {
+	const needs = o.needs.map((id) => CLOUDFLARE_PERMISSIONS[id] as CloudflarePermission);
+	const policies = [...new Set(needs.map((p) => (p.scope === "account" ? `${b("Entire Account")} policy` : "domains policy")))];
+	return {
+		summary: o.summary,
+		steps: [
+			...(o.before ?? []),
+			`This uses the Cloudflare API token from the plugin's ${link(SETTINGS_PAGE, "Settings page")} (or the ${code("CLOUDFLARE_API_TOKEN")} Worker secret). Here it needs ${named(needs)}.`,
+			`No token yet? Create it with the steps under ${b("Cloudflare API token")} on the ${link(SETTINGS_PAGE, "Settings page")}: one token covers every feature, so you make it once.`,
+			`Token missing a permission? Open ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}, wherever you created it) and select ${b("⋯ → Edit")} next to the token. Under ${b("Permission policies")}, add it to the ${andList(policies)} (search for its name) and save. The token itself doesn't change, so there's nothing to paste again.`,
+		],
+		...(o.note ? { note: o.note } : {}),
+	};
+}
 
 export const GUIDES: Record<GuideId, Guide> = {
 	anthropic: {
@@ -121,8 +196,29 @@ export const GUIDES: Record<GuideId, Guide> = {
 		],
 		note: "Workers AI is billed to your Cloudflare account, with a daily free allowance.",
 	},
+	"cloudflare-token": {
+		summary: "How to create the Cloudflare API token",
+		steps: [
+			...createTokenSteps,
+			`Paste it into ${b("Cloudflare API token")} on the plugin's Settings page and save. It's stored encrypted. Or set it as a Worker secret instead: ${code("npx wrangler secret put CLOUDFLARE_API_TOKEN")}.`,
+		],
+		note: `Which feature needs which. ${PERMISSION_LIST.map((p) => `${b(p.name)}: ${p.for}`).join("; ")}. Restores never use this token: they keep the ${code("BACKUPS_API_TOKEN")} Worker secret (D1 → Edit), so this token doesn't need D1. Older per-feature tokens keep working until this one is saved; then remove them on the Features page.`,
+	},
+	"usage-token": featureGuide({
+		summary: "How Cloudflare usage reads your account",
+		needs: ["accountAnalytics", "accountSettings", "workersMetadata"],
+		note: "Account Settings → Read detects your plan; Workers → Metadata Read-Only finds this site's Worker and database and reads Workers Logs for the cache-warming estimate. The older Cloudflare usage token and USAGE_API_TOKEN Worker secret keep working until the Cloudflare API token is saved.",
+	}),
+	"files-token": featureGuide({
+		summary: "How large uploads use the Cloudflare API token",
+		before: [
+			`Under Buckets in the ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")}, find the bucket bound as ${code("MEDIA")} in your ${code("wrangler.jsonc")} (its ${code("bucket_name")}), and enter it as the R2 bucket name.`,
+		],
+		needs: ["r2"],
+		note: "The pack makes the R2 keys from the token (R2's access key ID is the token's ID, and its secret is the token's SHA-256), so there's nothing else to paste. A key pair for one bucket, under Advanced, wins over it.",
+	}),
 	r2: {
-		summary: "How to get the R2 account ID and keys",
+		summary: "How to get an R2 key for one bucket (optional)",
 		steps: [
 			`In the ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")}, copy your ${b("Account ID")} (shown on the R2 overview page) into R2 account ID on the Files page → Settings.`,
 			`Under Buckets, note the name of the bucket bound as ${code("MEDIA")} in your ${code("wrangler.jsonc")}. Enter it as the R2 bucket name.`,
@@ -131,71 +227,33 @@ export const GUIDES: Record<GuideId, Guide> = {
 			`Select ${b("Create API Token")}. Copy the ${b("Access Key ID")} and ${b("Secret Access Key")}. The secret is shown only once.`,
 			"Paste them into their fields and save. The secret is stored encrypted.",
 		],
+		note: "Only needed without the Cloudflare API token, or to limit large uploads to one bucket: a saved key pair wins over the token.",
 	},
-	stream: {
-		summary: "How to get the Stream account ID and API token",
-		steps: [
-			`In the ${link("https://dash.cloudflare.com/?to=/:account/stream", "Cloudflare dashboard → Stream")}, copy your ${b("Account ID")} (in the right-hand column, or from the address bar after dash.cloudflare.com/) into Cloudflare account ID on the Videos page → Settings.`,
-			...cloudflareTokenSteps({
-				permissions: b("Account → Stream → Edit"),
-				prefill: { name: "Coywolf Pack Stream", keys: [{ key: "stream", type: "edit" }], shows: `one policy, scoped to ${b("Entire Account")}, with ${b("Stream → Edit")}` },
-			}),
-			"Paste the token into Stream API token and save. It's stored encrypted.",
-		],
-		note: `Or set them as Worker variables instead: ${code("CF_ACCOUNT_ID")}, and the token with ${code("npx wrangler secret put CF_STREAM_TOKEN")}.`,
-	},
-	radar: {
-		summary: "How to get a Cloudflare Radar API token",
-		steps: [
-			...cloudflareTokenSteps({ permissions: b("Account → Radar → Read"), add: `In the policy scoped to ${b("Entire Account")}, search for ${code("Radar")} and select ${b("Read")}.` }),
-			"Paste the token into Cloudflare Radar API token and save. It's stored encrypted.",
-		],
-		note: `Radar's API is free. Or set the token as a Worker secret instead: ${code("npx wrangler secret put RADAR_API_TOKEN")}.`,
-	},
-	"crawler-hints-token": {
-		summary: "How to let the pack read Crawler Hints",
-		steps: [
-			`If the Performance page already shows Cloudflare usage, add one permission to that token: ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}, wherever you created it), then ${b("⋯ → Edit")} next to the token.`,
-			`Under Permission policies, select ${b("+ Add policy")}. Set the new policy's scope (it starts as Entire Account, which lists only account permissions) to ${b("All Domains")}, or ${b("Specified Domains")} with your site's domain. Search for ${code("zone")} and tick ${b("Read")} on the ${b("Zone")} row. In Cloudflare's older token editor, it's ${b("+ Add more → Zone → Zone → Read")}, with Zone Resources ${b("Include → All zones from an account")}.`,
-			`Save the token (${b("Update token")} or ${b("Save")} at the bottom). The token itself doesn't change, so there's nothing to paste again.`,
-			`No token yet? Create one with ${link(tokenFormUrl("Coywolf Pack read-only", [{ key: "zone", type: "read" }]), "this pre-filled form")}: it should show the name ${b("Coywolf Pack read-only")} and the permission ${b("Zone → Zone → Read")}. Choose your zones, create it, and copy the token (it's shown once).`,
-			`Set it as the ${code("USAGE_API_TOKEN")} Worker secret (${code("npx wrangler secret put USAGE_API_TOKEN")}; one token works for every site in the account), or paste it in ${b("Cloudflare usage")} on the plugin's Settings page. The Performance page's usage figures need three more read permissions, listed there.`,
-			"Come back to this page: the Crawler Hints card shows On or Off.",
-		],
-		note: "The token only reads. Cloudflare doesn't let API tokens change Crawler Hints, so the switch itself is always in the Cloudflare dashboard (Turn on in Cloudflare).",
-	},
-	"checkup-read-token": {
-		summary: "How to let the pack read the zone's settings",
-		steps: [
-			`The checkup reads with the Performance page's read-only token (Cloudflare usage). Open ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}, wherever you created it), then select ${b("⋯ → Edit")} next to that token.`,
-			`Under Permission policies, find the policy scoped to ${b("All Domains")} or ${b("Specified Domains")} (the one with ${b("Zone → Read")}, if you added it for Crawler Hints), or select ${b("+ Add policy")} and set its scope to one of those: zone permissions only show in a policy scoped to domains.`,
-			`In that policy, tick ${b("Read")} on these rows (search for each): ${b("Zone")}, ${b("Zone Settings")}, ${b("DNS")} (lists the zone's other hostnames) and ${b("Bot Management")} (the bot rows). In Cloudflare's older token editor: ${b("+ Add more → Zone → Zone Settings → Read")}, and the same for the others.`,
-			`Save the token (${b("Update token")} or ${b("Save")} at the bottom). The token itself doesn't change, so there's nothing to paste again.`,
-			`No token yet? Create one with ${link(tokenFormUrl("Coywolf Pack read-only", [{ key: "zone", type: "read" }, { key: "zone_settings", type: "read" }, { key: "dns", type: "read" }]), "this pre-filled form")}: it should show the name ${b("Coywolf Pack read-only")} and, in a policy scoped to domains, ${b("Zone → Read")}, ${b("Zone Settings → Read")} and ${b("DNS → Read")}. Add ${b("Bot Management → Read")} in the same policy (search for ${code("bot")}), choose your zones, create it, and copy the token (it's shown once).`,
-			`Set it as the ${code("USAGE_API_TOKEN")} Worker secret (${code("npx wrangler secret put USAGE_API_TOKEN")}; one token works for every site in the account), or paste it in ${b("Cloudflare usage")} on the plugin's Settings page. The Performance page's usage figures need three account permissions too, listed there.`,
-			`Come back to this page and select ${b("Check again")}.`,
-		],
-		note: "This token only reads. The one-click fixes use a separate setup token, so the read-only token can stay read-only.",
-	},
-	"checkup-setup-token": {
-		summary: "How to get the setup token for the one-click fixes",
-		steps: [
-			...cloudflareTokenSteps({
-				permissions: `${b("Zone → Zone → Read")} and ${b("Zone → Zone Settings → Edit")}, for this site's domain only`,
-				prefill: {
-					name: "Coywolf Pack Cloudflare setup",
-					keys: [
-						{ key: "zone", type: "read" },
-						{ key: "zone_settings", type: "edit" },
-					],
-					shows: `one policy scoped to domains, with ${b("Zone → Read")} and ${b("Zone Settings → Edit")}`,
-				},
-				zone: true,
-			}),
-			`Paste it into ${b("Setup token")} on this page. Save it to keep it (stored encrypted), or leave it unsaved to use it just for the next fix.`,
-		],
-		note: "Each fix changes one zone setting, and only when it isn't already set. You can delete the token in Cloudflare once you're done.",
-	},
+	stream: featureGuide({
+		summary: "How Videos uses the Cloudflare API token",
+		needs: ["stream"],
+		note: `The account is the token's own; if it sees more than one, enter the account ID under Advanced (or set ${code("CF_ACCOUNT_ID")}). The older Stream token and ${code("CF_STREAM_TOKEN")} Worker secret keep working until the Cloudflare API token is saved.`,
+	}),
+	radar: featureGuide({
+		summary: "How the crawler list uses the Cloudflare API token",
+		needs: ["radar"],
+		note: `Radar's API is free. The older Radar token and ${code("RADAR_API_TOKEN")} Worker secret keep working until the Cloudflare API token is saved.`,
+	}),
+	"crawler-hints-token": featureGuide({
+		summary: "How the pack reads Crawler Hints",
+		needs: ["zone"],
+		note: "The token only reads it. Cloudflare doesn't let API tokens change Crawler Hints, so the switch itself is always in the Cloudflare dashboard (Turn on in Cloudflare).",
+	}),
+	"checkup-read-token": featureGuide({
+		summary: "How the checkup reads the zone's settings",
+		needs: ["zone", "zoneSettings", "dns", "botManagement"],
+		note: `Then come back to this page and select ${b("Check again")}. Zone Settings → Edit and DNS → Edit include reading.`,
+	}),
+	"checkup-setup-token": featureGuide({
+		summary: "How the one-click fixes use the Cloudflare API token",
+		needs: ["zone", "zoneSettings"],
+		note: "Each fix changes one zone setting, and only when it isn't already set.",
+	}),
 	"tracking-params": {
 		summary: "How to serve links with tracking parameters from the cache",
 		steps: [
@@ -207,31 +265,11 @@ export const GUIDES: Record<GuideId, Guide> = {
 		],
 		note: "Only links with tracking parameters run the Worker (once, without rendering); every other request is served from the cache as before. Analytics in the browser still see the parameters. Each such request is billed twice: the request and the call through the cache.",
 	},
-	"insights-token": {
-		summary: "How to let the pack read Cloudflare analytics for Insights",
-		steps: [
-			`If the Performance page already shows Cloudflare usage, edit that token instead of making a new one: ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}), then ${b("⋯ → Edit")} next to it. Under Permission policies, select ${b("+ Add policy")}, set its scope to ${b("All Domains")} (or ${b("Specified Domains")} → this site's domain), and add ${b("Zone → Read")} and ${b("Analytics → Read")} (search for ${code("analytics")}: it's the zone permission, not Account Analytics). Save it. The token itself doesn't change, so there's nothing to paste again.`,
-			"No token yet? Create one with the steps below. It only reads.",
-			...cloudflareTokenSteps({
-				permissions: `${b("Account → Account Analytics → Read")} and ${b("Account → Account Settings → Read")} (Core Web Vitals, and the Performance page's usage card), and ${b("Zone → Zone → Read")} and ${b("Zone → Analytics → Read")} (edge errors and crawlers)`,
-				prefill: {
-					name: "Coywolf Pack read-only",
-					keys: [
-						{ key: "account_analytics", type: "read" },
-						{ key: "account_settings", type: "read" },
-						{ key: "zone", type: "read" },
-						{ key: "analytics", type: "read" },
-					],
-					shows: `${b("Account Analytics → Read")} and ${b("Account Settings → Read")} in a policy scoped to ${b("Entire Account")}, and ${b("Zone → Read")} and ${b("Analytics → Read")} in a policy scoped to domains`,
-				},
-				add: `For the Performance page's usage card too, add ${b("Workers → Metadata Read-Only")} in the Entire Account policy (search for ${code("workers")}).`,
-				zone: true,
-			}),
-			`Set it as the ${code("USAGE_API_TOKEN")} Worker secret (${code("npx wrangler secret put USAGE_API_TOKEN")}; one token works for every site in the account), or paste it in ${b("Cloudflare usage")} on the plugin's Settings page. It's stored encrypted.`,
-			`Come back to this page and select ${b("Refresh")}.`,
-		],
-		note: "Cloudflare's HTTP analytics are sampled, so counts are estimates. Every plan keeps at least 31 days, and a Free zone can read 30 days at a time.",
-	},
+	"insights-token": featureGuide({
+		summary: "How Insights reads Cloudflare's analytics",
+		needs: ["accountAnalytics", "accountSettings", "zone", "analytics"],
+		note: `Account Analytics → Read is for Core Web Vitals; Zone → Read and Analytics → Read are for edge errors and crawlers. Then select ${b("Refresh")}. Cloudflare's HTTP analytics are sampled, so counts are estimates. Every plan keeps at least 31 days, and a Free zone can read 30 days at a time.`,
+	}),
 	"web-analytics": {
 		summary: "How to add the site to Cloudflare Web Analytics",
 		steps: [
@@ -239,7 +277,7 @@ export const GUIDES: Record<GuideId, Guide> = {
 			`Open the site's ${b("Manage site")} page and find the JavaScript snippet. Copy the token from it: the 32 letters and digits after ${code("&quot;token&quot;:")} in ${code("data-cf-beacon")}.`,
 			`Paste the token into ${b("Web Analytics token")} on this page and save, then turn on ${b("Web Analytics beacon")}. The pack adds the beacon to every public page and clears the cached pages, so it's on them at once.`,
 			"If Cloudflare's own automatic setup is on for the site, pages may get the beacon from Cloudflare instead. Cloudflare doesn't document whether it reaches pages a Worker serves, so the pack's beacon is the dependable way. The two never double up: the pack's script does nothing on a page that already has the beacon.",
-			"The card reads the numbers with the read-only Cloudflare token (Account Analytics → Read, and Account Settings → Read to find the site). They show after the first visits; a low-traffic site needs a few days.",
+			"The card reads the numbers with the Cloudflare API token from the plugin's Settings page (Account Analytics → Read, and Account Settings → Read to find the site). They show after the first visits; a low-traffic site needs a few days.",
 		],
 		note: "Web Analytics sets no cookies, uses no localStorage, doesn't fingerprint visitors by IP address or user agent, and doesn't log query strings. The beacon loads from static.cloudflareinsights.com and reports to cloudflareinsights.com. CLS is measured in Chromium browsers only.",
 	},
@@ -281,26 +319,14 @@ export const GUIDES: Record<GuideId, Guide> = {
 		],
 		note: "Cloudflare's Free plan includes 5,000 unique image transformations a month (each new size of each image counts once a month). Beyond that, transformations need a paid Cloudflare Images plan.",
 	},
-	"backups-token": {
-		summary: "How to get a Cloudflare API token for Retention on Cloudflare",
-		steps: [
-			`In the ${link("https://dash.cloudflare.com/", "Cloudflare dashboard")}, open any of your domains and copy the ${b("Account ID")} from the right-hand column (API section) into Cloudflare account ID. (Already filled in when the site's ${code("backups.restore")} option has it.)`,
+	"backups-token": featureGuide({
+		summary: "How Retention on Cloudflare uses the Cloudflare API token",
+		before: [
 			`Find the backup bucket's name: in the site's ${code("wrangler.jsonc")}, the ${code("bucket_name")} next to ${code('"binding": "BACKUPS"')} (or see ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")}). Enter it as Backup bucket name. The check makes sure it's the bucket this site writes to.`,
-			...cloudflareTokenSteps({
-				permissions: `${b("Account → Workers R2 Storage → Edit")}, and ${b("Account → D1 → Edit")} if the same token should also do restores`,
-				prefill: {
-					name: "Coywolf Pack backups",
-					keys: [
-						{ key: "workers_r2", type: "edit" },
-						{ key: "d1", type: "edit" },
-					],
-					shows: `one policy, scoped to ${b("Entire Account")}, with ${b("Workers R2 Storage → Edit")} and ${b("D1 → Edit")}`,
-				},
-			}),
-			`Paste the token into Cloudflare API token. Tick ${b("Remember the token")} to keep it (stored encrypted), so the pack can look at the rule each day; or leave it unticked to use it just this once. Then select ${b("Check")}.`,
 		],
-		note: `One token can do both jobs: set it as the ${code("BACKUPS_API_TOKEN")} Worker secret (${code("npx wrangler secret put BACKUPS_API_TOKEN")}) with both permissions, and this page uses it without pasting. It's only sent to api.cloudflare.com.`,
-	},
+		needs: ["r2"],
+		note: `Restores don't use this token: they keep their own (the ${code("BACKUPS_API_TOKEN")} Worker secret, with D1 → Edit). The older retention token, and that Worker secret when it has Workers R2 Storage → Edit, keep working until the Cloudflare API token is saved.`,
+	}),
 	"backups-retention": {
 		summary: "How to set the retention rule by hand in the Cloudflare dashboard",
 		steps: [
@@ -313,46 +339,16 @@ export const GUIDES: Record<GuideId, Guide> = {
 		],
 		note: "Keep the bucket's default rule that aborts incomplete multipart uploads after 7 days. A bucket lock is set the same way under Settings → Bucket lock rules; read the warning on this page first.",
 	},
-	"images-token": {
-		summary: "How to get a Cloudflare API token for Set up media host",
-		steps: [
-			`In the ${link("https://dash.cloudflare.com/", "Cloudflare dashboard")}, open the site's domain and copy the ${b("Account ID")} from the right-hand column (API section) into Cloudflare account ID.`,
-			...cloudflareTokenSteps({
-				permissions: `these six: ${b("Zone → Zone → Read")}, ${b("Zone → Zone Settings → Edit")}, ${b("Zone → Transform Rules → Edit")}, ${b("Zone → DNS → Edit")}, ${b("Account → Workers R2 Storage → Edit")} and ${b("Account → Account Rulesets → Read")}`,
-				prefill: {
-					name: "Coywolf Pack media host setup",
-					keys: [
-						{ key: "zone", type: "read" },
-						{ key: "zone_settings", type: "edit" },
-						{ key: "dns", type: "edit" },
-						{ key: "workers_r2", type: "edit" },
-					],
-					shows: `four of the six permissions: ${b("Zone → Read")}, ${b("Zone Settings → Edit")} and ${b("DNS → Edit")} in a policy scoped to domains, and ${b("Workers R2 Storage → Edit")} in one scoped to ${b("Entire Account")}`,
-				},
-				add: `Add the two the form can't pre-fill: ${b("Transform Rules → Edit")} in the domains policy (search for ${code("transform")}), and ${b("Account Rulesets → Read")} in the Entire Account policy (search for ${code("rulesets")}).`,
-				zone: true,
-			}),
-			"Paste the token into Cloudflare API token. Save it to keep it (stored encrypted), or leave it unsaved to use it just this once.",
-		],
-		note: `The token is used only for the setup, and only with api.cloudflare.com. You can delete it in Cloudflare afterward. Or set it as a Worker secret instead: ${code("npx wrangler secret put IMAGES_API_TOKEN")}.`,
-	},
-	"browser-run-token": {
-		summary: "How to get a Cloudflare API token for Social Images",
-		steps: [
-			`In the ${link("https://dash.cloudflare.com/", "Cloudflare dashboard")}, open the site's account and copy its ${b("Account ID")} (the account's home page, or the right-hand column of any domain's overview) into Cloudflare account ID.`,
-			...cloudflareTokenSteps({
-				permissions: `one permission: ${b("Account → Browser Run → Edit")} (called Browser Rendering → Edit in some accounts)`,
-				prefill: {
-					name: "Coywolf Pack Social Images",
-					keys: [],
-					shows: "no permissions yet: Cloudflare's form can't pre-select Browser Run",
-				},
-				add: `In a policy scoped to ${b("Entire Account")}, add ${b("Browser Run → Edit")} (search for ${code("browser")}).`,
-			}),
-			"Paste the token into Cloudflare API token and save. It's stored encrypted.",
-		],
-		note: `The token is used only with api.cloudflare.com, to take a screenshot of the image template. Browser Run includes 10 minutes of browser time a day on Workers Free and 10 hours a month on Workers Paid; one image takes a second or two. Or skip the token: add ${code('"browser": { "binding": "BROWSER" }')} to the site's ${code("wrangler.jsonc")} (with ${code("compatibility_date")} 2026-03-24 or later), or set the token as a Worker secret: ${code("npx wrangler secret put BROWSER_RUN_API_TOKEN")}.`,
-	},
+	"images-token": featureGuide({
+		summary: "How Set up media host uses the Cloudflare API token",
+		needs: ["zone", "zoneSettings", "transformRules", "dns", "r2", "rulesets"],
+		note: `Clearing the media host's images needs ${b("Cache Purge → Purge")} too, and its cache rule (Performance page) ${b("Cache Rules → Edit")}. The token is only sent to api.cloudflare.com. The older Clean Image URLs token and ${code("IMAGES_API_TOKEN")} Worker secret keep working until the Cloudflare API token is saved.`,
+	}),
+	"browser-run-token": featureGuide({
+		summary: "How Social Images uses the Cloudflare API token",
+		needs: ["browserRun"],
+		note: `The token is used only with api.cloudflare.com, to take a screenshot of the image template. Browser Run includes 10 minutes of browser time a day on Workers Free and 10 hours a month on Workers Paid; one image takes a second or two. Or skip the token: add ${code('"browser": { "binding": "BROWSER" }')} to the site's ${code("wrangler.jsonc")} (with ${code("compatibility_date")} 2026-03-24 or later). The older Social Images token and ${code("BROWSER_RUN_API_TOKEN")} Worker secret keep working until the Cloudflare API token is saved.`,
+	}),
 };
 
 /**
@@ -360,45 +356,21 @@ export const GUIDES: Record<GuideId, Guide> = {
  * plain description, then the guides (closed). Keys match SECRET_SETTINGS.
  */
 export const SETTINGS_PAGE_GUIDES: Record<string, { intro: string; guides: GuideId[] }> = {
+	cloudflareApiToken: {
+		intro: "One token for every Cloudflare feature: usage, Insights, Checkup, Clean Image URLs, Videos, Backups retention, Social Images, the Radar crawler list and large uploads. Or set the CLOUDFLARE_API_TOKEN Worker secret.",
+		guides: ["cloudflare-token"],
+	},
 	aiApiKey: {
-		intro: "For Anthropic, OpenAI or Gemini (Workers AI needs no key). The provider and model settings are on the AI Enrichment page.",
+		intro: "For Anthropic, OpenAI or Gemini (Workers AI needs no key). The provider and model are on the AI Enrichment page.",
 		guides: ["anthropic", "openai", "gemini"],
 	},
-	filesR2SecretAccessKey: {
-		intro: "For large uploads. The account ID, access key ID and bucket name go on the Files page → Settings.",
-		guides: ["r2"],
-	},
-	videosApiToken: {
-		intro: "Or set the CF_STREAM_TOKEN Worker secret. The account ID goes on the Videos page → Settings.",
-		guides: ["stream"],
-	},
-	imagesApiToken: {
-		intro: "Optional. Only for Set up media host on the Clean Image URLs page. Or set the IMAGES_API_TOKEN Worker secret.",
-		guides: ["images-token"],
-	},
-	backupsCloudflareToken: {
-		intro: "Optional. Only for Retention on Cloudflare on the Backups page. Or add Workers R2 Storage → Edit to the BACKUPS_API_TOKEN Worker secret's token.",
-		guides: ["backups-token"],
-	},
-	robotsRadarToken: {
-		intro: "Optional. Keeps the crawler list current from Cloudflare Radar each week. Or set the RADAR_API_TOKEN Worker secret.",
-		guides: ["radar"],
-	},
-	cloudflareSetupToken: {
-		intro: "Optional. Only for the one-click fixes on the Cloudflare Checkup page; reading the checkup uses the Cloudflare usage token.",
-		guides: ["checkup-setup-token"],
-	},
 	insightsFathomApiKey: {
-		intro: "Optional. For the Fathom traffic card on the Insights page, where the site ID goes.",
+		intro: "For the Fathom card on the Insights page, where the site ID goes.",
 		guides: ["fathom"],
 	},
 	insightsGoogleServiceAccount: {
-		intro: "Optional. For the Google Search Console card on the Insights page. Paste the whole JSON key file.",
+		intro: "For the Search Console card on the Insights page. Paste the whole JSON key file.",
 		guides: ["search-console"],
-	},
-	socialImagesApiToken: {
-		intro: "Optional with a BROWSER binding. Makes social images with Cloudflare Browser Run. The account ID and template are on the Social Images page. Or set the BROWSER_RUN_API_TOKEN Worker secret.",
-		guides: ["browser-run-token"],
 	},
 };
 

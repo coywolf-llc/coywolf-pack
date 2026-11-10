@@ -4,6 +4,9 @@
  *   GET https://api.cloudflare.com/client/v4/radar/bots?limit=1000&offset=N
  *   Authorization: Bearer <token>   (token permission: Account → Radar → Read)
  *
+ * The token is the Cloudflare API token (src/core/cloudflare-token.ts), else
+ * the older Radar token or the RADAR_API_TOKEN Worker secret.
+ *
  * One request covers the whole directory (~710 bots in October 2026; the
  * API caps `limit` at 1000, so we page by offset just in case). The list
  * gives slug, name, operator, category, description, kind and
@@ -13,7 +16,8 @@
 import type { PluginContext } from "emdash";
 
 import { CLOUDFLARE_API_HOST, CloudflareApiError, cloudflareApi, contextFetch, errorDetail } from "../core/cloudflare-api.js";
-import { secret, workerEnv } from "../shared.js";
+import { cloudflareToken, noTokenMessage } from "../core/cloudflare-token.js";
+import { workerEnv } from "../shared.js";
 import { type BotOverlay, type RadarBot, mergeRadar } from "./bots.js";
 import { baselineBots } from "./directory.js";
 
@@ -37,25 +41,25 @@ export interface SyncState {
 	error?: string;
 }
 
-/** Where the Radar token comes from: the encrypted plugin setting, the Worker secret, or nowhere. */
-export async function radarTokenSource(ctx: Pick<PluginContext, "settings">): Promise<"settings" | "env" | null> {
-	const fromSettings = await ctx.settings.get<string>(RADAR_TOKEN_SETTING).catch(() => null);
-	if (fromSettings?.trim()) return "settings";
-	try {
-		return secret(await workerEnv(), RADAR_TOKEN_SECRET)?.trim() ? "env" : null;
-	} catch {
-		return null;
-	}
+/**
+ * Where the Radar token comes from: the Cloudflare API token ("shared", saved on the plugin's Settings page;
+ * "shared-env", the CLOUDFLARE_API_TOKEN Worker secret), the older Radar token ("settings") or its Worker
+ * secret ("env"), or nowhere.
+ */
+export type RadarTokenSource = "shared" | "shared-env" | "settings" | "env";
+
+async function radarResolved(ctx: Pick<PluginContext, "settings">, bindings?: Record<string, unknown>) {
+	return cloudflareToken(ctx, bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>)), "radar");
 }
 
-export async function radarToken(ctx: Pick<PluginContext, "settings">): Promise<string | undefined> {
-	const fromSettings = await ctx.settings.get<string>(RADAR_TOKEN_SETTING);
-	if (fromSettings?.trim()) return fromSettings.trim();
-	try {
-		return secret(await workerEnv(), RADAR_TOKEN_SECRET)?.trim() || undefined;
-	} catch {
-		return undefined;
-	}
+export async function radarTokenSource(ctx: Pick<PluginContext, "settings">, bindings?: Record<string, unknown>): Promise<RadarTokenSource | null> {
+	const { source } = await radarResolved(ctx, bindings);
+	return source === "shared" || source === "shared-env" ? source : source === "older" ? "settings" : source === "older-env" ? "env" : null;
+}
+
+/** The token the Radar sync uses (`bindings` replaces the Worker's env in tests). */
+export async function radarToken(ctx: Pick<PluginContext, "settings">, bindings?: Record<string, unknown>): Promise<string | undefined> {
+	return (await radarResolved(ctx, bindings)).token ?? undefined;
 }
 
 /** Every overlay document (plugin storage pages are capped at 100). */
@@ -83,7 +87,7 @@ async function fetchRadar(ctx: PluginContext, token: string): Promise<RadarBot[]
 		} catch (error) {
 			if (!(error instanceof CloudflareApiError)) throw error;
 			if (error.status === 401 || error.status === 403) {
-				throw new Error(`Cloudflare rejected the Radar API token (${error.status}). It needs the Account → Radar → Read permission.`);
+				throw new Error(`Cloudflare refused the token (${error.status}). The Cloudflare API token needs Radar → Read.`);
 			}
 			const detail = errorDetail(error.errors);
 			throw new Error(`Radar API error ${error.status}${detail ? `: ${detail}` : ""}`);
@@ -100,7 +104,7 @@ export async function syncRadar(ctx: PluginContext): Promise<SyncState> {
 	const at = new Date().toISOString();
 	const token = await radarToken(ctx);
 	if (!token) {
-		const state: SyncState = { at, ok: false, error: "No Radar API token. Add one under Coywolf Pack settings, or set the RADAR_API_TOKEN Worker secret." };
+		const state: SyncState = { at, ok: false, error: noTokenMessage("Radar → Read") };
 		await ctx.kv.set(SYNC_STATE_KEY, state);
 		return state;
 	}

@@ -71,18 +71,18 @@ The media host needs three things on Cloudflare, in the zone of the site's domai
 
 4. **Smart Tiered Cache** turned on for the zone (Caching → Tiered Cache → Smart Tiered Caching; free on every plan). Each Cloudflare data center has its own cache, so an image nobody has loaded there yet goes back to R2. With Smart Tiered Cache, that data center asks a nearby upper-tier Cloudflare cache first (placed near the R2 bucket), so after one visit anywhere, first loads elsewhere come from Cloudflare's cache. Pages don't need it: Workers Cache is always tiered. The setup only ever turns it on, never off.
 
-Do it by hand with the step-by-step guide on the Clean Image URLs page, or let **Set up media host** on that page do it through the Cloudflare API: enter the media host, your Cloudflare account ID, the media bucket's name and an API token, select **Review setup** to see the plan ("Turn on Image Transformations for coywolf.com, connect media.coywolf.com to the R2 bucket example-media, add 2 URL rewrite rules, turn on Smart Tiered Cache"), then **Apply**. Anything already done is skipped (a token without permission for Smart Tiered Cache still gets the other steps, and that step names the missing permission), the zone's other URL rewrite rules are kept as they are, and only the pack's own two rules (matched by name) are replaced. It finishes with a check. The page checks the media host each time it opens: when it works, Set up media host shows as done with **Run setup again**, and the host field opens with **Change host**.
+Do it by hand with the step-by-step guide on the Clean Image URLs page, or let **Set up media host** on that page do it through the Cloudflare API: enter the media host and the media bucket's name (with the [Cloudflare API token](README.md#the-cloudflare-api-token) saved; the account comes from the token), select **Review setup** to see the plan ("Turn on Image Transformations for coywolf.com, connect media.coywolf.com to the R2 bucket example-media, add 2 URL rewrite rules, turn on Smart Tiered Cache"), then **Apply**. Anything already done is skipped (a token without permission for Smart Tiered Cache still gets the other steps, and that step names the missing permission), the zone's other URL rewrite rules are kept as they are, and only the pack's own two rules (matched by name) are replaced. It finishes with a check. The page checks the media host each time it opens: when it works, Set up media host shows as done with **Run setup again**, and the host field opens with **Change host**.
 
 With a media host set, every page the site serves carries `Link: <https://media.coywolf.com>; rel=preconnect`, so browsers open the connection to the media host (DNS, TCP and TLS) while the page is still arriving, not when they reach the first image.
 
-The API token needs these permissions (Account Resources: your account; Zone Resources: the site's zone):
+The Cloudflare API token needs these permissions here:
 
-- Zone → Zone → Read (to find the zone)
-- Zone → Zone Settings → Edit (Image Transformations and Smart Tiered Cache)
-- Zone → Transform Rules → Edit, and Account → Account Rulesets → Read (the URL rewrite rules)
-- Account → Workers R2 Storage → Edit, and Zone → DNS → Edit (the custom domain and its DNS record)
+- Zone → Read (to find the zone)
+- Zone Settings → Edit (Image Transformations and Smart Tiered Cache)
+- Transform Rules → Edit, and Account Rulesets → Read (the URL rewrite rules)
+- Workers R2 Storage → Edit, and DNS → Edit (the custom domain and its DNS record)
 
-The token can be typed just for the setup, saved (encrypted) on the page or the plugin's Settings page, or set as the `IMAGES_API_TOKEN` (or `CLOUDFLARE_API_TOKEN`) Worker secret; the account ID can come from `CF_ACCOUNT_ID`. It's only sent to `api.cloudflare.com`, and you can delete it in Cloudflare afterward.
+Clearing the media host's images also needs **Cache Purge → Purge**, and its cache rule on the Performance page **Cache Rules → Edit**. The token is only sent to `api.cloudflare.com`. If it sees more than one account, enter the account ID under **Advanced**, or set `CF_ACCOUNT_ID`. Before the Cloudflare API token is saved, the page keeps its own fields: a token typed just for the setup, the older saved token, or the `IMAGES_API_TOKEN` Worker secret, and the account ID.
 
 **Check** (on the page) fetches a recent image from the media host, and a 64×64 copy of it twice, and reports whether the host is reachable, the original is served, resizing works (`cf-resized` header or an image type) and the copy is cached.
 

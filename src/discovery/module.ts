@@ -17,6 +17,7 @@ import { type CrawlerHintsZone, crawlerHintsDashboardUrl, readCrawlerHints } fro
 import { buildFeed } from "./feed-build.js";
 import { FEED_PATH, FEED_TAG } from "./feed.js";
 import { purgePageCache } from "../pageCache/lib.js";
+import { UNREADABLE_TOKEN_MESSAGE } from "../core/cloudflare-token.js";
 import { readCloudflareToken } from "../pageCache/usage.js";
 import { markdownUrl } from "./markdown.js";
 import { SECURITY_TXT_PATH, SECURITY_TXT_TAG, securityTxtProblems } from "./security-txt.js";
@@ -99,7 +100,7 @@ export async function retireIndexNow(ctx: PluginContext): Promise<void> {
 /** The site's zone, found once with the token and kept: { host, zone }. */
 const ZONE_KEY = "state:discovery:crawlerHintsZone";
 
-/** Whether Crawler Hints is on for the site's zone, read with the read-only Cloudflare API token. */
+/** Whether Crawler Hints is on for the site's zone, read with the Cloudflare API token (Zone → Read). */
 async function crawlerHintsStatus(ctx: PluginContext) {
 	const host = new URL(siteOrigin(ctx)).host;
 	const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
@@ -112,8 +113,7 @@ async function crawlerHintsStatus(ctx: PluginContext) {
 			dashboardUrl: crawlerHintsDashboardUrl(null),
 			problem: {
 				kind: "bad-token" as const,
-				message:
-					"The saved Cloudflare usage token can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed. Save the token again (Cloudflare usage on the plugin's Settings page), or set the USAGE_API_TOKEN Worker secret.",
+				message: UNREADABLE_TOKEN_MESSAGE,
 			},
 			checkedAt: new Date().toISOString(),
 		};
@@ -283,7 +283,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 
 		/**
 		 * Whether Crawler Hints is on for the site's Cloudflare zone, and the link to its switch. Read with the
-		 * read-only Cloudflare API token (Zone → Zone → Read); Cloudflare doesn't let API tokens change it. A GET:
+		 * Cloudflare API token (Zone → Zone → Read); Cloudflare doesn't let API tokens change it. A GET:
 		 * it changes nothing, so it clears no cache. Loaded by the Discovery page after the rest of the page.
 		 */
 		"discovery/crawler-hints": {

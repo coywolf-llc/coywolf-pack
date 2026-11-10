@@ -4,6 +4,9 @@ import { test } from "node:test";
 
 import "./ts-resolve.mjs";
 
+// Worker secrets are also read from process.env: a developer's shell may export these.
+for (const name of ["CLOUDFLARE_API_TOKEN", "USAGE_API_TOKEN", "CF_ACCOUNT_ID", "CLOUDFLARE_ACCOUNT_ID"]) delete process.env[name];
+
 const { estimateBill, estimateWarming, foldTotals, planFromDailyPeaks, planFromEntitlements, PAID } = await import("../src/pageCache/usage-core.ts");
 const { usageReport } = await import("../src/pageCache/usage.ts");
 
@@ -105,7 +108,8 @@ function fakeApi(over = {}) {
 test("not configured without a token: says how to add one", async () => {
 	const r = await usageReport(fakeCtx(), false, {});
 	assert.equal(r.configured, false);
-	assert.match(r.reason, /USAGE_API_TOKEN/);
+	assert.match(r.reason, /Add the Cloudflare API token on the plugin's Settings page \(or the CLOUDFLARE_API_TOKEN Worker secret\)/);
+	assert.match(r.reason, /Workers → Metadata Read-Only/);
 });
 
 test("finds the site's Worker by its deployed version and its D1 database, then reads usage", async () => {
@@ -180,4 +184,18 @@ test("a Worker that isn't found is remembered for this version, not searched for
 	ctx.kvMap.delete("cache:usage");
 	await usageReport(ctx, false, { CF_VERSION_METADATA: { id: "v-unknown" } });
 	assert.equal(api.calls.filter((c) => c.path.endsWith("/deployments")).length, scans);
+});
+
+test("the Cloudflare API token wins over the older usage token; the older one, and its Worker secret, still work alone", async () => {
+	const read = async (settings, env) => {
+		const api = fakeApi();
+		const ctx = { ...fakeCtx(settings), http: { fetch: api.fetch } };
+		const r = await usageReport(ctx, false, { CF_VERSION_METADATA: { id: "v-123" }, ...env });
+		assert.equal(r.configured, true);
+		return [...new Set(api.calls.map((c) => c.auth))];
+	};
+	assert.deepEqual(await read({ cloudflareApiToken: "new-token", usageApiToken: "old-token" }, { USAGE_API_TOKEN: "env-token" }), ["Bearer new-token"]);
+	assert.deepEqual(await read({ usageApiToken: "old-token" }, { CLOUDFLARE_API_TOKEN: "shared-env" }), ["Bearer old-token"]);
+	assert.deepEqual(await read({}, { USAGE_API_TOKEN: "env-token", CLOUDFLARE_API_TOKEN: "shared-env" }), ["Bearer env-token"], "CLOUDFLARE_API_TOKEN ranks last");
+	assert.deepEqual(await read({}, { CLOUDFLARE_API_TOKEN: "shared-env" }), ["Bearer shared-env"]);
 });

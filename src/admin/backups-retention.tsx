@@ -12,7 +12,7 @@ import { apiGet, apiPost, errorText } from "./api.js";
 import { ConfirmDialog } from "./confirm-dialog.js";
 import { CredentialGuide } from "./guides.js";
 import { DocsLink } from "./page.js";
-import { SecretField, SettingsSection } from "./settings-ui.js";
+import { SecretField, SettingsSection, SharedTokenNote } from "./settings-ui.js";
 import { AGING_PREFIXES, backupsStoppedWarning, days, lifecycleSummary } from "./backups-retention-core.js";
 import { useToast } from "./toast.js";
 
@@ -50,6 +50,9 @@ interface RetentionInfo {
 	envToken: boolean;
 	envTokenName: string;
 	envAccountId: boolean;
+	/** The Cloudflare API token is the one in use (saved on Settings, or `sharedTokenEnv`: the Worker secret). */
+	sharedToken?: boolean;
+	sharedTokenEnv?: boolean;
 	retentionDays: number;
 	state: RetentionState | null;
 	/** When the newest backup was made (ISO), or null. */
@@ -123,8 +126,10 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 	const lockInSync = (status?.lockDays ?? null) === (lock ? props.retentionDays : null);
 	const showForm = open || !state;
 	const stoppedWarning = backupsStoppedWarning(info.newestBackup, props.retentionDays, Boolean(state && AGING_PREFIXES.every((p) => state.status.byPrefix[p] != null)));
-	const hasToken = Boolean(draft.token.trim() || info.tokenSaved || info.envToken);
-	const ready = Boolean((draft.accountId.trim() || info.envAccountId) && (draft.bucket.trim() || info.bucket) && hasToken);
+	const shared = Boolean(info.sharedToken);
+	const hasToken = Boolean(shared || draft.token.trim() || info.tokenSaved || info.envToken);
+	// With the Cloudflare API token, the account is found from the token (the check says so when it can't be).
+	const ready = Boolean((shared || draft.accountId.trim() || info.envAccountId) && (draft.bucket.trim() || info.bucket) && hasToken);
 	const busy = pending !== undefined;
 	const applyLabel = status?.ours ? (inSync ? "Apply again" : `Update the rule to ${days(props.retentionDays)}`) : "Set the retention rule";
 
@@ -211,7 +216,36 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 				</p>
 			)}
 
-			{showForm && (
+			{showForm && shared && (
+				<div className="space-y-4">
+					<div className="sm:max-w-md">
+						<Input
+							label="Backup bucket name"
+							description="The bucket_name of the BACKUPS binding in wrangler.jsonc. The check makes sure it's this site's."
+							placeholder={info.suggestedBucket}
+							value={draft.bucket}
+							disabled={busy}
+							onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft((d) => ({ ...d, bucket: e.target.value }))}
+						/>
+					</div>
+					<SharedTokenNote env={info.sharedTokenEnv}>
+						<div className="sm:max-w-md">
+							<Input
+								label="Cloudflare account ID"
+								description="Only if the token sees more than one account. Empty uses the backups.restore account, CF_ACCOUNT_ID, or the token's own account."
+								placeholder={info.envAccountId ? "From the site's settings" : "32 letters and numbers"}
+								value={draft.accountId}
+								disabled={busy}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft((d) => ({ ...d, accountId: e.target.value }))}
+							/>
+						</div>
+					</SharedTokenNote>
+					<CredentialGuide id="backups-token" />
+					<CredentialGuide id="backups-retention" />
+				</div>
+			)}
+
+			{showForm && !shared && (
 				<div className="space-y-4">
 					<div className="grid gap-4 sm:grid-cols-2">
 						<Input
@@ -291,7 +325,13 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 					</Button>
 				)}
 			</div>
-			{!ready && <p className="text-xs text-kumo-subtle">Enter the account ID, the backup bucket name and a token (or set the {info.envTokenName} Worker secret) first.</p>}
+			{!ready && (
+				<p className="text-xs text-kumo-subtle">
+					{shared
+						? "Enter the backup bucket name first."
+						: `Enter the account ID, the backup bucket name and a token (or add the Cloudflare API token on the plugin's Settings page) first.`}
+				</p>
+			)}
 
 			<ConfirmDialog
 				open={confirm === "lock"}

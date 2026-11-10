@@ -915,6 +915,83 @@ test("Settings page: the route, the form id and Kumo's Input for each secret fie
 	const field = functionSource(admin, "SettingFieldInput");
 	const secret = field.slice(field.indexOf('case "secret"'));
 	assert.match(secret, /^case "secret": return [\s\S]{0,200}?jsx\(Input, \{\s*type: "password",\s*label: field\.label,\s*description: field\.description,/, `the secret field isn't Kumo's Input with the schema's label and description:\n${secret.slice(0, 600)}`);
+	// The older-tokens toggle relies on this: each secret is a div holding Kumo's Input, then a type="button" Clear stored
+	// value button only while a value is saved (and not cleared yet). That button is how the script tells a saved secret.
+	const pure = String.raw`(?:\/\*\s*@__PURE__\s*\*\/\s*)?`;
+	assert.match(
+		secret,
+		new RegExp(String.raw`^case "secret": return ${pure}jsxs\("div", \{\s*className: "space-y-1",\s*children: \[${pure}jsx\(Input, \{`),
+		`the secret field is no longer a div around Kumo's Input:\n${secret.slice(0, 600)}`,
+	);
+	assert.match(
+		secret,
+		new RegExp(String.raw`\}\), secretSet && !secretCleared && ${pure}jsx\(Button, \{\s*type: "button",[\s\S]{0,300}?message: "Clear stored value"`),
+		`the Clear stored value button is no longer rendered only for a saved secret, as type="button", next to the Input:\n${secret.slice(0, 1200)}`,
+	);
+	// The fields are siblings in one container (the toggle is added among them).
+	assert.match(page, /className: "space-y-4",\s*children: \[fields\.length === 0 && [\s\S]{0,400}?fields\.map\(\(\[key, field\]\) => [\s\S]{0,40}?jsx\(SettingFieldInput, \{/);
+});
+
+test("Settings page: the script keeps four fields in view, hides empty older tokens and the webhook secret, and tucks saved ones behind a toggle (rendered as EmDash does, with the installed Kumo)", async () => {
+	const { Window } = await import("happy-dom");
+	const window = new Window({ url: "https://example.com/_emdash/admin/plugins-manager/coywolf-pack/settings" });
+	for (const key of ["window", "document", "navigator", "HTMLElement", "Node", "Element", "MutationObserver", "requestAnimationFrame", "cancelAnimationFrame", "getComputedStyle"]) {
+		Object.defineProperty(globalThis, key, { value: key === "window" ? window : window[key], configurable: true, writable: true });
+	}
+	globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+	try {
+		const React = await import("react");
+		const { createElement: h, act } = React;
+		const { createRoot } = await import("react-dom/client");
+		const { Button, Input } = await import("@cloudflare/kumo");
+		const { SECRET_SETTINGS, OLDER_SECRET_KEYS } = await import("../src/core/secrets.ts");
+		const { settingsEnhanceScript } = await import("../src/core/settings-enhance.ts");
+		const saved = new Set(["cloudflareApiToken", "videosApiToken", "videosWebhookSecret"]);
+		// EmDash's SettingFieldInput for a secret (checked against its bundle above), with its Clear stored value state.
+		function SecretField({ field, set }) {
+			const [cleared, setCleared] = React.useState(false);
+			return h("div", { className: "space-y-1" }, h(Input, { type: "password", label: field.label, description: field.description, value: "", onChange() {} }), set && !cleared && h(Button, { type: "button", variant: "ghost", size: "sm", onClick: () => setCleared(true) }, "Clear stored value"));
+		}
+		const container = window.document.createElement("div");
+		window.document.body.appendChild(container);
+		const reactRoot = createRoot(container);
+		const fields = Object.entries(SECRET_SETTINGS).map(([key, field]) => h(SecretField, { key, field, set: saved.has(key) }));
+		await act(async () => reactRoot.render(h("form", { id: "plugin-settings-form" }, h("div", { className: "rounded-lg" }, h("div", { className: "space-y-4" }, fields)))));
+		const list = container.querySelector(".space-y-4");
+		const reactNodes = [...list.children];
+		const wrapper = (key) => [...container.querySelectorAll("label")].find((l) => l.textContent.trim() === SECRET_SETTINGS[key].label).closest(".space-y-1");
+
+		window.eval(settingsEnhanceScript());
+		await window.happyDOM.waitUntilComplete();
+
+		for (const key of ["cloudflareApiToken", "aiApiKey", "insightsFathomApiKey", "insightsGoogleServiceAccount"]) assert.equal(wrapper(key).hidden, false, `${key} stays in view`);
+		for (const key of OLDER_SECRET_KEYS) assert.equal(wrapper(key).hidden, true, `${key} is out of view`);
+		assert.equal(wrapper("videosWebhookSecret").hidden, true, "the webhook secret is hidden even when saved");
+		const toggle = list.querySelector("[data-cw-older-toggle] button");
+		assert.ok(toggle, "a toggle for the saved older token");
+		assert.match(toggle.textContent, /Older tokens \(1\)/);
+		assert.equal(toggle.getAttribute("aria-expanded"), "false");
+		assert.equal(toggle.parentElement.nextElementSibling, wrapper(OLDER_SECRET_KEYS[0]), "the toggle sits right above the older tokens");
+
+		toggle.click();
+		await window.happyDOM.waitUntilComplete();
+		assert.equal(toggle.getAttribute("aria-expanded"), "true");
+		assert.equal(wrapper("videosApiToken").hidden, false, "the saved older token shows once opened");
+		assert.equal(wrapper("imagesApiToken").hidden, true, "an empty one never shows");
+
+		// Clear stored value (EmDash removes its button): the field stays with the older tokens, so it can still be seen.
+		await act(async () => wrapper("videosApiToken").querySelector("button[type=button]").click());
+		await window.happyDOM.waitUntilComplete();
+		assert.equal(wrapper("videosApiToken").querySelector("button"), null);
+		assert.equal(wrapper("videosApiToken").hidden, false);
+		assert.match(toggle.textContent, /Older tokens \(1\)/);
+
+		// React's own nodes were never moved: the same elements, in the same order, beside the one added toggle.
+		assert.deepEqual([...list.children].filter((n) => !n.hasAttribute("data-cw-older-toggle")), reactNodes);
+		await act(async () => reactRoot.unmount());
+	} finally {
+		await window.happyDOM.close();
+	}
 });
 
 test("Settings page guides: the pack's script finds Kumo's secret fields by label and adds the guides (rendered with the installed Kumo)", async () => {

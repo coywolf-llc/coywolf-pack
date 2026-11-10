@@ -16,6 +16,7 @@ import { definePlugin } from "emdash";
 import { composeHooks, hookCapabilities } from "./core/compose.js";
 import { configureContentUrls } from "./core/content-url.js";
 import { PLUGIN_ID, isOn, knownFeatures } from "./core/features.js";
+import { cloudflareTokenRoutes } from "./core/cloudflare-token-routes.js";
 import { featuresRoutes } from "./core/features-module.js";
 import type { AdminPageDef, PackModule, WidgetDef } from "./core/module.js";
 import { readOnlyRouteNames } from "./core/routes.js";
@@ -128,7 +129,7 @@ export function createPlugin(options: CoywolfOptions = {}) {
 	const modules = buildModules(options);
 	const s = surfaces(modules);
 	const { hooks, tasks } = composeHooks(modules, { tasks: [] });
-	const routes: Record<string, unknown> = Object.assign({}, featuresRoutes(modules, tasks), ...modules.map((m) => m.routes ?? {}));
+	const routes: Record<string, unknown> = Object.assign({}, featuresRoutes(modules, tasks), cloudflareTokenRoutes(), ...modules.map((m) => m.routes ?? {}));
 	// Routes that only read (readOnlyRoute): the page cache middleware leaves the cache and the settings generation alone after them.
 	registerReadOnlyRoutes(readOnlyRouteNames(routes));
 

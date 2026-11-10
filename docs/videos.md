@@ -26,8 +26,8 @@ EmDash 1.2.0 added its own **Video** block (`video`): a media-library video in t
 
 ## Setup
 
-1. Create an API token with **Account → Stream → Edit**.
-2. On the **Videos** page, enter the account ID and the token in the **Connect** card (or later under **Videos → Settings**; the token is a secret setting, which needs EmDash's `EMDASH_ENCRYPTION_KEY`). Until Stream is connected, the page shows only that card: the library, uploads, captions and the webhook appear once it's connected. Or set `CF_ACCOUNT_ID` and the `CF_STREAM_TOKEN` Worker secret, the same variables EmDash's `cloudflareStream()` media provider reads. Optional settings (**Videos → Settings**): the customer subdomain (`customer-….cloudflarestream.com`, learned from the library if empty), the player accent color, Views & likes, Appearance (including the background color) and default upload tags.
+1. Save the [Cloudflare API token](README.md#the-cloudflare-api-token) on the plugin's Settings page (it needs **Stream → Edit**, which its form pre-fills). The account comes from the token; if it sees more than one account, enter the account ID on the **Videos** page (**Videos → Settings → Advanced**), or set `CF_ACCOUNT_ID`. Until Stream is connected, the page shows only the **Connect** card: the library, uploads, captions and the webhook appear once it's connected. An older Stream token (saved on the page, or the `CF_STREAM_TOKEN` Worker secret, the same variables EmDash's `cloudflareStream()` media provider reads) still works until the Cloudflare API token is saved.
+2. Optional settings (**Videos → Settings**): the customer subdomain (`customer-….cloudflarestream.com`, learned from the library if empty), the player accent color, Views & likes, Appearance (including the background color) and default upload tags.
 3. Turn on **Videos** (and any sub-features) on the **Features** page (**Coywolf Pack → Features** in the sidebar), open the **Videos** page, and click **Test connection**. Then **Rebuild embed index** once.
 4. For the sitemap and caption files, add `coywolfPack()` to the site middleware (see Redirects), and list the sitemap in `robots.txt`:
 

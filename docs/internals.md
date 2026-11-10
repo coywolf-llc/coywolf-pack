@@ -24,6 +24,22 @@ The pack shares work that's under way between the requests of a Worker isolate: 
 
 All the deadlines, with why each is what it is, are in `DEADLINES` in `src/core/single-flight.ts`.
 
+## Which Cloudflare token a feature uses
+
+Every Cloudflare feature reads its token through `cloudflareToken()` (`src/core/cloudflare-token.ts`), in this order:
+
+1. a token typed on the page for one action (Set up media host, a Checkup fix, a Retention check), used once unless the page saves it;
+2. the **Cloudflare API token** saved on the plugin's Settings page (`cloudflareApiToken`);
+3. the feature's older saved token: `usageApiToken` (Cloudflare usage, Insights, Crawler Hints, the checkup's reading), `cloudflareSetupToken` (Checkup fixes), `imagesApiToken`, `videosApiToken`, `backupsCloudflareToken`, `socialImagesApiToken`, `robotsRadarToken`;
+4. the feature's older Worker secret: `USAGE_API_TOKEN`, `IMAGES_API_TOKEN`, `CF_STREAM_TOKEN`, `BROWSER_RUN_API_TOKEN`, `RADAR_API_TOKEN`, or for Retention on Cloudflare the restore token's secret (`BACKUPS_API_TOKEN`, or `backups.restore.tokenSecret`);
+5. the `CLOUDFLARE_API_TOKEN` Worker secret, last, so a site that holds it for another reason keeps using its older tokens.
+
+So upgrading changes nothing until the new token is saved, and then it wins everywhere. Which token is used never depends on Cloudflare's answer: a refused call isn't retried with another token, and its error names the Cloudflare API token and the missing permission. A saved token that can't be decrypted is skipped (and reported when nothing else is found). Restores never read this order: they use only the restore token, so D1 → Edit stays out of the token saved in the database. Large uploads read only steps 2 and 5, and a complete saved R2 key pair wins over both.
+
+The account is `cloudflareAccountId()`: the page's own account ID, `CF_ACCOUNT_ID` or `CLOUDFLARE_ACCOUNT_ID`, Clean Image URLs' account ID, the account of a zone the token found (Insights), the account found before for this token, else `GET /accounts` when it lists exactly one. That answer is kept in plugin KV (`state:cloudflare:account`) with a fingerprint of the token (16 hex digits of a prefixed SHA-256, never part of the token's own hash), so another token looks again; a token that sees several accounts isn't asked again for five minutes per isolate. R2's S3 keys (`r2S3Credentials()`) are the token's ID, from `/accounts/{id}/tokens/verify` for an account token (`cfat_…`) or `/user/tokens/verify` for any other (then the other one, since older account tokens have no prefix), kept in KV by fingerprint (`state:cloudflare:tokenId`), and the token's SHA-256 in hex, worked out on each call and never stored.
+
+The Settings page shows the four fields people fill in; `src/core/settings-enhance.ts` hides the older ones while they're empty, puts the saved ones behind **Older tokens (N)**, and hides `videosWebhookSecret`. All of them stay declared in `src/core/secrets.ts`, since reading an encrypted value whose key isn't declared throws.
+
 ## EmDash internals the pack relies on
 
 Some features depend on EmDash behavior that EmDash doesn't promise to plugins. If EmDash changes it, the feature stops working without an error: no trash prompt, no guides, a query that reads nothing. `test/emdash-contract.test.mjs` checks each item below against the installed EmDash, using its real migrations, its plugin context, its admin bundle and Kumo's markup. CI runs it for the EmDash version the sites run and for the latest release (see [Releasing](releasing.md#ci)), so an EmDash change fails CI before the sites upgrade. Use this list when reviewing an EmDash upgrade.
@@ -44,6 +60,7 @@ Some features depend on EmDash behavior that EmDash doesn't promise to plugins. 
 - **Sidebar refresh.** The admin's manifest query key is `["manifest"]`.
 - **Settings saves.** The body of `POST /_emdash/api/settings` has `seo` at its top level. Once EmDash has a staging setting (1.5), the test fails if staging isn't saved there too.
 - **Settings page guides.** The page is `/_emdash/admin/plugins-manager/<id>/settings`, its form is `#plugin-settings-form`, and each secret is Kumo's `Input` with the schema's label and description. Rendered with the installed Kumo, that input points to its label and description with `aria-labelledby` and `aria-describedby`. The pack's script then finds every guided field by its label and adds the guides.
+- **Settings page older tokens.** The fields are siblings in one container, and each secret is a `div` holding Kumo's `Input`, then a `type="button"` **Clear stored value** button rendered only while a value is saved and not cleared. The script reads that button as "saved" (in any admin language), hides each field's `div` in place and adds its own toggle beside them; rendered as EmDash does, React's nodes stay where they were.
 - **Cookies.** Astro keeps a request's cookies on the response under `Symbol.for("astro.cookies")`, and they survive the pack's admin page rewrite.
 - **Admin router.** EmDash's admin is a TanStack Router app with basepath `/_emdash/admin`, and TanStack's Router puts itself on `window.__TSR_ROUTER__`. The pack's admin pages use it (`src/admin/router.ts`) for in-admin links that don't reload the app and for the unsaved-changes guard, which blocks through `router.history.block` as EmDash's own `UnsavedChangesGuard` does with `useBlocker`. Without it, links load the page and the guard falls back to the browser's prompt on reload or close.
 - **Plugin pages.** EmDash renders a plugin page bare (no error boundary or `Suspense`) inside its `<Toasty>` and `RouterProvider`, so the pack's `packPage()` adds the boundary and `Suspense` for its lazy-loaded pages, and its save results use EmDash's toast stack.

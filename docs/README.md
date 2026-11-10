@@ -41,6 +41,33 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 - [Custom Blocks](custom-blocks.md)
 - [AI Enrichment](ai.md)
 
+## The Cloudflare API token
+
+One token covers every Cloudflare feature. It's saved as **Cloudflare API token** on the plugin's Settings page (or set as the `CLOUDFLARE_API_TOKEN` Worker secret), and its guide there opens Cloudflare's account token form with the name **Coywolf Pack** and these permissions:
+
+| Permission | Policy | Pre-filled | For |
+| --- | --- | --- | --- |
+| Account Analytics → Read | Entire Account | Yes | Cloudflare usage, Insights |
+| Account Settings → Read | Entire Account | Yes | Finding the account and its plan |
+| Workers R2 Storage → Edit | Entire Account | Yes | Set up media host, Retention on Cloudflare, large uploads |
+| Stream → Edit | Entire Account | Yes | Videos |
+| Workers → Metadata Read-Only | Entire Account | By hand | Cloudflare usage (this site's Worker and database, Workers Logs) |
+| Account Rulesets → Read | Entire Account | By hand | Set up media host |
+| Browser Run → Edit | Entire Account | By hand | Social Images |
+| Radar → Read | Entire Account | By hand | The Robots.txt crawler list |
+| Zone → Read | This site's domain | Yes | Finding the site's zone |
+| Zone Settings → Edit | This site's domain | Yes | Cloudflare Checkup, Set up media host |
+| DNS → Edit | This site's domain | Yes | Set up media host, Cloudflare Checkup |
+| Analytics → Read | This site's domain | Yes | Insights (edge errors and crawlers) |
+| Transform Rules → Edit | This site's domain | By hand | Set up media host |
+| Cache Rules → Edit | This site's domain | By hand | The media host's cache rule |
+| Cache Purge → Purge | This site's domain | By hand | Clearing the media host's images |
+| Bot Management → Read | This site's domain | By hand | Cloudflare Checkup's bot rows |
+
+Skip any whose feature you don't use: a page whose token lacks a permission says which one to add. For the domains policy, **Specified Domains → this site's domain** is recommended (the token can then change only this site); **All Domains** lets one token work on every site in the account. The account comes from `CF_ACCOUNT_ID`, the Clean Image URLs account ID, or the token's only account (remembered); a page that needs it asks for the account ID under **Advanced** when the token sees more than one. Large uploads make R2's S3 keys from the token (its ID and its SHA-256). D1 → Edit is never part of it: restores keep the `BACKUPS_API_TOKEN` Worker secret.
+
+Older per-feature tokens keep working until the Cloudflare API token is saved; [Internals](internals.md#which-cloudflare-token-a-feature-uses) has the order. **Features → Cloudflare API token** shows which are still saved and removes them (the File Downloads R2 key pair only when you tick it).
+
 ## Moving to EmDash
 
 - [Migrating from WordPress](wordpress-import.md)

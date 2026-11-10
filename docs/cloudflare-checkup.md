@@ -48,16 +48,16 @@ HSTS is never a button. Neither is anything the pack can't undo safely or that C
 
 ## Tokens
 
-**Reading** uses the read-only token the Performance page already has ([Cloudflare usage](performance.md#cloudflare-usage): saved on the plugin's Settings page, or the `USAGE_API_TOKEN` Worker secret). In its policy scoped to **All Domains** (or **Specified Domains** → the site's domain), it needs:
+Reading and the fixes use the [Cloudflare API token](README.md#the-cloudflare-api-token) (the plugin's Settings page, or the `CLOUDFLARE_API_TOKEN` Worker secret). In its policy for the site's domain it needs:
 
 - **Zone → Read**: finds the zone (also used by Crawler Hints);
-- **Zone Settings → Read**: the settings rows;
-- **DNS → Read** (optional): lists the zone's other hostnames;
+- **Zone Settings → Edit**: the settings rows, and the fixes;
+- **DNS → Edit** (optional here; Edit includes reading): lists the zone's other hostnames;
 - **Bot Management → Read** (optional): the bot rows.
 
-A part the token can't read says which permission to add; the page has the steps and a pre-filled form for a new token.
+A part the token can't read says which permission to add. Each fix changes one zone setting, only when it isn't already set, and the token is only ever sent to `api.cloudflare.com`, never logged or returned.
 
-**Fixes** use a separate setup token, so the read-only token stays read-only: **Zone → Read** and **Zone Settings → Edit**, for the site's domain only (a pre-filled form is on the page: *Coywolf Pack Cloudflare setup*). Paste it in **Setup token** on the page and save it (stored encrypted as `cloudflareSetupToken`), or leave it unsaved to use it just for the next fix. It's only ever sent to `api.cloudflare.com`, never logged or returned. You can delete it in Cloudflare once you're done.
+Before the Cloudflare API token is saved, reading uses the older read-only token ([Cloudflare usage](performance.md#cloudflare-usage), or `USAGE_API_TOKEN`), and the fixes the older setup token: the page then shows a **Setup token** field (saved as `cloudflareSetupToken`, or typed in and used just for the next fix). Once the Cloudflare API token is saved, that field goes away.
 
 ## Tracking parameters
 
@@ -129,4 +129,4 @@ If the row stays at **Installed, no cache hit seen yet** after a few tracked vis
 
 ## Setup
 
-Nothing beyond the switch and the tokens. The plugin asks for `network:request` (host `api.cloudflare.com`).
+Nothing beyond the switch and the [Cloudflare API token](README.md#the-cloudflare-api-token). The plugin asks for `network:request` (host `api.cloudflare.com`).

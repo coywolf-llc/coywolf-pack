@@ -59,8 +59,8 @@ test("without a token nothing is fetched, and the card says which token to add",
 	const status = await readCrawlerHints("coywolf.com", { token: null, fetch: cf.fetch });
 	assert.equal(status.enabled, null);
 	assert.equal(status.problem.kind, "no-token");
-	assert.match(status.problem.message, /Zone → Zone → Read/);
-	assert.match(status.problem.message, /Cloudflare usage token/);
+	assert.match(status.problem.message, /Add the Cloudflare API token on the plugin's Settings page/);
+	assert.match(status.problem.message, /Here it needs Zone → Read\./);
 	assert.equal(cf.calls.length, 0);
 });
 
@@ -103,11 +103,11 @@ test("a token without Zone Read sees no zone: the card says to add it", async ()
 	const status = await readCrawlerHints("coywolf.com", { token: TOKEN, fetch: cf.fetch });
 	assert.equal(status.enabled, null);
 	assert.equal(status.problem.kind, "no-zone");
-	assert.match(status.problem.message, /can't see a zone for coywolf\.com\. Add Zone → Zone → Read/);
+	assert.match(status.problem.message, /can't see a zone for coywolf\.com\. Add Zone → Read to it, for this site's domain/);
 	const refused = cloudflare({ onZones: () => fail(403, 9109, "Unauthorized to access requested resource") });
 	const r = await readCrawlerHints("coywolf.com", { token: TOKEN, fetch: refused.fetch });
 	assert.equal(r.problem.kind, "no-zone");
-	assert.match(r.problem.message, /can't list zones \(HTTP 403: Unauthorized to access requested resource \(code 9109\)\)\. Add Zone → Zone → Read/);
+	assert.match(r.problem.message, /can't list zones \(HTTP 403: Unauthorized to access requested resource \(code 9109\)\)\. Add Zone → Read/);
 });
 
 test("a token Cloudflare doesn't accept (malformed, deleted, expired) says so, not that a permission is missing", async () => {
@@ -219,7 +219,7 @@ test("IndexNow and Bing submission are gone: no switch, routes, key file or host
 	assert.deepEqual(Object.keys(pack.retiredTasks), [RETIRED_BING_TASK]);
 	assert.equal(SECRET_SETTINGS.discoveryBingApiKey, undefined);
 	assert.equal(GUIDES.bing, undefined);
-	assert.match(GUIDES["crawler-hints-token"].steps.join(" "), /Zone → Zone → Read/);
+	assert.match(GUIDES["crawler-hints-token"].steps.join(" "), /Here it needs <strong[^>]*>Zone → Read<\/strong>\./);
 	assert.deepEqual(discoveryMiddleware.map((m) => m.feature), ["discovery.newsSitemap", "discovery.feed", "discovery.llms", "discovery.securityTxt"]);
 	// A GET: it changes nothing, so it clears no cache (only POSTs to pack routes do).
 	assert.equal(pack.routes["discovery/crawler-hints"].methods, undefined);
@@ -237,6 +237,16 @@ test("the route reads Crawler Hints with the Performance page's token, and remem
 	// The next read uses the remembered zone.
 	await pack.routes["discovery/crawler-hints"].handler(ctx);
 	assert.deepEqual(cf.calls.slice(2).map((c) => c.url), [`${API}/zones/zone-c/flags`]);
+});
+
+test("the Cloudflare API token wins over the older usage token; the older one still works alone", async () => {
+	const zones = { zones: { "coywolf.com": "zone-c" }, flags: { "zone-c": true } };
+	const both = cloudflare(zones);
+	await pack.routes["discovery/crawler-hints"].handler(fakeCtx({ settings: { cloudflareApiToken: "cf-new-token-0123456789", usageApiToken: TOKEN }, fetch: both.fetch }));
+	assert.deepEqual([...new Set(both.calls.map((c) => c.auth))], ["Bearer cf-new-token-0123456789"]);
+	const older = cloudflare(zones);
+	assert.equal((await pack.routes["discovery/crawler-hints"].handler(fakeCtx({ settings: { usageApiToken: TOKEN }, fetch: older.fetch }))).enabled, true);
+	assert.deepEqual([...new Set(older.calls.map((c) => c.auth))], [`Bearer ${TOKEN}`]);
 });
 
 test("a remembered zone that stopped working is looked up again, once, and replaced", async () => {

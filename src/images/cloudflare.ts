@@ -130,7 +130,7 @@ export async function findZone(config: CloudflareConfig, hostname: string): Prom
 		if (zone) return { id: zone.id, name: zone.name, plan: zone.plan?.name };
 	}
 	throw new CloudflareApiError(
-		`No zone for ${hostname} in this Cloudflare account. Add the site's domain to the account, or check the account ID. The API token needs ${PERMISSION_HINT.zone}.`,
+		`No zone for ${hostname} in this Cloudflare account. Add the site's domain to the account, or check the account ID. The Cloudflare API token needs ${PERMISSION_HINT.zone}.`,
 		404,
 	);
 }

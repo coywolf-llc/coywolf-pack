@@ -6,6 +6,8 @@
 import { STORAGE_IN_LIMIT, deleteManyBatched, getManyBatched } from "../core/storage.js";
 import type { PluginContext, StorageCollection } from "emdash";
 
+import { contextFetch } from "../core/cloudflare-api.js";
+import { cloudflareAccountId, cloudflareToken, sharedTokenState } from "../core/cloudflare-token.js";
 import { PLUGIN_ID, isCurrent, readSiteSetting, registerSiteSetting, settingsEpoch } from "../core/features.js";
 import { batchedAll } from "../core/d1-batch.js";
 import { peekRequestMemo, seedRequestMemo } from "../core/request-memo.js";
@@ -57,9 +59,11 @@ export const SETTINGS = {
 } as const;
 
 /**
- * The API token and webhook secret are declared secret in the plugin's
- * settingsSchema (src/core/secrets.ts); the account ID and player settings
- * are plain values edited on the Videos page → Settings, read with fallbacks.
+ * The older Stream token and the webhook secret are declared secret in the
+ * plugin's settingsSchema (src/core/secrets.ts); the account ID and player
+ * settings are plain values edited on the Videos page → Settings, read with
+ * fallbacks. The token is the Cloudflare API token when there is one
+ * (src/core/cloudflare-token.ts).
  */
 
 export type Ctx = PluginContext;
@@ -127,17 +131,17 @@ async function learnHost(ctx: Ctx, videos: StreamVideo[]): Promise<void> {
 	}
 }
 
-export async function credentials(ctx: Ctx): Promise<StreamCredentials | null> {
-	const [accountId, token] = await Promise.all([ctx.settings.get<string>(SETTINGS.accountId), ctx.settings.get<string>(SETTINGS.token)]);
-	let env: Record<string, unknown> = {};
-	try {
-		env = await workerEnv();
-	} catch {
-		env = {};
-	}
-	const a = accountId?.trim() || secret(env, "CF_ACCOUNT_ID");
-	const t = token?.trim() || secret(env, "CF_STREAM_TOKEN");
-	return a && t ? { accountId: a, token: t } : null;
+/**
+ * Stream's token and account: the Cloudflare API token (else the older Stream token, else CF_STREAM_TOKEN, else
+ * CLOUDFLARE_API_TOKEN), and the account saved on the Videos page, else CF_ACCOUNT_ID, else the token's own.
+ * Null until both are known. `bindings` replaces the Worker's env (tests).
+ */
+export async function credentials(ctx: Ctx, bindings?: Record<string, unknown>): Promise<StreamCredentials | null> {
+	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
+	const [accountId, { token }] = await Promise.all([ctx.settings.get<string>(SETTINGS.accountId), cloudflareToken(ctx, env, "stream")]);
+	if (!token) return null;
+	const a = await cloudflareAccountId(ctx, env, { token, fetch: contextFetch(ctx) }, accountId);
+	return a ? { accountId: a, token } : null;
 }
 
 /** The saved settings for the Videos page's Settings tab (the token only as set / not set). */
@@ -161,6 +165,8 @@ export async function adminSettings(ctx: Ctx) {
 	return {
 		accountId: accountId ?? "",
 		tokenSet: Boolean(token?.trim()),
+		/** The Cloudflare API token is the one in use: the page shows no token field of its own. */
+		...sharedTokenState(await cloudflareToken(ctx, env, "stream")),
 		customerSubdomain: host ?? "",
 		accentColor: accent ?? "",
 		backgroundColor: background ?? "",
@@ -236,7 +242,7 @@ export async function library(ctx: Ctx, force = false): Promise<LibraryVideo[]> 
 		}
 	}
 	const api = await client(ctx);
-	if (!api) throw new Error("Connect Cloudflare Stream first (account ID and API token in the plugin settings).");
+	if (!api) throw new Error("Connect Cloudflare Stream first: add the Cloudflare API token on the plugin's Settings page (it needs Stream → Edit).");
 	const videos = await api.list();
 	await learnHost(ctx, videos);
 	const items = videos.map(slim);

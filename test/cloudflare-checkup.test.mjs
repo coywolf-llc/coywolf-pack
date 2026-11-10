@@ -214,13 +214,13 @@ test("reading with missing permissions: each part says which one to add", async 
 	const partial = await readCheckup("recollect.fyi", { token: TOKEN, fetch: cf.fetch, ...local });
 	assert.equal(partial.problem, undefined);
 	assert.equal(partial.otherHosts, null);
-	assert.match(partial.otherHostsProblem, /DNS → Read/);
+	assert.match(partial.otherHostsProblem, /DNS → Edit \(or Read\) to the Cloudflare API token/);
 	assert.equal(partial.rows.find((r) => r.id === "bot_fight_mode").status, "unknown");
 	assert.match(partial.rows.find((r) => r.id === "bot_fight_mode").recommendation, /Bot Management → Read/);
 
 	const noSettings = await readCheckup("recollect.fyi", { token: TOKEN, fetch: cloudflare({ deny: ["/zones/zone-1/settings"] }).fetch, ...local });
 	assert.equal(noSettings.problem.kind, "no-access");
-	assert.match(noSettings.problem.message, /Zone Settings → Read/);
+	assert.match(noSettings.problem.message, /Cloudflare API token can't read this zone's settings\. Add Zone Settings → Edit/);
 	assert.equal(noSettings.rows.find((r) => r.id === "speed_brain").status, "unknown");
 
 	const none = await readCheckup("recollect.fyi", { token: null, fetch: cloudflare().fetch, ...local });
@@ -247,6 +247,34 @@ test("a fix changes one setting, once; a second press changes nothing", async ()
 	const tls = cloudflare({ settings: { min_tls_version: "1.3" } });
 	assert.equal((await applyFix("min-tls-1.2", ZONE, { token: TOKEN, fetch: tls.fetch })).changed, false);
 	assert.equal(tls.calls.filter((c) => c.method !== "GET").length, 0);
+});
+
+test("the fix route: a typed token, else the Cloudflare API token, else the older setup token; the checkup tells the page which", async () => {
+	const pack = cloudflarePack();
+	const ctx = (settings, cf) => {
+		const stored = new Map([["features", { cloudflareCheckup: true }], ...Object.entries(settings)]);
+		const kv = new Map();
+		return {
+			site: { url: "https://recollect.fyi/", name: "Recollect" },
+			settings: { get: async (k) => stored.get(k) ?? null, set: async (k, v) => void stored.set(k, v), delete: async (k) => void stored.delete(k) },
+			kv: { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v), delete: async (k) => void kv.delete(k) },
+			http: { fetch: cf.fetch },
+			log: { info() {}, warn() {}, error() {} },
+		};
+	};
+	const fix = async (settings, token) => {
+		const cf = cloudflare();
+		await pack.routes["cloudflare/fix"].handler({ ...ctx(settings, cf), input: { fix: "speed-brain-off", ...(token ? { token } : {}) } });
+		return [...new Set(cf.calls.map((c) => c.auth))];
+	};
+	assert.deepEqual(await fix({ cloudflareApiToken: "new-token", cloudflareSetupToken: "setup-token" }), ["Bearer new-token"]);
+	assert.deepEqual(await fix({ cloudflareApiToken: "new-token", cloudflareSetupToken: "setup-token" }, "typed-token"), ["Bearer typed-token"]);
+	assert.deepEqual(await fix({ cloudflareSetupToken: "setup-token" }), ["Bearer setup-token"], "the older setup token still works alone");
+	await assert.rejects(fix({}), /Add the Cloudflare API token on the plugin's Settings page.*Zone Settings → Edit/);
+
+	const page = async (settings) => (await pack.routes["cloudflare/checkup"].handler(ctx(settings, cloudflare()))).sharedToken;
+	assert.equal(await page({ cloudflareApiToken: "new-token", cloudflareSetupToken: "setup-token" }), true, "the page hides the setup token");
+	assert.equal(await page({ cloudflareSetupToken: "setup-token", usageApiToken: TOKEN }), false);
 });
 
 test("a refused fix reports what the token needs, without the token", async () => {

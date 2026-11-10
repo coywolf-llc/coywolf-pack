@@ -149,6 +149,42 @@ test("applySetup turns Smart Tiered Cache on, and only when it's off", async () 
 	assert.ok(!on.calls.some((c) => c.startsWith("PATCH") && c.includes("tiered_cache")), "never PATCHed when already on");
 });
 
+test("the media host's token: the Cloudflare API token wins over the older Clean Image URLs token; the older one still works alone", async () => {
+	for (const name of ["CLOUDFLARE_API_TOKEN", "IMAGES_API_TOKEN", "CF_ACCOUNT_ID", "CLOUDFLARE_ACCOUNT_ID"]) delete process.env[name];
+	await import("../src/images/pack.ts"); // registers the images feature
+	const { mediaApiAccess, imagesModule } = await import("../src/images/module.ts");
+	const { invalidateMediaHost } = await import("../src/images/settings.ts");
+	invalidateMediaHost(`https://${HOST}`);
+	const ACCOUNT = "9".repeat(32);
+	const ctx = (settings, fetch) => {
+		const stored = new Map([["features", { images: true }], ...Object.entries(settings)]);
+		const kv = new Map();
+		return {
+			settings: { get: async (k) => stored.get(k) ?? null, set: async (k, v) => void stored.set(k, v), delete: async (k) => void stored.delete(k) },
+			kv: { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v) },
+			site: { url: "https://example.com/" },
+			...(fetch ? { http: { fetch } } : {}),
+		};
+	};
+	const access = async (settings, fetch) => {
+		const a = await mediaApiAccess(ctx(settings, fetch));
+		return "config" in a ? [a.config.token, a.config.accountId] : a.reason;
+	};
+	assert.deepEqual(await access({ cloudflareApiToken: "new-token", imagesApiToken: "old-token", imagesAccountId: ACCOUNT }), ["new-token", ACCOUNT]);
+	assert.deepEqual(await access({ imagesApiToken: "old-token", imagesAccountId: ACCOUNT }), ["old-token", ACCOUNT]);
+	assert.match(await access({ imagesAccountId: ACCOUNT }), /Add the Cloudflare API token on the plugin's Settings page/);
+	// No account saved: the token's only account.
+	const lookup = async (url) => (assert.match(url, /\/accounts\?per_page=5$/), Response.json({ success: true, result: [{ id: ACCOUNT }] }));
+	assert.deepEqual(await access({ cloudflareApiToken: "new-token" }, lookup), ["new-token", ACCOUNT]);
+
+	// The page shows its own token field only while the Cloudflare API token isn't the one in use.
+	const page = imagesModule({ variants: { start: async () => null, deps: async () => null } }).routes["images/settings"];
+	assert.equal((await page.handler(ctx({ cloudflareApiToken: "new-token", imagesApiToken: "old-token" }))).sharedToken, true);
+	const older = await page.handler(ctx({ imagesApiToken: "old-token" }));
+	assert.deepEqual([older.sharedToken, older.tokenSet], [false, true]);
+	invalidateMediaHost(null);
+});
+
 test("a token without Zone Settings Edit: the rest of the setup still runs, the step explains the permission", async () => {
 	const fake = fakeCloudflare({ deny: ["/cache/tiered_cache_smart_topology_enable"] });
 	const r = await applySetup(fake.config, { host: HOST, bucket: "example-media" });

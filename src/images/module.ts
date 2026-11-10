@@ -3,14 +3,17 @@
  * media host, and the optional one-click Cloudflare setup (plan, then apply).
  *
  * The Cloudflare API token comes from the request (typed on the page, not
- * stored unless saved), the saved secret, or a Worker secret
- * (IMAGES_API_TOKEN, then CLOUDFLARE_API_TOKEN). It's only sent to
- * api.cloudflare.com, never logged or returned.
+ * stored unless saved), else src/core/cloudflare-token.ts: the Cloudflare API
+ * token from the plugin's Settings page, the older saved token, the
+ * IMAGES_API_TOKEN Worker secret, then CLOUDFLARE_API_TOKEN. It's only sent
+ * to api.cloudflare.com, never logged or returned.
  */
 import type { PluginContext } from "emdash";
 import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
+import { contextFetch } from "../core/cloudflare-api.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, sharedTokenState } from "../core/cloudflare-token.js";
 import { requireFeature } from "../core/features.js";
 import { afterResponse, parseInput, secret, workerEnv } from "../shared.js";
 import { CloudflareApiError, type CloudflareConfig, applySetup, checkMediaHost, planSetup, purgeHost } from "./cloudflare.js";
@@ -81,13 +84,14 @@ async function env(): Promise<Record<string, unknown>> {
 }
 
 async function adminSettings(ctx: PluginContext) {
-	const [host, accountId, bucket, token] = await Promise.all([
+	const e = await env();
+	const [host, accountId, bucket, token, resolved] = await Promise.all([
 		ctx.settings.get<string>(IMAGES_SETTINGS.host),
 		ctx.settings.get<string>(IMAGES_SETTINGS.accountId),
 		ctx.settings.get<string>(IMAGES_SETTINGS.bucket),
 		ctx.settings.get<string>(IMAGES_SETTINGS.token).catch(() => null),
+		cloudflareToken(ctx, e, "images"),
 	]);
-	const e = await env();
 	invalidateMediaHost(host ?? null);
 	await loadStoragePublicUrl();
 	const source = imageCdnSource();
@@ -106,6 +110,8 @@ async function adminSettings(ctx: PluginContext) {
 		tokenSet: Boolean(token?.trim()),
 		envToken: Boolean(secret(e, "IMAGES_API_TOKEN") || secret(e, "CLOUDFLARE_API_TOKEN")),
 		envAccountId: Boolean(secret(e, "CF_ACCOUNT_ID") || secret(e, "CLOUDFLARE_ACCOUNT_ID")),
+		/** The Cloudflare API token is the one in use: the page shows no token field of its own. */
+		...sharedTokenState(resolved),
 		siteHost: siteHostname(ctx),
 		quotaNote: QUOTA_NOTE,
 	};
@@ -119,25 +125,31 @@ function siteHostname(ctx: PluginContext): string {
 	}
 }
 
+/** The account: the one typed or saved on this page, else CF_ACCOUNT_ID, else the token's only account (src/core/cloudflare-token.ts). */
+async function accountFor(ctx: PluginContext, e: Record<string, unknown>, token: string, typed?: string): Promise<string | null> {
+	const saved = typed || (await ctx.settings.get<string>(IMAGES_SETTINGS.accountId))?.trim();
+	return cloudflareAccountId(ctx, e, { token, fetch: contextFetch(ctx) }, saved);
+}
+
 /** Credentials for the setup: the request's, then the saved ones, then Worker variables. */
 async function credentials(ctx: PluginContext, input: z.infer<typeof setupInput>): Promise<CloudflareConfig & { bucket: string; host: string }> {
 	const e = await env();
-	const savedToken = await ctx.settings.get<string>(IMAGES_SETTINGS.token).catch(() => null);
-	const token = input.token || savedToken?.trim() || secret(e, "IMAGES_API_TOKEN") || secret(e, "CLOUDFLARE_API_TOKEN");
-	const accountId =
-		input.accountId || (await ctx.settings.get<string>(IMAGES_SETTINGS.accountId))?.trim() || secret(e, "CF_ACCOUNT_ID") || secret(e, "CLOUDFLARE_ACCOUNT_ID");
+	const { token, unreadable } = await cloudflareToken(ctx, e, "images", { typed: input.token });
 	const bucket = input.bucket || (await ctx.settings.get<string>(IMAGES_SETTINGS.bucket))?.trim() || "";
 	const host = input.host || imageCdn() || "";
-	const missing = [!host && "media host", !accountId && "Cloudflare account ID", !bucket && "R2 bucket name", !token && "Cloudflare API token"].filter(Boolean);
+	if (!token && unreadable) throw PluginRouteError.badRequest(UNREADABLE_TOKEN_MESSAGE);
+	const missing = [!host && "media host", !bucket && "R2 bucket name", !token && "Cloudflare API token (on the plugin's Settings page)"].filter(Boolean);
 	if (missing.length) throw PluginRouteError.badRequest(`Enter the ${missing.join(", ")} first.`);
+	const accountId = await accountFor(ctx, e, token as string, input.accountId);
+	if (!accountId) throw PluginRouteError.badRequest(noAccountMessage("Advanced"));
 	const doFetch = ctx.http ? (ctx.http.fetch.bind(ctx.http) as CloudflareConfig["fetch"]) : undefined;
-	return { token: token as string, accountId: accountId as string, bucket, host, fetch: doFetch };
+	return { token: token as string, accountId, bucket, host, fetch: doFetch };
 }
 
 /**
- * The media host and the Cloudflare API access for it (the token and account
- * saved on this page, else the IMAGES_API_TOKEN / CLOUDFLARE_API_TOKEN and
- * CF_ACCOUNT_ID Worker secrets). `reason` says what's missing instead.
+ * The media host and the Cloudflare API access for it (the token from
+ * src/core/cloudflare-token.ts, and the account saved on this page, else
+ * CF_ACCOUNT_ID, else the token's own). `reason` says what's missing instead.
  */
 export async function mediaApiAccess(
 	ctx: PluginContext,
@@ -147,12 +159,10 @@ export async function mediaApiAccess(
 	if (!host) return { hostname: null, reason: "No media host is set (Clean Image URLs)." };
 	const hostname = new URL(host).hostname;
 	const e = await env();
-	const savedToken = await ctx.settings.get<string>(IMAGES_SETTINGS.token).catch(() => null);
-	const token = savedToken?.trim() || secret(e, "IMAGES_API_TOKEN") || secret(e, "CLOUDFLARE_API_TOKEN");
-	const accountId = (await ctx.settings.get<string>(IMAGES_SETTINGS.accountId))?.trim() || secret(e, "CF_ACCOUNT_ID") || secret(e, "CLOUDFLARE_ACCOUNT_ID");
-	if (!token || !accountId) {
-		return { hostname, reason: "Add a Cloudflare API token and account ID on the Clean Image URLs page." };
-	}
+	const { token, unreadable } = await cloudflareToken(ctx, e, "images");
+	if (!token) return { hostname, reason: unreadable ? UNREADABLE_TOKEN_MESSAGE : "Add the Cloudflare API token on the plugin's Settings page (or the CLOUDFLARE_API_TOKEN Worker secret)." };
+	const accountId = await accountFor(ctx, e, token);
+	if (!accountId) return { hostname, reason: noAccountMessage("Advanced on the Clean Image URLs page") };
 	const doFetch = ctx.http ? (ctx.http.fetch.bind(ctx.http) as CloudflareConfig["fetch"]) : undefined;
 	return { hostname, config: { token, accountId, fetch: doFetch } };
 }
@@ -161,7 +171,7 @@ export async function mediaApiAccess(
 export async function purgeMediaHost(ctx: PluginContext): Promise<{ purged: boolean; host: string | null; message?: string }> {
 	const access = await mediaApiAccess(ctx);
 	if (!("config" in access)) {
-		return { purged: false, host: access.hostname, message: access.hostname ? `Images on ${access.hostname} weren't cleared. ${access.reason} The token needs Zone → Cache Purge → Purge.` : access.reason };
+		return { purged: false, host: access.hostname, message: access.hostname ? `Images on ${access.hostname} weren't cleared. ${access.reason} The Cloudflare API token needs Cache Purge → Purge.` : access.reason };
 	}
 	try {
 		await purgeHost(access.config, access.hostname);

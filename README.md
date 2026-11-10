@@ -124,7 +124,7 @@ If the site has no `src/middleware.ts` yet, create it with just these lines.
 }
 ```
 
-API keys and tokens (for AI Enrichment, Videos, Robots.txt's Cloudflare Radar sync, Clean Image URLs setup, Cloudflare usage) are stored encrypted, so the site also needs EmDash's `EMDASH_ENCRYPTION_KEY` secret. EmDash's setup usually creates it; if not:
+API keys and tokens ([Keys](#keys)) are stored encrypted, so the site also needs EmDash's `EMDASH_ENCRYPTION_KEY` secret. EmDash's setup usually creates it; if not:
 
 ```bash
 npx wrangler secret put EMDASH_ENCRYPTION_KEY
@@ -159,11 +159,26 @@ A good first set for most sites:
 
 - **Features** (**Coywolf Pack → Features**) turns modules and their parts on or off. A module's page also has switches for its parts.
 - **Each module's page** holds its settings, grouped into sections, with step-by-step guides. A feature that needs an API key or a binding shows a setup card until it's there.
-- **API keys and tokens** can be entered on their module's page or on the plugin's **Settings** page, which lists only those. EmDash stores them encrypted.
+- **API keys and tokens** go on the plugin's **Settings** page ([Keys](#keys)). EmDash stores them encrypted.
 - **In the entry editor and content lists** (EmDash 1.4+, admins only): sections in a saved entry's sidebar for **Schema & Social**, **AI suggestions** and **Link status**, and a **Links** column in content lists, each while its module is on.
 - **Saving:** a bar appears at the bottom of a settings page when there are unsaved changes, with **Discard** and **Save** (also Ctrl/⌘+S). The result shows as a notice at the bottom of the screen. Leaving the page with unsaved changes asks first.
 - **Hiding EmDash's own pages:** a site that uses Redirect Manager or WordPress Migration instead of EmDash's Redirects or Import can hide those with EmDash's `admin.hiddenNavItems` option in `astro.config.mjs` (for example `emdash({ admin: { hiddenNavItems: ["redirects"] } })`).
 - **Language:** the pack's admin pages and docs are in English only; they don't follow EmDash's admin language setting.
+
+### Keys
+
+The plugin's **Settings** page (`https://coywolf.com/_emdash/admin/plugins-manager/coywolf-pack/settings`) has four fields, each with its step-by-step guide:
+
+| Field | For |
+| --- | --- |
+| **Cloudflare API token** | Every Cloudflare feature: Cloudflare usage, Insights, Cloudflare Checkup, Crawler Hints, Set up media host, Videos, Retention on Cloudflare, Social Images, the Radar crawler list and large uploads |
+| **AI API key** | AI Enrichment (Anthropic, OpenAI or Gemini) |
+| **Fathom API key** | Insights' Fathom card |
+| **Google service account key** | Insights' Search Console card |
+
+Create the Cloudflare API token with the pre-filled form in its guide, and add the few permissions Cloudflare's form can't pre-select ([the list](docs/README.md#the-cloudflare-api-token)). For the domains policy, **Specified Domains → this site's domain** is recommended; choose **All Domains** to use one token on every site in the account. Or set it as a Worker secret: `npx wrangler secret put CLOUDFLARE_API_TOKEN`. The token never needs D1: restores keep their own token (`BACKUPS_API_TOKEN`).
+
+**Older tokens.** Sites set up before this had a token per feature. Those keep working: the Cloudflare API token, once saved on Settings, ranks above them, and the `CLOUDFLARE_API_TOKEN` Worker secret below them. Settings hides the empty ones and puts saved ones under **Older tokens**. Once the new token works, remove them on **Features → Cloudflare API token → Remove older tokens** (or select **Clear stored value** on each on Settings), then delete them in Cloudflare.
 
 ### Updating
 

@@ -14,7 +14,7 @@ import { PACK_API, apiGet, apiPost, errorText } from "./api.js";
 import { ConfirmDialog } from "./confirm-dialog.js";
 import { CredentialGuide } from "./guides.js";
 import { DocsLink, Loading, PageHeader } from "./page.js";
-import { SecretField } from "./settings-ui.js";
+import { SecretField, SharedTokenNote } from "./settings-ui.js";
 import { useToast } from "./toast.js";
 
 type RowStatus = "good" | "warn" | "info" | "unknown";
@@ -46,6 +46,9 @@ interface Checkup {
 	otherHostsProblem?: string;
 	checkedAt: string;
 	setupToken: { saved: boolean; unreadable: boolean };
+	/** The fixes use the Cloudflare API token (saved on Settings, or `sharedTokenEnv`: the Worker secret): no setup token needed. */
+	sharedToken?: boolean;
+	sharedTokenEnv?: boolean;
 	fixes: Record<FixId, { title: string; button: string; setting: string; target: string; targetLabel: string; effect: string }>;
 }
 
@@ -223,7 +226,7 @@ export function CloudflareCheckupPage() {
 	if (asking) lastAsked.current = { fix: asking, value: data.rows.find((r) => r.fix === asking)?.value ?? null };
 	const shown = lastAsked.current;
 	const fix = shown ? data.fixes[shown.fix] : null;
-	const canFix = data.setupToken.saved || Boolean(token.trim());
+	const canFix = Boolean(data.sharedToken) || data.setupToken.saved || Boolean(token.trim());
 
 	return (
 		<div className="space-y-6" aria-busy={loading}>
@@ -231,7 +234,7 @@ export function CloudflareCheckupPage() {
 			<div aria-live="polite">{error && <Banner variant="error" role="alert" description={error} />}</div>
 
 			{data.problem && (
-				<section className="space-y-3 rounded-lg border border-kumo-line p-4" aria-label="Read-only token">
+				<section className="space-y-3 rounded-lg border border-kumo-line p-4" aria-label="Cloudflare API token">
 					<Banner variant={data.problem.kind === "error" ? "error" : "default"} description={data.problem.message} />
 					{needsReadToken && (
 						<div className="sm:max-w-md">
@@ -275,15 +278,21 @@ export function CloudflareCheckupPage() {
 				);
 			})}
 
-			{(hasFixes || data.setupToken.saved) && (
+			{hasFixes && data.sharedToken && (
+				<section className="rounded-lg border border-kumo-line p-4" aria-label="One-click fixes">
+					<SharedTokenNote env={data.sharedTokenEnv} />
+				</section>
+			)}
+
+			{!data.sharedToken && (hasFixes || data.setupToken.saved) && (
 				<section className="rounded-lg border border-kumo-line" aria-labelledby="cw-setup-token">
 					<div className="border-b border-kumo-line p-4">
 						<h2 id="cw-setup-token" className="text-base font-semibold">
 							Setup token
 						</h2>
 						<p className="mt-1 max-w-2xl text-sm leading-5 text-pretty text-kumo-subtle">
-							The one-click fixes change zone settings, which the read-only token can't do. They use this separate token (Zone Settings → Edit for this site's
-							zone only). Save it, or type it in and use it for the next fix without saving it.
+							The one-click fixes change zone settings. They use the Cloudflare API token from the plugin's Settings page once it's saved (it needs Zone
+							Settings → Edit). Until then, they use this older setup token: save it, or type it in and use it for the next fix without saving it.
 						</p>
 					</div>
 					<div className="space-y-3 p-4">
@@ -328,7 +337,7 @@ export function CloudflareCheckupPage() {
 				variant="primary"
 				isPending={fixing}
 				confirmDisabled={!canFix}
-				error={fixError ?? (canFix ? null : "Add the setup token first (below the checkup), then try again.")}
+				error={fixError ?? (canFix ? null : "Add the Cloudflare API token on the plugin's Settings page (or a setup token below the checkup) first, then try again.")}
 				onConfirm={() => void applyFix()}
 			>
 				{fix && (
