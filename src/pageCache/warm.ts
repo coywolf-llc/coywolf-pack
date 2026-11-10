@@ -10,11 +10,12 @@
  *
  * The work rides on real traffic: after the site answers a page request, the
  * Worker claims a small batch from the queue and visits it in the background
- * (waitUntil). Cron Triggers can't do this: they run in whatever data center
- * has spare capacity (often on another continent), far from the database and
- * the readers, and placement hints don't apply to them. Visits from request
- * context run where the traffic is (with Smart Placement, near the database),
- * so they warm the region the readers and crawlers come from.
+ * (waitUntil). Visits from request context run where the traffic is (with
+ * Smart Placement, near the database). Cron Triggers run in whatever data
+ * center has spare capacity (often on another continent), far from the
+ * database, and placement hints don't apply to them, so the hourly task
+ * (WARM_TASK, warmFromCron) is only the fallback for when no request reaches
+ * the Worker: as caching improves, fewer do.
  *
  * The job's progress lives in one small option row, the URLs in rows of
  * their own written once per run. Batches are claimed with a compare-and-swap
@@ -524,6 +525,43 @@ export function warmMayHaveWork(raw: string | null | undefined, now = Date.now()
 	} catch {
 		return true;
 	}
+}
+
+// ── The hourly fallback (cron) ──
+
+/** The hourly task that keeps warming going when no visitor request reaches the Worker (see warmFromCron). */
+export const WARM_TASK = "page-cache-warm";
+/** Most warm steps one hourly run takes (each ends within DEADLINES.warmStepMs; the cron hook allows 14 minutes). */
+export const CRON_WARM_STEPS = 8;
+
+/**
+ * The fallback tick, from the site's hourly Cron Trigger. Warm steps ride on
+ * page requests that reach the Worker, and as caching gets better fewer do:
+ * a cache hit never runs it. A site whose pages are all cached (or that gets
+ * little traffic) could leave a run, a re-warm after edits or the daily
+ * refresh waiting for hours. This takes up to `steps` steps in a row, while
+ * they make progress, and does nothing (one read of the progress row) when
+ * there's no work. Cron runs in whatever data center has capacity, so these
+ * visits may render far from the database (slower, still within each visit's
+ * deadline); Workers Cache's upper tier, which every data center consults,
+ * gets the pages either way. Claims are atomic, so it never repeats pages a
+ * request-driven step is warming.
+ */
+export async function warmFromCron(
+	db: D1Database,
+	self: Fetcher,
+	origin: string,
+	options: { daily: boolean; steps?: number; budgetMs?: number; now?: () => number },
+): Promise<string[]> {
+	const now = options.now ?? Date.now;
+	if (!warmMayHaveWork(await readRaw(db), now(), options.daily)) return [];
+	const done: string[] = [];
+	for (let i = 0; i < (options.steps ?? CRON_WARM_STEPS); i++) {
+		const did = await warmStep(db, self, origin, { budgetMs: options.budgetMs ?? 14_000, batchSize: 4, daily: options.daily, now });
+		done.push(did);
+		if (did !== "warmed" && did !== "collected" && did !== "revisited") break;
+	}
+	return done;
 }
 
 // ── Claims (compare-and-swap on the progress row) ──

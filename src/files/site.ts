@@ -5,7 +5,7 @@
  * large uploads and download counts in `_plugin_storage`, media library files
  * in `media`. Reads are cached per isolate; download counts are batched and written after the response.
  */
-import { PLUGIN_ID, invalidateFeatures, readSiteSetting, registerSiteSetting } from "../core/features.js";
+import { PLUGIN_ID, invalidateFeatures, isCurrent, readSiteSetting, registerSiteSetting, settingsEpoch } from "../core/features.js";
 import { createDownloadCounter } from "./counts.js";
 import { isUploadId, normalizeBase, safeColor } from "./format.js";
 
@@ -54,7 +54,14 @@ const FILE_CACHE_MAX = 500;
 
 /** The last stored values and the settings made from them, so a cache hit doesn't rebuild them. */
 let settingsMemo: { raw: unknown[]; value: SiteSettings } | null = null;
-const fileCache = new Map<string, { value: FileRecord | null; at: number }>();
+/**
+ * File records by id, per isolate. Keyed on the settings epoch as well as the
+ * lifetime: a pack admin change in another isolate (a deleted or replaced
+ * large upload) reaches this one with the settings generation, and a page
+ * rendered after that carries the new generation's cache tag, so it must not
+ * show the old record (the settling purge wouldn't clear it).
+ */
+const fileCache = new Map<string, { value: FileRecord | null; at: number; epoch: number }>();
 
 /** Forget cached settings and files (after admin changes in this isolate). */
 export function invalidateSiteCache(id?: string): void {
@@ -95,7 +102,8 @@ export function uploadToRecord(doc: UploadDoc): FileRecord {
 /** Look up a file by id: a ready large upload, or a ready media library item. Null when missing. */
 export async function resolveFile(db: D1Database, id: string): Promise<FileRecord | null> {
 	const hit = fileCache.get(id);
-	if (hit && Date.now() - hit.at < FILE_TTL) return hit.value;
+	if (hit && isCurrent(hit, FILE_TTL)) return hit.value;
+	const epoch = settingsEpoch();
 	let value: FileRecord | null = null;
 	if (isUploadId(id)) {
 		const row = await db
@@ -123,7 +131,8 @@ export async function resolveFile(db: D1Database, id: string): Promise<FileRecor
 				: null;
 	}
 	if (fileCache.size >= FILE_CACHE_MAX) fileCache.delete(fileCache.keys().next().value as string);
-	fileCache.set(id, { value, at: Date.now() });
+	// Not when the settings moved while this read ran: it may be from before the change.
+	if (epoch === settingsEpoch()) fileCache.set(id, { value, at: Date.now(), epoch });
 	return value;
 }
 

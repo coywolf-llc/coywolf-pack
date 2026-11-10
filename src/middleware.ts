@@ -19,7 +19,7 @@
 import type { MiddlewareHandler } from "astro";
 
 import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOption, siteFeatures, siteOption, siteSetting, isOn } from "./core/features.js";
-import { claimSettle, recordSettingsChange } from "./core/generation.js";
+import { SETTLE_RETRY_MS, claimSettle, currentGenerationTag, mergeScopes, recordSettingsChange, settleLater } from "./core/generation.js";
 import { invalidateRobotsCache } from "./robots/middleware.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
 import { DEADLINES } from "./core/single-flight.js";
@@ -28,9 +28,9 @@ import type { PackMiddleware } from "./core/module.js";
 import { MIDDLEWARE } from "./modules.js";
 import { ALWAYS, LIFETIME_DEFAULTS, LIFETIME_SETTINGS } from "./pageCache/pack.js";
 import { ROBOTS_EDGE_MAX_AGE } from "./robots/pack.js";
-import { type PurgeScope, ROBOTS_TAG, applyPageLifetime, keepAtEdge, isRedirectSave, purgePageCache, purgeScope, purgesAfter, redirectPagesScope, settlePage, watchInvalidation } from "./pageCache/lib.js";
+import { type PurgeScope, ROBOTS_TAG, applyPageLifetime, keepAtEdge, isRedirectSave, purgeOutcome, purgeScope, purgesAfter, redirectPagesScope, settlePage, tagGeneration, watchInvalidation } from "./pageCache/lib.js";
 import { STOPGAP_HEADER, WARMER_AGENT, WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, scheduleRewarm, startWarm, warmMayHaveWork, warmStep } from "./pageCache/warm.js";
-import { prefetchRedirects } from "./redirects/middleware.js";
+import { prefetchRedirects, serveLateRedirect } from "./redirects/middleware.js";
 import { notePackMiddleware } from "./search/live-serve.js";
 import { withMediaPreconnect } from "./images/lib.js";
 import { pendingMediaRenders, renderedPendingMedia } from "./images/pending.js";
@@ -115,30 +115,42 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		const known = knownFeatures();
 		if (!known || isOn(known, "redirects")) prefetchRedirects(context.url, env, { database: options.database });
 		const features = await siteFeatures(options.database, context.url.pathname === ADMIN_MANIFEST);
+		// The settings generation this request renders with (read with the switches): its tag goes on
+		// whatever this response leaves in the edge cache, so a settings save can clear just those.
+		const generation = currentGenerationTag();
 		const db = env[options.database ?? "DB"] as D1Database | undefined;
-		/** Clear cached pages, then (for a full purge, when warming is on) start warming them again. */
-		const purge = (scope: PurgeScope) =>
-			purgePageCache(scope).then(async (purged) => {
-				if (purged && "purgeEverything" in scope && db && (await siteSetting<boolean>(WARM_SETTING, options.database))) await startWarming(db, "settings");
+		/**
+		 * Clear cached pages, then (for a full purge, when warming is on) start warming them again. A purge
+		 * that's refused (the account's purge rate limit) or fails is kept for the settling purge (settleLater),
+		 * or, when it was the settling purge, tried again a minute later.
+		 */
+		const purge = (scope: PurgeScope, settling = false) =>
+			purgeOutcome(scope).then(async (outcome) => {
+				if (outcome === "refused") {
+					if (db) await settleLater(db, scope, Date.now(), settling ? SETTLE_RETRY_MS : undefined);
+					return;
+				}
+				if (outcome === "purged" && "purgeEverything" in scope && db && (await siteSetting<boolean>(WARM_SETTING, options.database))) await startWarming(db, "settings");
 			});
 		// Page cache: a successful pack admin write (settings, redirects, imports…) can change any page.
 		if (purgesAfter(context.request.method, context.url.pathname)) {
-			// A redirect save also clears the pages cached at its sources; read its body before the route does.
-			// Only a body the route would accept (it checks permissions after this): anything else gets the tag purge alone.
+			// A redirect save also clears the pages cached at its sources: keep a copy of its body, the route reads
+			// the original. Only a body the route would accept (anything else gets the tag purge alone), and it's
+			// parsed only once the route has answered with success: EmDash checks who's asking in the route
+			// dispatcher, after this middleware, so parsing first let anyone make the Worker parse 2 MiB of JSON.
 			const length = Number(context.request.headers.get("content-length"));
-			const redirectBody =
-				isRedirectSave(context.url.pathname) && length > 0 && length <= REDIRECT_BODY_MAX
-					? context.request.clone().json().catch(() => null)
-					: null;
+			const redirectCopy = isRedirectSave(context.url.pathname) && length > 0 && length <= REDIRECT_BODY_MAX ? context.request.clone() : null;
 			const response = await next();
 			if (response.status < 400) {
-				const pages = redirectPagesScope(await redirectBody);
-				const scope = pages && "purgeEverything" in pages ? pages : purgeScope(context.url.pathname);
-				if (pages && !("purgeEverything" in pages)) waitUntil(purge(pages).catch((error) => console.error("coywolf-pack: could not clear pages at redirect sources", error)));
+				// One purge for both: the cached redirects (their tag) and the pages cached at the new sources.
+				// The settling purge repeats both: an isolate that hasn't seen the edit yet may render (and cache)
+				// a source's page instead of redirecting.
+				const redirectBody = redirectCopy ? await redirectCopy.json().catch(() => null) : null;
+				const scope = mergeScopes(purgeScope(context.url.pathname), redirectPagesScope(redirectBody));
 				// This isolate's settings caches go now; other isolates drop theirs when they see the new generation.
 				invalidateFeatures();
 				const recorded = db
-					? recordSettingsChange(db, scope).catch((error) => console.error("coywolf-pack: could not record the settings change", error))
+					? recordSettingsChange(db, scope, undefined, { byGeneration: true }).catch((error) => console.error("coywolf-pack: could not record the settings change", error))
 					: Promise.resolve();
 				if (scope) waitUntil(recorded.then(() => purge(scope)));
 				else waitUntil(recorded);
@@ -154,17 +166,19 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				: null;
 		// Only SEO saves can change it (not General, Social…), so other settings saves don't touch the settings generation.
 		// A staging change (EmDash's Site Status: Go live, or back to staging) changes every page's robots tag.
+		// A copy of the body, read only after EmDash has accepted the save (it checks permissions after this middleware).
 		const settingsLength = Number(context.request.headers.get("content-length"));
-		const settingsKeys: { seo: boolean; staging: boolean } =
-			method === "POST" && context.url.pathname === EMDASH_SETTINGS_API && settingsLength > 0 && settingsLength <= 64 * 1024
-				? await context.request
-						.clone()
-						.json()
-						.then((body: unknown) => (body && typeof body === "object" ? { seo: "seo" in body, staging: "staging" in body } : { seo: false, staging: false }))
-						.catch(() => ({ seo: false, staging: false }))
-				: { seo: false, staging: false };
-		const seoSave = settingsKeys.seo;
-		const afterWrite = (response: Response): Response => {
+		const settingsCopy = method === "POST" && context.url.pathname === EMDASH_SETTINGS_API && settingsLength > 0 && settingsLength <= 64 * 1024 ? context.request.clone() : null;
+		const savedKeys = async (response: Response): Promise<{ seo: boolean; staging: boolean }> => {
+			if (!settingsCopy || response.status >= 400) return { seo: false, staging: false };
+			return settingsCopy
+				.json()
+				.then((body: unknown) => (body && typeof body === "object" ? { seo: "seo" in body, staging: "staging" in body } : { seo: false, staging: false }))
+				.catch(() => ({ seo: false, staging: false }));
+		};
+		const afterWrite = async (response: Response): Promise<Response> => {
+			const settingsKeys = await savedKeys(response);
+			const seoSave = settingsKeys.seo;
 			// EmDash's SEO settings include "Disallow AI training", whose lines the pack's robots.txt carries: clear it,
 			// here now and (settling purge) again once every isolate's robots.txt cache has expired.
 			if (seoSave && response.status < 400 && isOn(features, "robots")) {
@@ -208,7 +222,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		if (db) {
 			waitUntil(
 				claimSettle(db)
-					.then((scope) => (scope ? purge(scope) : undefined))
+					.then((scope) => (scope ? purge(scope, true) : undefined))
 					.catch((error) => console.error("coywolf-pack: settling purge failed", error)),
 			);
 		}
@@ -257,6 +271,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 					// Without this, a site route rule (e.g. on a catch-all page route) would add
 					// its edge lifetime to them too. Redirects set their own edge caching.
 					if (!handler.ownsCache || readFailed()) routeCache?.set?.(false);
+					else tagGeneration(routeCache, generation);
 					return response;
 				}
 			} catch (error) {
@@ -272,7 +287,20 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		// (STOPGAP_HEADER) and visits again.
 		if (method === "GET" || method === "HEAD") {
 			const before = pendingMediaRenders();
-			const response = await next();
+			let response = await next();
+			// A 404 at a path this isolate's redirect index doesn't know: a rule added elsewhere (a slug change) may be there.
+			if (response.status === 404 && isOn(features, "redirects")) {
+				const late = await serveLateRedirect(context, env, waitUntil).catch(() => undefined);
+				if (late) {
+					// Drain the discarded 404 render rather than cancel it, as EmDash's own redirect middleware does: a render
+					// cancelled midway can leave an isolate-wide read unsettled, which later renders would wait on.
+					const discarded = response.body;
+					if (discarded) waitUntil(discarded.pipeTo(new WritableStream()).catch(() => undefined));
+					response = late;
+					tagGeneration(routeCache, generation);
+					return response;
+				}
+			}
 			// EmDash's own robots.txt (Robots.txt Rules off): kept at the edge for a day, as the pack's is.
 			if (context.url.pathname === "/robots.txt" && response.status === 200 && !readFailed()) keepAtEdge(context, ROBOTS_EDGE_MAX_AGE, [ROBOTS_TAG]);
 			// The media host (read with the feature switches: no extra query) for the page's preconnect header.
@@ -284,6 +312,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				label: `${method} ${context.url.pathname}`,
 				reason: lastReadFailure,
 			});
+			tagGeneration(routeCache, generation);
 			return context.url.pathname.startsWith("/_emdash/") ? settled : withMediaPreconnect(settled);
 		}
 		return afterWrite(await next());

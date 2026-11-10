@@ -6,10 +6,11 @@ import { parseInput } from "../shared.js";
 import { CLOUDFLARE_API_HOST, CloudflareApiError, applyMediaCacheRule, readMediaCacheRule } from "../images/cloudflare.js";
 import { mediaApiAccess, purgeMediaHost } from "../images/module.js";
 import type { PackMiddleware, PackModule } from "../core/module.js";
+import { settleLater } from "../core/generation.js";
 import { workerEnv } from "../shared.js";
-import { ROBOTS_TAG, VERSION_OPTION, keepAtEdge, purgeIfNewVersion, purgePageCache, versionId } from "./lib.js";
+import { ROBOTS_TAG, VERSION_OPTION, keepAtEdge, noteNewVersion, purgePageCache, versionId } from "./lib.js";
 import { usageReport } from "./usage.js";
-import { WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, nextDailyAt, pendingRevisits, readWarmState, remainingUrls, startWarm } from "./warm.js";
+import { WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, WARM_TASK, nextDailyAt, pendingRevisits, readWarmState, remainingUrls, startWarm, warmFromCron } from "./warm.js";
 
 /**
  * Performance is always on (its page sits right below Coywolf Pack). On a site
@@ -17,6 +18,32 @@ import { WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, nextDailyAt, pendi
  * route, so there's nothing to switch off.
  */
 export const ALWAYS = "*";
+
+export interface PageCacheOptions {
+	/**
+	 * Set this when the site shares Workers Cache across deploys
+	 * (`"cache": { "enabled": true, "cross_version_cache": true }` in
+	 * wrangler.jsonc). Then a page cached by the previous deploy is still
+	 * served after the next one, so the first request a new Worker version
+	 * handles clears every cached page, as the pack always did before 0.35.19.
+	 * Default false: Workers Cache keeps each version's pages apart, a deploy
+	 * starts from a cold cache by itself, and the pack only notices the new
+	 * version (to start cache warming).
+	 */
+	crossVersionCache?: boolean;
+}
+
+/**
+ * Options from coywolfPlugin({ pageCache }). EmDash creates the plugin when the Worker
+ * isolate starts, before any request reaches the middleware (as with the search rate limit).
+ */
+let config: PageCacheOptions = {};
+export function configurePageCache(options: PageCacheOptions): void {
+	config = { ...options };
+}
+export function pageCacheConfig(): PageCacheOptions {
+	return config;
+}
 
 /** How long the edge keeps a page, and how long after that it may serve it while refreshing. */
 export const LIFETIME_SETTINGS = { maxAgeDays: "pageCacheMaxAgeDays", refreshDays: "pageCacheRefreshDays" } as const;
@@ -33,6 +60,26 @@ async function siteDb(): Promise<D1Database | undefined> {
 	return env.DB as D1Database | undefined;
 }
 
+/** The hourly warming fallback (WARM_TASK): does nothing while cache warming is off. */
+const WARM_SCHEDULE = "@hourly";
+
+async function warmTask(ctx: { settings: { get<T>(key: string): Promise<T | null | undefined> }; site?: { url?: string }; log: { info(msg: string, data?: unknown): void } }): Promise<void> {
+	if (!(await ctx.settings.get<boolean>(WARM_SETTING))) return;
+	const env: Record<string, unknown> = await workerEnv().catch(() => ({}));
+	const db = env.DB as D1Database | undefined;
+	const self = env.SELF as Fetcher | undefined;
+	let origin: string | null = null;
+	try {
+		origin = ctx.site?.url ? new URL(ctx.site.url).origin : null;
+	} catch {
+		origin = null;
+	}
+	if (!db || !self || !origin) return;
+	const daily = (await ctx.settings.get<boolean>(WARM_DAILY_SETTING)) !== false;
+	const steps = await warmFromCron(db, self, origin, { daily });
+	if (steps.length) ctx.log.info("Cache warming: hourly fallback", { steps });
+}
+
 
 const lifetimeInput = z.object({
 	maxAgeDays: z.number().int().min(1, "Keep pages for at least 1 day.").max(365, "Keep pages for at most 365 days."),
@@ -44,7 +91,8 @@ const apiError = (error: unknown): never => {
 	throw error;
 };
 
-export function pageCachePack(): PackModule {
+export function pageCachePack(options: PageCacheOptions = {}): PackModule {
+	configurePageCache(options);
 	return {
 		id: "pageCache",
 		label: "Page cache",
@@ -92,6 +140,8 @@ export function pageCachePack(): PackModule {
 					if (enabled !== undefined) {
 						await ctx.settings.set(WARM_SETTING, enabled);
 						rememberSiteSetting(WARM_SETTING, enabled);
+						// The hourly fallback (it's also scheduled whenever the Features page opens).
+						if (enabled) await ctx.cron?.schedule(WARM_TASK, { schedule: WARM_SCHEDULE }).catch((error: unknown) => ctx.log.warn("Cache warming: couldn't schedule the hourly task", { error: String(error) }));
 					}
 					if (daily !== undefined) {
 						await ctx.settings.set(WARM_DAILY_SETTING, daily);
@@ -190,6 +240,15 @@ export function pageCachePack(): PackModule {
 				},
 			}),
 		},
+		tasks: [
+			{
+				name: WARM_TASK,
+				schedule: WARM_SCHEDULE,
+				// Performance has no switch: the task always runs and checks the warming switch itself.
+				feature: "",
+				handler: warmTask,
+			},
+		],
 		// Its page (/performance) is listed by index.ts, always, right below Coywolf Pack.
 		adminPages: [],
 		widgets: [{ id: "cloudflare-usage", title: "Cloudflare usage", size: "third" }],
@@ -201,7 +260,12 @@ export function pageCachePack(): PackModule {
 
 let checkedVersion = false;
 
-/** Once per isolate: if this is a new deploy, clear the cache (never answers a request). */
+/**
+ * Once per isolate: notice a new deploy (never answers a request). It starts
+ * cache warming, and clears the cache first only on sites that share it across
+ * versions (PageCacheOptions.crossVersionCache) or after a rollback to a
+ * version seen before (see noteNewVersion).
+ */
 export const pageCacheMiddleware: PackMiddleware = {
 	module: "pageCache",
 	feature: ALWAYS,
@@ -212,9 +276,9 @@ export const pageCacheMiddleware: PackMiddleware = {
 		const db = env.DB as D1Database | undefined;
 		if (id && db)
 			waitUntil(
-				purgeIfNewVersion(db, id, siteOption(VERSION_OPTION))
-					.then(async (purged) => {
-						if (purged && (await siteSetting<boolean>(WARM_SETTING))) rememberSiteOption(WARM_STATE_OPTION, JSON.stringify(await startWarm(db, "deploy")));
+				noteNewVersion(db, id, siteOption(VERSION_OPTION), { purge: config.crossVersionCache === true, settleLater: (scope) => settleLater(db, scope) })
+					.then(async (deployed) => {
+						if (deployed && (await siteSetting<boolean>(WARM_SETTING))) rememberSiteOption(WARM_STATE_OPTION, JSON.stringify(await startWarm(db, "deploy")));
 					})
 					.catch((error) => console.error("coywolf-pack: page cache version check failed", error)),
 			);

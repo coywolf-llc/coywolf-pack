@@ -3,7 +3,8 @@ import { getPublicPluginApiRouteHandler } from "emdash/plugin-utils";
 import { PLUGIN_ID, registerFeatures } from "../core/features.js";
 import { noteReadFailure, routeFailed } from "../core/read-failures.js";
 import type { PackMiddleware, PackModule } from "../core/module.js";
-import { BLOCK_TYPE } from "./lib.js";
+import { keepAtEdge } from "../pageCache/lib.js";
+import { BLOCK_TYPE, VIDEO_SITEMAP_EDGE_MAX_AGE, VIDEO_SITEMAP_TAG } from "./lib.js";
 import { F, type VideosOptions, videosModule } from "./module.js";
 // Registers the copied-posters setting before the first settings read (see poster.ts).
 import "./poster.js";
@@ -152,18 +153,24 @@ async function callPublic(locals: unknown, origin: string, route: string, body: 
 }
 
 const SITEMAP_PATH = "/coywolf-video-sitemap.xml";
-let sitemapMemo: { xml: string; at: number } | null = null;
+let sitemapMemo: { xml: string; tags: string[]; at: number } | null = null;
 
 export const videosSitemapMiddleware: PackMiddleware = {
 	module: "videos",
 	feature: F.sitemap,
+	// Kept at the edge for an hour (see VIDEO_SITEMAP_TAG for what clears it sooner).
+	ownsCache: true,
 	handle: async (context) => {
 		if (context.url.pathname !== SITEMAP_PATH) return undefined;
-		if (!sitemapMemo || Date.now() - sitemapMemo.at > 5 * 60_000) {
-			const data = (await callPublic(context.locals, context.url.origin, "videos/sitemap", {})) as { xml?: string } | null;
+		// With route caching (Workers Cache) on, the edge keeps the copy, and this isolate doesn't: a copy from
+		// memory could put the sitemap from before an edit back at the edge right after it was cleared.
+		const edge = Boolean((context as unknown as { cache?: { enabled?: boolean } }).cache?.enabled);
+		if (edge || !sitemapMemo || Date.now() - sitemapMemo.at > 5 * 60_000) {
+			const data = (await callPublic(context.locals, context.url.origin, "videos/sitemap", {})) as { xml?: string; tags?: string[] } | null;
 			if (!data?.xml) return undefined;
-			sitemapMemo = { xml: data.xml, at: Date.now() };
+			sitemapMemo = { xml: data.xml, tags: data.tags ?? [VIDEO_SITEMAP_TAG], at: Date.now() };
 		}
+		keepAtEdge(context, VIDEO_SITEMAP_EDGE_MAX_AGE, sitemapMemo.tags);
 		return new Response(context.request.method === "HEAD" ? null : sitemapMemo.xml, {
 			headers: { "Content-Type": "application/xml; charset=utf-8", "Cache-Control": "public, max-age=900" },
 		});

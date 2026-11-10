@@ -120,7 +120,14 @@ function markdownLite(escaped: string): string {
 		.replace(/\*\*(?=\S)([^*\n]{1,1000}?)\*\*/g, "<strong>$1</strong>");
 }
 
-const TAG = /<!--[\s\S]*?(?:-->|$)|<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s+[^\s"'>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g;
+/**
+ * One tag (or comment). Attribute names can't contain `<`, so a tag that never
+ * closes stops being a candidate at the next `<`: with `<` allowed, every
+ * unclosed `<a b c …` was scanned to the end of the field again from each
+ * `<`, a quadratic case (80,000 characters took 4 seconds; fields take up to
+ * 500,000). Quoted values may still contain `<`.
+ */
+const TAG = /<!--[\s\S]*?(?:-->|$)|<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g;
 const ATTR = /([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
 
 const STYLE_PROPS = new Set(["color", "background-color", "font-size", "font-weight", "font-style", "font-variant", "text-decoration", "text-transform", "text-align", "letter-spacing", "white-space"]);
@@ -298,13 +305,41 @@ export function renderRich(input: unknown, opts: RichOptions = {}): string {
 	return out.trim();
 }
 
+/**
+ * `<script>` and `<style>` elements removed, body and all, in one pass. A lazy
+ * `<script[\s\S]*?</script>` regex rescans to the end from every opening tag
+ * that has no closing one (quadratic); this looks for a tag's closing tag at
+ * most once after it's known to have none.
+ */
+function dropScriptsAndStyles(input: string): string {
+	const open = /<(script|style)\b/gi;
+	const unclosed = new Set<string>();
+	let out = "";
+	let last = 0;
+	for (let m = open.exec(input); m; m = open.exec(input)) {
+		const tag = (m[1] as string).toLowerCase();
+		if (unclosed.has(tag)) continue;
+		const close = new RegExp(`<\\/${tag}\\s*>`, "gi");
+		close.lastIndex = open.lastIndex;
+		const end = close.exec(input);
+		if (!end) {
+			unclosed.add(tag);
+			continue;
+		}
+		out += input.slice(last, m.index);
+		last = end.index + end[0].length;
+		open.lastIndex = last;
+	}
+	return out + input.slice(last);
+}
+
 /** Plain text of a field (for labels, schema and checks): tags dropped, entities decoded, whitespace collapsed. */
 export function plainText(input: unknown): string {
 	if (typeof input !== "string") return "";
 	return decodeAttr(
-		input
-			.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, "")
-			.replace(/<[^>]*>/g, " ")
+		// A tag ends at the next `>` or `<` (an unclosed `<` stays text): linear, however many `<` there are.
+		dropScriptsAndStyles(input)
+			.replace(/<[^<>]*>/g, " ")
 			.replace(/\[([^\]\n]+)\]\([^()\s]+\)/g, "$1")
 			.replace(/\*\*([^*\n]+)\*\*/g, "$1"),
 	)

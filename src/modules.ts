@@ -50,7 +50,7 @@ export const MODULES: Factory[] = [
 	(o) => (o.reviews === false ? null : reviewsPack(o.reviews ?? {})),
 	(o) => (o.customBlocks === false || o.contentBlocks === false ? null : customBlocksPack()),
 	(o) => (o.images === false ? null : imagesPack(o.images ?? {})),
-	(o) => (o.pageCache === false ? null : pageCachePack()),
+	(o) => (o.pageCache === false ? null : pageCachePack(o.pageCache ?? {})),
 ];
 
 export const MIDDLEWARE: PackMiddleware[] = [pageCacheMiddleware, strayRobotsMiddleware, imagesMiddleware, backupsDownloadMiddleware, redirectsMiddleware, robotsMiddleware, filesMiddleware, searchLiveMiddleware, searchRateLimitMiddleware, ...discoveryMiddleware, videosSitemapMiddleware, videosCaptionsMiddleware];

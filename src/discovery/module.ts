@@ -12,7 +12,7 @@ import { siteName } from "../core/site.js";
 import { cachedCtxFeatures, ctxFeatures, invalidateFeatures, isOn, readSiteSetting, registerSiteSetting, requireFeature } from "../core/features.js";
 import type { TaskDef } from "../core/module.js";
 import { afterResponse, parseInput, workerEnv } from "../shared.js";
-import { LLMS_CACHE, NEWS_CACHE, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
+import { LLMS_CACHE, LLMS_TAG, NEWS_CACHE, NEWS_TAG, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
 import { type CrawlerHintsZone, crawlerHintsDashboardUrl, readCrawlerHints } from "./crawler-hints.js";
 import { buildFeed } from "./feed-build.js";
 import { FEED_PATH, FEED_TAG } from "./feed.js";
@@ -207,7 +207,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 			public: true,
 			handler: async (ctx: PluginContext) => {
 				await requireFeature(ctx, FEATURE.news);
-				return { body: (await readDoc(ctx, "news")).body };
+				const doc = await readDoc(ctx, "news");
+				return { body: doc.body, tags: [NEWS_TAG, ...(doc.collections ?? [])] };
 			},
 		},
 		"discovery/public/feed": {
@@ -224,7 +225,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 			public: true,
 			handler: async (ctx: PluginContext) => {
 				await requireFeature(ctx, FEATURE.llms);
-				return { body: (await readDoc(ctx, "llms")).body };
+				const doc = await readDoc(ctx, "llms");
+				return { body: doc.body, tags: [LLMS_TAG, ...(doc.collections ?? [])] };
 			},
 		},
 		"discovery/public/markdown": {

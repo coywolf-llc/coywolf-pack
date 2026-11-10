@@ -96,8 +96,146 @@ export function normalizePath(path: string): string {
 
 export class RedirectValidationError extends Error {}
 
+/** Longest request path tried against pattern rules; longer paths match exact rules only (bounds a slow pattern's cost per request). */
+export const MAX_PATTERN_PATH = 512;
+
+/** A literal character as written in a pattern (`\/` and `/` are the same). */
+const literal = (c: string) => (c.length === 2 && c.startsWith("\\") && !/[A-Za-z0-9]/.test(c[1] as string) ? c[1] : c);
+
+/**
+ * A repeated group whose own repeat can't overlap between iterations: `[^X]+X`
+ * or `X[^X]+` (or `*`), where X is one literal character. Each iteration then
+ * ends (or starts) at the next X, so there's one way to split a path, such as
+ * the common `(?:[^/]+/)*` for "any number of path segments".
+ */
+function unambiguousRepeat(body: string): boolean {
+	const ends = /^\[\^(\\.|[^\\\]])\][+*](\\.|[^\\()[\]{}|*+?^$.])$/.exec(body);
+	if (ends && literal(ends[1] as string) === literal(ends[2] as string)) return true;
+	const starts = /^(\\.|[^\\()[\]{}|*+?^$.])\[\^(\\.|[^\\\]])\][+*]$/.exec(body);
+	return Boolean(starts && literal(starts[1] as string) === literal(starts[2] as string));
+}
+
+/** Alternatives that are plain words starting with different characters (`jpg|png`): each iteration has one way to match. */
+function distinctWords(body: string): boolean {
+	const words = body.split("|");
+	if (!words.every((w) => /^(?:[A-Za-z0-9_\-/]|\\[./-])+$/.test(w))) return false;
+	const firsts = words.map((w) => literal(w.startsWith("\\") ? w.slice(0, 2) : (w[0] as string)));
+	return new Set(firsts).size === firsts.length;
+}
+
+/** Most unbounded repeats of a broad atom (`.*`, `\S+`, `[^x]*`…) in one pattern: each more multiplies the work on a long path. */
+export const MAX_WILDCARD_REPEATS = 2;
+
+/** What follows an atom: no quantifier, `?`, a fixed count (`{n}`), a bounded repeat (`{n,m}`) or an unbounded one (`*`, `+`, `{n,}`). */
+interface Quantifier {
+	/** Characters it takes, with a lazy `?` after it. */
+	len: number;
+	kind: "none" | "optional" | "fixed" | "bounded" | "unbounded";
+	/** Most times the atom may match (Infinity when unbounded). */
+	max: number;
+}
+
+function quantifierAt(source: string, i: number): Quantifier {
+	const c = source[i];
+	const lazy = (len: number) => (source[i + len] === "?" ? len + 1 : len);
+	if (c === "*" || c === "+") return { len: lazy(1), kind: "unbounded", max: Number.POSITIVE_INFINITY };
+	if (c === "?") return { len: lazy(1), kind: "optional", max: 1 };
+	const m = c === "{" ? /^\{(\d+)(,(\d*))?\}/.exec(source.slice(i)) : null;
+	if (!m) return { len: 0, kind: "none", max: 1 };
+	if (m[2] === undefined) return { len: lazy(m[0].length), kind: "fixed", max: Number(m[1]) };
+	if (m[3] === "") return { len: lazy(m[0].length), kind: "unbounded", max: Number.POSITIVE_INFINITY };
+	return { len: lazy(m[0].length), kind: "bounded", max: Number(m[3]) };
+}
+
+/** A broad atom: `.`, `\S`, `\D`, `\W`, `\w`, a class like `[\s\S]`, or a negated class that lets `/` through. */
+function broadAtom(atom: string): boolean {
+	if (atom === "." || /^\\[SDWw]$/.test(atom)) return true;
+	if (!atom.startsWith("[")) return false;
+	if (/\\s[^\]]*\\S|\\S[^\]]*\\s|\\d[^\]]*\\D|\\D[^\]]*\\d|\\w[^\]]*\\W|\\W[^\]]*\\w/.test(atom)) return true;
+	return atom.startsWith("[^") && !/\/|\\\//.test(atom);
+}
+
+/**
+ * A pattern that can take exponential (or steeply polynomial) time on a path
+ * that almost matches, found by reading the pattern (escapes and character
+ * classes skipped). Every request whose path has no exact rule runs every
+ * pattern, so one such pattern lets anyone burn the Worker's CPU:
+ * - a repeated group (`*`, `+`, `{n,}`, or `{n}`/`{n,m}` above 1) whose body
+ *   can match in more than one way: it contains a repeat, an optional part
+ *   (`?`) or alternatives, as in `(a+)+`, `(aa?)*` (41 characters took 12 s),
+ *   `(.?.)*`, `(a|a){30}` or `(a|ab)+`. Allowed: an inner repeat that can't
+ *   overlap (unambiguousRepeat: `(?:[^/]+/)*`, `(?:/[^/]+)+`) and plain words
+ *   that start differently (`(?:jpg|png)+`). A fixed count inside (`{4}`)
+ *   doesn't make a body ambiguous;
+ * - more than MAX_WILDCARD_REPEATS unbounded repeats of a broad atom, such as
+ *   `(.*)(.*)(.*)(.*)x` (400 characters took 3.4 s).
+ * Some fast patterns are refused too; they can be written another way.
+ * Returns the reason, or null.
+ */
+export function nestedRepeat(source: string): string | null {
+	interface Group {
+		start: number;
+		/** Contains a repeat or an optional part (directly or in a group inside it). */
+		ambiguous: boolean;
+		/** Contains alternatives (directly or in a group inside it). */
+		alt: boolean;
+	}
+	const root = (): Group => ({ start: -1, ambiguous: false, alt: false });
+	const stack: Group[] = [];
+	let top = root();
+	let wildcards = 0;
+	for (let i = 0; i < source.length; i++) {
+		const c = source[i];
+		if (c === "(") {
+			stack.push(top);
+			top = { start: i, ambiguous: false, alt: false };
+			continue;
+		}
+		if (c === "|") {
+			top.alt = true;
+			continue;
+		}
+		if (c === ")") {
+			const group = top;
+			top = stack.pop() ?? root();
+			const body = source.slice(group.start + 1, i).replace(/^\?(?::|<[=!]|<[^>]*>|[=!])/, "");
+			const q = quantifierAt(source, i + 1);
+			if (q.kind !== "none" && q.kind !== "optional" && q.max > 1) {
+				const safe = unambiguousRepeat(body) || (group.alt && !group.ambiguous && distinctWords(body));
+				if (group.ambiguous && !safe) return "it repeats a group that can match in more than one way (such as (a+)+ or (aa?)*)";
+				if (group.alt && !safe) return "it repeats a group of alternatives that can match the same text (such as (a|ab)+)";
+			}
+			if (group.ambiguous || group.alt || (q.kind !== "none" && q.kind !== "fixed")) top.ambiguous = true;
+			if (group.alt) top.alt = true;
+			i += q.len;
+			continue;
+		}
+		// One atom: an escape, a class, `.`, or a literal character.
+		let end = i + 1;
+		if (c === "\\") end = i + 2;
+		else if (c === "[") {
+			// In JavaScript `[]` is empty, so the first unescaped `]` ends the class.
+			let j = i + 1;
+			for (; j < source.length && source[j] !== "]"; j++) if (source[j] === "\\") j++;
+			end = j + 1;
+		}
+		const atom = source.slice(i, end);
+		const q = quantifierAt(source, end);
+		if (q.kind !== "none" && q.kind !== "fixed") top.ambiguous = true;
+		if (q.kind === "unbounded" && broadAtom(atom) && ++wildcards > MAX_WILDCARD_REPEATS) {
+			return `it has more than ${MAX_WILDCARD_REPEATS} open-ended wildcards (such as .* or [^x]+)`;
+		}
+		i = end - 1 + q.len;
+	}
+	return null;
+}
+
 /** Validate and normalize a rule; throws RedirectValidationError with a readable message. */
-export function validate(input: RedirectInput): Omit<RedirectInput, "type"> & { type: RedirectType; target: string } {
+/**
+ * `unchangedPattern`: the rule already exists with this very pattern (enabling, disabling, editing its target
+ * or note, re-importing an export), so the speed check is skipped: patterns saved before it existed stay editable.
+ */
+export function validate(input: RedirectInput, options: { unchangedPattern?: boolean } = {}): Omit<RedirectInput, "type"> & { type: RedirectType; target: string } {
 	const source = (input.source ?? "").trim();
 	const target = (input.target ?? "").trim();
 	const type = (input.type ?? 301) as RedirectType;
@@ -111,6 +249,8 @@ export function validate(input: RedirectInput): Omit<RedirectInput, "type"> & { 
 		} catch (error) {
 			throw new RedirectValidationError(`Invalid pattern: ${(error as Error).message}`);
 		}
+		const slow = options.unchangedPattern ? null : nestedRepeat(source);
+		if (slow) throw new RedirectValidationError(`This pattern could make some requests very slow: ${slow}. Write it another way, for example ^/blog/[a-z0-9/-]+$ instead of ^/blog(/[a-z0-9-]+)+$, or (?:[^/]+/)* for any number of path segments.`);
 	} else if (!source.startsWith("/") || source.startsWith("//")) {
 		throw new RedirectValidationError("The source must be a path starting with /.");
 	}
@@ -207,6 +347,20 @@ export async function findExactRule(db: D1Database, pathname: string): Promise<R
 	return (await readMatchRules(db, statement))[0] ?? null;
 }
 
+/**
+ * The sources of the enabled exact rules, at most `max` + 1 of them (more than `max` tells the caller there
+ * are too many to keep in memory). Read with the pack's other reads of this tick, in one D1 batch.
+ */
+export async function loadExactSources(db: D1Database, max: number): Promise<string[]> {
+	const statement = db.prepare(`SELECT source FROM ${TABLE} WHERE is_regex = 0 AND enabled = 1 LIMIT ?`).bind(max + 1);
+	try {
+		return (await batchedAll<{ source: string }>(db, statement)).map((r) => r.source);
+	} catch (error) {
+		if (isMissingTable(error)) return [];
+		throw error;
+	}
+}
+
 /** The enabled pattern rules, in source order (the order they're tried); read through the patterns index. */
 export function loadPatternRules(db: D1Database): Promise<RedirectRule[]> {
 	return readMatchRules(db, db.prepare(`SELECT ${MATCH_COLUMNS} FROM ${TABLE} WHERE is_regex = 1 AND enabled = 1 ORDER BY source`));
@@ -215,14 +369,16 @@ export function loadPatternRules(db: D1Database): Promise<RedirectRule[]> {
 /** Create or update (by id, or by source when importing). Returns the saved rule. */
 export async function saveRule(db: D1Database, input: RedirectInput & { id?: string }): Promise<RedirectRule> {
 	await ensureTable(db);
-	const rule = validate(input);
-	const now = new Date().toISOString();
+	const isRegex = input.isRegex === true;
+	const trimmed = (input.source ?? "").trim();
 	const existing = input.id
-		? await db.prepare(`SELECT id FROM ${TABLE} WHERE id = ?`).bind(input.id).first<{ id: string }>()
+		? await db.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE id = ?`).bind(input.id).first<{ id: string; source: string; is_regex: number }>()
 		: await db
-				.prepare(`SELECT id FROM ${TABLE} WHERE source = ? AND is_regex = ?`)
-				.bind(rule.source, rule.isRegex ? 1 : 0)
-				.first<{ id: string }>();
+				.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE source = ? AND is_regex = ?`)
+				.bind(isRegex ? trimmed : normalizePath(trimmed), isRegex ? 1 : 0)
+				.first<{ id: string; source: string; is_regex: number }>();
+	const rule = validate(input, { unchangedPattern: isRegex && existing?.is_regex === 1 && existing.source === trimmed });
+	const now = new Date().toISOString();
 	const id = existing?.id ?? input.id ?? crypto.randomUUID();
 	if (existing) {
 		await db
@@ -333,7 +489,7 @@ export interface Match {
 export function match(compiled: CompiledRules, pathname: string, search: string): Match | null {
 	let rule = compiled.exact.get(normalizePath(pathname));
 	let location = rule?.target ?? "";
-	if (!rule) {
+	if (!rule && pathname.length <= MAX_PATTERN_PATH) {
 		for (const candidate of compiled.patterns) {
 			const m = pathname.match(candidate.regex);
 			if (!m) continue;
@@ -366,8 +522,10 @@ export function withQuery(location: string, search: string): string {
 }
 
 export async function recordHit(db: D1Database, id: string): Promise<void> {
-	await db
-		.prepare(`UPDATE ${TABLE} SET hits = hits + 1, last_hit = ? WHERE id = ?`)
-		.bind(new Date().toISOString(), id)
-		.run();
+	await (hitStatement(db, id, 1, new Date().toISOString()) as D1PreparedStatement).run();
+}
+
+/** One statement adding `n` hits to a rule (batched per isolate by the site middleware). */
+export function hitStatement(db: { prepare(sql: string): { bind(...values: unknown[]): unknown } }, id: string, n: number, now: string): unknown {
+	return db.prepare(`UPDATE ${TABLE} SET hits = hits + ?, last_hit = ? WHERE id = ?`).bind(n, now, id);
 }

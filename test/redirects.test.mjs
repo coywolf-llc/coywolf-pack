@@ -16,7 +16,8 @@ registerHooks({
 });
 
 const { compile, match, listRules, saveRule } = await import("../src/redirects/rules.ts");
-const { serveRedirect, invalidateRedirectCache } = await import("../src/redirects/middleware.ts");
+const { serveRedirect, invalidateRedirectCache, setRedirectHitDelay } = await import("../src/redirects/middleware.ts");
+setRedirectHitDelay(0); // Hits are batched per isolate (a second's wait in production).
 
 const rule = (source, target, extra = {}) => ({
 	id: source,
@@ -259,22 +260,115 @@ test("hits are counted for exact and pattern matches", async () => {
 	invalidateRedirectCache();
 });
 
-test("a request reads only its exact rule (indexed) and, once per isolate, the patterns", async () => {
+test("a request reads its exact rule (indexed) only when its path is an exact source; the patterns and sources once per isolate", async () => {
 	const db = await seeded();
+	invalidateRedirectCache();
 	await serve(db, "https://example.com/old/");
 	await serve(db, "https://example.com/nothing-here");
-	const reads = db.log.filter((q) => /^SELECT/.test(q.sql));
+	await serve(db, "https://example.com/old");
+	const reads = db.log.filter((q) => /^SELECT/.test(q.sql) && /coywolf_redirects/.test(q.sql) && !/SELECT \* FROM/.test(q.sql));
 	const exact = reads.filter((q) => /WHERE source = \? AND is_regex = 0 AND enabled = 1$/.test(q.sql));
 	const patterns = reads.filter((q) => /WHERE is_regex = 1 AND enabled = 1 ORDER BY source$/.test(q.sql));
-	assert.deepEqual(exact.map((q) => q.params), [["/old"], ["/nothing-here"]]);
+	const sources = reads.filter((q) => /^SELECT source FROM coywolf_redirects WHERE is_regex = 0 AND enabled = 1 LIMIT/.test(q.sql));
+	assert.deepEqual(exact.map((q) => q.params), [["/old"], ["/old"]], "/nothing-here is no exact source: no read");
 	assert.equal(patterns.length, 1);
-	assert.equal(reads.length, 3, reads.map((q) => q.sql).join("\n"));
+	assert.equal(sources.length, 1);
+	assert.equal(reads.length, 4, reads.map((q) => q.sql).join("\n"));
 	// Both go through an index: no scan of the table.
 	const plan = (q) => db.sqlite.prepare(`EXPLAIN QUERY PLAN ${q.sql}`).all(...q.params).map((r) => r.detail).join("; ");
 	assert.match(plan(exact[0]), /SEARCH coywolf_redirects USING INDEX coywolf_redirects_source \(source=\? AND is_regex=\?\)/);
 	assert.match(plan(patterns[0]), /coywolf_redirects USING INDEX coywolf_redirects_patterns/);
 	assert.doesNotMatch(plan(patterns[0]), /TEMP B-TREE/);
 	invalidateRedirectCache();
+});
+
+test("hits within a moment are written together: one UPDATE per rule, not one per request", async () => {
+	const db = await seeded();
+	invalidateRedirectCache();
+	await serve(db, "https://example.com/nothing"); // The rules' index is in memory: the requests below answer within a millisecond or two.
+	setRedirectHitDelay(100);
+	const pending = [];
+	await Promise.all(["/old?a=1", "/old?a=2", "/old?a=3", "/a/1", "/a/2"].map((path) => serveRedirect(new URL(`https://example.com${path}`), { DB: db }, (p) => pending.push(p))));
+	await Promise.all(pending);
+	setRedirectHitDelay(0);
+	const updates = db.log.filter((q) => /^UPDATE coywolf_redirects SET hits/.test(q.sql));
+	assert.equal(updates.length, 2, `one per rule: ${JSON.stringify(updates.map((u) => u.params))}`);
+	const hits = Object.fromEntries(db.sqlite.prepare("SELECT source, hits FROM coywolf_redirects").all().map((r) => [r.source, r.hits]));
+	assert.equal(hits["/old"], 3);
+	assert.equal(hits["^/a/"], 2, JSON.stringify(hits)); // the first pattern in source order that matches
+	invalidateRedirectCache();
+});
+
+test("an exact rule added in another isolate is seen once this one reads the new redirects version (or settings generation)", async () => {
+	const features = await import("../src/core/features.ts");
+	const { REDIRECTS_VERSION_OPTION, noteRedirectsChanged } = await import("../src/redirects/middleware.ts");
+	const db = await seeded();
+	db.sqlite.exec("CREATE TABLE IF NOT EXISTS options (name TEXT PRIMARY KEY, value TEXT NOT NULL)");
+	features.invalidateFeatures();
+	await features.siteFeatures(db); // This isolate's read of the switches (no redirects version yet).
+	invalidateRedirectCache();
+	assert.equal(await serve(db, "https://example.com/added"), undefined, "not an exact source yet");
+	await saveRule(db, { source: "/added", target: "/there" }); // in another isolate, by a content hook
+	assert.equal(await serve(db, "https://example.com/added"), undefined, "this isolate's index doesn't have it yet");
+	features.rememberSiteOption(REDIRECTS_VERSION_OPTION, JSON.stringify("v2")); // the switches' next read carries the new version
+	assert.deepEqual(await serve(db, "https://example.com/added"), [301, "https://example.com/there"]);
+	// noteRedirectsChanged writes the version other isolates read with the switches.
+	await noteRedirectsChanged(db);
+	assert.match(db.sqlite.prepare("SELECT value FROM options WHERE name = ?").get(REDIRECTS_VERSION_OPTION).value, /^"[0-9a-f-]{36}"$/);
+	invalidateRedirectCache();
+});
+
+test("patterns: nested repeats are refused on save; paths longer than MAX_PATTERN_PATH only match exact rules", async () => {
+	const { nestedRepeat, validate, RedirectValidationError, MAX_PATTERN_PATH } = await import("../src/redirects/rules.ts");
+	for (const slow of ["^/(a+)+$", "(\\w+\\s?)*", "^/((a)+)+$", "^/(a{2,})+$", "^/(x*y?)+z$", "^/(?:[a-z]+/)*end$", "^/(a|a)*$", "^/(a|ab)+$", "^/(?:x|(?:x))*$", "^/([^/]+a)+$"])
+		assert.ok(nestedRepeat(slow), slow);
+	// Found by the re-review: 41 characters took 12 s; over 5 s; over 5 s; 400 characters took 3.4 s.
+	for (const slow of ["^/(aa?)*$", "^/(a|a){30}$", "^/(.?.)*$", "^/(.*)(.*)(.*)(.*)x$", "^/(.*)/(.*)/(.*)$", "^/(\\S+)(\\S+)(\\S+)x$", "^/([^x]*)([^x]*)([^x]*)y$", "^/(ab?){3,5}$"])
+		assert.ok(nestedRepeat(slow), slow);
+	assert.match(nestedRepeat("^/(.*)(.*)(.*)(.*)x$"), /open-ended wildcards/);
+	for (const fine of [
+		"^/a/(\\d+)/?$",
+		"^/blog/(.*)$",
+		"^/(?:news|blog)/(\\d{4})/(\\d{2})/(.*)$",
+		"^/[(a+)+]$",
+		"^/\\(a+\\)+$",
+		"^/(a|b){2}$",
+		"^/(ab)?c+$",
+		"^/(?:[^/]+/)*feed/?$",
+		"^/(?:[^\\/]+\\/)*feed/?$",
+		"^/blog(?:/[^/]+)+$",
+		"^/img/[a-z0-9-]+\\.(?:jpg|png)+$",
+		"^/(.*)/(.*)$",
+		"^/([^/]+)/([^/]+)/([^/]+)/?$",
+		"^/(\\d{4})/(\\d{2})/(.*)$",
+		"^/(?:ab){2}$",
+		"^/(\\d{2})+$",
+	])
+		assert.equal(nestedRepeat(fine), null, fine);
+	// The allowed shapes really are fast on a path that almost matches.
+	const started = performance.now();
+	assert.equal(new RegExp("^/(?:[^/]+/)*feed/?$").test(`/${"a/".repeat(500)}x`), false);
+	assert.equal(new RegExp("^/blog(?:/[^/]+)+$").test(`/blog${"/a".repeat(500)}/`), false);
+	assert.ok(performance.now() - started < 200);
+	assert.throws(() => validate({ source: "^/(a+)+$", target: "/x", isRegex: true }), (error) => error instanceof RedirectValidationError && /very slow/.test(error.message));
+	assert.doesNotThrow(() => validate({ source: "^/a/(\\d+)/?$", target: "/b/$1", isRegex: true }));
+	const compiled = compile([rule("^/(.*)$", "/all/$1")]);
+	assert.ok(match(compiled, "/x", ""));
+	assert.equal(match(compiled, `/${"x".repeat(MAX_PATTERN_PATH)}`, ""), null, "a crafted long path can't make every pattern run on it");
+});
+
+test("a pattern saved before the speed check can still be enabled, disabled or retargeted (its pattern unchanged), not changed into another slow one", async () => {
+	const db = sqliteD1();
+	await saveRule(db, { source: "/x", target: "/y" }); // creates the table
+	db.sqlite.prepare("INSERT INTO coywolf_redirects (id, source, target, type, is_regex, enabled, created_at, updated_at) VALUES ('old', '^/(a+)+$', '/a', 301, 1, 1, 'x', 'x')").run();
+	const disabled = await saveRule(db, { id: "old", source: "^/(a+)+$", target: "/a", isRegex: true, enabled: false });
+	assert.equal(disabled.enabled, false);
+	const moved = await saveRule(db, { id: "old", source: "^/(a+)+$", target: "/elsewhere", isRegex: true });
+	assert.equal(moved.target, "/elsewhere");
+	await assert.rejects(saveRule(db, { id: "old", source: "^/(b+)+$", target: "/a", isRegex: true }), /very slow/);
+	// Importing it again (an export) is fine too; a new slow pattern isn't.
+	await assert.doesNotReject(saveRule(db, { source: "^/(a+)+$", target: "/a", isRegex: true }));
+	await assert.rejects(saveRule(db, { source: "^/(c|c)*$", target: "/a", isRegex: true }), /very slow/);
 });
 
 test("serving from a database without the table: no rules, no error, no CREATE", async () => {

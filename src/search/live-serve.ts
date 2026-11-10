@@ -1,15 +1,23 @@
 /**
  * Live results and the title index, served by the pack middleware (feature
- * "search.live") ahead of EmDash's plugin route dispatch, with Cloudflare's
- * Cache API in front.
+ * "search.live") ahead of EmDash's plugin route dispatch.
  *
- * Worker responses aren't cached by the CDN on their own, so every answer is
- * stored in caches.default (per Cloudflare location) and in a small
- * per-isolate memory cache, keyed by the normalized query, limit,
- * collections, locale and the search content version. Publishing changes the
- * version, so new keys miss and old answers simply expire. Cache hits skip
- * the rate limit and the database entirely; misses count against
- * search.rateLimit when it's on.
+ * With Workers Cache in front of the Worker (Astro route caching on), each
+ * answer goes to the edge cache, where repeats are served without running the
+ * Worker: tagged SEARCH_TAG and with every searchable collection's slug, which
+ * EmDash clears whenever content in that collection changes. Live answers are
+ * kept for LIVE_EDGE_TTL (they're per query, so many are asked once); a title
+ * index for the current content version for a day. Only successful answers are
+ * kept: bad input (400), the rate limit's 429 and failures never are.
+ *
+ * Without Workers Cache, every answer is stored in caches.default (per
+ * Cloudflare location) and in a small per-isolate memory cache instead, keyed
+ * by the normalized query, limit, collections, locale and the search content
+ * version. Publishing changes the version, so new keys miss and old answers
+ * simply expire. (With Workers Cache those layers are skipped: an isolate that
+ * hasn't seen a new version yet would put its old copy back at the edge right
+ * after EmDash cleared it.) Cache hits skip the rate limit and the database
+ * entirely; misses count against search.rateLimit when it's on.
  *
  * The plugin routes (search/live, search/index) stay as the fallback for
  * sites without the middleware; they run the same engine.
@@ -31,8 +39,12 @@ export const INDEX_ENDPOINT = "/_emdash/api/plugins/coywolf-pack/search/index";
 export const VERSION_SETTING = "searchVersion";
 registerSiteSetting(VERSION_SETTING);
 
-/** Seconds a live answer is kept at the edge (the version in its key retires it sooner after a publish). */
+/** Seconds a live answer is kept at the edge (a publish in a searchable collection clears it sooner). */
 export const LIVE_EDGE_TTL = 300;
+/** Cache tag on every live answer and title index in the edge cache (with the searchable collections' slugs). */
+export const SEARCH_TAG = "coywolf-search";
+/** Most collection tags on one answer. */
+const MAX_COLLECTION_TAGS = 50;
 /** Seconds browsers keep a live answer. */
 export const LIVE_BROWSER_TTL = 60;
 /** Seconds a title index is kept at the edge. */
@@ -118,6 +130,18 @@ function store(memory: Lru<string>, key: string, body: string, edgeTtl: number, 
 
 type Context = Parameters<PackMiddleware["handle"]>[0];
 
+/** True when Astro route caching (Workers Cache) is on for this request: answers go to the edge cache. */
+function edgeCaching(context: Context): boolean {
+	return Boolean((context as unknown as { cache?: { enabled?: boolean } }).cache?.enabled);
+}
+
+/** Edge cache tags for an answer: SEARCH_TAG and the searchable collections (EmDash clears a collection's tag when its content changes). */
+async function searchTags(db: D1Database, version: string): Promise<string[]> {
+	const meta = await loadSearchMeta(db, config.database, version).catch(() => null);
+	const slugs = meta ? [...meta.collections.values()].filter((c) => c.searchEnabled).map((c) => c.slug) : [];
+	return [SEARCH_TAG, ...slugs.slice(0, MAX_COLLECTION_TAGS)];
+}
+
 async function rateLimited(context: Context, env: Record<string, unknown>): Promise<Response | undefined> {
 	return isOn(await siteFeatures(config.database), "search.rateLimit") ? rateLimitResponse(context, env) : undefined;
 }
@@ -147,7 +171,8 @@ async function serveLive(context: Context, env: Record<string, unknown>, waitUnt
 
 	const key = liveCacheKey(context.url.origin, { version, query, limit, collections, locale });
 	const browser = { "Cache-Control": `public, max-age=${LIVE_BROWSER_TTL}` };
-	const hit = await cachedBody(liveMemory, key);
+	const edge = edgeCaching(context);
+	const hit = edge ? null : await cachedBody(liveMemory, key);
 	if (hit) return jsonResponse(hit.body, 200, { ...browser, "Server-Timing": timing(hit.where, started), "X-Coywolf-Cache": "HIT" });
 
 	const limited = await rateLimited(context, env);
@@ -156,6 +181,11 @@ async function serveLive(context: Context, env: Record<string, unknown>, waitUnt
 	const stats: QueryStats = { statements: 0, roundTrips: 0 };
 	const data = await liveSearchD1(countingD1(db, stats), query, { collections, locale, limit, database: config.database, version });
 	const body = JSON.stringify({ success: true, data });
+	if (edge) {
+		keepAtEdge(context, LIVE_EDGE_TTL, await searchTags(db, version));
+		// No Server-Timing or cache state: the edge would hand this render's timings to every later visitor.
+		return jsonResponse(body, 200, browser);
+	}
 	store(liveMemory, key, body, LIVE_EDGE_TTL, waitUntil);
 	return jsonResponse(body, 200, { ...browser, "Server-Timing": timing("miss", started, stats), "X-Coywolf-Cache": "MISS" });
 }
@@ -178,7 +208,8 @@ async function serveIndex(context: Context, env: Record<string, unknown>, waitUn
 	};
 	if (context.request.headers.get("If-None-Match") === headers.ETag) return new Response(null, { status: 304, headers: new Headers(headers) });
 
-	const hit = await cachedBody(indexMemory, key);
+	const edge = edgeCaching(context);
+	const hit = edge ? null : await cachedBody(indexMemory, key);
 	if (hit) return jsonResponse(hit.body, 200, { ...headers, "Server-Timing": timing(hit.where, started), "X-Coywolf-Cache": "HIT" });
 
 	const limited = await rateLimited(context, env);
@@ -189,6 +220,11 @@ async function serveIndex(context: Context, env: Record<string, unknown>, waitUn
 	const meta = await loadSearchMeta(counted, config.database, version);
 	const index = await buildTitleIndex(counted, meta, { collections, locale, version, max: config.indexMax });
 	const body = JSON.stringify(index);
+	if (edge) {
+		// An index for the current version until content changes (its collections' tags) or a day; one asked for by an old page, briefly.
+		keepAtEdge(context, params.get("v") === version ? INDEX_EDGE_TTL : 300, await searchTags(db, version));
+		return jsonResponse(body, 200, headers);
+	}
 	store(indexMemory, key, body, INDEX_EDGE_TTL, waitUntil);
 	return jsonResponse(body, 200, { ...headers, "Server-Timing": timing("miss", started, stats), "X-Coywolf-Cache": "MISS" });
 }
@@ -262,7 +298,8 @@ export function liveAssetParts(version: string | null): { status: number; header
 export const searchLiveMiddleware: PackMiddleware = {
 	module: "search",
 	feature: "search.live",
-	// The client file goes to the edge cache (a year when the URL names this version); live results use their own cache.
+	// The client file goes to the edge cache (a year when the URL names this version), and so do successful live
+	// answers and title indexes (see the file comment); anything else is kept out.
 	ownsCache: true,
 	handle: async (context, env, waitUntil) => {
 		const path = context.url.pathname.length > 1 ? context.url.pathname.replace(/\/+$/, "") : context.url.pathname;

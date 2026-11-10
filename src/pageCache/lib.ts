@@ -2,9 +2,10 @@
  * Page cache: keeps Cloudflare's Workers Cache (the edge HTML cache in front of
  * the Worker, turned on by Astro's cacheCloudflare() provider) in step with the
  * site. EmDash already purges the pages it tagged when content, menus or site
- * settings change. This covers what EmDash can't know about: a new deploy (theme
- * or code changes) and Coywolf Pack settings, which change page output (schema,
- * blocks, reviews, videos…).
+ * settings change. This covers what EmDash can't know about: Coywolf Pack
+ * settings, which change page output (schema, blocks, reviews, videos…), and a
+ * new deploy on sites that share the cache across Worker versions (by default
+ * Workers Cache keeps each version's pages apart; see noteNewVersion).
  *
  * Purging runs inside the Worker with cache.purge() from cloudflare:workers, so
  * it needs no API token. Outside Workers Cache it does nothing.
@@ -28,8 +29,27 @@ export const VERSION_OPTION = "plugin:coywolf-pack:pageCache:version";
  */
 const PUBLIC_ROUTE = /^\/_emdash\/api\/plugins\/coywolf-pack\/(search\/|discovery\/public\/|videos\/((like|play|caption|embed|sitemap)(\/|$)|webhook$))/;
 const PACK_API = "/_emdash/api/plugins/coywolf-pack/";
-/** Admin writes that change nothing a page or a cache shows: no purge and no new settings generation. */
-const NO_SETTINGS_CHANGE = /^\/_emdash\/api\/plugins\/coywolf-pack\/updates\//;
+/**
+ * Admin writes that change no settings: no purge here and no new settings
+ * generation (so no settling purge, no isolate dropping its caches, no
+ * re-warm).
+ * - updates/…: the update check.
+ * - Upload progress. videos/upload and videos/upload-chunk start and feed a
+ *   new Stream video, which is on no page until an entry embeds it (and that
+ *   entry's save clears its own pages). The large-file steps
+ *   files/upload-start, -part, -complete and -abort make a new file the
+ *   file picker lists only once it's finished (files/options), so no page
+ *   can show it before then. Each 5–6 MiB piece used to count as a settings
+ *   save: a 500 MB video was about 100 full purges, most of them refused by
+ *   the purge rate limit (along with purges that mattered).
+ * - Changes to one video (videos/update, videos/delete, videos/captions/…):
+ *   their routes clear only the pages that embed the video themselves, as the
+ *   Stream webhook does (src/videos/module.ts clearVideoPages). Video details
+ *   are read from D1 on every render, so no isolate holds an old copy and
+ *   nothing needs a settling purge.
+ */
+const NO_SETTINGS_CHANGE =
+	/^\/_emdash\/api\/plugins\/coywolf-pack\/(updates\/|videos\/(upload|upload-chunk|update|delete|captions\/(upload|generate|delete|refresh))$|files\/upload-(start|part|complete|abort)$)/;
 
 /**
  * Routes declared read-only where they're defined (readOnlyRoute in
@@ -101,7 +121,8 @@ export function purgeScope(pathname: string): PurgeScope | null {
 	// Stored image sizes: new uploads and crops are picked up after a short stopgap lifetime; a backfill run clears the cache itself once when it is done.
 	if (/^images\/variants\/(settings|run|bulk|estimate)$/.test(route)) return null;
 	// (Un)subscribing the Stream webhook changes no page (its secret is on no page). The videos admin reads
-	// (library, details, storage, captions list…) are declared read-only where they're defined (readOnlyRoute) and never get here.
+	// (status, library, details, storage, captions list…) are declared read-only where they're defined (readOnlyRoute)
+	// and never get here; uploads and changes to one video aren't settings saves at all (NO_SETTINGS_CHANGE).
 	if (/^videos\/(status|settings|webhook\/(subscribe|unsubscribe))$/.test(route)) return null;
 	if (/^robots\//.test(route)) return { pathPrefixes: ["/robots.txt"] };
 	return { purgeEverything: true };
@@ -152,26 +173,38 @@ export function disposeRpcResult(result: unknown): void {
 
 /** Purge cached pages (all of them unless a scope says otherwise). False when there's no Workers Cache or the purge was refused. */
 export async function purgePageCache(scope: PurgeScope = { purgeEverything: true }): Promise<boolean> {
+	return (await purgeOutcome(scope)) === "purged";
+}
+
+/**
+ * Purge, telling a refused or failed purge (worth trying again later) from a
+ * site without Workers Cache (nothing to purge, ever): "unavailable" outside
+ * Workers or without the cache.
+ */
+export async function purgeOutcome(scope: PurgeScope = { purgeEverything: true }): Promise<"purged" | "refused" | "unavailable"> {
+	let workers: { cache?: { purge(options: PurgeScope): Promise<{ success?: boolean; errors?: Array<{ message: string }> } | undefined> } };
 	try {
-		const workers = (await import("cloudflare:workers")) as unknown as {
-			cache?: { purge(options: PurgeScope): Promise<{ success?: boolean; errors?: Array<{ message: string }> } | undefined> };
-		};
-		if (!workers.cache?.purge) return false;
+		workers = (await import("cloudflare:workers")) as unknown as typeof workers;
+	} catch {
+		return "unavailable"; // Not on Workers.
+	}
+	if (!workers.cache?.purge) return "unavailable";
+	try {
 		const result = await workers.cache.purge(scope);
 		try {
 			// The purge API rate-limits (Free-tier limits for Workers Cache) and says so in the result.
 			if (result && result.success === false) {
 				console.error("coywolf-pack: page cache purge refused", result.errors);
-				return false;
+				return "refused";
 			}
-			return true;
+			return "purged";
 		} finally {
 			// The result is an RPC result: dispose of it, or the runtime warns that it wasn't.
 			disposeRpcResult(result);
 		}
 	} catch (error) {
 		console.error("coywolf-pack: page cache purge failed", error);
-		return false;
+		return "refused";
 	}
 }
 
@@ -181,29 +214,128 @@ export function versionId(env: Record<string, unknown>): string | undefined {
 	return typeof metadata?.id === "string" && metadata.id ? metadata.id : undefined;
 }
 
+/** Versions remembered in the VERSION_OPTION row, newest last (enough to recognize a rollback). */
+export const VERSION_HISTORY = 10;
+/** A rollback (or a gradual deployment switching between two live versions) clears the cache at most this often. */
+export const ROLLBACK_PURGE_EVERY_MS = 10 * 60_000;
+
+/** The VERSION_OPTION row: the version that last handled a request, the ones before it, and when a rollback last purged. */
+export interface VersionRow {
+	current: string | null;
+	seen: string[];
+	rollbackPurgedAt?: number;
+}
+
+/** A VERSION_OPTION row (a plain version id before 0.35.19; empty when missing or unreadable). */
+export function parseVersionRow(raw: string | null | undefined): VersionRow {
+	if (!raw) return { current: null, seen: [] };
+	try {
+		const value = JSON.parse(raw) as unknown;
+		if (typeof value === "string") return { current: value, seen: [value] };
+		const row = value as Partial<VersionRow> | null;
+		if (row && typeof row.current === "string") {
+			const seen = Array.isArray(row.seen) ? row.seen.filter((v): v is string => typeof v === "string").slice(-VERSION_HISTORY) : [row.current];
+			return { current: row.current, seen, ...(typeof row.rollbackPurgedAt === "number" ? { rollbackPurgedAt: row.rollbackPurgedAt } : {}) };
+		}
+	} catch {
+		// Unreadable: like no row.
+	}
+	return { current: null, seen: [] };
+}
+
 /**
- * Purge once per deploy: the first isolate of a new version that sees a request
- * compares its version with the stored one, purges, and records it. Other
- * isolates of the same version find it recorded. Racing isolates may both purge,
- * which is harmless.
+ * Replace the row only if it still holds `before` (null: only if there's no
+ * row). True when this call wrote it: the statement RETURNs the row it wrote,
+ * so this doesn't depend on how D1 counts a no-op upsert's changes.
  */
-export async function purgeIfNewVersion(db: D1Database, id: string, known?: string | null): Promise<boolean> {
+async function swapOption(db: D1Database, name: string, before: string | null, after: string): Promise<boolean> {
+	const statement =
+		before === null
+			? db.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO NOTHING RETURNING value").bind(name, after)
+			: db.prepare("UPDATE options SET value = ? WHERE name = ? AND value = ? RETURNING value").bind(after, name, before);
+	return (await statement.first<{ value: string }>()) !== null;
+}
+
+/**
+ * Notice a deploy: the first isolate of a Worker version that sees a request
+ * compares its version with the stored one and records it. The write is a
+ * compare-and-set, so when isolates race only one of them wins (the caller
+ * starts warming once, not once per isolate). True when the caller should
+ * start cache warming.
+ *
+ * A new version purges nothing by default. Workers Cache keeps each version's
+ * pages apart (the version is part of the cache key:
+ * https://developers.cloudflare.com/workers/cache/cache-keys/), so a deploy
+ * already starts from a cold cache, and a purge would only spend one of the
+ * account's purge requests (Free-tier limits: 5 a minute, shared by every site
+ * and by EmDash's own content purges) on pages nobody can reach anymore.
+ * `purge`: clear every cached page first, for sites that share Workers Cache
+ * across versions (`cache.cross_version_cache`, and the pack's
+ * `pageCache: { crossVersionCache: true }` option).
+ *
+ * A version seen before (in the last VERSION_HISTORY) is a rollback: its own
+ * cache partition may still hold the pages it served before, which don't
+ * have the edits made while the newer version was live (Cloudflare doesn't
+ * say whether purges reach other versions' partitions), so it clears every
+ * page, as before 0.35.19. A gradual deployment sends requests to two live
+ * versions, so each isolate of either sees "the other" version stored: those
+ * flips clear the cache at most once every ROLLBACK_PURGE_EVERY_MS and start
+ * warming only when they clear it.
+ *
+ * A refused purge (the account's purge rate limit) is handed to `settleLater`
+ * (the pending settling purge, src/core/generation.ts) and the version is
+ * recorded anyway: this isolate checks once (pageCacheMiddleware), so without
+ * that nothing would try again until another isolate of this version came
+ * along. The settling purge clears everything later and restarts warming.
+ */
+export async function noteNewVersion(
+	db: D1Database,
+	id: string,
+	known: string | null | undefined,
+	options: { purge: boolean; now?: number; settleLater?: (scope: PurgeScope) => Promise<void> },
+): Promise<boolean> {
 	// `known`: the row as read with the feature switches (undefined when not read; then it's read here).
-	const value = known !== undefined ? known : ((await db.prepare("SELECT value FROM options WHERE name = ?").bind(VERSION_OPTION).first<{ value: string }>())?.value ?? null);
-	if (value && JSON.parse(value) === id) return false;
-	if (!(await purgePageCache())) return false;
-	await db
-		.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value")
-		.bind(VERSION_OPTION, JSON.stringify(id))
-		.run();
-	return true;
+	const raw = known !== undefined ? known : ((await db.prepare("SELECT value FROM options WHERE name = ?").bind(VERSION_OPTION).first<{ value: string }>())?.value ?? null);
+	const stored = parseVersionRow(raw);
+	if (stored.current === id) return false;
+	const now = options.now ?? Date.now();
+	const returning = stored.seen.includes(id);
+	const purgeNow = returning ? stored.rollbackPurgedAt === undefined || now - stored.rollbackPurgedAt >= ROLLBACK_PURGE_EVERY_MS : options.purge;
+	const outcome = purgeNow ? await purgeOutcome() : "unavailable";
+	if (outcome === "refused") {
+		if (!options.settleLater) return false; // Not recorded: the next isolate tries again.
+		await options.settleLater({ purgeEverything: true });
+	}
+	const next: VersionRow = {
+		current: id,
+		seen: [...stored.seen.filter((v) => v !== id), id].slice(-VERSION_HISTORY),
+		...(returning && purgeNow ? { rollbackPurgedAt: now } : stored.rollbackPurgedAt !== undefined ? { rollbackPurgedAt: stored.rollbackPurgedAt } : {}),
+	};
+	// Another isolate (of this version or the other one) recorded first: it handles warming.
+	if (!(await swapOption(db, VERSION_OPTION, raw, JSON.stringify(next)))) return false;
+	if (outcome === "refused") return false; // The settling purge restarts warming once it has cleared.
+	return !returning || purgeNow;
 }
 
 /** Astro's per-request cache controls (route caching), as far as the pack uses them. */
 interface RouteCache {
 	enabled?: boolean;
-	options?: { maxAge?: number };
-	set(options: { maxAge?: number; swr?: number } | false): void;
+	options?: { maxAge?: number; tags?: string[] };
+	set(options: { maxAge?: number; swr?: number; tags?: string[] } | false): void;
+}
+
+/**
+ * Tag a response that's going to the edge cache with the settings generation
+ * it was rendered with (src/core/generation.ts currentGenerationTag), so a
+ * settings save can later clear just the pages rendered with old settings.
+ * Called by the pack middleware once the response is final. Never turns
+ * caching on: a response without a lifetime, or turned off, is left alone
+ * (Astro's set() would re-enable it).
+ */
+export function tagGeneration(cache: RouteCache | undefined, tag: string): void {
+	const maxAge = cache?.enabled ? cache.options?.maxAge : undefined;
+	if (maxAge === undefined || maxAge <= 0) return;
+	cache!.set({ tags: [tag] });
 }
 
 /**
@@ -279,6 +411,10 @@ export async function settlePage(cache: RouteCache | undefined, response: Respon
 			headers.set(checks.markHeader, "1");
 		} else cache.set({ maxAge: Math.min(maxAge, STOPGAP_LIFETIME.maxAge), swr: STOPGAP_LIFETIME.swr });
 	}
+	// A page going to the edge cache doesn't keep this render's Server-Timing: every later visitor would get it
+	// (a cold start's timings, served for days). Only what's set by the time the pack's middleware returns; EmDash's
+	// own middleware runs outside the pack's and adds its timings after (see docs/performance.md).
+	if (cache.options?.maxAge !== undefined) headers.delete("Server-Timing");
 	return new Response(body, { status: response.status, statusText: response.statusText, headers });
 }
 

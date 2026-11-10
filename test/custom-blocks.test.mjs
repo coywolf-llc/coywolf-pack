@@ -414,6 +414,21 @@ test("0.10/0.11 testimonial and podcast markers (WordPress's markup only) conver
 	assert.equal(testimonialBlock({ quote: " " }), null);
 });
 
+test("sanitizer: unclosed tags can't make a field take seconds (no rescan to the end from every <)", () => {
+	for (const input of ["<a b".repeat(100_000), "<a b=c ".repeat(60_000), "<".repeat(400_000), "<script".repeat(60_000), '<a x="'.repeat(60_000)]) {
+		const started = performance.now();
+		renderRich(input);
+		plainText(input);
+		assert.ok(performance.now() - started < 1000, `${input.slice(0, 8)}… took ${Math.round(performance.now() - started)} ms`);
+	}
+	// Output is unchanged where tags close: an unclosed `<` before a real tag stays text, the real tag still counts.
+	assert.equal(renderRich("a <b <strong>bold</strong>", { inline: true }), "a &lt;b <strong>bold</strong>");
+	assert.equal(plainText("x <script>alert(1)</script> y <style>p{}</style> z"), "x y z");
+	assert.equal(plainText("<SCRIPT>a</script > b"), "b", "closing tags in any case, with spaces");
+	assert.equal(plainText("x <script never closed <style>gone</style> y"), "x <script never closed y", "as before: an unclosed script stays text, a later style still goes");
+	assert.equal(plainText("a < b and c > d"), "a d", "as before: anything between < and > reads as a tag");
+});
+
 test("muted text in the blocks keeps at least 80% of the text color (contrast)", () => {
 	const textMixes = [...R.CUSTOM_BLOCKS_CSS.matchAll(/(?:^|[;{])color:color-mix\(in srgb,currentColor (\d+)%,transparent\)/g)].map((m) => Number(m[1]));
 	assert.ok(textMixes.length >= 3);

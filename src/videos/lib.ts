@@ -683,6 +683,11 @@ export class RecentKeys {
 /** Most pages one webhook call clears by path; the newest are cleared, the rest left to expire on their own. */
 export const MAX_WEBHOOK_PAGES = 30;
 
+/** Edge cache tag of the video sitemap (/coywolf-video-sitemap.xml). */
+export const VIDEO_SITEMAP_TAG = "coywolf:video-sitemap";
+/** How long the edge keeps the video sitemap (content changes and changes to a listed video clear it sooner). */
+export const VIDEO_SITEMAP_EDGE_MAX_AGE = 3600;
+
 /** What a Stream webhook call clears (see videoPagesScope). */
 export interface VideoPagesScope {
 	/** The pages that embed the video, as path prefixes (each covers its trailing-slash form and query strings). */

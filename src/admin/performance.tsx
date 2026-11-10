@@ -197,7 +197,7 @@ export function PerformancePage() {
 				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
 					Cloudflare keeps copies of your public pages at its edge (Workers Cache), so visitors get them without waiting for the
 					site to build them. EmDash clears the pages that change when you publish or edit content, menus or settings; Coywolf
-					Pack clears everything after each deploy and whenever its settings change. These settings take effect on sites that
+					Pack clears the pages its settings change. Each deploy starts with an empty cache. These settings take effect on sites that
 					turn on Workers Cache (Astro's cacheCloudflare(); see docs/performance.md in the Coywolf Pack repository).
 				</p>
 			</header>
@@ -247,7 +247,7 @@ export function PerformancePage() {
 								After a deploy or a full clear, every page is cold until someone visits it. Warming visits every page in your
 								sitemap (home page first, then newest posts) a few at a time, in the background of the requests your site already
 								gets, so the next visitors and search engine crawlers get cached pages. It warms the region your traffic comes
-								from; it doesn't run while nobody is visiting. Warming also runs a minute after content edits (saving or
+								from, with an hourly check in case nobody visits. Warming also runs a minute after content edits (saving or
 								publishing an entry, menus, categories, site settings), which clear the home page, archives and related pages.
 							</p>
 						</div>

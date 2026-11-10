@@ -11,8 +11,41 @@ const { purgesAfter, watchInvalidation } = await import("./lib.ts");
 const api = "/_emdash/api/plugins/coywolf-pack/";
 
 test("admin writes to pack routes purge the page cache", () => {
-	for (const route of ["schema/site/save", "redirects/import", "features/save", "robots/save", "videos/update", "videos/webhook/subscribe", "backups/run"]) {
+	for (const route of ["schema/site/save", "redirects/import", "features/save", "robots/save", "videos/settings/save", "videos/webhook/subscribe", "backups/run", "files/delete"]) {
 		assert.equal(purgesAfter("POST", api + route), true, route);
+	}
+});
+
+test("uploads and changes to one video aren't settings saves: no purge, no settings generation", () => {
+	// Each upload piece used to clear every page (a 500 MB video: about 100 full purges). A new upload is on
+	// no page yet; a change to one video clears only the pages that embed it, in its route (clearVideoPages).
+	for (const route of [
+		"videos/upload",
+		"videos/upload-chunk",
+		"videos/update",
+		"videos/delete",
+		"videos/captions/upload",
+		"videos/captions/generate",
+		"videos/captions/delete",
+		"videos/captions/refresh",
+		"files/upload-start",
+		"files/upload-part",
+		"files/upload-complete",
+		"files/upload-abort",
+	]) {
+		assert.equal(purgesAfter("POST", api + route), false, route);
+	}
+	// Neighbors that do change pages still purge.
+	for (const route of ["videos/settings/save", "videos/reindex", "files/delete", "files/settings/save", "videos/uploads"]) assert.equal(purgesAfter("POST", api + route), true, route);
+});
+
+test("changes to one video clear the pages that embed it, from their routes", () => {
+	const src = readFileSync(new URL("../videos/module.ts", import.meta.url), "utf8");
+	for (const route of ["videos/update", "videos/delete", "videos/captions/upload", "videos/captions/delete", "videos/captions/refresh"]) {
+		const at = src.indexOf(`"${route}":`);
+		assert.ok(at > 0, route);
+		const body = src.slice(at, src.indexOf("\n\t\t}),", at));
+		assert.match(body, /clearVideoPages\(ctx, (input\.)?uid\)/, route);
 	}
 });
 
@@ -197,6 +230,15 @@ test("a page whose render saw a failed read isn't cached, decided after its body
 	assert.equal(out.status, 200);
 });
 
+test("a page going to the edge cache loses this render's Server-Timing; one kept out of it keeps it", async () => {
+	const timed = () => html("<p>hi</p>", { headers: { "content-type": "text/html", "server-timing": 'cw;dur=12', "x-keep": "1" } });
+	const cached = await settlePage(astroCache(), timed(), { failed: () => false });
+	assert.equal(cached.headers.get("server-timing"), null);
+	assert.equal(cached.headers.get("x-keep"), "1");
+	const failed = await settlePage(astroCache(), timed(), { failed: () => true });
+	assert.equal(failed.headers.get("server-timing"), "cw;dur=12", "not cached, so the visitor's own timings stay");
+});
+
 test("a failed read wins over a stopgap; the cache warmer is told to come back", async () => {
 	const visitor = astroCache();
 	await settlePage(visitor, html(), { failed: () => true, stopgap: () => true });
@@ -267,6 +309,7 @@ const READ_ONLY_ROUTES = [
 	"videos/detail",
 	"videos/list",
 	"videos/options",
+	"videos/status",
 	"videos/storage",
 	"videos/test",
 	"wpImport/urls",
@@ -284,7 +327,7 @@ function sourceRoutes(marker) {
 test("the read-only routes are exactly the ones declared with readOnlyRoute, and createPlugin registers them", () => {
 	assert.deepEqual(sourceRoutes(/"([a-z][\w/-]*)":\s*readOnlyRoute\(/g), READ_ONLY_ROUTES);
 	// Every other POST route is a write (or public): none of them is in the list by accident.
-	const writes = ["schema/custom/save", "schema/custom/delete", "schema/entries/save", "schema/entries/delete", "schema/site/save", "features/save", "videos/update", "wpImport/scan", "links/scan", "ai/run", "images/setup/apply"];
+	const writes = ["schema/custom/save", "schema/custom/delete", "schema/entries/save", "schema/entries/delete", "schema/site/save", "features/save", "videos/settings/save", "wpImport/scan", "links/scan", "ai/run", "images/setup/apply"];
 	for (const route of writes) assert.ok(!READ_ONLY_ROUTES.includes(route), route);
 	const index = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 	assert.ok(index.includes("registerReadOnlyRoutes(readOnlyRouteNames(routes))"), "createPlugin registers the marked routes with the page cache");
@@ -308,7 +351,7 @@ test("a POST to a read-only route purges nothing and records no settings change;
 	}
 	// purgesAfter false means the middleware runs none of: purge, invalidateFeatures, recordSettingsChange, startWarming (src/middleware.ts).
 	assert.equal(isReadOnlyRoutePath("/_emdash/api/plugins/other-plugin/schema/preview"), false);
-	for (const route of ["schema/custom/save", "schema/custom/delete", "schema/entries/save", "schema/site/save", "features/save", "videos/update"]) {
+	for (const route of ["schema/custom/save", "schema/custom/delete", "schema/entries/save", "schema/site/save", "features/save", "videos/settings/save"]) {
 		assert.equal(purgesAfter("POST", api + route), true, route);
 		assert.deepEqual(purgeScope(api + route), { purgeEverything: true }, route);
 	}

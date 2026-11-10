@@ -109,11 +109,13 @@ If the site has no `src/middleware.ts` yet, create it with just these lines.
     // Backups: a second bucket for backup files.
     { "binding": "BACKUPS", "bucket_name": "coywolf-backups" }
   ],
-  // Page cache: Workers Cache in front of the Worker, and the deployed version so old pages are cleared after a deploy.
+  // Page cache: Workers Cache in front of the Worker, and the deployed version so cache warming starts after a deploy.
   "cache": { "enabled": true },
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
   // Cache warming and checking internal links: the Worker calling itself.
-  "services": [{ "binding": "SELF", "service": "coywolf" }]
+  "services": [{ "binding": "SELF", "service": "coywolf" }],
+  // Optional: search, video plays and likes limited per visitor across isolates (namespace_id: one per site in the account).
+  "ratelimits": [{ "name": "COYWOLF_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }]
 }
 ```
 

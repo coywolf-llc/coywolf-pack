@@ -276,7 +276,7 @@ test("redirects: a pattern load that never answers doesn't hang later requests; 
 	const first = go("/a/1");
 	await sleep(5);
 	const warnings = await quietly("warn", async () => assert.deepEqual(await go("/a/2"), [301, "https://example.com/b/2"]));
-	assert.match(warnings[0], /shared read stalled: the redirect patterns/);
+	assert.match(warnings[0], /shared read stalled: the redirect rules/);
 	// The stranded request fails closed by the D1 read deadline (the page renders instead; not edge-cached).
 	const errors = await quietly("error", async () => assert.equal(await first, undefined));
 	assert.match(errors[0], /could not load rules/);
@@ -565,7 +565,7 @@ test("Stream webhook: clears only the pages that show the video (no full purge),
 		globalThis.fetch = realFetch;
 	}
 	assert.equal(docs.get(UID)?.duration, 12, "the video's details were refreshed");
-	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/news/a"], tags: ["home"] }], "only the page that shows it, and the home page by its entry's tag, in one call");
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/news/a"], tags: ["home", "coywolf:video-sitemap"] }], "only the page that shows it, the home page by its entry's tag, and the video sitemap, in one call");
 });
 
 // ── Off the request path: crops and posters (src/images/pack.ts, src/videos/poster.ts) ──

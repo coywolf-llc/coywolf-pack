@@ -668,3 +668,36 @@ test("a failed run is retried by the daily refresh a day after it started", () =
 	assert.equal(nextDailyAt({ phase: "failed", startedAt }), Date.parse(startedAt) + DAILY_REFRESH_MS);
 	assert.equal(nextDailyAt({ phase: "warm", startedAt }), null);
 });
+
+// ── The hourly fallback (no visitor requests reach the Worker) ──
+
+const { warmFromCron, WARM_TASK, CRON_WARM_STEPS } = await import("./warm.ts");
+
+test("hourly fallback: finishes a run nobody's requests drive, step after step, then stops", async () => {
+	const db = fakeDb();
+	const s = site(["/a/", "/b/", "/c/", "/d/", "/e/"]);
+	await startWarm(db, "deploy");
+	const steps = await warmFromCron(db, s, "https://x.com", { daily: true });
+	assert.ok(steps.length > 1 && steps.length <= CRON_WARM_STEPS, steps.join());
+	assert.notEqual(steps[0], "idle");
+	assert.equal(steps.at(-1), "idle", "stops once there's nothing left");
+	const state = await readWarmState(db);
+	assert.equal(state.phase, "done");
+	assert.equal(state.warmed, 6);
+});
+
+test("hourly fallback: with nothing to do it reads the progress row and stops; the daily refresh still starts on time", async () => {
+	const db = fakeDb();
+	const s = site(["/a/"]);
+	await startWarm(db, "deploy");
+	await warmFromCron(db, s, "https://x.com", { daily: true });
+	const writes = db.stateWrites.length;
+	assert.deepEqual(await warmFromCron(db, s, "https://x.com", { daily: true }), [], "a finished run: no step at all");
+	assert.equal(db.stateWrites.length, writes, "nothing written");
+	// A day later the refresh is due even if no page request reached the Worker.
+	const later = Date.now() + DAILY_REFRESH_MS + 60_000;
+	const steps = await warmFromCron(db, s, "https://x.com", { daily: true, now: () => later });
+	assert.ok(steps.length > 0);
+	assert.equal((await readWarmState(db)).reason, "daily");
+	assert.match(WARM_TASK, /^[a-zA-Z][a-zA-Z0-9_-]*$/, "EmDash's task-name rule");
+});
