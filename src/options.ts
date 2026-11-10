@@ -38,7 +38,7 @@ export interface CoywolfOptions {
 	reviews?: ReviewsOptions | false;
 	/** Custom Blocks: Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks (no options yet). `false` leaves the module out. */
 	customBlocks?: Record<string, never> | false;
-	/** Clean image URLs (/media/<id>-<w>x<h>.<format>): media bucket and Images binding names. */
+	/** Clean Image URLs on the media host: its fallback address (`cdn`; EmDash's r2({ publicUrl }) wins), the media bucket and Images binding names, crops. */
 	images?: import("./images/pack.js").ImagesOptions | false;
 	/** Page cache upkeep for Cloudflare Workers Cache (see docs/performance.md). `false` leaves the module out. */
 	pageCache?: import("./pageCache/pack.js").PageCacheOptions | false;

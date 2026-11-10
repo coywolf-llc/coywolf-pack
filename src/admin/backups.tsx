@@ -18,6 +18,7 @@ import * as React from "react";
 import { apiPost, errorText } from "./api.js";
 import { DocsLink, Loading, PageHeader } from "./page.js";
 import { type Backup, type ListResponse, type UndoPoint, ago, isStale, sourceLabel, useBackups } from "./backups-widget.js";
+import { RetentionCard } from "./backups-retention.js";
 import { SaveBar } from "./save-bar.js";
 import { SettingsSection } from "./settings-ui.js";
 import { useSaveResult } from "./toast.js";
@@ -134,13 +135,15 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 		setPending(true);
 		result.clear();
 		try {
-			await post("settings/save", {
+			const saved = await post<{ retentionWarning?: string }>("settings/save", {
 				scheduled: draft.scheduled,
 				retentionDays: Number(draft.retentionDays),
 				staleAfterHours: Number(draft.staleAfterHours),
 			});
 			await props.onSaved();
-			result.saved("Backup settings saved");
+			// The lifecycle rule couldn't follow the new retention days (no token, or Cloudflare refused).
+			if (saved.retentionWarning) result.failed(saved.retentionWarning, "Saved, but the lifecycle rule wasn't updated");
+			else result.saved("Backup settings saved");
 		} catch (cause) {
 			result.failed(errorText(cause, "Could not save the backup settings"));
 		} finally {
@@ -174,7 +177,7 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 							min={1}
 							max={365}
 							label="Keep backups for (days)"
-							description="Older database backups and replaced media and upload copies are deleted daily. The mirrors themselves are kept."
+							description="Older database backups and replaced media and upload copies are deleted daily (by Cloudflare instead, with Retention on Cloudflare below). The mirrors themselves are kept."
 							value={draft.retentionDays}
 							onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft((d) => ({ ...d, retentionDays: e.target.value }))}
 						/>
@@ -471,6 +474,7 @@ export function BackupsPage() {
 			)}
 
 			{data && <ScheduleSettings data={data} onSaved={load} />}
+			{data && <RetentionCard retentionDays={data.retentionDays} />}
 
 			<TypedConfirmDialog
 				open={action?.kind === "rewind"}

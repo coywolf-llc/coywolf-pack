@@ -25,7 +25,7 @@ test("settingsSchema contains only secret fields", () => {
 });
 
 test("the known secrets keep their stored keys", () => {
-	assert.deepEqual(Object.keys(SECRET_SETTINGS).sort(), ["aiApiKey", "cloudflareSetupToken", "filesR2SecretAccessKey", "imagesApiToken", "insightsFathomApiKey", "insightsGoogleServiceAccount", "robotsRadarToken", "usageApiToken", "videosApiToken", "videosWebhookSecret"]);
+	assert.deepEqual(Object.keys(SECRET_SETTINGS).sort(), ["aiApiKey", "backupsCloudflareToken", "cloudflareSetupToken", "filesR2SecretAccessKey", "imagesApiToken", "insightsFathomApiKey", "insightsGoogleServiceAccount", "robotsRadarToken", "usageApiToken", "videosApiToken", "videosWebhookSecret"]);
 	assert.match(read("ai/store.ts"), /aiApiKey: \{ type: "secret"/);
 	assert.match(read("files/module.ts"), /"filesR2SecretAccessKey"/);
 	assert.match(read("videos/store.ts"), /token: "videosApiToken"/);
@@ -33,6 +33,7 @@ test("the known secrets keep their stored keys", () => {
 	assert.match(read("robots/radar.ts"), /RADAR_TOKEN_SETTING = "robotsRadarToken"/);
 	assert.match(read("images/settings.ts"), /token: "imagesApiToken"/);
 	assert.match(read("pageCache/usage.ts"), /USAGE_TOKEN_SETTING = "usageApiToken"/);
+	assert.match(read("backups/module.ts"), /token: "backupsCloudflareToken"/);
 	// Removed with Bing submission (0.35.18): no longer declared, and deleted from storage (retireIndexNow).
 	assert.match(read("discovery/settings.ts"), /RETIRED_SETTINGS = \["discoveryIndexnowKey", "discoveryBingApiKey"\]/);
 });

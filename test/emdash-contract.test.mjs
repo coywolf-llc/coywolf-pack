@@ -165,7 +165,8 @@ before(async () => {
 	manager.register({
 		id: PLUGIN_ID,
 		version: "0.0.0",
-		capabilities: [],
+		// redirects:write: what the pack declares for Slug changes (ctx.redirects).
+		capabilities: ["redirects:write"],
 		storage: { imageVariants: { indexes: [] }, videoStats: { indexes: [] }, videoLikes: { indexes: ["uid"] } },
 		admin: { settingsSchema: secretSettingsSchema() },
 		hooks: { cron: { handler: async (_event, context) => void (ctx = context) } },
@@ -608,6 +609,52 @@ test("ctx.cron: schedule, list and cancel by name", async () => {
 	await assert.doesNotReject(cron.cancel("never-scheduled"), "cancelling a task that isn't there (src/discovery/module.ts) is fine");
 });
 
+/** A class from EmDash's dist that no public entry exports, found by a line only it has. */
+async function distClass(name, marker) {
+	for (const [file, src] of emdashDist) {
+		if (!src.includes(marker) || !src.includes(`var ${name} = class`)) continue;
+		const exported = src.match(/export \{([^}]*)\};?\s*(?:\/\/# sourceMappingURL=.*)?$/)?.[1] ?? "";
+		const entry = exported.split(",").map((s) => s.trim().split(/\s+as\s+/)).find(([local]) => local === name);
+		if (entry) return (await import(pathToFileURL(file).href))[entry[1] ?? entry[0]];
+	}
+	assert.fail(`EmDash ${emdashVersion}'s dist has no exported class ${name} with ${marker}`);
+}
+
+test("ctx.redirects (redirects:write): Slug changes delete EmDash's own slug-change redirect through it, matched by auto, group, source and destination (src/redirects/slug-changes.ts)", async () => {
+	const { dropEmDashAuto, EMDASH_AUTO_GROUP } = await import("../src/redirects/slug-changes.ts");
+	const { redirectsPack } = await import("../src/redirects/pack.ts");
+	assert.ok(redirectsPack({}).capabilities.includes("redirects:write"), "the Redirect Manager module no longer declares redirects:write");
+	assert.equal(typeof ctx.redirects?.delete, "function", "EmDash gives a plugin with redirects:write no ctx.redirects.delete");
+	// EmDash's own slug-change redirect, written the way its content update writes it (posts' pattern is /{slug}/).
+	const RedirectRepository = await distClass("RedirectRepository", "async createAutoRedirect(");
+	const repo = new RedirectRepository(db);
+	const auto = await repo.createAutoRedirect("posts", "old-name", "new-name", "c1", "/{slug}/", null, null);
+	assert.equal(auto.groupName, EMDASH_AUTO_GROUP, "EmDash files its slug-change redirects under another group now");
+	assert.equal(auto.auto, true);
+	const unrelated = await repo.createAutoRedirect("posts", "keep-me", "elsewhere", "c2", "/{slug}/", null, null);
+	const handMade = await ctx.redirects.create({ source: "/posts/old-name", destination: "/new-name/" });
+	// Listing by auto and group, narrowed by search, finds it; get gives the revision delete wants.
+	const listed = await ctx.redirects.list({ auto: true, group: EMDASH_AUTO_GROUP, search: "new-name", limit: 100 });
+	assert.deepEqual(listed.items.map((r) => r.id), [auto.id]);
+	assert.equal(typeof (await ctx.redirects.get(auto.id))._rev, "string");
+
+	assert.equal(await dropEmDashAuto(ctx, "posts", "/old-name/", "new-name"), 1);
+	assert.equal(await ctx.redirects.get(auto.id), null, "EmDash's row for the change is gone");
+	assert.ok(await ctx.redirects.get(unrelated.id), "another change's row stays");
+	assert.ok(await ctx.redirects.get(handMade.redirect.id), "a hand-made redirect stays, even from a matching path");
+	assert.equal(await dropEmDashAuto(ctx, "posts", "/old-name/", "new-name"), 0, "nothing left to delete");
+
+	// A revision read before a change is refused: the pack leaves a row someone changed meanwhile.
+	const later = await repo.createAutoRedirect("posts", "first", "second", "c3", "/{slug}/", null, null);
+	const read = await ctx.redirects.get(later.id);
+	await ctx.redirects.update(later.id, { enabled: false, _rev: read._rev });
+	await assert.rejects(ctx.redirects.delete(later.id, { _rev: read._rev }));
+	for (const id of [unrelated.id, handMade.redirect.id, later.id]) {
+		const current = await ctx.redirects.get(id);
+		await ctx.redirects.delete(id, { _rev: current._rev });
+	}
+});
+
 test("secret settings: encrypted at rest, decrypted for a declared secret, refused for an undeclared one (src/core/secrets.ts)", async () => {
 	const emdash = await import("emdash");
 	// EmDash's Settings page API handlers (emdash/internal/plugin-test-runtime exports them, but it loads Astro's virtual modules).
@@ -664,6 +711,41 @@ test("definePlugin keeps admin.pages and admin.widgets as getters, and the manif
 	assert.match(runtime, /requestCached\("emdash:manifest", \(\) => this\._buildManifest\(\)\)/);
 	assert.match(runtime, /adminPages: plugin\.admin\?\.pages \?\? \[\]/);
 	assert.match(runtime, /dashboardWidgets: plugin\.admin\?\.widgets \?\? \[\]/);
+});
+
+// ── Storage publicUrl (the media host) ────────────────────────
+
+test("EmDash's storage publicUrl reaches the pack through virtual:emdash/config, and EmDash's media URLs are <publicUrl>/<key> (src/images/settings.ts, src/images/lib.ts)", async () => {
+	// The build-time config module is the serializable config as JSON, with storage as the site configured it.
+	const astro = [...emdashDist.values()].find((src) => src.includes("function buildSerializableConfig("));
+	assert.ok(astro, `EmDash ${emdashVersion} no longer builds a serializable config`);
+	assert.match(functionSource(astro, "buildSerializableConfig"), /storage: resolvedConfig\.storage,/);
+	const virtual = [...emdashDist.values()].find((src) => src.includes("function generateConfigModule("));
+	assert.ok(virtual, "no generateConfigModule");
+	assert.match(functionSource(virtual, "generateConfigModule"), /return `export default \$\{JSON\.stringify\(serializableConfig\)\};`/);
+	assert.match(virtual, /const VIRTUAL_CONFIG_ID = "virtual:emdash\/config";/);
+	// A storage adapter's config keeps publicUrl (EmDash's S3 adapter; @emdash-cms/cloudflare's r2() passes it the same way), and a
+	// stored key's public URL is publicUrl, trailing slashes removed, then /<key>.
+	const s3 = [...emdashDist.entries()].find(([file]) => file.endsWith(join("storage", "s3.mjs")))?.[1];
+	assert.ok(s3, "no storage/s3.mjs");
+	assert.match(s3, /getPublicUrl\(key\) \{\s*if \(this\.publicUrl\) return `\$\{this\.publicUrl\.replace\(TRAILING_SLASH_PATTERN, ""\)\}\/\$\{key\}`;/);
+	// What EmDash's components call (Astro.locals.emdash.getPublicMediaUrl): the storage adapter's getPublicUrl.
+	const resolver = await distFunction("createPublicMediaUrlResolver");
+	const resolveUrl = (storage, key) => resolver(storage)(key);
+	assert.equal(resolveUrl({ getPublicUrl: (key) => `https://media.example.com/${key}` }, "01ABC.jpg"), "https://media.example.com/01ABC.jpg");
+	assert.equal(resolveUrl(undefined, "01ABC.jpg"), "/_emdash/api/media/file/01ABC.jpg");
+	// The pack reads that config and recognizes both forms.
+	const { loadStoragePublicUrl, resetStoragePublicUrl } = await import("../src/images/settings.ts");
+	const { imageCdn, mediaFile } = await import("../src/images/lib.ts");
+	resetStoragePublicUrl();
+	await loadStoragePublicUrl(async () => JSON.parse(JSON.stringify({ storage: { entrypoint: "@emdash-cms/cloudflare/storage/r2", config: { binding: "MEDIA", publicUrl: "https://media.example.com/" } } })));
+	try {
+		assert.equal(imageCdn(), "https://media.example.com");
+		assert.deepEqual(mediaFile("https://media.example.com/01ABC.jpg"), { id: "01ABC", ext: "jpg" });
+		assert.deepEqual(mediaFile(resolveUrl(undefined, "01ABC.jpg")), { id: "01ABC", ext: "jpg" });
+	} finally {
+		resetStoragePublicUrl();
+	}
 });
 
 // ── page:metadata ──────────────────────────────────────────────
@@ -861,6 +943,39 @@ test("the admin is a TanStack Router app at /_emdash/admin, and the router puts 
 test("plugin pages render inside the admin's <Toasty> and RouterProvider, bare (src/admin/page.tsx adds the boundary and Suspense)", () => {
 	assert.match(admin, /jsx\(Toasty, \{ children:[\s\S]{0,1200}?jsx\(RouterProvider, \{ router \}\)/);
 	assert.match(functionSource(admin, "PluginPage"), /if \(PluginComponent\) return \/\* @__PURE__ \*\/ jsx\(PluginComponent, \{\}\)/);
+});
+
+test("entry editor panels and content-list columns: read from the plugin's admin module, picked by a synchronous collections predicate re-run when manifest.plugins changes, and the manifest is in the router context's queryClient (src/admin/extensions.ts)", async () => {
+	// The admin registry imports each plugin's admin entry as a namespace, so named exports reach pluginAdmins.
+	const registry = [...emdashDist.values()].find((src) => src.includes("function generateAdminRegistryModule("));
+	assert.ok(registry, "no generateAdminRegistryModule");
+	assert.match(functionSource(registry, "generateAdminRegistryModule"), /import \* as \$\{varName\} from "\$\{descriptor\.adminEntry\}";/);
+	// Panels: pluginAdmins[id].contentEditorPanels, predicate called with the collection, disabled plugins skipped, role checked.
+	const panels = functionSource(admin, "resolveContentEditorPanels");
+	assert.match(panels, /pluginAdmins\[pluginId\]\?\.contentEditorPanels/);
+	assert.match(admin, /function appliesToCollection\$1\(pluginId, panel, collection\) \{[\s\S]{0,300}?return panel\.collections\(collection\);/);
+	assert.match(panels, /candidate\.minRole !== void 0 && userRole < candidate\.minRole/);
+	assert.match(admin, /resolveContentEditorPanels\(pluginAdmins, collection, currentUser\?\.role \?\? 0, manifest\?\.plugins\) : \[\], \[[\s\S]{0,120}?manifest\?\.plugins,/);
+	assert.match(admin, /jsx\(Panel, \{\s*collection,\s*entry: item,\s*locale:/);
+	// Columns: the same, keyed on pluginStates = manifest.plugins; cells get the page's visibleItems.
+	const columns = functionSource(admin, "resolveContentListColumns");
+	assert.match(columns, /pluginAdmins\[pluginId\]\?\.contentListColumns/);
+	assert.match(admin, /function appliesToCollection\(pluginId, column, collection\) \{[\s\S]{0,300}?return column\.collections\(collection\);/);
+	assert.match(admin, /resolveContentListColumns\(pluginAdmins, collection, userRole, pluginStates\), \[[\s\S]{0,80}?pluginStates,/);
+	assert.match(admin, /pluginStates: manifest\.plugins,/);
+	assert.match(admin, /jsx\(Cell, \{\s*collection,\s*item,\s*locale: item\.locale,\s*visibleItems\s*\}\)/);
+	// The router's context carries the React Query client that holds ["manifest"].
+	assert.match(functionSource(admin, "createAdminRouter"), /context: \{ queryClient \}/);
+	assert.match(admin, /queryKey: \["manifest"\]/);
+	// The manifest's plugin entry lists the admin pages EmDash got from plugin.admin.pages (the pack's live getter).
+	const runtime = [...emdashDist.values()].find((src) => src.includes("_buildManifest()"));
+	assert.match(runtime, /enabled,\s*adminMode,\s*adminPages: plugin\.admin\?\.pages \?\? \[\]/);
+	// And the predicate the pack hands EmDash reads it from there.
+	const { packPageOn } = await import("../src/admin/extensions.ts");
+	const queryClient = { getQueryData: (key) => (key[0] === "manifest" ? { plugins: { "coywolf-pack": { enabled: true, adminPages: [{ path: "/links" }] } } } : undefined) };
+	const router = { navigate() {}, history: { block: () => () => {} }, options: { basepath: "/_emdash/admin", context: { queryClient } } };
+	assert.equal(packPageOn("/links", { __TSR_ROUTER__: router }), true);
+	assert.equal(packPageOn("/schema", { __TSR_ROUTER__: router }), false);
 });
 
 test("EmDash runs plugin:install, then plugin:activate, once for a config plugin with no _plugin_state row (the 0.36.0 defaults: src/core/features.ts recordDefaults)", () => {

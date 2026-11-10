@@ -146,17 +146,18 @@ A good first set for most sites:
 | --- | --- | --- |
 | **Update check** | A card on the EmDash dashboard when a new version of Coywolf Pack is out, with the command to install it | Nothing: it checks npm once a day (see [Updating](#updating)) |
 | **Performance** (always on) | Page cache lifetimes, clearing after deploys, cache warming | Turn on **Cache warming** on the Performance page (needs `SELF`) |
-| **Clean Image URLs** | Images from a `media.` subdomain, resized and cached | Run **Set up media host** on its page (see [Setting up a media host](docs/images.md#setting-up-a-media-host)) |
+| **Clean Image URLs** | Images from a `media.` subdomain, resized and cached | Run **Set up media host** on its page, then make it EmDash's own media host with `r2({ publicUrl })` (see [Setting up a media host](docs/images.md#setting-up-a-media-host)) |
 | **Schema & Social** | Schema.org markup and Open Graph tags | Review the publisher on the Schema page |
 | **Redirect Manager** | Redirects EmDash's own can't handle, plus slug-change and removed-content redirects | Import old redirects on the Redirect Manager page |
 | **Discovery** | An RSS feed, a news sitemap, llms.txt; Crawler Hints status | Turn on the parts you want on the Discovery page |
-| **Backups** | Backups of the database and media, on demand or daily | Add `backups: { name: "coywolf" }` (step 2) and the `BACKUPS` bucket, then turn on the daily backup (see [Backups](docs/backups.md)) |
+| **Backups** | Backups of the database and media, on demand or daily | Add `backups: { name: "coywolf" }` (step 2) and the `BACKUPS` bucket, then turn on the daily backup; optionally let Cloudflare delete old ones ([Retention on Cloudflare](docs/backups.md#retention-on-cloudflare)) |
 
 ### Using the admin
 
 - **Features** (**Coywolf Pack → Features**) turns modules and their parts on or off. A module's page also has switches for its parts.
 - **Each module's page** holds its settings, grouped into sections, with step-by-step guides. A feature that needs an API key or a binding shows a setup card until it's there.
 - **API keys and tokens** can be entered on their module's page or on the plugin's **Settings** page, which lists only those. EmDash stores them encrypted.
+- **In the entry editor and content lists** (EmDash 1.4+, admins only): sections in a saved entry's sidebar for **Schema & Social**, **AI suggestions** and **Link status**, and a **Links** column in content lists, each while its module is on.
 - **Saving:** a bar appears at the bottom of a settings page when there are unsaved changes, with **Discard** and **Save** (also Ctrl/⌘+S). The result shows as a notice at the bottom of the screen. Leaving the page with unsaved changes asks first.
 - **Hiding EmDash's own pages:** a site that uses Redirect Manager or WordPress Migration instead of EmDash's Redirects or Import can hide those with EmDash's `admin.hiddenNavItems` option in `astro.config.mjs` (for example `emdash({ admin: { hiddenNavItems: ["redirects"] } })`).
 - **Language:** the pack's admin pages and docs are in English only; they don't follow EmDash's admin language setting.

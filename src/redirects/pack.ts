@@ -80,7 +80,8 @@ export function redirectsPack(options: RedirectsOptions): PackModule {
 			{ feature: SLUG_CHANGES_FEATURE, hooks: slugs.hooks },
 		]),
 		storage: { ...removed.storage, ...slugs.storage },
-		capabilities: ["content:read"],
+		// redirects:write: Slug changes delete EmDash's own redirect for the same change (ctx.redirects).
+		capabilities: ["content:read", "redirects:write"],
 	};
 }
 

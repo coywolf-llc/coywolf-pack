@@ -42,6 +42,8 @@ function skipBraces(src, start) {
 		const ch = src[i];
 		if (ch === '"' || ch === "'") {
 			i = src.indexOf(ch, i + 1);
+			// An apostrophe in JSX text has no closing quote: indexOf gives -1, which would restart the scan forever.
+			if (i === -1) return src.length;
 		} else if (ch === "`") {
 			i = skipTemplate(src, i);
 		} else if (ch === "{") depth++;
@@ -65,7 +67,8 @@ function expressionStrings(expr) {
 	for (let i = 0; i < expr.length; i++) {
 		const ch = expr[i];
 		if (ch === '"' || ch === "'") {
-			const end = expr.indexOf(ch, i + 1);
+			const found = expr.indexOf(ch, i + 1);
+			const end = found === -1 ? expr.length : found;
 			if (!/[=!]==?\s*$/.test(expr.slice(0, i))) out.push(expr.slice(i + 1, end));
 			i = end;
 		} else if (ch === "`") {
@@ -91,8 +94,10 @@ function statementEnd(src, start) {
 	let depth = 0;
 	for (let i = start; i < src.length; i++) {
 		const ch = src[i];
-		if (ch === '"' || ch === "'") i = src.indexOf(ch, i + 1);
-		else if (ch === "`") i = skipTemplate(src, i);
+		if (ch === '"' || ch === "'") {
+			i = src.indexOf(ch, i + 1);
+			if (i === -1) return src.length;
+		} else if (ch === "`") i = skipTemplate(src, i);
 		else if (ch === "(" || ch === "[" || ch === "{") depth++;
 		else if (ch === ")" || ch === "]" || ch === "}") depth--;
 		else if (ch === ";" && depth <= 0) return i;

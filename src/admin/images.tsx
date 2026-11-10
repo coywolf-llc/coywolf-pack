@@ -25,6 +25,12 @@ interface Settings {
 	host: string;
 	optionHost: string;
 	activeHost: string;
+	/** "storage" (EmDash's r2({ publicUrl })), "saved" (this page), "option" (images.cdn), or "" (none). */
+	hostSource?: string;
+	/** EmDash's publicUrl as written, when set. */
+	storageUrl?: string;
+	/** EmDash's publicUrl host, when it differs from the media host in use. */
+	storageConflict?: string;
 	accountId: string;
 	bucket: string;
 	tokenSet: boolean;
@@ -610,6 +616,8 @@ export function ImagesPage() {
 	const hostWorks = Boolean(saved?.activeHost && check?.ok && bare(check.host) === bare(saved.activeHost));
 	// Only the check on load collapses the setup form to "Checking…"; a Check the user asks for leaves the page as it is.
 	const firstCheck = autoChecking && !setupOpen;
+	// EmDash's publicUrl wins over this page and images.cdn: it's changed in astro.config.mjs, not here.
+	const hostFromStorage = saved?.hostSource === "storage";
 	const showHostInput = !saved?.activeHost || hostOpen || draft.host !== (saved?.host ?? "");
 	const setupDone = (hostWorks || firstCheck) && !setupOpen && !plan && !applied;
 
@@ -624,9 +632,8 @@ export function ImagesPage() {
 				title="Clean Image URLs"
 				description={
 					<>
-						Resized images at short, cacheable addresses. With a media host, images are served and resized by Cloudflare at
-						addresses like media.example.com/s/600x315/&lt;file&gt; and never touch the site's Worker. Without one, they're
-						served at /media/&lt;id&gt;-600x315.webp.
+						Resized images at short, cacheable addresses on your own media host. Cloudflare serves and resizes them at
+						addresses like media.example.com/s/600x315/&lt;file&gt;, so they never touch the site's Worker.
 					</>
 				}
 			/>
@@ -653,15 +660,20 @@ export function ImagesPage() {
 							saved.activeHost ? (
 								<>
 									Images use <span className="font-medium">{saved.activeHost}</span>
-									{saved.host ? " (saved here)" : " (from astro.config.mjs)"}. Old /media/ addresses redirect there.
+									{hostFromStorage
+										? " (EmDash's own media setting: storage: r2({ publicUrl }) in astro.config.mjs). EmDash's own images load from it too."
+										: saved.host
+											? " (saved here)."
+											: " (images.cdn in astro.config.mjs)."}{" "}
+									Old /media/ addresses redirect there.
 								</>
 							) : (
-								"None yet: images use the site's /media/ addresses, resized by the Worker."
+								"None yet: images keep EmDash's own addresses, and themes their usual image code, until a media host is set."
 							)
 						}
 						actions={
 							<>
-								{!showHostInput && (
+								{!showHostInput && !hostFromStorage && (
 									<Button type="button" variant="secondary" disabled={busy} onClick={() => setHostOpen(true)}>
 										Change host
 									</Button>
@@ -672,7 +684,20 @@ export function ImagesPage() {
 							</>
 						}
 					>
-						{showHostInput && (
+						{saved.storageConflict && (
+							<Banner
+								variant="alert"
+								title="EmDash's media setting names another host"
+								description={`EmDash's storage publicUrl is ${saved.storageConflict}, but the pack uses ${saved.activeHost}, which it knows serves resized images. EmDash's own components print media at ${saved.storageConflict}. Make publicUrl ${saved.activeHost} in astro.config.mjs, or, after Check passes on ${saved.storageConflict}, remove the pack's own host (images.cdn, or the one saved here) so publicUrl takes over.`}
+							/>
+						)}
+						{saved.storageUrl && !hostFromStorage && !saved.storageConflict && (
+							<Banner
+								variant="default"
+								description={`EmDash's storage setting has publicUrl ${saved.storageUrl}, which can't be the media host (it needs a plain https address with no path, like https://media.example.com). Images under it are still recognized.`}
+							/>
+						)}
+						{showHostInput && !hostFromStorage && (
 							<Input
 								label="Media host"
 								placeholder={`https://${suggestedHost}`}

@@ -204,6 +204,54 @@ export async function refsWhere(ctx: PluginContext, field: "entryKey" | "urlId",
 	return (results ?? []).map((row) => ({ id: row.id, data: JSON.parse(row.data) as RefRow }));
 }
 
+/**
+ * Reference rows of any of `keys` (entryKey), for the content list's Links column: one statement per
+ * 90 keys over the entryKey expression index (no ORDER BY, see refsWhereSql), so a page of the list
+ * costs one D1 read, not one per row. Without a D1 binding it falls back to the storage API.
+ */
+export async function refsForEntries(ctx: PluginContext, keys: string[]): Promise<RefRow[]> {
+	const unique = [...new Set(keys)];
+	if (!unique.length) return [];
+	const db = await d1();
+	if (!db) return (await queryIn(refs(ctx), "entryKey", unique)).map((row) => row.data);
+	const out: RefRow[] = [];
+	for (let i = 0; i < unique.length; i += 90) {
+		const part = unique.slice(i, i + 90);
+		const { results } = await db
+			.prepare(`SELECT data FROM _plugin_storage WHERE plugin_id = ? AND collection = ? AND json_extract(data, '$.entryKey') IN (${part.map(() => "?").join(", ")})`)
+			.bind(PLUGIN_ID, "links_refs", ...part)
+			.all<{ data: string }>();
+		for (const row of results ?? []) out.push(JSON.parse(row.data) as RefRow);
+	}
+	return out;
+}
+
+/** An entry's links by status, for the editor panel and the list column. Ignored links aren't counted. */
+export interface EntryLinkSummary {
+	total: number;
+	broken: number;
+	error: number;
+	blocked: number;
+	redirect: number;
+	unchecked: number;
+}
+
+/** Each entry's links by status (each URL once per entry), from its reference rows and the URLs' rows. */
+export function summarizeEntryLinks(rows: RefRow[], urlRows: Map<string, UrlRow>): Map<string, EntryLinkSummary> {
+	const out = new Map<string, EntryLinkSummary>();
+	const seen = new Set<string>();
+	for (const ref of rows) {
+		const url = urlRows.get(ref.urlId);
+		if (!url || url.ignored || seen.has(`${ref.entryKey} ${ref.urlId}`)) continue;
+		seen.add(`${ref.entryKey} ${ref.urlId}`);
+		const summary = out.get(ref.entryKey) ?? { total: 0, broken: 0, error: 0, blocked: 0, redirect: 0, unchecked: 0 };
+		summary.total++;
+		if (url.status in summary && url.status !== "ok") summary[url.status as Exclude<LinkStatus, "ok">]++;
+		out.set(ref.entryKey, summary);
+	}
+	return out;
+}
+
 /** Rows whose `field` is any of `values`, chunked so each statement stays under D1's parameter limit. */
 export async function queryIn<T>(
 	collection: StorageCollection<T>,

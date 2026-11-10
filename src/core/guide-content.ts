@@ -23,6 +23,8 @@ export type GuideId =
 	| "checkup-read-token"
 	| "checkup-setup-token"
 	| "tracking-params"
+	| "backups-token"
+	| "backups-retention"
 	| "insights-token"
 	| "web-analytics"
 	| "fathom"
@@ -278,6 +280,38 @@ export const GUIDES: Record<GuideId, Guide> = {
 		],
 		note: "Cloudflare's Free plan includes 5,000 unique image transformations a month (each new size of each image counts once a month). Beyond that, transformations need a paid Cloudflare Images plan.",
 	},
+	"backups-token": {
+		summary: "How to get a Cloudflare API token for Retention on Cloudflare",
+		steps: [
+			`In the ${link("https://dash.cloudflare.com/", "Cloudflare dashboard")}, open any of your domains and copy the ${b("Account ID")} from the right-hand column (API section) into Cloudflare account ID. (Already filled in when the site's ${code("backups.restore")} option has it.)`,
+			`Find the backup bucket's name: in the site's ${code("wrangler.jsonc")}, the ${code("bucket_name")} next to ${code('"binding": "BACKUPS"')} (or see ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")}). Enter it as Backup bucket name. The check makes sure it's the bucket this site writes to.`,
+			...cloudflareTokenSteps({
+				permissions: `${b("Account → Workers R2 Storage → Edit")}, and ${b("Account → D1 → Edit")} if the same token should also do restores`,
+				prefill: {
+					name: "Coywolf Pack backups",
+					keys: [
+						{ key: "workers_r2", type: "edit" },
+						{ key: "d1", type: "edit" },
+					],
+					shows: `one policy, scoped to ${b("Entire Account")}, with ${b("Workers R2 Storage → Edit")} and ${b("D1 → Edit")}`,
+				},
+			}),
+			`Paste the token into Cloudflare API token. Tick ${b("Remember the token")} to keep it (stored encrypted), so the pack can look at the rule each day; or leave it unticked to use it just this once. Then select ${b("Check")}.`,
+		],
+		note: `One token can do both jobs: set it as the ${code("BACKUPS_API_TOKEN")} Worker secret (${code("npx wrangler secret put BACKUPS_API_TOKEN")}) with both permissions, and this page uses it without pasting. It's only sent to api.cloudflare.com.`,
+	},
+	"backups-retention": {
+		summary: "How to set the retention rule by hand in the Cloudflare dashboard",
+		steps: [
+			`Open ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")} and select the backup bucket (the ${code("bucket_name")} of ${code("BACKUPS")} in ${code("wrangler.jsonc")}).`,
+			`Go to ${b("Settings → Object lifecycle rules → Add rule")}.`,
+			`Name it ${code("coywolf-pack-backups-retention:d1/")}, choose ${b("Apply to objects with a prefix")} and enter ${code("d1/")}. Turn on ${b("Expire objects")} after the retention days (the number in Keep backups for). Save.`,
+			`Add two more rules the same way: ${code("coywolf-pack-backups-retention:media/changed/")} for the prefix ${code("media/changed/")}, and ${code("coywolf-pack-backups-retention:uploads/changed/")} for ${code("uploads/changed/")}, with the same number of days.`,
+			`Never add a rule for ${code("media/current/")} or ${code("uploads/current/")}, or for the whole bucket: those are the mirrors of your live files.`,
+			`Come back to this page and select ${b("Check")}. With the three rules found, the pack stops deleting old backups itself.`,
+		],
+		note: "Keep the bucket's default rule that aborts incomplete multipart uploads after 7 days. A bucket lock is set the same way under Settings → Bucket lock rules; read the warning on this page first.",
+	},
 	"images-token": {
 		summary: "How to get a Cloudflare API token for Set up media host",
 		steps: [
@@ -323,6 +357,10 @@ export const SETTINGS_PAGE_GUIDES: Record<string, { intro: string; guides: Guide
 	imagesApiToken: {
 		intro: "Optional. Only for Set up media host on the Clean Image URLs page. Or set the IMAGES_API_TOKEN Worker secret.",
 		guides: ["images-token"],
+	},
+	backupsCloudflareToken: {
+		intro: "Optional. Only for Retention on Cloudflare on the Backups page. Or add Workers R2 Storage → Edit to the BACKUPS_API_TOKEN Worker secret's token.",
+		guides: ["backups-token"],
 	},
 	robotsRadarToken: {
 		intro: "Optional. Keeps the crawler list current from Cloudflare Radar each week. Or set the RADAR_API_TOKEN Worker secret.",

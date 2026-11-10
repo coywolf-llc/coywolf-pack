@@ -408,7 +408,7 @@ function SettingsDialog(props: { open: boolean; onClose: () => void; onSaved: (m
 						<p className="-mt-2 text-sm text-kumo-subtle">Internal links are always listed; this also requests them to see if they work.</p>
 						<Input
 							label="User-Agent override (optional)"
-							description="Leave empty to present a current desktop Chrome, which avoids most false “Blocked” results."
+							description="Leave empty to identify as Coywolf Pack’s link checker, with this site’s address. Sites that turn checkers away show as Blocked, not Broken."
 							value={draft.userAgent}
 							onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, userAgent: e.target.value })}
 						/>
