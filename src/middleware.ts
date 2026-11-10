@@ -26,24 +26,9 @@ import { DEADLINES } from "./core/single-flight.js";
 import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
 import { MIDDLEWARE } from "./modules.js";
-import { ALWAYS, LIFETIME_DEFAULTS, LIFETIME_SETTINGS, NOT_FOUND_SETTING } from "./pageCache/pack.js";
+import { ALWAYS, LIFETIME_DEFAULTS, LIFETIME_SETTINGS } from "./pageCache/pack.js";
 import { ROBOTS_EDGE_MAX_AGE } from "./robots/pack.js";
-import {
-	NOT_FOUND_TAG,
-	type PurgeScope,
-	ROBOTS_TAG,
-	applyPageLifetime,
-	keepAtEdge,
-	keepNotFound,
-	isRedirectSave,
-	purgePageCache,
-	purgeScope,
-	purgesAfter,
-	redirectPagesScope,
-	settlePage,
-	tagGeneration,
-	watchInvalidation,
-} from "./pageCache/lib.js";
+import { type PurgeScope, ROBOTS_TAG, applyPageLifetime, keepAtEdge, isRedirectSave, purgePageCache, purgeScope, purgesAfter, redirectPagesScope, settlePage, tagGeneration, watchInvalidation } from "./pageCache/lib.js";
 import { STOPGAP_HEADER, WARMER_AGENT, WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, scheduleRewarm, startWarm, warmMayHaveWork, warmStep } from "./pageCache/warm.js";
 import { prefetchRedirects } from "./redirects/middleware.js";
 import { notePackMiddleware } from "./search/live-serve.js";
@@ -167,13 +152,9 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		// Content writes: EmDash clears the pages tagged with the collection (home page, archives, many
 		// posts). With warming on, a run starts a minute after the last such write (scheduleRewarm).
 		const method = context.request.method;
-		// With "not found" pages cached (Performance), every content change clears them too: a new entry may now be at that address.
 		const invalidated =
 			method !== "GET" && method !== "HEAD" && context.url.pathname.startsWith("/_emdash/api/")
-				? watchInvalidation(
-						(context as unknown as { cache?: Parameters<typeof watchInvalidation>[0] }).cache,
-						(await siteSetting<boolean>(NOT_FOUND_SETTING, options.database)) === true ? [NOT_FOUND_TAG] : [],
-					)
+				? watchInvalidation((context as unknown as { cache?: Parameters<typeof watchInvalidation>[0] }).cache)
 				: null;
 		// Only SEO saves can change it (not General, Social…), so other settings saves don't touch the settings generation.
 		// A staging change (EmDash's Site Status: Go live, or back to staging) changes every page's robots tag.
@@ -238,13 +219,12 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			);
 		}
 		// Page cache lifetimes from Plugins → Performance, on routes the site made cacheable.
-		let cacheableRoute = false;
 		if (context.request.method === "GET") {
 			const [maxAgeDays, refreshDays] = await Promise.all([
 				siteSetting<number>(LIFETIME_SETTINGS.maxAgeDays, options.database),
 				siteSetting<number>(LIFETIME_SETTINGS.refreshDays, options.database),
 			]);
-			cacheableRoute = applyPageLifetime(
+			applyPageLifetime(
 				(context as unknown as { cache?: Parameters<typeof applyPageLifetime>[0] }).cache,
 				maxAgeDays ?? LIFETIME_DEFAULTS.maxAgeDays,
 				refreshDays ?? LIFETIME_DEFAULTS.refreshDays,
@@ -311,11 +291,6 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				label: `${method} ${context.url.pathname}`,
 				reason: lastReadFailure,
 			});
-			// "Not found" pages, when that's on (Performance): minutes at the edge, on routes the site made cacheable, and never
-			// after a failed read (the 404 may be the failure's doing, such as a redirect that couldn't be read).
-			if (cacheableRoute && settled.status === 404 && !readFailed() && (await siteSetting<boolean>(NOT_FOUND_SETTING, options.database)) === true) {
-				keepNotFound(routeCache, settled, context.url.pathname);
-			}
 			tagGeneration(routeCache, generation);
 			return context.url.pathname.startsWith("/_emdash/") ? settled : withMediaPreconnect(settled);
 		}

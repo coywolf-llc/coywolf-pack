@@ -19,8 +19,6 @@ const API = "/_emdash/api/plugins/coywolf-pack/cache";
 interface Lifetimes {
 	maxAgeDays: number;
 	refreshDays: number;
-	/** Keep "not found" pages at the edge for 5 minutes. */
-	notFound: boolean;
 	images: boolean;
 }
 
@@ -93,7 +91,7 @@ export function PerformancePage() {
 	const [lifetimes, setLifetimes] = React.useState<Lifetimes | null>(null);
 	const [draft, setDraft] = React.useState({ maxAgeDays: "", refreshDays: "" });
 	const [media, setMedia] = React.useState<MediaCache | null>(null);
-	const [busy, setBusy] = React.useState<"save" | "notFound" | "media" | "clear" | "warm" | null>(null);
+	const [busy, setBusy] = React.useState<"save" | "media" | "clear" | "warm" | null>(null);
 	const [notice, setNotice] = React.useState<Notice>(null);
 	const [warm, setWarm] = React.useState<WarmStatus | null>(null);
 
@@ -131,7 +129,7 @@ export function PerformancePage() {
 		void load();
 	}, [load]);
 
-	async function run(kind: "save" | "notFound" | "media" | "clear" | "warm", action: () => Promise<string>) {
+	async function run(kind: "save" | "media" | "clear" | "warm", action: () => Promise<string>) {
 		setBusy(kind);
 		setNotice(null);
 		try {
@@ -151,13 +149,6 @@ export function PerformancePage() {
 			});
 			setLifetimes((l) => (l ? { ...l, ...next } : l));
 			return "Saved. Cached pages were cleared, so new visits use the new lifetime.";
-		});
-
-	const toggleNotFound = (enabled: boolean) =>
-		run("notFound", async () => {
-			const next = await post<{ notFound: boolean }>("not-found/save", { enabled });
-			setLifetimes((l) => (l ? { ...l, ...next } : l));
-			return enabled ? "Not-found pages are kept at the edge for 5 minutes." : "Not-found pages are no longer kept at the edge.";
 		});
 
 	const applyMedia = () =>
@@ -245,19 +236,6 @@ export function PerformancePage() {
 						<Button variant="primary" disabled={!dirty || busy !== null} onClick={() => void save()}>
 							{busy === "save" ? "Saving…" : "Save"}
 						</Button>
-					</div>
-					<div className="grid gap-1">
-						<Checkbox
-							label="Keep “not found” pages for 5 minutes"
-							checked={Boolean(lifetimes?.notFound)}
-							disabled={!lifetimes || busy !== null}
-							onCheckedChange={(checked: boolean) => void toggleNotFound(checked)}
-						/>
-						<p className="text-sm leading-5 text-pretty text-kumo-subtle">
-							Bots and old links ask for pages that don't exist all the time, and each one makes your site build its not-found page.
-							With this on, Cloudflare keeps that page for 5 minutes. Saving or publishing content clears them, so a new page shows up
-							right away.
-						</p>
 					</div>
 				</div>
 

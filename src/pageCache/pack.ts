@@ -47,9 +47,6 @@ export function pageCacheConfig(): PageCacheOptions {
 /** How long the edge keeps a page, and how long after that it may serve it while refreshing. */
 export const LIFETIME_SETTINGS = { maxAgeDays: "pageCacheMaxAgeDays", refreshDays: "pageCacheRefreshDays" } as const;
 export const LIFETIME_DEFAULTS = { maxAgeDays: 7, refreshDays: 1 } as const;
-/** Keep "not found" pages at the edge for a few minutes (off unless turned on; see keepNotFound). */
-export const NOT_FOUND_SETTING = "pageCacheNotFound";
-registerSiteSetting(NOT_FOUND_SETTING);
 registerSiteSetting(LIFETIME_SETTINGS.maxAgeDays);
 registerSiteSetting(LIFETIME_SETTINGS.refreshDays);
 registerSiteSetting(WARM_SETTING);
@@ -111,7 +108,6 @@ export function pageCachePack(options: PageCacheOptions = {}): PackModule {
 					return {
 						maxAgeDays: maxAgeDays ?? LIFETIME_DEFAULTS.maxAgeDays,
 						refreshDays: refreshDays ?? LIFETIME_DEFAULTS.refreshDays,
-						notFound: (await ctx.settings.get<boolean>(NOT_FOUND_SETTING)) === true,
 						images: await siteFeatureOn("images"),
 					};
 				},
@@ -151,22 +147,6 @@ export function pageCachePack(options: PageCacheOptions = {}): PackModule {
 						rememberSiteSetting(WARM_DAILY_SETTING, daily);
 					}
 					return { enabled, daily };
-				},
-			}),
-
-			/**
-			 * The "not found" option. Turning it on or off changes no cached page (404s are only cached while it's
-			 * on, for minutes), so it clears nothing (src/pageCache/lib.ts purgeScope).
-			 */
-			"cache/not-found/save": definePluginRoute({
-				permission: "plugins:manage",
-				methods: ["POST"],
-				request: { body: "json" },
-				handler: async (ctx) => {
-					const { enabled } = parseInput(z.object({ enabled: z.boolean() }), ctx.input);
-					await ctx.settings.set(NOT_FOUND_SETTING, enabled);
-					rememberSiteSetting(NOT_FOUND_SETTING, enabled);
-					return { notFound: enabled };
 				},
 			}),
 
