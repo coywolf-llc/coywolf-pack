@@ -9,7 +9,7 @@ import type { PackMiddleware, PackModule } from "../core/module.js";
 import { workerEnv } from "../shared.js";
 import { ROBOTS_TAG, VERSION_OPTION, keepAtEdge, noteNewVersion, purgePageCache, versionId } from "./lib.js";
 import { usageReport } from "./usage.js";
-import { WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, nextDailyAt, pendingRevisits, readWarmState, remainingUrls, startWarm } from "./warm.js";
+import { WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, WARM_TASK, nextDailyAt, pendingRevisits, readWarmState, remainingUrls, startWarm, warmFromCron } from "./warm.js";
 
 /**
  * Performance is always on (its page sits right below Coywolf Pack). On a site
@@ -60,6 +60,26 @@ registerSiteOption(VERSION_OPTION);
 async function siteDb(): Promise<D1Database | undefined> {
 	const env: Record<string, unknown> = await workerEnv().catch(() => ({}));
 	return env.DB as D1Database | undefined;
+}
+
+/** The hourly warming fallback (WARM_TASK): does nothing while cache warming is off. */
+const WARM_SCHEDULE = "@hourly";
+
+async function warmTask(ctx: { settings: { get<T>(key: string): Promise<T | null | undefined> }; site?: { url?: string }; log: { info(msg: string, data?: unknown): void } }): Promise<void> {
+	if (!(await ctx.settings.get<boolean>(WARM_SETTING))) return;
+	const env: Record<string, unknown> = await workerEnv().catch(() => ({}));
+	const db = env.DB as D1Database | undefined;
+	const self = env.SELF as Fetcher | undefined;
+	let origin: string | null = null;
+	try {
+		origin = ctx.site?.url ? new URL(ctx.site.url).origin : null;
+	} catch {
+		origin = null;
+	}
+	if (!db || !self || !origin) return;
+	const daily = (await ctx.settings.get<boolean>(WARM_DAILY_SETTING)) !== false;
+	const steps = await warmFromCron(db, self, origin, { daily });
+	if (steps.length) ctx.log.info("Cache warming: hourly fallback", { steps });
 }
 
 
@@ -123,6 +143,8 @@ export function pageCachePack(options: PageCacheOptions = {}): PackModule {
 					if (enabled !== undefined) {
 						await ctx.settings.set(WARM_SETTING, enabled);
 						rememberSiteSetting(WARM_SETTING, enabled);
+						// The hourly fallback (it's also scheduled whenever the Features page opens).
+						if (enabled) await ctx.cron?.schedule(WARM_TASK, { schedule: WARM_SCHEDULE }).catch((error: unknown) => ctx.log.warn("Cache warming: couldn't schedule the hourly task", { error: String(error) }));
 					}
 					if (daily !== undefined) {
 						await ctx.settings.set(WARM_DAILY_SETTING, daily);
@@ -237,6 +259,15 @@ export function pageCachePack(options: PageCacheOptions = {}): PackModule {
 				},
 			}),
 		},
+		tasks: [
+			{
+				name: WARM_TASK,
+				schedule: WARM_SCHEDULE,
+				// Performance has no switch: the task always runs and checks the warming switch itself.
+				feature: "",
+				handler: warmTask,
+			},
+		],
 		// Its page (/performance) is listed by index.ts, always, right below Coywolf Pack.
 		adminPages: [],
 		widgets: [{ id: "cloudflare-usage", title: "Cloudflare usage", size: "third" }],

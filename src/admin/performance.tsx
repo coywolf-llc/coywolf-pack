@@ -269,7 +269,7 @@ export function PerformancePage() {
 								After a deploy or a full clear, every page is cold until someone visits it. Warming visits every page in your
 								sitemap (home page first, then newest posts) a few at a time, in the background of the requests your site already
 								gets, so the next visitors and search engine crawlers get cached pages. It warms the region your traffic comes
-								from; it doesn't run while nobody is visiting. Warming also runs a minute after content edits (saving or
+								from, with an hourly check in case nobody visits. Warming also runs a minute after content edits (saving or
 								publishing an entry, menus, categories, site settings), which clear the home page, archives and related pages.
 							</p>
 						</div>

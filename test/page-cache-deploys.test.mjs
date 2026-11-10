@@ -80,3 +80,18 @@ test("the option reaches the middleware; it's off by default", () => {
 	assert.equal(pageCacheConfig().crossVersionCache, undefined);
 	assert.equal(pageCacheMiddleware.handle({}, {}, () => {}), undefined, "never answers a request");
 });
+
+test("the hourly warming fallback is scheduled with the pack, runs whatever the switches say, and does nothing while warming is off", async () => {
+	const { composeHooks } = await import("../src/core/compose.ts");
+	const { WARM_TASK } = await import("../src/pageCache/warm.ts");
+	const module = pageCachePack();
+	const task = module.tasks.find((t) => t.name === WARM_TASK);
+	assert.ok(task);
+	assert.equal(task.schedule, "@hourly");
+	const { tasks, hooks } = composeHooks([module], { tasks: [] });
+	assert.equal(tasks.find((t) => t.name === WARM_TASK).feature, "", "Performance has no switch: not gated on one");
+	const asked = [];
+	const ctx = { settings: { get: async (k) => (asked.push(k), k === "features" ? {} : null) }, site: { url: "https://example.com" }, log: { info() {}, warn() {}, error() {} } };
+	await hooks.cron.handler({ name: WARM_TASK }, ctx);
+	assert.ok(asked.includes("pageCacheWarm"), "the task itself checks the warming switch");
+});
