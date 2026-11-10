@@ -223,9 +223,12 @@ test("apply: sets the rule to the retention days, keeps the bucket's own rules, 
 	assert.equal(locked.status.lockDays, 21);
 	assert.equal(cf.state.locks.length, 3);
 
-	// Unticking the lock removes the pack's lock rules (and only those).
+	// Unticking the lock removes the pack's lock rules (and only those), and only with LOCK typed.
 	cf.state.locks.push({ id: "their lock", enabled: true, prefix: "legal/", condition: { type: "Indefinite" } });
-	const unlocked = await routes["backups/cloudflare/apply"].handler({ ...ctx, input: { lock: false } });
+	await assert.rejects(routes["backups/cloudflare/apply"].handler({ ...ctx, input: { lock: false } }), /Removing the lock unlocks older backups/);
+	assert.equal(cf.state.locks.length, 4, "nothing changed");
+	await assert.rejects(routes["backups/cloudflare/remove"].handler({ ...ctx, input: {} }), /needs the LOCK confirmation/);
+	const unlocked = await routes["backups/cloudflare/apply"].handler({ ...ctx, input: { lock: false, confirm: "LOCK" } });
 	assert.equal(unlocked.status.lockDays, null);
 	assert.deepEqual(cf.state.locks.map((r) => r.id), ["their lock"]);
 
@@ -307,6 +310,104 @@ test("a manual backup applies the same trust window: a look older than a week me
 	assert.ok(!backups.store.has("d1/2020-01-01T0000Z/manifest.json"), "pruned");
 });
 
+test("lowering Keep backups for with a lock in place changes nothing on Cloudflare; only the card's LOCK confirmation shortens it", async () => {
+	const backups = bucket();
+	globalThis.__testEnv = { DB: {}, MEDIA: bucket(), BACKUPS: backups };
+	const cf = cloudflare({ lifecycle: R.retentionRules(30), locks: R.lockRules(30), keys: () => [...backups.store.keys()] });
+	const { routes } = backupsModule({ name: "coywolf" });
+	const ctx = context(cf, { [RETENTION_SETTINGS.token]: "tok-123", [RETENTION_SETTINGS.accountId]: ACCOUNT, [RETENTION_SETTINGS.bucket]: "coywolf-backups" });
+	ctx.kvMap.set(RETENTION_STATE_KEY, { checkedAt: new Date().toISOString(), bucket: "coywolf-backups", retentionDays: 30, status: R.retentionStatus(R.retentionRules(30), R.lockRules(30), 30) });
+	const saved = await routes["backups/settings/save"].handler({ ...ctx, input: { scheduled: false, retentionDays: 1, staleAfterHours: 36 } });
+	assert.match(saved.retentionWarning, /locked for 30 days\. Shortening it to 1 days unlocks older backups.*LOCK confirmation/);
+	assert.ok(!cf.calls.some((c) => c.startsWith("PUT")), "neither the lifecycle rule nor the lock was touched");
+	assert.ok(cf.state.locks.every((r) => r.condition.maxAgeSeconds === 30 * DAY));
+	// The card's apply without LOCK is refused too; with it, both move to 1 day.
+	ctx.stored.set("backupsRetentionDays", 1);
+	await assert.rejects(routes["backups/cloudflare/apply"].handler({ ...ctx, input: { lock: true } }), /Type LOCK/);
+	const shortened = await routes["backups/cloudflare/apply"].handler({ ...ctx, input: { lock: true, confirm: "LOCK" } });
+	assert.equal(shortened.status.lockDays, 1);
+	// Without a token the save doesn't touch anything either, and says the same.
+	const ctx2 = context(cloudflare());
+	ctx2.kvMap.set(RETENTION_STATE_KEY, { checkedAt: new Date().toISOString(), bucket: "coywolf-backups", retentionDays: 30, status: R.retentionStatus(R.retentionRules(30), R.lockRules(30), 30) });
+	const noToken = await routes["backups/settings/save"].handler({ ...ctx2, input: { scheduled: false, retentionDays: 7, staleAfterHours: 36 } });
+	assert.match(noToken.retentionWarning, /LOCK confirmation/);
+});
+
+test("lowering Keep backups for without a lock moves the rule automatically; a rule removed in the dashboard isn't put back", async () => {
+	const backups = bucket();
+	globalThis.__testEnv = { DB: {}, MEDIA: bucket(), BACKUPS: backups };
+	const cf = cloudflare({ lifecycle: R.retentionRules(30), keys: () => [...backups.store.keys()] });
+	const { routes } = backupsModule({ name: "coywolf" });
+	const ctx = context(cf, { [RETENTION_SETTINGS.token]: "tok-123", [RETENTION_SETTINGS.accountId]: ACCOUNT, [RETENTION_SETTINGS.bucket]: "coywolf-backups" });
+	ctx.kvMap.set(RETENTION_STATE_KEY, { checkedAt: new Date().toISOString(), bucket: "coywolf-backups", retentionDays: 30, status: R.retentionStatus(R.retentionRules(30), [], 30) });
+	const saved = await routes["backups/settings/save"].handler({ ...ctx, input: { scheduled: false, retentionDays: 14, staleAfterHours: 36 } });
+	assert.equal(saved.retentionWarning, undefined);
+	assert.ok(cf.state.lifecycle.every((r) => r.deleteObjectsTransition.condition.maxAge === 14 * DAY));
+	assert.deepEqual(cf.state.locks, [], "no lock is created");
+
+	// Someone removed the rule in the dashboard; the saved state still says it's there. The next save doesn't re-create it.
+	cf.state.lifecycle = [];
+	const puts = cf.calls.filter((c) => c.startsWith("PUT")).length;
+	const again = await routes["backups/settings/save"].handler({ ...ctx, input: { scheduled: false, retentionDays: 21, staleAfterHours: 36 } });
+	assert.equal(again.retentionWarning, undefined);
+	assert.equal(cf.calls.filter((c) => c.startsWith("PUT")).length, puts, "nothing written");
+	assert.deepEqual(cf.state.lifecycle, []);
+	assert.equal(ctx.kvMap.get(RETENTION_STATE_KEY).status.ours, false, "the state now knows");
+});
+
+test("a scheduled backup that fails still logs the stopped-backups warning (and the failure goes on)", async () => {
+	const backups = bucket();
+	backups.store.set(R.BUCKET_MARKER, JSON.stringify({ bucket: "b" }));
+	globalThis.__testEnv = { DB: { prepare: () => ({ bind() { return this; }, all: async () => { throw new Error("D1 is down"); }, raw: async () => { throw new Error("D1 is down"); }, first: async () => { throw new Error("D1 is down"); } }) }, MEDIA: bucket(), BACKUPS: backups };
+	const { daily } = backupsModule({ name: "coywolf" });
+	const ctx = context(cloudflare(), { backupsScheduled: true });
+	ctx.kvMap.set(RETENTION_STATE_KEY, { checkedAt: new Date().toISOString(), bucket: "b", retentionDays: 30, status: R.retentionStatus(R.retentionRules(30), [], 30) });
+	const warnings = [];
+	ctx.log.warn = (m) => warnings.push(m);
+	const error = console.error;
+	console.error = () => {};
+	try {
+		await assert.rejects(daily(ctx), /D1 is down/);
+	} finally {
+		console.error = error;
+	}
+	assert.ok(warnings.some((m) => /older than half the retention days/.test(m)));
+});
+
+test("a lock that isn't the pack's and covers the marker gets a clear message, not an error 500", async () => {
+	const backups = bucket();
+	backups.store.set(R.BUCKET_MARKER, JSON.stringify({ bucket: "old" }));
+	backups.refused.add(R.BUCKET_MARKER);
+	globalThis.__testEnv = { DB: {}, MEDIA: bucket(), BACKUPS: backups };
+	const cf = cloudflare({ keys: () => [...backups.store.keys()] });
+	const { routes } = backupsModule({ name: "coywolf" });
+	const ctx = context(cf);
+	const attempt = routes["backups/cloudflare/check"].handler({ ...ctx, input: { accountId: ACCOUNT, bucket: "coywolf-backups", token: "tok-123" } });
+	await assert.rejects(attempt, (error) => error.constructor.name === "PluginRouteError" && /bucket lock rule that covers/.test(error.message));
+});
+
+test("a mirror-count file isn't pruned while its backup is still there (a lock keeps it longer)", async () => {
+	const { pruneBackups, MIRRORS_PREFIX } = await import("../src/backups/store.ts");
+	const backups = bucket();
+	backups.store.set("d1/2020-01-01T0000Z/manifest.json", "{}");
+	backups.store.set(`${MIRRORS_PREFIX}2020-01-01T0000Z.json`, "{}");
+	backups.store.set(`${MIRRORS_PREFIX}2020-01-02T0000Z.json`, "{}");
+	const remove = backups.delete.bind(backups);
+	backups.delete = async (keys) => {
+		if ([].concat(keys).some((k) => k.startsWith("d1/2020-01-01"))) throw new Error("ObjectLockedByBucketPolicy");
+		return remove(keys);
+	};
+	const warn = console.warn;
+	console.warn = () => {};
+	try {
+		await pruneBackups(backups, 1);
+	} finally {
+		console.warn = warn;
+	}
+	assert.ok(backups.store.has(`${MIRRORS_PREFIX}2020-01-01T0000Z.json`), "kept with its locked backup");
+	assert.ok(!backups.store.has(`${MIRRORS_PREFIX}2020-01-02T0000Z.json`), "its backup is gone: pruned");
+});
+
 test("saving a new Keep backups for moves the pack's rule (and its lock) with it, or says it couldn't", async () => {
 	const backups = bucket();
 	globalThis.__testEnv = { DB: {}, MEDIA: bucket(), BACKUPS: backups };
@@ -320,7 +421,7 @@ test("saving a new Keep backups for moves the pack's rule (and its lock) with it
 	assert.ok(cf.state.locks.every((r) => r.condition.maxAgeSeconds === 90 * DAY), "the lock follows");
 	assert.equal(ctx.kvMap.get(RETENTION_STATE_KEY).status.byPrefix["d1/"], 90);
 
-	// No token anywhere: the save goes through, and says the rule still deletes sooner.
+	// No token anywhere: the save goes through, creates nothing, and says the rule still deletes sooner.
 	const ctx2 = context(cloudflare({ lifecycle: R.retentionRules(30) }));
 	ctx2.kvMap.set(RETENTION_STATE_KEY, { checkedAt: new Date().toISOString(), bucket: "coywolf-backups", retentionDays: 30, status: R.retentionStatus(R.retentionRules(30), [], 30) });
 	const warned = await routes["backups/settings/save"].handler({ ...ctx2, input: { scheduled: false, retentionDays: 90, staleAfterHours: 36 } });

@@ -456,13 +456,19 @@ export async function pruneBackups(bucket: R2Bucket, days: number): Promise<numb
 			cursor = page.truncated ? page.cursor : undefined;
 		} while (cursor);
 	}
-	// Mirror counts kept beside locked manifests go with their backup.
+	// Mirror counts kept beside locked manifests go with their backup, never before it (a lock can keep the backup longer).
+	const kept = new Set<string>();
 	let cursor: string | undefined;
+	do {
+		const page = await bucket.list({ prefix: "d1/", delimiter: "/", cursor });
+		for (const dir of page.delimitedPrefixes) kept.add(dir.slice(3, -1));
+		cursor = page.truncated ? page.cursor : undefined;
+	} while (cursor);
 	do {
 		const page = await bucket.list({ prefix: MIRRORS_PREFIX, cursor });
 		const old = page.objects.map((o) => o.key).filter((key) => {
 			const stamp = key.slice(MIRRORS_PREFIX.length).replace(/\.json$/, "");
-			return STAMP.test(stamp) && stamp < cutoff;
+			return STAMP.test(stamp) && stamp < cutoff && !kept.has(stamp);
 		});
 		if (old.length) await bucket.delete(old).catch(() => undefined);
 		cursor = page.truncated ? page.cursor : undefined;

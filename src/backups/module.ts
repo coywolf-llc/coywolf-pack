@@ -233,7 +233,14 @@ export function backupsModule(options: BackupsOptions) {
 			await backups.delete(key).catch(() => undefined);
 		}
 		// Which bucket was checked, readable through the binding alone (bucketMatches).
-		await backups.put(BUCKET_MARKER, JSON.stringify({ bucket: access.bucket, at: new Date().toISOString() }), { httpMetadata: { contentType: "application/json" } });
+		try {
+			await backups.put(BUCKET_MARKER, JSON.stringify({ bucket: access.bucket, at: new Date().toISOString() }), { httpMetadata: { contentType: "application/json" } });
+		} catch {
+			// R2 refuses to overwrite a locked object: only a lock rule that isn't the pack's reaches coywolf-pack/.
+			throw PluginRouteError.badRequest(
+				`The bucket ${access.bucket} has a bucket lock rule that covers ${BUCKET_MARKER} (a lock on the whole bucket, most likely), so the pack can't record which bucket it checked. Narrow that lock to d1/, media/changed/ and uploads/changed/ in the Cloudflare dashboard (R2 → the bucket → Settings → Bucket lock rules), then try again. A whole-bucket lock also stops the media mirror from updating.`,
+			);
+		}
 	}
 
 	/** Whether the BACKUPS binding still writes to the bucket the rule was checked on (the marker verifyBucket left there). */
@@ -312,30 +319,51 @@ export function backupsModule(options: BackupsOptions) {
 		}
 	}
 
+	/** What to say when the pack's lock would get shorter (or go): only the Backups card's LOCK confirmation does that. */
+	const lockShortening = (current: number, next: number | null) =>
+		`Backups are locked for ${current} days. ${next == null ? "Removing the lock" : `Shortening it to ${next} days`} unlocks older backups (and the lifecycle rule would delete them), so it needs the LOCK confirmation: use Retention on Cloudflare on the Backups page. Until then the rule and the lock keep ${current} days.`;
+
 	/**
-	 * After Keep backups for changes: set the pack's rule (and its lock) to the new days when the site has
-	 * a token (saved or a Worker secret), so Cloudflare doesn't keep deleting at the old days. Returns a
-	 * warning when it couldn't, or null.
+	 * After Keep backups for changes: move the pack's rule (and its lock) to the new days, when the site
+	 * has a token (saved or a Worker secret). The bucket's rules are read again first, so a rule or lock
+	 * removed in the Cloudflare dashboard isn't put back. A lock is never shortened here: lowering the
+	 * days with a lock in place changes nothing on Cloudflare and says the card's LOCK confirmation is
+	 * needed. Lengthening is automatic. Returns a warning when the rule wasn't moved, or null.
 	 */
 	async function followRetention(ctx: PluginContext, retentionDays: number): Promise<string | null> {
-		const state = await readRetentionState(ctx);
-		if (!state?.status.ours || pruningRedundant(state.status, retentionDays)) return null;
-		const stale = `The backup bucket's lifecycle rule still deletes backups after ${Math.min(...Object.values(state.status.byPrefix).filter((d): d is number => d !== null))} days. Update it under Retention on Cloudflare, or backups are deleted before Keep backups for says.`;
+		const saved = await readRetentionState(ctx);
+		if (!saved?.status.ours || pruningRedundant(saved.status, retentionDays)) return null;
+		const ruleDays = (status: RetentionStatus) => Math.min(...Object.values(status.byPrefix).filter((d): d is number => d !== null));
+		const stale = (status: RetentionStatus) =>
+			`The backup bucket's lifecycle rule still deletes backups after ${ruleDays(status)} days. Update it under Retention on Cloudflare, so it matches Keep backups for.`;
 		const access = await retentionAccess(ctx).catch(() => null);
-		if (!access) return stale;
+		// No token: nothing is (re)created on Cloudflare; the card shows the mismatch.
+		if (!access) return saved.status.lockDays != null && retentionDays < saved.status.lockDays ? lockShortening(saved.status.lockDays, retentionDays) : stale(saved.status);
 		try {
-			await applyRules(ctx, access, retentionDays, state.status.lockDays != null);
+			const live = await inspectRetention(ctx, access, saved.retentionDays);
+			// Removed in the dashboard since: don't put it back.
+			if (!live.status.ours) return null;
+			if (live.status.lockDays != null && retentionDays < live.status.lockDays) return lockShortening(live.status.lockDays, retentionDays);
+			await applyRules(ctx, access, retentionDays, live.status.lockDays != null);
 			return null;
 		} catch (error) {
 			ctx.log.warn("Backups: couldn't update the lifecycle rule to the new retention days", { error: String(error).slice(0, 300) });
-			return stale;
+			return stale(saved.status);
 		}
 	}
 
-	/** Set the pack's lifecycle rule to `retentionDays` (keeping the bucket's other rules), and its lock with `lock`. */
-	async function applyRules(ctx: PluginContext, access: RetentionAccess, retentionDays: number, lock: boolean): Promise<RetentionState> {
+	/**
+	 * Set the pack's lifecycle rule to `retentionDays` (keeping the bucket's other rules), and its lock with
+	 * `lock`. Shortening or removing the pack's lock unlocks backups, so it needs `confirmed` (LOCK typed on
+	 * the Backups card): without it nothing is changed. Lengthening it, or setting the same days, doesn't.
+	 */
+	async function applyRules(ctx: PluginContext, access: RetentionAccess, retentionDays: number, lock: boolean, confirmed = false): Promise<RetentionState> {
 		await verifyBucket(access);
 		const [lifecycle, locks] = await Promise.all([getLifecycle(access), getLocks(access)]);
+		const current = retentionStatus(lifecycle, locks, retentionDays).lockDays;
+		if (current != null && (!lock || retentionDays < current) && !confirmed) {
+			throw PluginRouteError.badRequest(lockShortening(current, lock ? retentionDays : null));
+		}
 		await putLifecycle(access, mergeRules(lifecycle, retentionRules(retentionDays)));
 		const hadLock = locks.some((rule) => rule.id.startsWith("coywolf-pack-backups-"));
 		if (lock || hadLock) await putLocks(access, mergeRules(locks, lock ? lockRules(retentionDays) : []));
@@ -347,15 +375,17 @@ export function backupsModule(options: BackupsOptions) {
 	async function daily(ctx: PluginContext) {
 		const s = await settings(ctx);
 		const retention = await pruningSkippable(ctx, s.retentionDays);
-		if (s.scheduled) {
-			const manifest = await runBackup("scheduled", retention.state?.status.d1Locked === true);
-			ctx.log.info("Scheduled backup complete", { stamp: manifest.stamp, bytes: manifest.bytes });
+		try {
+			if (s.scheduled) {
+				const manifest = await runBackup("scheduled", retention.state?.status.d1Locked === true);
+				ctx.log.info("Scheduled backup complete", { stamp: manifest.stamp, bytes: manifest.bytes });
+			}
+		} finally {
+			// With the lifecycle rule deleting by age, say so when backups have stopped, also when this one failed.
+			if (retention.skip) await warnIfBackupsStopped(ctx, s.retentionDays).catch(() => undefined);
 		}
 		// The backup bucket's lifecycle rule deletes old backups itself: pruning here would only repeat it.
-		if (retention.skip) {
-			await warnIfBackupsStopped(ctx, s.retentionDays);
-			return;
-		}
+		if (retention.skip) return;
 		const { backups } = await bindings();
 		const pruned = await pruneBackups(backups, s.retentionDays);
 		if (pruned) ctx.log.info("Pruned old backups", { pruned });
@@ -535,12 +565,13 @@ export function backupsModule(options: BackupsOptions) {
 					retentionInput.extend({ saveToken: z.boolean().optional(), lock: z.boolean(), confirm: z.string().optional() }).refine((v) => !v.lock || v.confirm === "LOCK", {
 						message: "Type LOCK to confirm the bucket lock.",
 					}),
+					// Shortening or removing an existing lock needs LOCK too (applyRules checks against the live lock).
 					ctx.input,
 				);
 				const access = await retentionAccess(ctx, input);
 				const { retentionDays } = await settings(ctx);
 				try {
-					const state = await applyRules(ctx, access, retentionDays, input.lock);
+					const state = await applyRules(ctx, access, retentionDays, input.lock, input.confirm === "LOCK");
 					await rememberAccess(ctx, input, access);
 					return state;
 				} catch (error) {
@@ -555,12 +586,14 @@ export function backupsModule(options: BackupsOptions) {
 			methods: ["POST"],
 			request: { body: "json" },
 			handler: async (ctx) => {
-				const input = parseInput(retentionInput, ctx.input ?? {});
+				const input = parseInput(retentionInput.extend({ confirm: z.string().optional() }), ctx.input ?? {});
 				const access = await retentionAccess(ctx, input);
 				const { retentionDays } = await settings(ctx);
 				try {
 					await verifyBucket(access);
 					const [lifecycle, locks] = await Promise.all([getLifecycle(access), getLocks(access)]);
+					const current = retentionStatus(lifecycle, locks, retentionDays).lockDays;
+					if (current != null && input.confirm !== "LOCK") throw PluginRouteError.badRequest(lockShortening(current, null));
 					await putLifecycle(access, mergeRules(lifecycle, []));
 					if (locks.some((rule) => rule.id.startsWith("coywolf-pack-backups-"))) await putLocks(access, mergeRules(locks, []));
 					const state = await inspectRetention(ctx, access, retentionDays);

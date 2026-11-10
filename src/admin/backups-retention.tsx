@@ -128,12 +128,25 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 	const busy = pending !== undefined;
 	const applyLabel = status?.ours ? (inSync ? "Apply again" : `Update the rule to ${days(props.retentionDays)}`) : "Set the retention rule";
 
+	// Setting, shortening or removing the lock takes LOCK typed (the server refuses the last two without it).
+	const currentLock = status?.lockDays ?? null;
+	const lockChange: "set" | "shorten" | "remove" | null = lock
+		? currentLock === null || props.retentionDays > currentLock
+			? currentLock === props.retentionDays
+				? null
+				: "set"
+			: props.retentionDays < currentLock
+				? "shorten"
+				: null
+		: currentLock !== null
+			? "remove"
+			: null;
 	const apply = () => {
-		if (lock && status?.lockDays !== props.retentionDays) {
+		if (lockChange) {
 			setConfirm("lock");
 			return;
 		}
-		// The lock is already at these days (confirmed when it was set), or it's being removed.
+		// No change to the lock (or none at all): the lock's days are already confirmed.
 		void run("apply", { lock, saveToken: draft.saveToken, ...(lock ? { confirm: "LOCK" } : {}) });
 	};
 
@@ -286,30 +299,50 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 					setConfirm(undefined);
 					setTyped("");
 				}}
-				title={`Lock backups for ${days(props.retentionDays)}?`}
-				description="Each database backup and each copy of a replaced file is then kept, and can't be deleted or overwritten, until it's that old. That includes deleting it yourself. The lock can be removed later with a Cloudflare API token."
-				confirmLabel="Set the rule and lock"
+				title={
+					lockChange === "remove"
+						? "Remove the lock?"
+						: lockChange === "shorten"
+							? `Shorten the lock to ${days(props.retentionDays)}?`
+							: `Lock backups for ${days(props.retentionDays)}?`
+				}
+				description={
+					lockChange === "remove"
+						? `Backups are locked for ${days(currentLock ?? 0)}. Without the lock they can be deleted or overwritten at any time again, by the site, a script, or anyone with the site's R2 access.`
+						: lockChange === "shorten"
+							? `Backups are locked for ${days(currentLock ?? 0)}. Every backup older than ${days(props.retentionDays)} is unlocked at once, and the lifecycle rule then deletes it.`
+							: "Each database backup and each copy of a replaced file is then kept, and can't be deleted or overwritten, until it's that old. That includes deleting it yourself. The lock can be removed later with a Cloudflare API token."
+				}
+				confirmLabel={lockChange === "remove" ? "Remove the lock" : lockChange === "shorten" ? "Shorten the lock" : "Set the rule and lock"}
 				pendingLabel="Applying…"
 				variant="primary"
 				confirmDisabled={typed !== "LOCK"}
 				isPending={pending === "apply"}
 				error={confirm === "lock" ? error : null}
-				onConfirm={() => void run("apply", { lock: true, confirm: "LOCK", saveToken: draft.saveToken })}
+				onConfirm={() => void run("apply", { lock, confirm: "LOCK", saveToken: draft.saveToken })}
 			>
 				<Input label="Type LOCK to confirm" value={typed} autoComplete="off" onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTyped(e.target.value)} />
 			</ConfirmDialog>
 
 			<ConfirmDialog
 				open={confirm === "remove"}
-				onClose={() => setConfirm(undefined)}
+				onClose={() => {
+					setConfirm(undefined);
+					setTyped("");
+				}}
 				title="Remove the pack's rules from the backup bucket?"
-				description="The lifecycle rule and the lock the pack set are removed; the bucket's other rules stay. From tomorrow the site deletes backups older than the retention days itself again."
+				description={`The lifecycle rule${currentLock !== null ? " and the lock" : ""} the pack set are removed; the bucket's other rules stay. From tomorrow the site deletes backups older than the retention days itself again.${currentLock !== null ? " Without the lock, backups can be deleted or overwritten at any time again." : ""}`}
 				confirmLabel="Remove"
 				pendingLabel="Removing…"
+				confirmDisabled={currentLock !== null && typed !== "LOCK"}
 				isPending={pending === "remove"}
 				error={confirm === "remove" ? error : null}
-				onConfirm={() => void run("remove")}
-			/>
+				onConfirm={() => void run("remove", currentLock !== null ? { confirm: "LOCK" } : {})}
+			>
+				{currentLock !== null && (
+					<Input label="Type LOCK to confirm removing the lock" value={typed} autoComplete="off" onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTyped(e.target.value)} />
+				)}
+			</ConfirmDialog>
 		</SettingsSection>
 	);
 }
