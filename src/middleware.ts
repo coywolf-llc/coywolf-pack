@@ -126,19 +126,19 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			});
 		// Page cache: a successful pack admin write (settings, redirects, imports…) can change any page.
 		if (purgesAfter(context.request.method, context.url.pathname)) {
-			// A redirect save also clears the pages cached at its sources; read its body before the route does.
-			// Only a body the route would accept (it checks permissions after this): anything else gets the tag purge alone.
+			// A redirect save also clears the pages cached at its sources: keep a copy of its body, the route reads
+			// the original. Only a body the route would accept (anything else gets the tag purge alone), and it's
+			// parsed only once the route has answered with success: EmDash checks who's asking in the route
+			// dispatcher, after this middleware, so parsing first let anyone make the Worker parse 2 MiB of JSON.
 			const length = Number(context.request.headers.get("content-length"));
-			const redirectBody =
-				isRedirectSave(context.url.pathname) && length > 0 && length <= REDIRECT_BODY_MAX
-					? context.request.clone().json().catch(() => null)
-					: null;
+			const redirectCopy = isRedirectSave(context.url.pathname) && length > 0 && length <= REDIRECT_BODY_MAX ? context.request.clone() : null;
 			const response = await next();
 			if (response.status < 400) {
 				// One purge for both: the cached redirects (their tag) and the pages cached at the new sources.
 				// The settling purge repeats both: an isolate that hasn't seen the edit yet may render (and cache)
 				// a source's page instead of redirecting.
-				const scope = mergeScopes(purgeScope(context.url.pathname), redirectPagesScope(await redirectBody));
+				const redirectBody = redirectCopy ? await redirectCopy.json().catch(() => null) : null;
+				const scope = mergeScopes(purgeScope(context.url.pathname), redirectPagesScope(redirectBody));
 				// This isolate's settings caches go now; other isolates drop theirs when they see the new generation.
 				invalidateFeatures();
 				const recorded = db
@@ -158,17 +158,19 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				: null;
 		// Only SEO saves can change it (not General, Social…), so other settings saves don't touch the settings generation.
 		// A staging change (EmDash's Site Status: Go live, or back to staging) changes every page's robots tag.
+		// A copy of the body, read only after EmDash has accepted the save (it checks permissions after this middleware).
 		const settingsLength = Number(context.request.headers.get("content-length"));
-		const settingsKeys: { seo: boolean; staging: boolean } =
-			method === "POST" && context.url.pathname === EMDASH_SETTINGS_API && settingsLength > 0 && settingsLength <= 64 * 1024
-				? await context.request
-						.clone()
-						.json()
-						.then((body: unknown) => (body && typeof body === "object" ? { seo: "seo" in body, staging: "staging" in body } : { seo: false, staging: false }))
-						.catch(() => ({ seo: false, staging: false }))
-				: { seo: false, staging: false };
-		const seoSave = settingsKeys.seo;
-		const afterWrite = (response: Response): Response => {
+		const settingsCopy = method === "POST" && context.url.pathname === EMDASH_SETTINGS_API && settingsLength > 0 && settingsLength <= 64 * 1024 ? context.request.clone() : null;
+		const savedKeys = async (response: Response): Promise<{ seo: boolean; staging: boolean }> => {
+			if (!settingsCopy || response.status >= 400) return { seo: false, staging: false };
+			return settingsCopy
+				.json()
+				.then((body: unknown) => (body && typeof body === "object" ? { seo: "seo" in body, staging: "staging" in body } : { seo: false, staging: false }))
+				.catch(() => ({ seo: false, staging: false }));
+		};
+		const afterWrite = async (response: Response): Promise<Response> => {
+			const settingsKeys = await savedKeys(response);
+			const seoSave = settingsKeys.seo;
 			// EmDash's SEO settings include "Disallow AI training", whose lines the pack's robots.txt carries: clear it,
 			// here now and (settling purge) again once every isolate's robots.txt cache has expired.
 			if (seoSave && response.status < 400 && isOn(features, "robots")) {

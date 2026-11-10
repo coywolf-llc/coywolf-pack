@@ -201,3 +201,45 @@ test("a redirect save clears the cached redirects and the pages at its sources i
 	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/old-page"], tags: ["coywolf-redirects"] }]);
 	assert.deepEqual(row(db).settle, { pathPrefixes: ["/old-page"], tags: ["coywolf-redirects"] });
 });
+
+// ── Request bodies are read only after the route accepted the write ──
+
+/** A POST that records whether the middleware parsed its copy of the body. */
+function trackedPost(path, json) {
+	const url = new URL(`https://example.com${path}`);
+	const body = JSON.stringify(json);
+	const state = { pulled: false };
+	const request = new Request(url, { method: "POST", body, headers: { "content-type": "application/json", "content-length": String(body.length) } });
+	request.clone = () => {
+		const copy = Request.prototype.clone.call(request);
+		const parse = copy.json.bind(copy);
+		copy.json = () => {
+			state.pulled = true;
+			return parse();
+		};
+		return copy;
+	};
+	return { ctx: { url, request, cache: undefined, locals: {}, site: undefined }, state };
+}
+
+test("a refused redirect save or settings save isn't parsed (EmDash checks permissions after the pack middleware)", async () => {
+	const db = d1();
+	freshIsolate(db);
+	await features.siteFeatures();
+	const redirect = trackedPost("/_emdash/api/plugins/coywolf-pack/redirects/import", { rules: [{ source: "/a", target: "/b" }] });
+	await coywolfPack({}, [])(redirect.ctx, async () => Response.json({ error: "forbidden" }, { status: 403 }));
+	const settings = trackedPost("/_emdash/api/settings", { staging: false });
+	await coywolfPack({}, [])(settings.ctx, async () => Response.json({ error: "forbidden" }, { status: 401 }));
+	await settled();
+	assert.equal(redirect.state.pulled, false, "2 MiB of JSON from anyone isn't parsed");
+	assert.equal(settings.state.pulled, false);
+	assert.deepEqual(globalThis.__purges, []);
+	// Accepted: read after the route answered, from the copy (the route consumed the original).
+	const accepted = trackedPost("/_emdash/api/settings", { staging: false });
+	await coywolfPack({}, [])(accepted.ctx, async () => {
+		await accepted.ctx.request.json();
+		return Response.json({ ok: true });
+	});
+	await settled();
+	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }], "going live still clears every page");
+});
