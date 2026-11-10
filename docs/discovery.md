@@ -33,7 +33,7 @@ Until 0.35.17 the pack sent IndexNow pings itself, and changed URLs to Bing's UR
 
 ## Setup
 
-Nothing to configure beyond the feature switches. The module's site URLs are served by the pack middleware (see Redirects → Setup), so add `coywolfPack()` from `@coywolf/emdash/middleware` to `src/middleware.ts` if you haven't. The plugin asks for `content:read`, `schema:read`, `bylines:read` (feed authors), `network:request` (host `api.cloudflare.com`, to read Crawler Hints), and `hooks.page-fragments:register`. A theme that has its own feed route or head link can drop them: the pack's middleware answers `/feed/` first, and the head link would be listed twice.
+Nothing to configure beyond the feature switches. The module's site URLs are served by the pack middleware (see [Redirect Manager → Setup](redirects.md#setup)), so add `coywolfPack()` from `@coywolf/emdash/middleware` to `src/middleware.ts` if you haven't. The plugin asks for `content:read`, `schema:read`, `bylines:read` (feed authors), `network:request` (host `api.cloudflare.com`, to read Crawler Hints), and `hooks.page-fragments:register`. A theme that has its own feed route or head link can drop them: the pack's middleware answers `/feed/` first, and the head link would be listed twice.
 
 ## Caching and limits
 

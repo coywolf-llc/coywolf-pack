@@ -146,7 +146,7 @@ A good first set for most sites:
 | **Performance** (always on) | Page cache lifetimes, clearing after deploys, cache warming | Turn on **Cache warming** on the Performance page (needs `SELF`) |
 | **Clean Image URLs** | Images from a `media.` subdomain, resized and cached | Run **Set up media host** on its page (see [Setting up a media host](docs/images.md#setting-up-a-media-host)) |
 | **Schema & Social** | Schema.org markup and Open Graph tags | Review the publisher on the Schema page |
-| **Redirects** | Redirects EmDash's own can't handle, plus slug-change and removed-content redirects | Import old redirects on the Redirects page |
+| **Redirect Manager** | Redirects EmDash's own can't handle, plus slug-change and removed-content redirects | Import old redirects on the Redirect Manager page |
 | **Discovery** | An RSS feed, a news sitemap, llms.txt; Crawler Hints status | Turn on the parts you want on the Discovery page |
 | **Backups** | Backups of the database and media, on demand or daily | Add `backups: { name: "coywolf" }` (step 2) and the `BACKUPS` bucket, then turn on the daily backup (see [Backups](docs/backups.md)) |
 
@@ -189,7 +189,7 @@ export default defineConfig({
 
 - **Coywolf Pack isn't in the admin.** Check that `coywolfPlugin()` is in `emdash({ plugins: [...] })` in `astro.config.mjs` and that the site was deployed (or the dev server restarted) after adding it.
 - **A module's page isn't in the sidebar.** Its main switch is off: turn it on on the **Features** page (**Coywolf Pack → Features**).
-- **Redirects, `/robots.txt` rules, the feed or downloads don't answer.** The middleware isn't running: check step 3, and that `coywolfPack()` comes before your own middleware in `sequence()`.
+- **Redirect Manager's redirects, `/robots.txt` rules, the feed or downloads don't answer.** The middleware isn't running: check step 3, and that `coywolfPack()` comes before your own middleware in `sequence()`.
 - **A feature shows a setup card instead of its settings.** It needs a binding, an API key or `EMDASH_ENCRYPTION_KEY`; the card says which.
 - **Pages don't change after an edit.** EmDash and the pack clear cached pages on edits and deploys; **Coywolf Pack → Performance → Clear pages and images** clears everything now. Cloudflare's zone **Purge Everything** doesn't reach the Worker's page cache.
 - **Pages time out (524) after 100 seconds, with almost no CPU time in Workers Logs.** A Worker isolate is stuck: before 0.35.16, a request canceled in the middle of a read the pack shares could leave every later request of that isolate waiting forever. Update to 0.35.16 or later, which puts a deadline on every shared wait (see [Shared reads have deadlines](docs/internals.md#shared-reads-have-deadlines)). Until then, re-running the deploy clears it at once: a new Worker version replaces every isolate.

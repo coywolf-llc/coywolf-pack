@@ -10,6 +10,7 @@
 import { PluginRouteError } from "emdash";
 
 import { CloudflareApiError, type Fetch, cloudflareApi } from "../core/cloudflare-api.js";
+import { DeadlineError } from "../core/single-flight.js";
 import { stampToDate } from "./store.js";
 
 /** One file per rewind, newest last: undo pops the most recent, so earlier states stay reachable. */
@@ -30,13 +31,20 @@ export interface UndoPoint {
 	rewoundTo: string;
 }
 
+/** How long one D1 restore call may take: Time Travel restores and imports answer slower than other API calls. */
+const RESTORE_CALL_MS = 60_000;
+
 /** One D1 call through the shared client (src/core/cloudflare-api.ts): a deadline, ctx.http when the route passes it, no token in errors. */
 async function cf<T>(config: RestoreConfig, path: string, init: { method?: string; body?: string } = {}): Promise<T> {
 	try {
-		return (await cloudflareApi<T>(`/accounts/${config.accountId}${path}`, { token: config.token, fetch: config.fetch, method: init.method ?? "GET", body: init.body, permission: "Account → D1 → Edit" })).result;
+		return (await cloudflareApi<T>(`/accounts/${config.accountId}${path}`, { token: config.token, fetch: config.fetch, method: init.method ?? "GET", body: init.body, permission: "Account → D1 → Edit", deadlineMs: RESTORE_CALL_MS })).result;
 	} catch (error) {
 		// Surface the API's message in the admin (plain Errors become a generic 500).
 		if (error instanceof CloudflareApiError) throw PluginRouteError.badRequest(error.message);
+		// The call ran out of time, but Cloudflare may still carry it out.
+		if (error instanceof DeadlineError) {
+			throw PluginRouteError.badRequest("Cloudflare didn't answer within a minute. The restore may still be finishing at Cloudflare: reload this page before trying again.");
+		}
 		throw error;
 	}
 }

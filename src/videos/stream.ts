@@ -5,7 +5,7 @@
  * credentials from env at import time and has no captions, downloads or
  * webhook calls.
  */
-import { CLOUDFLARE_API, CloudflareApiError, cloudflareApi, errorDetail } from "../core/cloudflare-api.js";
+import { CLOUDFLARE_API, CloudflareApiError, cloudflareApi } from "../core/cloudflare-api.js";
 
 const API = CLOUDFLARE_API;
 
@@ -63,7 +63,8 @@ export function streamClient(creds: StreamCredentials) {
 			return (await cloudflareApi<T>(`/accounts/${encodeURIComponent(creds.accountId)}/stream${path}`, { token: creds.token, method, body, headers })).result;
 		} catch (error) {
 			if (!(error instanceof CloudflareApiError)) throw error;
-			throw new StreamError(errorDetail(error.errors).replaceAll("; ", " ") || `Cloudflare Stream returned HTTP ${error.status}.`, error.status);
+			const detail = error.errors.map((e) => e.message).filter(Boolean).join(" ");
+			throw new StreamError(detail || `Cloudflare Stream returned HTTP ${error.status}.`, error.status);
 		}
 	}
 

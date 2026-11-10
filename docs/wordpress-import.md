@@ -164,7 +164,7 @@ Old-slug rules point at the URLs WordPress used. If EmDash serves different URLs
 
 ## Coywolf WordPress plugins
 
-For sites that used Coywolf's WordPress plugins. These all run as part of the steps above (their blocks are converted by the same prepare step and converter), plus three extra steps (A–C) at the bottom of the WordPress import page.
+For sites that used Coywolf's WordPress plugins. These all run as part of the steps above (their blocks are converted by the same prepare step and converter), plus three extra steps (A–C) at the bottom of the WordPress Migration page.
 
 **Before importing**, also turn on **Videos** (and Video schema, sitemap, plays and likes as wanted), **Reviews** and **Review schema**, **Custom Blocks** with the Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks, **Headings & TOC** with the **Table of Contents block**, **File Downloads**, and **Code Blocks**. Set your disclosure wording and podcast links on the Custom Blocks page. Connect Stream on the Videos page (same account), or at least set the customer subdomain. Then paste Video Manager's and Coywolf Files' settings into **A. Player and download card defaults** (`wp option get coywolf_cvm_settings --format=json`, `wp option get coywolf_files_settings --format=json`) so converted blocks keep the site-wide choices.
 

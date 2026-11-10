@@ -268,6 +268,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 	const save = async (clearR2Secret = false) => {
 		if (!draft) return;
 		setPending(clearR2Secret ? "clear" : "save");
+		setError(undefined);
 		saveResult.clear();
 		try {
 			const { filesR2SecretAccessKey, filesMaxUploadGb, ...rest } = draft;
@@ -280,7 +281,10 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 			saveResult.saved(clearR2Secret ? "R2 secret access key removed" : "File Downloads settings saved");
 			props.onSaved();
 		} catch (cause) {
-			saveResult.failed(errorText(cause, "Could not save the settings"));
+			const message = errorText(cause, "Could not save the settings");
+			saveResult.failed(message);
+			// Removing the secret happens with the form clean, when the Save bar (and its message) isn't showing.
+			if (clearR2Secret) setError(message);
 		} finally {
 			setPending(undefined);
 		}

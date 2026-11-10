@@ -5,7 +5,7 @@ Coywolf Pack is an [EmDash](https://emdashcms.com) plugin that enhances existing
 - **Absurdly fast for humans and bots:** cached pages answer in 60–90 ms, cache warming keeps pages cached for visitors and crawlers alike, and images come straight from Cloudflare's edge.
 - **Enhances what EmDash already does:** redirects, search, robots.txt, schema, images and RSS feeds go well beyond EmDash's built-in versions and starter templates.
 - **Adds what EmDash doesn't have:** backups and restore, link checking, videos, reviews, AI enrichment and more.
-- **Manage your site like a pro:** turn each feature on or off, see your Cloudflare usage and estimated bill, and finish a move from WordPress. Everything starts off, so installing or updating changes nothing until you're ready.
+- **Manage your site like a pro:** turn each feature on or off, see your Cloudflare usage and estimated bill, and finish a move from WordPress. On a new site everything starts off, so installing changes nothing until you're ready, and updating never turns a feature on.
 - **Free and open source** (MIT).
 
 Start with [Getting started](../README.md#getting-started) to install the pack and turn features on.

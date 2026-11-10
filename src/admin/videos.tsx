@@ -695,7 +695,10 @@ function SettingsPanel(props: { onSaved: () => void }) {
 			result.saved(clearToken ? "Stream API token removed" : "Videos settings saved");
 			props.onSaved();
 		} catch (cause) {
-			result.failed(errorText(cause, "Could not save the settings"));
+			const message = errorText(cause, "Could not save the settings");
+			result.failed(message);
+			// Removing the token happens with the form clean, when the Save bar (and its message) isn't showing.
+			if (clearToken) setError(message);
 		} finally {
 			setPending(undefined);
 		}

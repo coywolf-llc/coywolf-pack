@@ -68,7 +68,8 @@ async function api<T>(doFetch: Fetch, token: string, path: string, init: { metho
 	try {
 		return (await cloudflareApi<T>(path, { token, fetch: doFetch, method: init.method ?? "GET", body: init.body, graphql: path === "/graphql" })).result;
 	} catch (error) {
-		throw new UsageError(error instanceof Error ? error.message : String(error));
+		// Its messages had no closing period before the shared client.
+		throw new UsageError((error instanceof Error ? error.message : String(error)).replace(/\.$/, ""));
 	}
 }
 

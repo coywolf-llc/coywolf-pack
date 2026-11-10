@@ -518,6 +518,7 @@ export function ImagesPage() {
 
 	const save = async (clearToken = false) => {
 		setPending(clearToken ? "clear" : "save");
+		setError(null);
 		result.clear();
 		try {
 			const { token, ...rest } = draft;
@@ -525,7 +526,10 @@ export function ImagesPage() {
 			if (clearToken) result.saved("API token removed");
 			else result.saved("Settings saved", "The site picks up a new media host within a minute.");
 		} catch (cause) {
-			result.failed(errorText(cause, "Couldn't save"));
+			const message = errorText(cause, "Couldn't save");
+			result.failed(message);
+			// Removing the token happens with the form clean, when the Save bar (and its message) isn't showing.
+			if (clearToken) setError(message);
 		} finally {
 			setPending(undefined);
 		}

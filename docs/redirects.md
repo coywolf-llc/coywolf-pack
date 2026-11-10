@@ -43,7 +43,7 @@ Each Worker isolate keeps the rules' index in memory: the pattern rules (usually
 
 ## Removed content
 
-Feature **Redirects → Removed content** (`redirects.trashPrompt`, off by default). When a published entry is trashed or unpublished, the admin asks right away what its old URL should do:
+Feature **Redirect Manager → Removed content** (`redirects.trashPrompt`, off by default). When a published entry is trashed or unpublished, the admin asks right away what its old URL should do:
 
 - **Redirect to…** creates a Coywolf redirect rule (301 by default) from the old URL.
 - **Return 410 Gone** creates a 410 rule, telling search engines the page is gone for good.
@@ -72,7 +72,7 @@ Feature **Redirect Manager → Slug changes** (`redirects.slugChanges`; off on n
 wp db query "SELECT source, target, type, is_regex FROM wp_coywolf_seo_redirects"
 ```
 
-Paste the output into **Redirects → Import**.
+Paste the output into **Redirect Manager → Import**.
 
 ## Export and move redirects
 
