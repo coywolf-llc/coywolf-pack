@@ -15,7 +15,6 @@
  */
 import { Badge, Button } from "@cloudflare/kumo";
 import { ArrowsClockwise, Copy } from "@phosphor-icons/react";
-import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
 import { PACK_API, apiPost, errorText } from "./api.js";
@@ -88,13 +87,14 @@ export function SchemaPanel(props: PanelProps) {
 	const { data, error, loading } = useEntryData(() => schemaPost<SchemaEntry>("entry", { collection, entryId: entry.id }, "Couldn't read the schema override"), [collection, entry.id, entry.updatedAt]);
 	if (loading && !data) return <Muted>Loading…</Muted>;
 	if (error || !data) return <Muted>{error ?? "Couldn't read the schema override."}</Muted>;
-	const type = (key: "pageType" | "articleType", fallback: string) => {
+	// The entry's own type, else its collection's (Types tab), else the graph's default (which depends on the page).
+	const type = (key: "pageType" | "articleType") => {
 		const own = data.override?.[key];
 		const value = own ?? data.collectionTypes[key];
-		const label = value ? (data.labels[value] ?? value) : fallback;
+		if (!value) return <span className="text-kumo-subtle">Default</span>;
 		return (
 			<>
-				{label}
+				{data.labels[value] ?? value}
 				{!own && <span className="text-kumo-subtle"> (from the collection)</span>}
 			</>
 		);
@@ -104,8 +104,8 @@ export function SchemaPanel(props: PanelProps) {
 		<div className="space-y-3">
 			{!data.features.graph && <Muted>The Schema.org graph is off, so these types aren't output.</Muted>}
 			<dl className="space-y-2">
-				<Row label="Page type">{type("pageType", "Web Page")}</Row>
-				<Row label="Article type">{type("articleType", "Article")}</Row>
+				<Row label="Page type">{type("pageType")}</Row>
+				<Row label="Article type">{type("articleType")}</Row>
 				<Row label="About (main subject)">{data.mainSubject ?? <span className="text-kumo-subtle">Not set</span>}</Row>
 				<Row label="Custom markup">
 					{custom ? (
@@ -316,21 +316,49 @@ export function LinksPanel(props: PanelProps) {
 
 // ── Links column ─────────────────────────────────────────────────
 
-/** One request for every row on the page: the cells share the query key (React Query dedupes them). */
+type PageLinks = Record<string, LinkSummary | null>;
+
+/**
+ * The link problems of one list page, requested once for all its rows: every cell asks with the same
+ * collection and ids in the same render, so the first starts the request and the rest share it. Kept
+ * for a minute (a list re-rendering doesn't ask again). Not React Query: the pack's copy of it isn't
+ * always EmDash's (Vite pre-bundles EmDash's admin in dev), and a second copy has no client.
+ */
+const pageRequests = new Map<string, { at: number; promise: Promise<PageLinks> }>();
+const PAGE_LINKS_MS = 60_000;
+
+export function pageLinks(collection: string, ids: string[], now = Date.now()): Promise<PageLinks> {
+	const key = `${collection}\n${ids.join(",")}`;
+	const hit = pageRequests.get(key);
+	if (hit && now - hit.at < PAGE_LINKS_MS) return hit.promise;
+	if (pageRequests.size > 50) pageRequests.clear();
+	const promise = linksPost<{ entries: PageLinks }>("entries/status", { collection, ids }, "Couldn't read link status").then((r) => r.entries);
+	promise.catch(() => pageRequests.delete(key));
+	pageRequests.set(key, { at: now, promise });
+	return promise;
+}
+
 export function LinksCell(props: CellProps) {
 	const ids = props.visibleItems.map((i) => i.id);
-	const query = useQuery({
-		queryKey: ["coywolf-pack", "links-column", props.collection, ids],
-		queryFn: () => linksPost<{ entries: Record<string, LinkSummary | null> }>("entries/status", { collection: props.collection, ids }, "Couldn't read link status"),
-		staleTime: 60_000,
-	});
-	const summary = query.data?.entries[props.item.id];
-	if (query.isLoading) return <span className="text-kumo-subtle" aria-label="Loading">…</span>;
+	const key = `${props.collection}\n${ids.join(",")}`;
+	const [state, setState] = React.useState<{ key: string; entries?: PageLinks; failed?: boolean }>();
+	React.useEffect(() => {
+		let live = true;
+		pageLinks(props.collection, ids)
+			.then((entries) => live && setState({ key, entries }))
+			.catch(() => live && setState({ key, failed: true }));
+		return () => {
+			live = false;
+		};
+		// The ids are in `key`.
+	}, [key]);
+	if (!state || state.key !== key) return <span className="text-kumo-subtle" aria-label="Loading">…</span>;
+	const summary = state.entries?.[props.item.id];
 	if (!summary) {
 		return (
 			<span className="text-kumo-subtle">
 				<span aria-hidden="true">-</span>
-				<span className="sr-only">No links</span>
+				<span className="sr-only">{state.failed ? "Link status unavailable" : "No links"}</span>
 			</span>
 		);
 	}

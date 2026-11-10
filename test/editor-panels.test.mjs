@@ -53,8 +53,9 @@ test("the panels and the column: valid for EmDash (ids, titles, finite order and
 	const panels = readFileSync(new URL("../src/admin/editor-panels.tsx", import.meta.url), "utf8");
 	assert.match(panels, /export const contentEditorPanels = EDITOR_PANELS\.map\(\(\{ page, \.\.\.panel \}\) => \(\{ \.\.\.panel, component: PANEL_COMPONENTS\[panel\.id\], collections: \(\) => packPageOn\(page\) \}\)\);/);
 	assert.match(panels, /export const contentListColumns = LIST_COLUMNS\.map\(\(\{ page, \.\.\.column \}\) => \(\{ \.\.\.column, cell: LinksCell, collections: \(\) => packPageOn\(page\) \}\)\);/);
-	// The column's cells share one query per page (React Query dedupes the same key).
-	assert.match(panels, /queryKey: \["coywolf-pack", "links-column", props\.collection, ids\]/);
+	// The column's cells share one request per page (pageLinks, keyed by collection and the page's ids).
+	assert.match(panels, /pageLinks\(props\.collection, ids\)/);
+	assert.doesNotMatch(panels, /@tanstack\/react-query/, "a second React Query copy in dev has no client");
 });
 
 test("the Schema panel's link opens the entry's override: the query string goes to the router as search params", () => {
