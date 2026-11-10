@@ -55,7 +55,7 @@ export function filesPack(options: FilesOptions): PackModule {
 				},
 			},
 		],
-		adminPages: [{ path: "/files", label: "Files", icon: "file-arrow-down" }],
+		adminPages: [{ path: "/files", label: "File Downloads", icon: "file-arrow-down" }],
 		storage: filesStorage,
 		capabilities: ["content:read", "schema:read", "media:read", "network:request"],
 		allowedHosts: ["*.r2.cloudflarestorage.com"],

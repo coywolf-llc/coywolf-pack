@@ -8,7 +8,7 @@
  * ```
  *
  * and add `coywolfPack()` from "@coywolf/emdash/middleware" to the site's
- * middleware. Every feature can be turned on or off under Plugins → Coywolf Pack.
+ * middleware. Every feature can be turned on or off on the pack's Features page (Coywolf Pack → Features).
  */
 import type { PluginCapability, PluginDescriptor } from "emdash";
 import { definePlugin } from "emdash";
@@ -20,6 +20,7 @@ import { featuresRoutes } from "./core/features-module.js";
 import type { AdminPageDef, PackModule, WidgetDef } from "./core/module.js";
 import { readOnlyRouteNames } from "./core/routes.js";
 import { secretSettingsSchema } from "./core/secrets.js";
+import { sidebarPages } from "./core/sidebar.js";
 import { MODULES } from "./modules.js";
 import type { CoywolfOptions } from "./options.js";
 import { registerReadOnlyRoutes } from "./pageCache/lib.js";
@@ -36,19 +37,14 @@ export type { ContentUrlOptions, TrailingSlash } from "./core/content-url.js";
 
 const PACKAGE = "@coywolf/emdash";
 
-/** The admin sidebar folder holding every pack page (EmDash 1.2.0+ keeps the pages' order inside it). */
-const SIDEBAR_GROUP = "Coywolf Pack";
-/** First in the folder (its icon is the folder's). Labeled "Features", not "Coywolf Pack": the folder already says that. */
+/** First in the Coywolf Pack folder (its icon is the folder's). Labeled "Features", not "Coywolf Pack": the folder already says that. */
 const FEATURES_PAGE = { path: "/features", label: "Features", icon: "toggle-right" };
-/** Always on (not a feature), listed right below Coywolf Pack. */
+/** Always on (not a feature), listed right below Features. */
 const PERFORMANCE_PAGE = { path: "/performance", label: "Performance", icon: "lightning" };
-/** Module pages listed right after Performance (when their feature is on), ahead of the rest. */
-const AFTER_PERFORMANCE = ["/images"];
 
+/** Folders and their order: src/core/sidebar.ts. */
 function sidebar(modules: PackModule[]): AdminPageDef[] {
-	const pages = modules.flatMap((m) => m.adminPages ?? []);
-	const early = AFTER_PERFORMANCE.flatMap((path) => pages.filter((p) => p.path === path));
-	return [FEATURES_PAGE, PERFORMANCE_PAGE, ...early, ...pages.filter((p) => !early.includes(p))].map((p) => ({ ...p, group: SIDEBAR_GROUP }));
+	return sidebarPages([FEATURES_PAGE, PERFORMANCE_PAGE, ...modules.flatMap((m) => m.adminPages ?? [])]);
 }
 
 function buildModules(options: CoywolfOptions): PackModule[] {

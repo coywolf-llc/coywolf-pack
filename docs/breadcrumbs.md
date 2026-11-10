@@ -2,7 +2,7 @@
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-An accessible breadcrumb trail (`<nav aria-label="Breadcrumb">` around an `<ol>`, `aria-current="page"` on the current page, separators in CSS that screen readers skip), as a component for theme layouts and as a **Breadcrumbs** block for content. Off until you turn it on under **Plugins → Coywolf Pack**:
+An accessible breadcrumb trail (`<nav aria-label="Breadcrumb">` around an `<ol>`, `aria-current="page"` on the current page, separators in CSS that screen readers skip), as a component for theme layouts and as a **Breadcrumbs** block for content. Off until you turn it on on the **Features** page (**Coywolf Pack → Features** in the sidebar):
 
 | Feature | Default | What it does |
 | --- | --- | --- |

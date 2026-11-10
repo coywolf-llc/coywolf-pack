@@ -2,7 +2,7 @@
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-Help search engines, feed readers and AI agents find your content. Ported from Coywolf SEO for WordPress (the RSS feed is new). Everything is off until you turn it on under **Plugins → Coywolf Pack**: the **Discovery** switch, then any of its three parts (here or with the switch next to each part's title on the Discovery page). Settings and status are under **Plugins → Coywolf Pack → Discovery**, which also shows whether Cloudflare's [Crawler Hints](#crawler-hints) is on.
+Help search engines, feed readers and AI agents find your content. Ported from Coywolf SEO for WordPress (the RSS feed is new). Everything is off until you turn it on on the **Features** page (**Coywolf Pack → Features** in the sidebar): the **Discovery** switch, then any of its three parts (here or with the switch next to each part's title on the Discovery page). Settings and status are on the Discovery page (**SEO → Discovery**), which also shows whether Cloudflare's [Crawler Hints](#crawler-hints) is on.
 
 | Feature switch | Default | What it does |
 | --- | --- | --- |

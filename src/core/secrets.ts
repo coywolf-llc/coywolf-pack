@@ -39,7 +39,7 @@ export const SECRET_SETTINGS = {
 		type: "secret",
 		label: "File Downloads — R2 secret access key",
 		description:
-			"For large uploads. To get one: (1) Cloudflare dashboard → R2 → Manage API tokens → Create Account API token; (2) choose Object Read & Write on the bucket bound as MEDIA; (3) create it and copy the Secret Access Key (shown once); (4) paste it here and save. The account ID, access key ID and bucket name go on the Files page → Settings, which has the full step-by-step guide.",
+			"For large uploads. To get one: (1) Cloudflare dashboard → R2 → Manage API tokens → Create Account API token; (2) choose Object Read & Write on the bucket bound as MEDIA; (3) create it and copy the Secret Access Key (shown once); (4) paste it here and save. The account ID, access key ID and bucket name go on the File Downloads page → Settings, which has the full step-by-step guide.",
 	},
 	videosApiToken: {
 		type: "secret",
@@ -54,7 +54,7 @@ export const SECRET_SETTINGS = {
 	},
 	imagesApiToken: {
 		type: "secret",
-		label: "Clean image URLs — Cloudflare API token",
+		label: "Clean Image URLs — Cloudflare API token",
 		description:
 			"Optional. Only for Set up media host on the Clean Image URLs page, which does the Cloudflare setup for you. To get one: (1) Cloudflare dashboard → My Profile → API Tokens → Create Token → Create Custom Token; (2) add the permissions Zone → Zone → Read, Zone → Zone Settings → Edit, Zone → Transform Rules → Edit, Zone → DNS → Edit, Account → Workers R2 Storage → Edit and Account → Account Rulesets → Read; (3) include your account and the site's zone; (4) create it, copy the token (shown once), paste it here and save. Or set the IMAGES_API_TOKEN Worker secret.",
 	},
@@ -66,7 +66,7 @@ export const SECRET_SETTINGS = {
 	},
 	robotsRadarToken: {
 		type: "secret",
-		label: "Robots.txt Rules — Cloudflare Radar API token",
+		label: "Robots.txt — Cloudflare Radar API token",
 		description:
 			"Optional. Keeps the crawler list current from Cloudflare Radar each week. To get one: (1) Cloudflare dashboard → My Profile → API Tokens → Create Token → Create Custom Token; (2) add the permission Account → Radar → Read and include your account; (3) create it and copy the token (shown once); (4) paste it here and save. Or set the RADAR_API_TOKEN Worker secret. The full step-by-step guide is on the Robots.txt page → Bots.",
 	},

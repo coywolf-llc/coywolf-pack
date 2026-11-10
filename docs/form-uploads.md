@@ -1,8 +1,8 @@
-# Private form uploads
+# Private Form Uploads
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-The EmDash Forms plugin (`@emdash-cms/plugin-forms`) saves a file field's upload in the **media library**, where every file is public to anyone with its URL (`/_emdash/api/media/file/<key>`). With **Private form uploads** on, those files go to a private R2 bucket instead, and only admins can get them back.
+The EmDash Forms plugin (`@emdash-cms/plugin-forms`) saves a file field's upload in the **media library**, where every file is public to anyone with its URL (`/_emdash/api/media/file/<key>`). With **Private Form Uploads** on, those files go to a private R2 bucket instead, and only admins can get them back.
 
 - **Where files go**: an R2 bucket with no public access (no r2.dev URL, no custom domain), bound as `FORM_UPLOADS`. Nothing is written to the media library, so there's no public URL to cache.
 - **Form uploads page** (**Plugins → Form uploads**): every private file, newest first, with its form and field, size, upload time, and the submission it came with (date and a short preview of the answers). **Download** and **Delete** per file.
@@ -44,7 +44,7 @@ Everything else about the form is still the Forms plugin's own: spam protection 
    ```
 
    Options (second argument): `bucket` (default `"FORM_UPLOADS"`), `mediaBucket` (default `"MEDIA"`, for moving earlier files), `database` (default `"DB"`).
-4. Deploy, turn on **Private form uploads** under **Plugins → Coywolf Pack**, and check **Plugins → Form uploads**.
+4. Deploy, turn on **Private Form Uploads** on the **Features** page (**Coywolf Pack → Features** in the sidebar), and check its page (**Media Tools → Private Form Uploads**).
 
 ## How it works
 

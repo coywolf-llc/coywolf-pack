@@ -58,7 +58,7 @@ export const F = { main: "images" } as const;
 export const FEATURES = [
 	{
 		id: F.main,
-		label: "Clean image URLs",
+		label: "Clean Image URLs",
 		description:
 			"Resized images at short addresses instead of /_image?href=…: on your own media host (media.example.com/s/600x315/<file>, set up on the Clean Image URLs page) or at /media/<id>-600x315.webp. Themes use cleanImageUrl() to build them.",
 		default: false,

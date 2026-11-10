@@ -20,7 +20,7 @@ export interface CodeBlocksOptions {}
 export const FEATURES = [
 	{
 		id: "codeBlocks",
-		label: "Code blocks",
+		label: "Code Blocks",
 		description: "Syntax highlighting and themes for code blocks on the site, rendered on the server (no highlighting script for visitors).",
 		default: false,
 	},

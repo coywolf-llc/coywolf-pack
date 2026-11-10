@@ -2,7 +2,7 @@
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-Resized copies of media-library images at short, cacheable addresses instead of Astro's `/_image?href=…&w=…&h=…` endpoint. Off until you turn on **Clean image URLs** on the Coywolf Pack page; the **Clean Image URLs** admin page appears once it's on.
+Resized copies of media-library images at short, cacheable addresses instead of Astro's `/_image?href=…&w=…&h=…` endpoint. Off until you turn on **Clean Image URLs** on the **Features** page (**Coywolf Pack → Features** in the sidebar); the **Clean Image URLs** admin page appears once it's on.
 
 ## Two modes
 
