@@ -97,7 +97,7 @@ export function normalizePath(path: string): string {
 export class RedirectValidationError extends Error {}
 
 /** Longest request path tried against pattern rules; longer paths match exact rules only (bounds a slow pattern's cost per request). */
-export const MAX_PATTERN_PATH = 1024;
+export const MAX_PATTERN_PATH = 512;
 
 /** A literal character as written in a pattern (`\/` and `/` are the same). */
 const literal = (c: string) => (c.length === 2 && c.startsWith("\\") && !/[A-Za-z0-9]/.test(c[1] as string) ? c[1] : c);
@@ -123,77 +123,109 @@ function distinctWords(body: string): boolean {
 	return new Set(firsts).size === firsts.length;
 }
 
+/** Most unbounded repeats of a broad atom (`.*`, `\S+`, `[^x]*`…) in one pattern: each more multiplies the work on a long path. */
+export const MAX_WILDCARD_REPEATS = 2;
+
+/** What follows an atom: no quantifier, `?`, a fixed count (`{n}`), a bounded repeat (`{n,m}`) or an unbounded one (`*`, `+`, `{n,}`). */
+interface Quantifier {
+	/** Characters it takes, with a lazy `?` after it. */
+	len: number;
+	kind: "none" | "optional" | "fixed" | "bounded" | "unbounded";
+	/** Most times the atom may match (Infinity when unbounded). */
+	max: number;
+}
+
+function quantifierAt(source: string, i: number): Quantifier {
+	const c = source[i];
+	const lazy = (len: number) => (source[i + len] === "?" ? len + 1 : len);
+	if (c === "*" || c === "+") return { len: lazy(1), kind: "unbounded", max: Number.POSITIVE_INFINITY };
+	if (c === "?") return { len: lazy(1), kind: "optional", max: 1 };
+	const m = c === "{" ? /^\{(\d+)(,(\d*))?\}/.exec(source.slice(i)) : null;
+	if (!m) return { len: 0, kind: "none", max: 1 };
+	if (m[2] === undefined) return { len: lazy(m[0].length), kind: "fixed", max: Number(m[1]) };
+	if (m[3] === "") return { len: lazy(m[0].length), kind: "unbounded", max: Number.POSITIVE_INFINITY };
+	return { len: lazy(m[0].length), kind: "bounded", max: Number(m[3]) };
+}
+
+/** A broad atom: `.`, `\S`, `\D`, `\W`, `\w`, a class like `[\s\S]`, or a negated class that lets `/` through. */
+function broadAtom(atom: string): boolean {
+	if (atom === "." || /^\\[SDWw]$/.test(atom)) return true;
+	if (!atom.startsWith("[")) return false;
+	if (/\\s[^\]]*\\S|\\S[^\]]*\\s|\\d[^\]]*\\D|\\D[^\]]*\\d|\\w[^\]]*\\W|\\W[^\]]*\\w/.test(atom)) return true;
+	return atom.startsWith("[^") && !/\/|\\\//.test(atom);
+}
+
 /**
- * A pattern that can take exponential time on a path that almost matches,
- * found by reading the pattern (escapes and character classes skipped):
- * - a repeated group that itself repeats, such as `(a+)+` or `(\w+\s?)*`: the
- *   engine tries every way of splitting the path between the two repeats.
- *   Allowed when the inner repeat can't overlap (unambiguousRepeat), as in
- *   `(?:[^/]+/)*`;
- * - an unbounded repeat of a group with alternatives, such as `(a|a)*` or
- *   `(a|ab)+` (`^/(a|a)*$` took 16 seconds on a 30-character path). Allowed
- *   for plain words that start differently (`(?:jpg|png)+`).
- * Every request whose path has no exact rule runs every pattern, so one such
- * pattern lets anyone burn the Worker's CPU. Some fast patterns are refused
- * too; they can be written another way. Returns the reason, or null.
+ * A pattern that can take exponential (or steeply polynomial) time on a path
+ * that almost matches, found by reading the pattern (escapes and character
+ * classes skipped). Every request whose path has no exact rule runs every
+ * pattern, so one such pattern lets anyone burn the Worker's CPU:
+ * - a repeated group (`*`, `+`, `{n,}`, or `{n}`/`{n,m}` above 1) whose body
+ *   can match in more than one way: it contains a repeat, an optional part
+ *   (`?`) or alternatives, as in `(a+)+`, `(aa?)*` (41 characters took 12 s),
+ *   `(.?.)*`, `(a|a){30}` or `(a|ab)+`. Allowed: an inner repeat that can't
+ *   overlap (unambiguousRepeat: `(?:[^/]+/)*`, `(?:/[^/]+)+`) and plain words
+ *   that start differently (`(?:jpg|png)+`). A fixed count inside (`{4}`)
+ *   doesn't make a body ambiguous;
+ * - more than MAX_WILDCARD_REPEATS unbounded repeats of a broad atom, such as
+ *   `(.*)(.*)(.*)(.*)x` (400 characters took 3.4 s).
+ * Some fast patterns are refused too; they can be written another way.
+ * Returns the reason, or null.
  */
 export function nestedRepeat(source: string): string | null {
 	interface Group {
 		start: number;
-		/** Contains a repeat (directly or in a group inside it). */
-		repeat: boolean;
+		/** Contains a repeat or an optional part (directly or in a group inside it). */
+		ambiguous: boolean;
 		/** Contains alternatives (directly or in a group inside it). */
 		alt: boolean;
 	}
+	const root = (): Group => ({ start: -1, ambiguous: false, alt: false });
 	const stack: Group[] = [];
-	let top: Group = { start: -1, repeat: false, alt: false };
-	/** `*`, `+` or `{n,}` at i: its length, else 0. */
-	const unboundedAt = (i: number): number => {
-		const c = source[i];
-		if (c === "*" || c === "+") return 1;
-		const m = c === "{" ? /^\{\d+,\}/.exec(source.slice(i)) : null;
-		return m ? m[0].length : 0;
-	};
-	/** Any repeat at i (`*`, `+`, `{n,}`, or `{n}`/`{n,m}` above 1): its length, else 0 (`?`, `{1}` and `{0,1}` don't repeat). */
-	const repeatAt = (i: number): number => {
-		const unbounded = unboundedAt(i);
-		if (unbounded) return unbounded;
-		const m = source[i] === "{" ? /^\{(\d+)(?:,(\d+))?\}/.exec(source.slice(i)) : null;
-		return m && Number(m[2] ?? m[1]) > 1 ? m[0].length : 0;
-	};
+	let top = root();
+	let wildcards = 0;
 	for (let i = 0; i < source.length; i++) {
 		const c = source[i];
-		if (c === "\\") {
-			i++; // An escaped character (\d, \., \( …): one atom.
-		} else if (c === "[") {
-			// A character class is one atom (in JavaScript `[]` is empty, so the first `]` ends it).
+		if (c === "(") {
+			stack.push(top);
+			top = { start: i, ambiguous: false, alt: false };
+			continue;
+		}
+		if (c === "|") {
+			top.alt = true;
+			continue;
+		}
+		if (c === ")") {
+			const group = top;
+			top = stack.pop() ?? root();
+			const body = source.slice(group.start + 1, i).replace(/^\?(?::|<[=!]|<[^>]*>|[=!])/, "");
+			const q = quantifierAt(source, i + 1);
+			if (q.kind !== "none" && q.kind !== "optional" && q.max > 1) {
+				const safe = unambiguousRepeat(body) || (group.alt && !group.ambiguous && distinctWords(body));
+				if (group.ambiguous && !safe) return "it repeats a group that can match in more than one way (such as (a+)+ or (aa?)*)";
+				if (group.alt && !safe) return "it repeats a group of alternatives that can match the same text (such as (a|ab)+)";
+			}
+			if (group.ambiguous || group.alt || (q.kind !== "none" && q.kind !== "fixed")) top.ambiguous = true;
+			if (group.alt) top.alt = true;
+			i += q.len;
+			continue;
+		}
+		// One atom: an escape, a class, `.`, or a literal character.
+		let end = i + 1;
+		if (c === "\\") end = i + 2;
+		else if (c === "[") {
+			// In JavaScript `[]` is empty, so the first unescaped `]` ends the class.
 			let j = i + 1;
 			for (; j < source.length && source[j] !== "]"; j++) if (source[j] === "\\") j++;
-			i = j;
-		} else if (c === "(") {
-			stack.push(top);
-			top = { start: i, repeat: false, alt: false };
-		} else if (c === "|") {
-			top.alt = true;
-		} else if (c === ")") {
-			const group = top;
-			top = stack.pop() ?? { start: -1, repeat: false, alt: false };
-			const body = source.slice(group.start + 1, i).replace(/^\?(?::|<[=!]|<[^>]*>|[=!])/, "");
-			const len = repeatAt(i + 1);
-			if (len) {
-				if (group.repeat && !unambiguousRepeat(body)) return "it repeats a group that itself repeats (such as (a+)+)";
-				if (unboundedAt(i + 1) && group.alt && !distinctWords(body)) return "it repeats a group of alternatives that can match the same text (such as (a|ab)+)";
-				top.repeat = true;
-				i += len;
-			} else if (group.repeat) top.repeat = true;
-			if (group.alt) top.alt = true;
-		} else {
-			const len = repeatAt(i);
-			if (len) {
-				top.repeat = true;
-				i += len - 1;
-			}
+			end = j + 1;
 		}
+		const atom = source.slice(i, end);
+		const q = quantifierAt(source, end);
+		if (q.kind !== "none" && q.kind !== "fixed") top.ambiguous = true;
+		if (q.kind === "unbounded" && broadAtom(atom) && ++wildcards > MAX_WILDCARD_REPEATS) {
+			return `it has more than ${MAX_WILDCARD_REPEATS} open-ended wildcards (such as .* or [^x]+)`;
+		}
+		i = end - 1 + q.len;
 	}
 	return null;
 }

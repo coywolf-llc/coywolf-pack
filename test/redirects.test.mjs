@@ -322,6 +322,10 @@ test("patterns: nested repeats are refused on save; paths longer than MAX_PATTER
 	const { nestedRepeat, validate, RedirectValidationError, MAX_PATTERN_PATH } = await import("../src/redirects/rules.ts");
 	for (const slow of ["^/(a+)+$", "(\\w+\\s?)*", "^/((a)+)+$", "^/(a{2,})+$", "^/(x*y?)+z$", "^/(?:[a-z]+/)*end$", "^/(a|a)*$", "^/(a|ab)+$", "^/(?:x|(?:x))*$", "^/([^/]+a)+$"])
 		assert.ok(nestedRepeat(slow), slow);
+	// Found by the re-review: 41 characters took 12 s; over 5 s; over 5 s; 400 characters took 3.4 s.
+	for (const slow of ["^/(aa?)*$", "^/(a|a){30}$", "^/(.?.)*$", "^/(.*)(.*)(.*)(.*)x$", "^/(.*)/(.*)/(.*)$", "^/(\\S+)(\\S+)(\\S+)x$", "^/([^x]*)([^x]*)([^x]*)y$", "^/(ab?){3,5}$"])
+		assert.ok(nestedRepeat(slow), slow);
+	assert.match(nestedRepeat("^/(.*)(.*)(.*)(.*)x$"), /open-ended wildcards/);
 	for (const fine of [
 		"^/a/(\\d+)/?$",
 		"^/blog/(.*)$",
@@ -334,6 +338,11 @@ test("patterns: nested repeats are refused on save; paths longer than MAX_PATTER
 		"^/(?:[^\\/]+\\/)*feed/?$",
 		"^/blog(?:/[^/]+)+$",
 		"^/img/[a-z0-9-]+\\.(?:jpg|png)+$",
+		"^/(.*)/(.*)$",
+		"^/([^/]+)/([^/]+)/([^/]+)/?$",
+		"^/(\\d{4})/(\\d{2})/(.*)$",
+		"^/(?:ab){2}$",
+		"^/(\\d{2})+$",
 	])
 		assert.equal(nestedRepeat(fine), null, fine);
 	// The allowed shapes really are fast on a path that almost matches.
