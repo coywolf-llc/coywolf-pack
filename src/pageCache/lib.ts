@@ -280,10 +280,20 @@ async function swapOption(db: D1Database, name: string, before: string | null, a
  * page, as before 0.35.19. A gradual deployment sends requests to two live
  * versions, so each isolate of either sees "the other" version stored: those
  * flips clear the cache at most once every ROLLBACK_PURGE_EVERY_MS and start
- * warming only when they clear it. A refused purge isn't recorded, so the
- * next isolate tries again.
+ * warming only when they clear it.
+ *
+ * A refused purge (the account's purge rate limit) is handed to `settleLater`
+ * (the pending settling purge, src/core/generation.ts) and the version is
+ * recorded anyway: this isolate checks once (pageCacheMiddleware), so without
+ * that nothing would try again until another isolate of this version came
+ * along. The settling purge clears everything later and restarts warming.
  */
-export async function noteNewVersion(db: D1Database, id: string, known: string | null | undefined, options: { purge: boolean; now?: number }): Promise<boolean> {
+export async function noteNewVersion(
+	db: D1Database,
+	id: string,
+	known: string | null | undefined,
+	options: { purge: boolean; now?: number; settleLater?: (scope: PurgeScope) => Promise<void> },
+): Promise<boolean> {
 	// `known`: the row as read with the feature switches (undefined when not read; then it's read here).
 	const raw = known !== undefined ? known : ((await db.prepare("SELECT value FROM options WHERE name = ?").bind(VERSION_OPTION).first<{ value: string }>())?.value ?? null);
 	const stored = parseVersionRow(raw);
@@ -291,7 +301,11 @@ export async function noteNewVersion(db: D1Database, id: string, known: string |
 	const now = options.now ?? Date.now();
 	const returning = stored.seen.includes(id);
 	const purgeNow = returning ? stored.rollbackPurgedAt === undefined || now - stored.rollbackPurgedAt >= ROLLBACK_PURGE_EVERY_MS : options.purge;
-	if (purgeNow && !(await purgePageCache())) return false;
+	const outcome = purgeNow ? await purgeOutcome() : "unavailable";
+	if (outcome === "refused") {
+		if (!options.settleLater) return false; // Not recorded: the next isolate tries again.
+		await options.settleLater({ purgeEverything: true });
+	}
 	const next: VersionRow = {
 		current: id,
 		seen: [...stored.seen.filter((v) => v !== id), id].slice(-VERSION_HISTORY),
@@ -299,6 +313,7 @@ export async function noteNewVersion(db: D1Database, id: string, known: string |
 	};
 	// Another isolate (of this version or the other one) recorded first: it handles warming.
 	if (!(await swapOption(db, VERSION_OPTION, raw, JSON.stringify(next)))) return false;
+	if (outcome === "refused") return false; // The settling purge restarts warming once it has cleared.
 	return !returning || purgeNow;
 }
 

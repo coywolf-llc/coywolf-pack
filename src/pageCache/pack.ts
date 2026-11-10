@@ -6,6 +6,7 @@ import { parseInput } from "../shared.js";
 import { CLOUDFLARE_API_HOST, CloudflareApiError, applyMediaCacheRule, readMediaCacheRule } from "../images/cloudflare.js";
 import { mediaApiAccess, purgeMediaHost } from "../images/module.js";
 import type { PackMiddleware, PackModule } from "../core/module.js";
+import { settleLater } from "../core/generation.js";
 import { workerEnv } from "../shared.js";
 import { ROBOTS_TAG, VERSION_OPTION, keepAtEdge, noteNewVersion, purgePageCache, versionId } from "./lib.js";
 import { usageReport } from "./usage.js";
@@ -275,7 +276,7 @@ export const pageCacheMiddleware: PackMiddleware = {
 		const db = env.DB as D1Database | undefined;
 		if (id && db)
 			waitUntil(
-				noteNewVersion(db, id, siteOption(VERSION_OPTION), { purge: config.crossVersionCache === true })
+				noteNewVersion(db, id, siteOption(VERSION_OPTION), { purge: config.crossVersionCache === true, settleLater: (scope) => settleLater(db, scope) })
 					.then(async (deployed) => {
 						if (deployed && (await siteSetting<boolean>(WARM_SETTING))) rememberSiteOption(WARM_STATE_OPTION, JSON.stringify(await startWarm(db, "deploy")));
 					})

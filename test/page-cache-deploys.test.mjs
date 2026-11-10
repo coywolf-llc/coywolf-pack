@@ -82,6 +82,26 @@ test("with cross-version caching, a new version clears every page first; a refus
 	assert.equal(stored(db).current, "v1");
 });
 
+test("a refused rollback purge is kept for the settling purge, and the version recorded (this isolate doesn't check again)", async () => {
+	const { settleLater } = await import("../src/core/generation.ts");
+	const { GENERATION_OPTION } = await import("../src/core/features.ts");
+	const db = d1();
+	const t0 = Date.UTC(2026, 10, 10, 12);
+	await noteNewVersion(db, "A", undefined, { purge: false, now: t0 });
+	await noteNewVersion(db, "B", undefined, { purge: false, now: t0 + 1000 });
+	globalThis.__purges = [];
+	globalThis.__purgeOk = false;
+	try {
+		assert.equal(await noteNewVersion(db, "A", undefined, { purge: false, now: t0 + 60_000, settleLater: (scope) => settleLater(db, scope, t0 + 60_000) }), false, "no warm-up yet");
+	} finally {
+		globalThis.__purgeOk = true;
+	}
+	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }], "tried once");
+	assert.equal(stored(db).current, "A");
+	const generation = JSON.parse(db.sqlite.prepare("SELECT value FROM options WHERE name = ?").get(GENERATION_OPTION).value);
+	assert.deepEqual(generation.settle, { purgeEverything: true }, "the settling purge clears everything (and restarts warming)");
+});
+
 test("a rollback to a version seen before clears every page (its partition may hold pages from before the edits); gradual-deployment flips at most every 10 minutes", async () => {
 	const db = d1();
 	globalThis.__purges = [];
