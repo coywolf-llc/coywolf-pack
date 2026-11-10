@@ -35,6 +35,12 @@ export interface DiscoveryOptions {
 }
 
 // ── Retired: IndexNow and Bing submission (removed in 0.35.18) ──
+//
+// REMOVE IN 0.38.0: everything in this section (retireIndexNow, the RETIRED_* constants), the
+// retiredTasks entry and the two calls below (plugin:activate, discovery/status), RETIRED_SETTINGS in
+// settings.ts, and the marker in HOUSEKEEPING_KEYS (src/core/features.ts). By then every site has run a
+// release that cleans up (0.35.18 to 0.37.x). test/indexnow-removal.test.mjs fails once package.json
+// reaches 0.38.0 while any of it is still here. See docs/discovery.md.
 
 /**
  * The daily task that sent Bing's queue. Its cron row stays scheduled on sites that ran 0.35.17, so it's
@@ -319,7 +325,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 		}),
 	};
 
-	/** IndexNow and Bing submission's daily task, from 0.35.17: cleans up and cancels itself when it next fires. */
+	/** IndexNow and Bing submission's daily task, from 0.35.17: cleans up and cancels itself when it next fires. Remove in 0.38.0 (see above). */
 	const retiredTasks: Record<string, (ctx: PluginContext) => Promise<void>> = {
 		[RETIRED_BING_TASK]: async (ctx) => {
 			await retireIndexNow(ctx);
