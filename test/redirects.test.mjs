@@ -498,3 +498,31 @@ test("a redirect save also clears the pages cached at its new sources", () => {
 	// Unreadable bodies clear nothing beyond the redirects' own tag.
 	for (const body of [null, "x", {}, { rules: [] }, { source: 5 }]) assert.equal(redirectPagesScope(body), null);
 });
+
+test("a prefetch of a redirect source is declined (503, never stored) and isn't a hit; the click is", async () => {
+	const { isSpeculative } = await import("../src/redirects/middleware.ts");
+	assert.equal(isSpeculative(new Request("https://example.com/", { headers: { "Sec-Purpose": "prefetch" } })), true);
+	assert.equal(isSpeculative(new Request("https://example.com/", { headers: { "Sec-Purpose": "prefetch;prerender" } })), true);
+	assert.equal(isSpeculative(new Request("https://example.com/", { headers: { Purpose: "prefetch" } })), true);
+	assert.equal(isSpeculative(new Request("https://example.com/")), false);
+
+	const db = await seeded();
+	invalidateRedirectCache();
+	const hitsOf = () => db.sqlite.prepare("SELECT hits FROM coywolf_redirects WHERE source = '/old'").get().hits;
+	const before = hitsOf();
+	const cache = routeCache();
+	const pending = [];
+	const context = { url: new URL("https://example.com/old"), request: new Request("https://example.com/old", { headers: { "Sec-Purpose": "prefetch" } }), cache };
+	const declined = await serveCachedRedirect(context, { DB: db }, (p) => pending.push(p));
+	await Promise.all(pending);
+	assert.equal(declined.status, 503);
+	assert.equal(declined.headers.get("Cache-Control"), "no-store");
+	assert.equal(declined.headers.get("Location"), null);
+	assert.deepEqual(cache.calls, [false], "kept out of the edge cache");
+	assert.equal(hitsOf(), before, "a prefetch isn't a hit");
+
+	const click = await serveWith(db, "https://example.com/old");
+	assert.equal(click.res.status, 301);
+	assert.equal(hitsOf(), before + 1);
+	invalidateRedirectCache();
+});

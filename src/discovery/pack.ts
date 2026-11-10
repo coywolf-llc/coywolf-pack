@@ -8,7 +8,7 @@ const FEATURES = [
 	{
 		id: FEATURE.main,
 		label: "Discovery",
-		description: "Help search engines, feed readers and AI agents find your content: a Google News sitemap, an RSS feed, llms.txt with Markdown versions of entries, and whether Cloudflare's Crawler Hints tells IndexNow engines about changes.",
+		description: "Help search engines, feed readers, AI agents and security researchers find what they need: a Google News sitemap, an RSS feed, llms.txt with Markdown versions of entries, security.txt, and whether Cloudflare's Crawler Hints tells IndexNow engines about changes.",
 		default: false,
 	},
 	{
@@ -27,6 +27,12 @@ const FEATURES = [
 		id: FEATURE.llms,
 		label: "llms.txt and Markdown",
 		description: "An llms.txt index at /llms.txt and a Markdown version of each entry at its URL + index.html.md.",
+		default: false,
+	},
+	{
+		id: FEATURE.securityTxt,
+		label: "security.txt",
+		description: "A security.txt file (RFC 9116) at /.well-known/security.txt that tells security researchers how to reach you, with an expiry date that renews itself.",
 		default: false,
 	},
 ];

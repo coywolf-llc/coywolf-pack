@@ -2,7 +2,7 @@
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-Help search engines, feed readers and AI agents find your content. Ported from Coywolf SEO for WordPress (the RSS feed is new). Everything is off until you turn it on on the **Features** page (**Coywolf Pack → Features** in the sidebar): the **Discovery** switch, then any of its three parts (here or with the switch next to each part's title on the Discovery page). Settings and status are on the Discovery page (**SEO → Discovery**), which also shows whether Cloudflare's [Crawler Hints](#crawler-hints) is on.
+Help search engines, feed readers, AI agents and security researchers find what they need. Ported from Coywolf SEO for WordPress (the RSS feed and security.txt are new). Everything is off until you turn it on on the **Features** page (**Coywolf Pack → Features** in the sidebar): the **Discovery** switch, then any of its four parts (here or with the switch next to each part's title on the Discovery page). Settings and status are on the Discovery page (**SEO → Discovery**), which also shows whether Cloudflare's [Crawler Hints](#crawler-hints) is on.
 
 | Feature switch | Default | What it does |
 | --- | --- | --- |
@@ -10,6 +10,7 @@ Help search engines, feed readers and AI agents find your content. Ported from C
 | `discovery.newsSitemap` | off | `/news-sitemap.xml` |
 | `discovery.feed` | off | RSS feed at `/feed/`, category feeds, and the `<link rel="alternate" type="application/rss+xml">` head tag |
 | `discovery.llms` | off | `/llms.txt`, Markdown versions of entries, and the `<link rel="alternate" type="text/markdown">` head tag |
+| `discovery.securityTxt` | off | [security.txt](#securitytxt) at `/.well-known/security.txt` |
 
 - **News sitemap**: entries published in the last 48 hours (the window Google News uses), newest first, at most 1,000, with publication name and language (defaults: site title and locale). Choose the collections (default: `posts`). Also served at `/coywolf-news-sitemap.xml`, Coywolf SEO's URL, so a sitemap submitted from WordPress keeps working. Submit it in Google Search Console; to list it in robots.txt, add `Sitemap: https://coywolf.com/news-sitemap.xml` to the custom robots.txt under **Settings → SEO**. The module doesn't change robots.txt.
 - **RSS feed**: RSS 2.0 at `/feed/` (WordPress's feed URL) with the newest entries of the chosen collections (default `posts`, 20 entries, up to 100), each with its title, link, author (the first byline), publish date, category (its first term in the taxonomy its URL uses, or `category`), and summary (the `excerpt` field or SEO description). The channel has the site title, tagline, locale, and the site logo (or favicon) when it's a PNG, JPEG or GIF. Every page gets `<link rel="alternate" type="application/rss+xml" href="https://coywolf.com/feed/">` in the head, so feed readers, apps and bots find it. **Category feeds** (on by default): when a collection's URL override is a term then the slug (`urls: { posts: "/{termpath:category|uncategorized}/{slug}/" }`, or `{term:…}` or `{category}`, with an optional fixed prefix), each term's archive URL + `feed/` is that term's feed, including its child terms' entries (`/news/feed/`, `/news/seo/feed/`), titled "<term> Archives - <site>" as WordPress titles them. A path that isn't a feed (no such term) goes on to the site. Entries set to noindex aren't listed. Feeds are built when requested and kept in the edge cache (Workers Cache, with Astro route caching on) for up to an hour, tagged with their collections and taxonomy: EmDash clears those tags on every publish, live edit, removal and term change, and saving the Discovery settings clears all feeds, so a change shows up on the next request. Readers may keep their own copy for up to 15 minutes (`Cache-Control: public, max-age=900`). Paths that aren't feeds are remembered in each isolate's memory for a minute. `/feed` without the slash is left to the site (which redirects it to `/feed/`).
@@ -17,6 +18,31 @@ Help search engines, feed readers and AI agents find your content. Ported from C
 - **Markdown versions**: each entry at its URL + `index.html.md` (`/blog/post/` → `/blog/post/index.html.md`, Coywolf SEO's convention). The Portable Text body becomes Markdown (headings, paragraphs, lists, links, images with captions, code, block quotes, tables, and horizontal rules; other blocks are skipped) under YAML frontmatter with the title, URL, dates, sources, and an optional license. There's no `Accept: text/markdown` negotiation on the entry's own URL: Cloudflare's cache key ignores `Accept`, so one such request could put Markdown into the cached HTML page. Responses carry `X-Markdown-Tokens`, an estimate at about 4 characters per token. Entry pages get `<link rel="alternate" type="text/markdown">` in the head.
 
 Only published, non-noindex entries in routable collections are included. URLs come from EmDash's own routing (each collection's URL pattern, date tokens, locale prefix, and trailing-slash setting), so they match the native sitemap.
+
+## security.txt
+
+A [security.txt](https://securitytxt.org/) file ([RFC 9116](https://www.rfc-editor.org/rfc/rfc9116)) at `/.well-known/security.txt` tells security researchers how to report a problem with the site. Fill in the **security.txt** section on the Discovery page and turn its switch on:
+
+- **Contacts** (required): one per line, most preferred first: an email address (served as `mailto:`), an `https://` page or form, or a `tel:` number with its country code (`tel:+1…`). Without one there's no file, and the address answers 404.
+- **Policy**, **Encryption key**, **Acknowledgments** and **Security jobs** (optional): `https://` links.
+- **Preferred languages**: language codes, such as `en` or `en, fr` (default `en`).
+
+The file also gets `Canonical:` (its own URL) and the required `Expires:`. Expires is worked out each time the file is built: the start of today (UTC) plus 364 days, so it's always about a year ahead and less than a year, as RFC 9116 recommends, and the file never goes stale. Nothing needs renewing by hand. The section shows a preview of the file as it will be served.
+
+```text
+# coywolf.com: how to report a security problem (RFC 9116).
+Contact: mailto:security@coywolf.com
+Expires: 2027-11-09T00:00:00Z
+Preferred-Languages: en
+Canonical: https://coywolf.com/.well-known/security.txt
+Policy: https://coywolf.com/security-policy/
+```
+
+- Served by the pack middleware as `text/plain`, and kept in the edge cache (Workers Cache) for a day, tagged `coywolf:security-txt`, which saving the Discovery settings clears. Browsers may keep it for a day (`Cache-Control: public, max-age=86400`), so Expires moves forward daily.
+- `/security.txt`, the legacy location, redirects there (301), as RFC 9116 allows.
+- Entries that aren't valid (an `http://` link, a contact that isn't an email address, `https://` URL or `tel:+…` number) can't be saved; the section says which.
+- The contact becomes public. The file isn't signed (an OpenPGP signature would have to be redone every day as Expires moves).
+- [Robots.txt Rules](robots.md) already keeps `/.well-known/` readable.
 
 ## Crawler Hints
 

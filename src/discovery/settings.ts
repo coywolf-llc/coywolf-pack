@@ -1,12 +1,13 @@
 /**
  * Discovery settings: one plugin setting ("discoverySettings") edited on the
- * Discovery admin page.
+ * Discovery admin page (news sitemap, RSS feed, llms.txt, security.txt).
  */
 import { z } from "zod";
 
 import type { SettingsReader } from "../shared.js";
 import { FEED_DEFAULT_ITEMS, FEED_MAX_ITEMS } from "./feed.js";
 import { DEFAULT_MAX_ENTRIES } from "./llms.js";
+import { SECURITY_TXT_DEFAULTS } from "./security-txt.js";
 
 export const SETTINGS_KEY = "discoverySettings";
 
@@ -54,6 +55,21 @@ export const settingsSchema = z.object({
 			license: z.string().max(200).default(""),
 		})
 		.default({ summary: "", intro: "", collections: [], maxEntries: DEFAULT_MAX_ENTRIES, markdown: true, license: "" }),
+	/**
+	 * security.txt (./security-txt.ts). Plain strings here: an entry that isn't valid is refused when saving
+	 * (securityTxtProblems) and skipped when serving, so a bad value can't reset the other Discovery settings.
+	 */
+	securityTxt: z
+		.object({
+			/** Email addresses or https:// / tel: URIs, most preferred first. */
+			contacts: z.array(z.string().max(300)).max(10).default([]),
+			policy: z.string().max(500).default(""),
+			languages: z.string().max(100).default(SECURITY_TXT_DEFAULTS.languages),
+			encryption: z.string().max(500).default(""),
+			acknowledgments: z.string().max(500).default(""),
+			hiring: z.string().max(500).default(""),
+		})
+		.default(() => ({ ...SECURITY_TXT_DEFAULTS, contacts: [] })),
 });
 
 export type DiscoverySettings = z.infer<typeof settingsSchema>;
