@@ -119,14 +119,26 @@ test("users below Admin can start 10 uploads a day; Admins and API tokens aren't
 		if (String(url).includes("/stream?direct_user=true")) return new Response(null, { status: 201, headers: { Location: TUS_URL, "stream-media-id": UID } });
 		return Response.json({ success: true, result: {} }); // tagging the waiting video
 	};
+	let revision = 0;
+	const revisions = new Map();
 	const upload = (user) => {
 		const c = ctx({ input: { name: "Clip", size: 1000, type: "video/mp4" }, kv });
+		// Plugin KV's compare-and-set, as EmDash provides it.
+		c.kv.getVersioned = async (key) => (kv.has(key) ? { value: kv.get(key), revision: revisions.get(key) } : null);
+		c.kv.compareAndSet = async (key, expected, value) => {
+			if ((revisions.get(key) ?? null) !== expected) return { applied: false };
+			kv.set(key, value);
+			revisions.set(key, String(++revision));
+			return { applied: true };
+		};
 		c.settings.get = async (key) => (key === "features" ? { videos: true } : key === "videosAccountId" ? "0123456789abcdef0123456789abcdef" : key === "videosApiToken" ? "t" : null);
 		return routes["videos/upload"].handler({ ...c, user });
 	};
 	const contributor = { id: "u1", role: 20 };
 	await withFetch(stream, async () => {
-		for (let i = 0; i < NON_ADMIN_UPLOADS_PER_DAY; i++) assert.equal((await upload(contributor)).uid, UID);
+		// Started at the same moment: the compare-and-set lets exactly the day's number through.
+		const results = await Promise.allSettled(Array.from({ length: NON_ADMIN_UPLOADS_PER_DAY + 3 }, () => upload(contributor)));
+		assert.equal(results.filter((r) => r.status === "fulfilled").length, NON_ADMIN_UPLOADS_PER_DAY);
 		await assert.rejects(upload(contributor), (error) => error.status === 429 && /10 video uploads a day/.test(error.message));
 		assert.equal((await upload({ id: "u2", role: 40 })).uid, UID, "each user has their own count");
 		assert.equal((await upload({ id: "admin", role: 50 })).uid, UID);

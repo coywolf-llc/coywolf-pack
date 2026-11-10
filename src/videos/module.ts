@@ -534,6 +534,30 @@ export function withoutDownloadUrl<T extends { downloadUrl?: string } | null>(me
  */
 export const NON_ADMIN_UPLOADS_PER_DAY = 10;
 const uploadsKey = (userId: string) => `state:videos:uploadsBy:${userId}`;
+type UploadCount = { day: string; count: number };
+
+/**
+ * Take one of today's uploads for a user below Admin: a compare-and-set on
+ * plugin KV, so two uploads started at once can't both take the last one.
+ * False when none are left (or the count kept changing: refused, to be safe).
+ */
+async function takeUpload(ctx: Ctx, userId: string, day: string): Promise<boolean> {
+	// Enough tries for every upload a user could start at once to get its turn.
+	for (let attempt = 0; attempt < NON_ADMIN_UPLOADS_PER_DAY + 10; attempt++) {
+		const current = await ctx.kv.getVersioned<UploadCount>(uploadsKey(userId));
+		const count = current?.value?.day === day ? current.value.count : 0;
+		if (count >= NON_ADMIN_UPLOADS_PER_DAY) return false;
+		if ((await ctx.kv.compareAndSet(uploadsKey(userId), current?.revision ?? null, { day, count: count + 1 } satisfies UploadCount)).applied) return true;
+	}
+	return false;
+}
+
+/** Give a taken upload back when Stream refused to start it (best effort). */
+async function giveBackUpload(ctx: Ctx, userId: string, day: string): Promise<void> {
+	const current = await ctx.kv.getVersioned<UploadCount>(uploadsKey(userId)).catch(() => null);
+	if (current?.value?.day !== day || current.value.count <= 0) return;
+	await ctx.kv.compareAndSet(uploadsKey(userId), current.revision, { day, count: current.value.count - 1 } satisfies UploadCount).catch(() => undefined);
+}
 
 /** Videos embedded in published entries: the only ones public routes answer for (drafts stay private). */
 let publishedMemo: { items: EmbedEntry[]; uids: Set<string> } | null = null;
@@ -794,19 +818,23 @@ export function videosModule(options: VideosOptions) {
 				// Below Admin: a daily number of uploads (counted once Stream has accepted one).
 				const limited = ctx.user && (ctx.user.role ?? 0) < ADMIN_ROLE ? ctx.user.id : null;
 				const day = new Date().toISOString().slice(0, 10);
-				const started = limited ? await ctx.kv.get<{ day: string; count: number }>(uploadsKey(limited)) : null;
-				const startedToday = started?.day === day ? started.count : 0;
-				if (limited && startedToday >= NON_ADMIN_UPLOADS_PER_DAY) {
+				if (limited && !(await takeUpload(ctx, limited, day))) {
 					throw new PluginRouteError("RATE_LIMITED", `You can start ${NON_ADMIN_UPLOADS_PER_DAY} video uploads a day. Ask an admin to upload more.`, 429);
 				}
 				await invalidateLibrary(ctx);
 				// The upload dialog starts with the default tags (Settings → Uploads).
 				const tags = parseTags(input.tags ?? (await ctx.settings.get<string>(SETTINGS.defaultTags)) ?? "").join(", ");
 				const meta: Record<string, string> = tags ? { name, tags } : { name };
-				const r = await stream(() => api.tusUpload({ length: size, maxDurationSeconds: maxDuration, name }));
-				if (!r.uid) throw new PluginRouteError("INTERNAL_ERROR", "Cloudflare Stream didn't return an id for the upload.", 502);
+				let r: Awaited<ReturnType<typeof api.tusUpload>>;
+				try {
+					r = await stream(() => api.tusUpload({ length: size, maxDurationSeconds: maxDuration, name }));
+					if (!r.uid) throw new PluginRouteError("INTERNAL_ERROR", "Cloudflare Stream didn't return an id for the upload.", 502);
+				} catch (error) {
+					// Not started: it doesn't count against the day's uploads.
+					if (limited) await giveBackUpload(ctx, limited, day);
+					throw error;
+				}
 				const uid = r.uid;
-				if (limited) await ctx.kv.set(uploadsKey(limited), { day, count: startedToday + 1 });
 				// tus uploads carry only the name; tags go on the waiting video record.
 				if (tags) await api.update(uid, { meta }).catch((error: unknown) => ctx.log.warn("Videos: could not tag the upload", { uid, error: String(error) }));
 				await ctx.kv.set(uploadKey(uid), { url: r.uploadURL, size, createdAt: Date.now() } satisfies PendingUpload);
