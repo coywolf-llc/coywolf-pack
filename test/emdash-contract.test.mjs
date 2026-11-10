@@ -165,7 +165,8 @@ before(async () => {
 	manager.register({
 		id: PLUGIN_ID,
 		version: "0.0.0",
-		capabilities: [],
+		// redirects:write: what the pack declares for Slug changes (ctx.redirects).
+		capabilities: ["redirects:write"],
 		storage: { imageVariants: { indexes: [] }, videoStats: { indexes: [] }, videoLikes: { indexes: ["uid"] } },
 		admin: { settingsSchema: secretSettingsSchema() },
 		hooks: { cron: { handler: async (_event, context) => void (ctx = context) } },
@@ -606,6 +607,52 @@ test("ctx.cron: schedule, list and cancel by name", async () => {
 	await cron.cancel("contract-task");
 	assert.deepEqual(await cron.list(), []);
 	await assert.doesNotReject(cron.cancel("never-scheduled"), "cancelling a task that isn't there (src/discovery/module.ts) is fine");
+});
+
+/** A class from EmDash's dist that no public entry exports, found by a line only it has. */
+async function distClass(name, marker) {
+	for (const [file, src] of emdashDist) {
+		if (!src.includes(marker) || !src.includes(`var ${name} = class`)) continue;
+		const exported = src.match(/export \{([^}]*)\};?\s*(?:\/\/# sourceMappingURL=.*)?$/)?.[1] ?? "";
+		const entry = exported.split(",").map((s) => s.trim().split(/\s+as\s+/)).find(([local]) => local === name);
+		if (entry) return (await import(pathToFileURL(file).href))[entry[1] ?? entry[0]];
+	}
+	assert.fail(`EmDash ${emdashVersion}'s dist has no exported class ${name} with ${marker}`);
+}
+
+test("ctx.redirects (redirects:write): Slug changes delete EmDash's own slug-change redirect through it, matched by auto, group, source and destination (src/redirects/slug-changes.ts)", async () => {
+	const { dropEmDashAuto, EMDASH_AUTO_GROUP } = await import("../src/redirects/slug-changes.ts");
+	const { redirectsPack } = await import("../src/redirects/pack.ts");
+	assert.ok(redirectsPack({}).capabilities.includes("redirects:write"), "the Redirect Manager module no longer declares redirects:write");
+	assert.equal(typeof ctx.redirects?.delete, "function", "EmDash gives a plugin with redirects:write no ctx.redirects.delete");
+	// EmDash's own slug-change redirect, written the way its content update writes it (posts' pattern is /{slug}/).
+	const RedirectRepository = await distClass("RedirectRepository", "async createAutoRedirect(");
+	const repo = new RedirectRepository(db);
+	const auto = await repo.createAutoRedirect("posts", "old-name", "new-name", "c1", "/{slug}/", null, null);
+	assert.equal(auto.groupName, EMDASH_AUTO_GROUP, "EmDash files its slug-change redirects under another group now");
+	assert.equal(auto.auto, true);
+	const unrelated = await repo.createAutoRedirect("posts", "keep-me", "elsewhere", "c2", "/{slug}/", null, null);
+	const handMade = await ctx.redirects.create({ source: "/posts/old-name", destination: "/new-name/" });
+	// Listing by auto and group, narrowed by search, finds it; get gives the revision delete wants.
+	const listed = await ctx.redirects.list({ auto: true, group: EMDASH_AUTO_GROUP, search: "new-name", limit: 100 });
+	assert.deepEqual(listed.items.map((r) => r.id), [auto.id]);
+	assert.equal(typeof (await ctx.redirects.get(auto.id))._rev, "string");
+
+	assert.equal(await dropEmDashAuto(ctx, "posts", "/old-name/", "new-name"), 1);
+	assert.equal(await ctx.redirects.get(auto.id), null, "EmDash's row for the change is gone");
+	assert.ok(await ctx.redirects.get(unrelated.id), "another change's row stays");
+	assert.ok(await ctx.redirects.get(handMade.redirect.id), "a hand-made redirect stays, even from a matching path");
+	assert.equal(await dropEmDashAuto(ctx, "posts", "/old-name/", "new-name"), 0, "nothing left to delete");
+
+	// A revision read before a change is refused: the pack leaves a row someone changed meanwhile.
+	const later = await repo.createAutoRedirect("posts", "first", "second", "c3", "/{slug}/", null, null);
+	const read = await ctx.redirects.get(later.id);
+	await ctx.redirects.update(later.id, { enabled: false, _rev: read._rev });
+	await assert.rejects(ctx.redirects.delete(later.id, { _rev: read._rev }));
+	for (const id of [unrelated.id, handMade.redirect.id, later.id]) {
+		const current = await ctx.redirects.get(id);
+		await ctx.redirects.delete(id, { _rev: current._rev });
+	}
 });
 
 test("secret settings: encrypted at rest, decrypted for a declared secret, refused for an undeclared one (src/core/secrets.ts)", async () => {
