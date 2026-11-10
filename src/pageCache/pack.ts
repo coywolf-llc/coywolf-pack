@@ -262,7 +262,8 @@ let checkedVersion = false;
 /**
  * Once per isolate: notice a new deploy (never answers a request). It starts
  * cache warming, and clears the cache first only on sites that share it across
- * versions (PageCacheOptions.crossVersionCache; see noteNewVersion).
+ * versions (PageCacheOptions.crossVersionCache) or after a rollback to a
+ * version seen before (see noteNewVersion).
  */
 export const pageCacheMiddleware: PackMiddleware = {
 	module: "pageCache",

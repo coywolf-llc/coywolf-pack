@@ -214,46 +214,92 @@ export function versionId(env: Record<string, unknown>): string | undefined {
 	return typeof metadata?.id === "string" && metadata.id ? metadata.id : undefined;
 }
 
-/** The version id stored in a VERSION_OPTION row (null when missing or unreadable). */
-function storedVersion(raw: string | null | undefined): string | null {
-	if (!raw) return null;
+/** Versions remembered in the VERSION_OPTION row, newest last (enough to recognize a rollback). */
+export const VERSION_HISTORY = 10;
+/** A rollback (or a gradual deployment switching between two live versions) clears the cache at most this often. */
+export const ROLLBACK_PURGE_EVERY_MS = 10 * 60_000;
+
+/** The VERSION_OPTION row: the version that last handled a request, the ones before it, and when a rollback last purged. */
+export interface VersionRow {
+	current: string | null;
+	seen: string[];
+	rollbackPurgedAt?: number;
+}
+
+/** A VERSION_OPTION row (a plain version id before 0.35.19; empty when missing or unreadable). */
+export function parseVersionRow(raw: string | null | undefined): VersionRow {
+	if (!raw) return { current: null, seen: [] };
 	try {
 		const value = JSON.parse(raw) as unknown;
-		return typeof value === "string" ? value : null;
+		if (typeof value === "string") return { current: value, seen: [value] };
+		const row = value as Partial<VersionRow> | null;
+		if (row && typeof row.current === "string") {
+			const seen = Array.isArray(row.seen) ? row.seen.filter((v): v is string => typeof v === "string").slice(-VERSION_HISTORY) : [row.current];
+			return { current: row.current, seen, ...(typeof row.rollbackPurgedAt === "number" ? { rollbackPurgedAt: row.rollbackPurgedAt } : {}) };
+		}
 	} catch {
-		return null;
+		// Unreadable: like no row.
 	}
+	return { current: null, seen: [] };
 }
 
 /**
- * Notice a deploy: the first isolate of a new Worker version that sees a
- * request compares its version with the stored one and records it. The
- * write is conditional, so when isolates race only one of them wins and
- * reports the new version (the caller starts warming once, not once per
- * isolate).
- *
- * `purge`: clear every cached page first. Only sites that share Workers Cache
- * across versions need that (`cache.cross_version_cache` in wrangler.jsonc,
- * and the pack's `pageCache: { crossVersionCache: true }` option). Without it
- * Workers Cache keeps each version's pages apart (the version is part of the
- * cache key: https://developers.cloudflare.com/workers/cache/cache-keys/),
- * so a deploy already starts from a cold cache, and a purge would only spend
- * one of the account's purge requests (Free-tier limits: 5 a minute, shared
- * by every site and by EmDash's own content purges) on pages nobody can
- * reach anymore. A refused purge isn't recorded, so the next isolate tries
- * again.
+ * Replace the row only if it still holds `before` (null: only if there's no
+ * row). True when this call wrote it: the statement RETURNs the row it wrote,
+ * so this doesn't depend on how D1 counts a no-op upsert's changes.
  */
-export async function noteNewVersion(db: D1Database, id: string, known: string | null | undefined, options: { purge: boolean }): Promise<boolean> {
+async function swapOption(db: D1Database, name: string, before: string | null, after: string): Promise<boolean> {
+	const statement =
+		before === null
+			? db.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO NOTHING RETURNING value").bind(name, after)
+			: db.prepare("UPDATE options SET value = ? WHERE name = ? AND value = ? RETURNING value").bind(after, name, before);
+	return (await statement.first<{ value: string }>()) !== null;
+}
+
+/**
+ * Notice a deploy: the first isolate of a Worker version that sees a request
+ * compares its version with the stored one and records it. The write is a
+ * compare-and-set, so when isolates race only one of them wins (the caller
+ * starts warming once, not once per isolate). True when the caller should
+ * start cache warming.
+ *
+ * A new version purges nothing by default. Workers Cache keeps each version's
+ * pages apart (the version is part of the cache key:
+ * https://developers.cloudflare.com/workers/cache/cache-keys/), so a deploy
+ * already starts from a cold cache, and a purge would only spend one of the
+ * account's purge requests (Free-tier limits: 5 a minute, shared by every site
+ * and by EmDash's own content purges) on pages nobody can reach anymore.
+ * `purge`: clear every cached page first, for sites that share Workers Cache
+ * across versions (`cache.cross_version_cache`, and the pack's
+ * `pageCache: { crossVersionCache: true }` option).
+ *
+ * A version seen before (in the last VERSION_HISTORY) is a rollback: its own
+ * cache partition may still hold the pages it served before, which don't
+ * have the edits made while the newer version was live (Cloudflare doesn't
+ * say whether purges reach other versions' partitions), so it clears every
+ * page, as before 0.35.19. A gradual deployment sends requests to two live
+ * versions, so each isolate of either sees "the other" version stored: those
+ * flips clear the cache at most once every ROLLBACK_PURGE_EVERY_MS and start
+ * warming only when they clear it. A refused purge isn't recorded, so the
+ * next isolate tries again.
+ */
+export async function noteNewVersion(db: D1Database, id: string, known: string | null | undefined, options: { purge: boolean; now?: number }): Promise<boolean> {
 	// `known`: the row as read with the feature switches (undefined when not read; then it's read here).
-	const value = known !== undefined ? known : ((await db.prepare("SELECT value FROM options WHERE name = ?").bind(VERSION_OPTION).first<{ value: string }>())?.value ?? null);
-	if (storedVersion(value) === id) return false;
-	if (options.purge && !(await purgePageCache())) return false;
-	const result = await db
-		.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value WHERE options.value IS NOT excluded.value")
-		.bind(VERSION_OPTION, JSON.stringify(id))
-		.run();
-	// Another isolate of this version recorded it first: it starts the warm-up.
-	return (result.meta?.changes ?? 1) > 0;
+	const raw = known !== undefined ? known : ((await db.prepare("SELECT value FROM options WHERE name = ?").bind(VERSION_OPTION).first<{ value: string }>())?.value ?? null);
+	const stored = parseVersionRow(raw);
+	if (stored.current === id) return false;
+	const now = options.now ?? Date.now();
+	const returning = stored.seen.includes(id);
+	const purgeNow = returning ? stored.rollbackPurgedAt === undefined || now - stored.rollbackPurgedAt >= ROLLBACK_PURGE_EVERY_MS : options.purge;
+	if (purgeNow && !(await purgePageCache())) return false;
+	const next: VersionRow = {
+		current: id,
+		seen: [...stored.seen.filter((v) => v !== id), id].slice(-VERSION_HISTORY),
+		...(returning && purgeNow ? { rollbackPurgedAt: now } : stored.rollbackPurgedAt !== undefined ? { rollbackPurgedAt: stored.rollbackPurgedAt } : {}),
+	};
+	// Another isolate (of this version or the other one) recorded first: it handles warming.
+	if (!(await swapOption(db, VERSION_OPTION, raw, JSON.stringify(next)))) return false;
+	return !returning || purgeNow;
 }
 
 /** Astro's per-request cache controls (route caching), as far as the pack uses them. */
