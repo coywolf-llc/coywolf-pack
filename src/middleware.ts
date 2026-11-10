@@ -292,7 +292,10 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			if (response.status === 404 && isOn(features, "redirects")) {
 				const late = await serveLateRedirect(context, env, waitUntil).catch(() => undefined);
 				if (late) {
-					await response.body?.cancel().catch(() => undefined);
+					// Drain the discarded 404 render rather than cancel it, as EmDash's own redirect middleware does: a render
+					// cancelled midway can leave an isolate-wide read unsettled, which later renders would wait on.
+					const discarded = response.body;
+					if (discarded) waitUntil(discarded.pipeTo(new WritableStream()).catch(() => undefined));
 					response = late;
 					tagGeneration(routeCache, generation);
 					return response;

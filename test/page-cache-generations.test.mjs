@@ -314,11 +314,31 @@ test("a 404 at a path this isolate's redirect index doesn't know reads the rule 
 	await (await run("/a-page/", cacheable(), html)).text(); // The index is in memory now.
 	await saveRule(db, { source: "/moved", target: "/new-home/" }); // A slug change in another isolate.
 	const cache = cacheable();
-	const res = await run("/moved/", cache, notFound);
+	// The discarded 404 render is drained to its end in the background, never cancelled midway.
+	const render = { cancelled: false, finished: false };
+	const streamed404 = async () =>
+		new Response(
+			new ReadableStream({
+				async pull(controller) {
+					await new Promise((r) => setTimeout(r, 5));
+					controller.enqueue(new TextEncoder().encode("<html>Not found</html>"));
+					render.finished = true;
+					controller.close();
+				},
+				cancel() {
+					render.cancelled = true;
+				},
+			}),
+			{ status: 404, headers: { "content-type": "text/html" } },
+		);
+	const res = await run("/moved/", cache, streamed404);
 	assert.equal(res.status, 301);
 	assert.equal(res.headers.get("location"), "/new-home/");
 	assert.equal(cache.options.maxAge, REDIRECT_EDGE_MAX_AGE);
 	assert.ok(cache.tags.includes("coywolf-redirects"));
+	await settled();
+	assert.equal(render.cancelled, false);
+	assert.equal(render.finished, true);
 	// A real 404 stays a 404.
 	assert.equal((await run("/nothing-here/", cacheable(), notFound)).status, 404);
 	await settled();
