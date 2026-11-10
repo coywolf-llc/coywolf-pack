@@ -8,7 +8,7 @@ EmDash on Cloudflare builds every page in a Worker, and a Worker that hasn't run
 
 | What it improves | How |
 | --- | --- |
-| **First visits** | Keeps Cloudflare's Workers Cache (the edge HTML cache in front of the Worker) correct, so pages can stay cached for days: it clears everything after each deploy and whenever pack settings change, and sets page lifetimes at runtime. Cached pages answer in 60–90 ms instead of 1–2 s. |
+| **First visits** | Keeps Cloudflare's Workers Cache (the edge HTML cache in front of the Worker) correct, so pages can stay cached for days: it clears the pages pack settings change, and sets page lifetimes at runtime. Each deploy starts with an empty cache. Cached pages answer in 60–90 ms instead of 1–2 s. |
 | **Clearing the cache** | **Plugins → Performance → Clear pages and images**. Cloudflare's zone "Purge Everything" doesn't reach Workers Cache, which belongs to the Worker. Settings that don't change pages (backups, the link report) don't clear it, redirect edits clear only cached redirects, and robots.txt rules clear only `/robots.txt`. |
 | **Cold pages after a clear** | Optional cache warming: after a deploy, a full clear or (a minute later) content edits, every page in the sitemap, plus the section pages the home page links to (category archives sitemaps often leave out), is visited in the background of the site's own traffic (home page and its menu pages first, then newest posts), so visitors and crawlers get cached pages instead of waiting for them to be built. |
 | **Images** | Serves media from a `media.` subdomain (R2 custom domain + Image Transformations), never through the Worker, with clean resized URLs, a one-year Cache Rule, responsive `srcset` helpers, and width/height lookups for images that have none (WordPress imports), so layouts don't shift. |
@@ -36,7 +36,15 @@ and add `"version_metadata": { "binding": "CF_VERSION_METADATA" }` to `wrangler.
 
 EmDash clears the pages it tagged when content, menus or site settings change. **Plugins → Performance** (always on, right below Coywolf Pack; on a site without Workers Cache it does nothing) covers the rest:
 
-- **After a deploy**: the first request a new Worker version handles clears every cached page, so theme and code changes show up right away.
+- **After a deploy**: Workers Cache keeps each Worker version's pages apart (the version is part of the cache key; see Cloudflare's [cache keys](https://developers.cloudflare.com/workers/cache/cache-keys/)), so a deploy starts from an empty cache by itself and theme and code changes show up right away. The pack doesn't spend a purge on it (purges share a small account-wide budget: 5 a minute, with EmDash's content purges): the first request a new version handles only records the version, once (a conditional write, so racing isolates agree), and starts cache warming when it's on.
+  - **Sites that share the cache across deploys** (`"cache": { "enabled": true, "cross_version_cache": true }` in `wrangler.jsonc`) keep serving the previous deploy's pages, so they need the old behavior: set the pack's `pageCache` option and the first request of a new version clears every cached page before recording it (a refused purge isn't recorded, so the next isolate tries again):
+
+    ```js
+    // astro.config.mjs (coywolf.com)
+    coywolfPlugin({ pageCache: { crossVersionCache: true } })
+    ```
+
+    Without `cross_version_cache` leave it off: the purge would clear nothing anyone can reach.
 - **After Coywolf Pack settings change**: a successful admin save that changes page output (schema, blocks, videos, images, feature switches…) clears every cached page (see Scoped clearing below). Routes anyone can call (search, discovery files, the video player's actions) and the signed Stream webhook aren't admin saves and never clear everything: the webhook clears only the pages that embed its video (see [Videos](videos.md)). Nor are the admin pages' reads (a schema preview, an entry or media picker, a connection test, the video library listing…): they're declared read-only where they're defined and clear nothing (see [Internals](internals.md#database-reads)). Other Worker isolates may keep the old settings for up to five minutes (see [Database reads](internals.md)), so pages they render meanwhile could be cached with them: about five minutes after the save, the first request in any isolate clears the same pages once more (a "settling" clear; with warming on, it restarts the warm-up).
 - **Page cache lifetimes**: how many days the edge keeps a page (default 7) and how many more days it may serve it while fetching a fresh copy in the background (default 1). They replace the `routeRules` lifetimes on the routes the site made cacheable, at runtime, so no deploy is needed. Routes without a route rule are never cached by this.
 - **After going live**: EmDash's staging mode (EmDash 1.5+) puts `noindex, nofollow` on every page until the site goes live. Going live, or switching back to staging, under **Settings → General → Site Status** clears every cached page (and restarts warming), so search engines don't get cached pages with the old robots tag.

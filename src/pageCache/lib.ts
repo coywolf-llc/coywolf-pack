@@ -2,9 +2,10 @@
  * Page cache: keeps Cloudflare's Workers Cache (the edge HTML cache in front of
  * the Worker, turned on by Astro's cacheCloudflare() provider) in step with the
  * site. EmDash already purges the pages it tagged when content, menus or site
- * settings change. This covers what EmDash can't know about: a new deploy (theme
- * or code changes) and Coywolf Pack settings, which change page output (schema,
- * blocks, reviews, videos…).
+ * settings change. This covers what EmDash can't know about: Coywolf Pack
+ * settings, which change page output (schema, blocks, reviews, videos…), and a
+ * new deploy on sites that share the cache across Worker versions (by default
+ * Workers Cache keeps each version's pages apart; see noteNewVersion).
  *
  * Purging runs inside the Worker with cache.purge() from cloudflare:workers, so
  * it needs no API token. Outside Workers Cache it does nothing.
@@ -201,22 +202,46 @@ export function versionId(env: Record<string, unknown>): string | undefined {
 	return typeof metadata?.id === "string" && metadata.id ? metadata.id : undefined;
 }
 
+/** The version id stored in a VERSION_OPTION row (null when missing or unreadable). */
+function storedVersion(raw: string | null | undefined): string | null {
+	if (!raw) return null;
+	try {
+		const value = JSON.parse(raw) as unknown;
+		return typeof value === "string" ? value : null;
+	} catch {
+		return null;
+	}
+}
+
 /**
- * Purge once per deploy: the first isolate of a new version that sees a request
- * compares its version with the stored one, purges, and records it. Other
- * isolates of the same version find it recorded. Racing isolates may both purge,
- * which is harmless.
+ * Notice a deploy: the first isolate of a new Worker version that sees a
+ * request compares its version with the stored one and records it. The
+ * write is conditional, so when isolates race only one of them wins and
+ * reports the new version (the caller starts warming once, not once per
+ * isolate).
+ *
+ * `purge`: clear every cached page first. Only sites that share Workers Cache
+ * across versions need that (`cache.cross_version_cache` in wrangler.jsonc,
+ * and the pack's `pageCache: { crossVersionCache: true }` option). Without it
+ * Workers Cache keeps each version's pages apart (the version is part of the
+ * cache key: https://developers.cloudflare.com/workers/cache/cache-keys/),
+ * so a deploy already starts from a cold cache, and a purge would only spend
+ * one of the account's purge requests (Free-tier limits: 5 a minute, shared
+ * by every site and by EmDash's own content purges) on pages nobody can
+ * reach anymore. A refused purge isn't recorded, so the next isolate tries
+ * again.
  */
-export async function purgeIfNewVersion(db: D1Database, id: string, known?: string | null): Promise<boolean> {
+export async function noteNewVersion(db: D1Database, id: string, known: string | null | undefined, options: { purge: boolean }): Promise<boolean> {
 	// `known`: the row as read with the feature switches (undefined when not read; then it's read here).
 	const value = known !== undefined ? known : ((await db.prepare("SELECT value FROM options WHERE name = ?").bind(VERSION_OPTION).first<{ value: string }>())?.value ?? null);
-	if (value && JSON.parse(value) === id) return false;
-	if (!(await purgePageCache())) return false;
-	await db
-		.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value")
+	if (storedVersion(value) === id) return false;
+	if (options.purge && !(await purgePageCache())) return false;
+	const result = await db
+		.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value WHERE options.value IS NOT excluded.value")
 		.bind(VERSION_OPTION, JSON.stringify(id))
 		.run();
-	return true;
+	// Another isolate of this version recorded it first: it starts the warm-up.
+	return (result.meta?.changes ?? 1) > 0;
 }
 
 /** Astro's per-request cache controls (route caching), as far as the pack uses them. */
