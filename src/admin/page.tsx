@@ -7,6 +7,7 @@ import { Banner, Button, Loader } from "@cloudflare/kumo";
 import * as React from "react";
 
 import { VERSION } from "../version.js";
+import { isChunkLoadError, pageLoader } from "./page-loader.js";
 import { adminHref, goTo, isPlainClick, packPagePath } from "./router.js";
 import { ToastProvider } from "./toast.js";
 import { UpdateNotice } from "./update-notice.js";
@@ -46,7 +47,7 @@ interface BoundaryState {
 }
 
 /** Keeps a page that throws while rendering from taking the admin down with it: the error shows in its place. */
-export class PageErrorBoundary extends React.Component<{ name: string; children: React.ReactNode }, BoundaryState> {
+export class PageErrorBoundary extends React.Component<{ name: string; children: React.ReactNode; onRetry?: () => void }, BoundaryState> {
 	override state: BoundaryState = { error: null };
 
 	static getDerivedStateFromError(error: unknown): BoundaryState {
@@ -60,19 +61,37 @@ export class PageErrorBoundary extends React.Component<{ name: string; children:
 	override render() {
 		const { error } = this.state;
 		if (!error) return this.props.children;
+		// The page's code couldn't be downloaded (usually: the site was deployed since this admin tab opened, so
+		// that chunk is gone). Importing it again fails the same way; only a reload gets the new admin.
+		const download = isChunkLoadError(error);
 		return (
 			<Banner
 				variant="error"
 				role="alert"
-				title={`The ${this.props.name} page couldn't be shown`}
+				title={download ? `The ${this.props.name} page couldn't be downloaded` : `The ${this.props.name} page couldn't be shown`}
 				description={
 					<div className="space-y-3">
-						<p>{error.message || "Something went wrong."} If it keeps happening, reload the page: a new version of the site may have been deployed.</p>
+						<p>
+							{download
+								? "The site may have been updated since this admin page was opened. Reload the page to get the new version."
+								: `${error.message || "Something went wrong."} If it keeps happening, reload the page: a new version of the site may have been deployed.`}
+						</p>
 						<div className="flex flex-wrap gap-2">
-							<Button type="button" variant="secondary" size="sm" onClick={() => this.setState({ error: null })}>
-								Try again
-							</Button>
-							<Button type="button" variant="secondary" size="sm" onClick={() => window.location.reload()}>
+							{!download && (
+								<Button
+									type="button"
+									variant="secondary"
+									size="sm"
+									onClick={() => {
+										// A new lazy component (React.lazy keeps a failed import's error), then render again.
+										this.props.onRetry?.();
+										this.setState({ error: null });
+									}}
+								>
+									Try again
+								</Button>
+							)}
+							<Button type="button" variant={download ? "primary" : "secondary"} size="sm" onClick={() => window.location.reload()}>
 								Reload the page
 							</Button>
 						</div>
@@ -90,12 +109,18 @@ export class PageErrorBoundary extends React.Component<{ name: string; children:
  * reachable.
  */
 export function packPage(name: string, load: () => Promise<React.ComponentType>): React.ComponentType {
-	const Lazy = React.lazy(async () => ({ default: await load() }));
+	const loader = pageLoader(load);
 	function PackPage() {
+		const [, setAttempt] = React.useState(0);
+		const Lazy = loader.component;
+		const retry = () => {
+			loader.retry();
+			setAttempt((n) => n + 1);
+		};
 		return (
 			<ToastProvider>
 				<UpdateNotice />
-				<PageErrorBoundary name={name}>
+				<PageErrorBoundary name={name} onRetry={retry}>
 					<React.Suspense fallback={<Loading label={`Loading ${name}…`} />}>
 						<Lazy />
 					</React.Suspense>
