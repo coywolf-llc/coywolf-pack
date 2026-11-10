@@ -52,8 +52,12 @@ const BEFORE_SAVE_BUDGET_MS = 1500;
 
 /** The group EmDash files its own slug-change redirects under (RedirectRepository.createAutoRedirect). */
 export const EMDASH_AUTO_GROUP = "Auto: slug change";
-/** Pages of EmDash's auto rows read per change (100 a page): a site with more matches than this keeps the rest. */
-const AUTO_PAGES = 10;
+/**
+ * Pages of EmDash's auto rows read per change (100 a page, narrowed by the new slug): every page until
+ * the last, up to this many (20,000 rows), which only a site with a runaway number of matching rows
+ * reaches; the log then says so and the rest are left.
+ */
+export const AUTO_PAGES = 200;
 
 /** The part of EmDash's redirects API (ctx.redirects, capability redirects:write) the slug changes use. */
 export type AutoRedirectsApi = Pick<RedirectAccessWithWrite, "list" | "get" | "delete">;
@@ -76,7 +80,14 @@ const trimSlash = (path: string) => path.replace(/\/+$/, "");
  * (ignoring ASCII case). A row changed since it was listed is left alone (its revision no
  * longer matches). Returns how many rows were deleted; 0 without the API.
  */
-export async function dropEmDashAuto(ctx: { redirects?: Partial<AutoRedirectsApi> }, collection: string, from: string, newSlug: string | null, earlier: string[] = []): Promise<number> {
+export async function dropEmDashAuto(
+	ctx: { redirects?: Partial<AutoRedirectsApi>; log?: { warn(message: string, data?: unknown): void } },
+	collection: string,
+	from: string,
+	newSlug: string | null,
+	earlier: string[] = [],
+	maxPages = AUTO_PAGES,
+): Promise<number> {
 	const api = ctx.redirects;
 	if (typeof api?.list !== "function" || typeof api.get !== "function" || typeof api.delete !== "function") return 0;
 	const oldSlug = normalizePath(from).split("/").pop();
@@ -88,7 +99,11 @@ export async function dropEmDashAuto(ctx: { redirects?: Partial<AutoRedirectsApi
 		row.auto && row.groupName === EMDASH_AUTO_GROUP && sources.has(trimSlash(row.source)) && trimSlash(row.destination).toLowerCase().endsWith(ending);
 	let removed = 0;
 	let cursor: string | undefined;
-	for (let page = 0; page < AUTO_PAGES; page++) {
+	for (let page = 0; ; page++) {
+		if (page >= maxPages) {
+			ctx.log?.warn("Slug change: stopped looking through EmDash's slug-change redirects after the page limit; the rest are left", { pages: maxPages, newSlug, removed });
+			break;
+		}
 		// `search` (source or destination containing the new slug) keeps the pages short.
 		const result = await api.list({ auto: true, group: EMDASH_AUTO_GROUP, search: newSlug, limit: 100, ...(cursor ? { cursor } : {}) });
 		for (const row of result.items) {

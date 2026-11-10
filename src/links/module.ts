@@ -6,6 +6,7 @@ import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
 import { ctxFeatures, requireFeature } from "../core/features.js";
+import { configuredSiteOrigin } from "../core/site.js";
 import { parseInput, workerEnv } from "../shared.js";
 import { BudgetExhausted, type Budget, checkUrl } from "./check.js";
 import { type IgnoreRule, IgnoreRuleError, type LinkStatus, nextCheckAt, normalizeIgnore } from "./classify.js";
@@ -173,6 +174,8 @@ export async function runChecks(ctx: PluginContext, options: { ids?: string[]; b
 	})();
 	const fetcher = (url: string, init: RequestInit) =>
 		self && siteHost && new URL(url).host === siteHost ? self.fetch(url, init) : fetch(url, init);
+	// The site the checker names in its user agent: the configured production address, never a staging or request origin.
+	const checkerSite = await configuredSiteOrigin(await workerEnv().catch(() => ({}))).catch(() => null);
 
 	let candidates: Array<{ id: string; data: UrlRow }>;
 	if (options.ids) {
@@ -214,7 +217,7 @@ export async function runChecks(ctx: PluginContext, options: { ids?: string[]; b
 				continue;
 			}
 			try {
-				const outcome = await checkUrl(new URL(data.resolved), budget, { userAgent, siteUrl: ctx.site.url, fetcher });
+				const outcome = await checkUrl(new URL(data.resolved), budget, { userAgent, siteUrl: checkerSite, fetcher });
 				await urls(ctx).put(id, {
 					...data,
 					status: outcome.status,
