@@ -326,6 +326,8 @@ const EXPRESSIONS = {
 	"src/search/engine.ts::select": 'c."content" AS f0',
 	// src/links/store.ts: refsWhereSql(field)
 	field: ["entryKey", "urlId"],
+	// src/links/inbound.ts: publishedEntriesSql (the collection's title field, else the slug)
+	"src/links/inbound.ts::titleColumn": ['content."title"', "content.slug"],
 	// src/schema/module.ts: a media reference by id or storage key
 	'ref.by === "id" ? "id" : "storage_key"': ["id", "storage_key"],
 };

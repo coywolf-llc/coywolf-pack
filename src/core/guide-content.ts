@@ -9,7 +9,7 @@
  * Kept free of imports so tests can load it directly.
  */
 
-export type GuideId = "anthropic" | "openai" | "gemini" | "workers-ai" | "r2" | "stream" | "radar" | "media-host" | "images-token" | "crawler-hints-token";
+export type GuideId = "anthropic" | "openai" | "gemini" | "workers-ai" | "r2" | "stream" | "radar" | "media-host" | "images-token" | "crawler-hints-token" | "browser-run-token";
 
 export interface Guide {
 	summary: string;
@@ -181,6 +181,23 @@ export const GUIDES: Record<GuideId, Guide> = {
 		],
 		note: `The token is used only for the setup, and only with api.cloudflare.com. You can delete it in Cloudflare afterward. Or set it as a Worker secret instead: ${code("npx wrangler secret put IMAGES_API_TOKEN")}.`,
 	},
+	"browser-run-token": {
+		summary: "How to get a Cloudflare API token for Social Images",
+		steps: [
+			`In the ${link("https://dash.cloudflare.com/", "Cloudflare dashboard")}, open the site's account and copy its ${b("Account ID")} (the account's home page, or the right-hand column of any domain's overview) into Cloudflare account ID.`,
+			...cloudflareTokenSteps({
+				permissions: `one permission: ${b("Account → Browser Run → Edit")} (called Browser Rendering → Edit in some accounts)`,
+				prefill: {
+					name: "Coywolf Pack Social Images",
+					keys: [],
+					shows: "no permissions yet: Cloudflare's form can't pre-select Browser Run",
+				},
+				add: `In a policy scoped to ${b("Entire Account")}, add ${b("Browser Run → Edit")} (search for ${code("browser")}).`,
+			}),
+			"Paste the token into Cloudflare API token and save. It's stored encrypted.",
+		],
+		note: `The token is used only with api.cloudflare.com, to take a screenshot of the image template. Browser Run includes 10 minutes of browser time a day on Workers Free and 10 hours a month on Workers Paid; one image takes a second or two. Or skip the token: add ${code('"browser": { "binding": "BROWSER" }')} to the site's ${code("wrangler.jsonc")} (with ${code("compatibility_date")} 2026-03-24 or later), or set the token as a Worker secret: ${code("npx wrangler secret put BROWSER_RUN_API_TOKEN")}.`,
+	},
 };
 
 /**
@@ -207,6 +224,10 @@ export const SETTINGS_PAGE_GUIDES: Record<string, { intro: string; guides: Guide
 	robotsRadarToken: {
 		intro: "Optional. Keeps the crawler list current from Cloudflare Radar each week. Or set the RADAR_API_TOKEN Worker secret.",
 		guides: ["radar"],
+	},
+	socialImagesApiToken: {
+		intro: "Optional with a BROWSER binding. Makes social images with Cloudflare Browser Run. The account ID and template are on the Social Images page. Or set the BROWSER_RUN_API_TOKEN Worker secret.",
+		guides: ["browser-run-token"],
 	},
 };
 

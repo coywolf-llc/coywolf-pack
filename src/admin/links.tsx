@@ -512,7 +512,8 @@ function IgnoreRulesDialog(props: { open: boolean; rules: IgnoreRule[]; onClose:
 	);
 }
 
-export function LinksPage() {
+/** `views`: the Links / Entries switch (links-entries.tsx), shown at the top of the header's rows. */
+export function LinksPage(props: { views?: React.ReactNode } = {}) {
 	const [data, setData] = React.useState<ListResponse>();
 	const [error, setError] = React.useState<string>();
 	const [notice, setNotice] = React.useState<string>();
@@ -690,6 +691,7 @@ export function LinksPage() {
 					</>
 				}
 			>
+				{props.views}
 				<div className="flex flex-wrap gap-1" role="group" aria-label="Filter by status">
 					{FILTERS.map((f) => (
 						<Button key={f.id} size="sm" variant={status === f.id ? "primary" : "ghost"} aria-pressed={status === f.id} onClick={() => setStatus(f.id)}>

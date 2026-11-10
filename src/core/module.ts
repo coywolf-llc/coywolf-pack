@@ -52,6 +52,11 @@ export interface TaskDef {
 	schedule: string;
 	/** Feature that must be on for the task to run (defaults to the module's main feature; "" runs it always, for a module without switches). */
 	feature?: string;
+	/**
+	 * Record each run's outcome (src/core/task-health.ts) for Alerts to read. One KV write per run, so only
+	 * for tasks that run daily or less often.
+	 */
+	recordOutcome?: boolean;
 	handler: (ctx: PluginContext) => Promise<void>;
 }
 

@@ -13,7 +13,7 @@ const { GUIDES, tokenFormUrl } = await import("../src/core/guide-content.ts");
 
 // developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/ (permission reference).
 const DOCUMENTED = new Set(["account_analytics", "account_api_tokens", "account_settings", "billing", "workers_scripts", "workers_kv_storage", "workers_routes", "workers_r2", "d1", "queues", "page", "stream", "images", "account_logs", "dns", "zone", "zone_settings", "analytics", "firewall_services", "page_rules", "cache", "ssl_and_certificates", "logs"]);
-const TOKEN_GUIDES = ["stream", "radar", "images-token", "crawler-hints-token"];
+const TOKEN_GUIDES = ["stream", "radar", "images-token", "crawler-hints-token", "browser-run-token"];
 
 const formLinks = (html) => [...html.matchAll(/href="(https:\/\/dash\.cloudflare\.com\/\?to=\/:account\/api-tokens&amp;permissionGroupKeys=[^"]+|https:\/\/dash\.cloudflare\.com\/\?to=\/:account\/api-tokens&permissionGroupKeys=[^"]+)"/g)].map((m) => new URL(m[1].replaceAll("&amp;", "&")));
 

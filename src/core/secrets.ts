@@ -64,6 +64,12 @@ export const SECRET_SETTINGS = {
 		description:
 			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Account Analytics → Read, Workers → Metadata Read-Only (finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. The Performance page has a pre-filled form. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account). With Zone → Read added too, in a policy scoped to All Domains or this site's domain, the Discovery page shows whether Cloudflare's Crawler Hints is on.",
 	},
+	socialImagesApiToken: {
+		type: "secret",
+		label: "Social Images — Cloudflare Browser Run API token",
+		description:
+			"Optional with a BROWSER binding. Makes the social images with Cloudflare Browser Run. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Browser Run → Edit; (3) create it, copy the token (shown once), paste it here and save. The Social Images page has a pre-filled form and the account ID field. Or set the BROWSER_RUN_API_TOKEN Worker secret.",
+	},
 	robotsRadarToken: {
 		type: "secret",
 		label: "Robots.txt — Cloudflare Radar API token",

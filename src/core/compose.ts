@@ -7,6 +7,7 @@ import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn, recordDefaults }
 import type { PackModule, TaskDef } from "./module.js";
 import { noteReadFailure } from "./read-failures.js";
 import { requestStore } from "./request-memo.js";
+import { withOutcome } from "./task-health.js";
 import { afterResponse } from "../shared.js";
 
 /**
@@ -242,7 +243,8 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 			}
 			const features: FeatureMap = await ctxFeatures(ctx);
 			if (task.feature && !isOn(features, task.feature)) return;
-			await task.handler(ctx);
+			if (task.recordOutcome) await withOutcome(ctx.kv, task.name, () => task.handler(ctx));
+			else await task.handler(ctx);
 		},
 	};
 
