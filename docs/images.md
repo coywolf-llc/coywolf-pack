@@ -16,11 +16,13 @@ https://media.coywolf.com/s/<w>/<file>         width only, keeps the ratio
 
 `<file>` is the media item's stored file name (`<id>.<ext>`, as in `/_emdash/api/media/file/<id>.<ext>`). Sizes go up to 2560px. Without a media host, `cleanImageUrl()` returns `null` and themes use their usual image code (EmDash's own `/_image` endpoint resizes through the Worker).
 
-**Where the host comes from**, first match wins:
+**Where the host comes from**:
 
 1. **EmDash's own media setting**: `storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" })` in `astro.config.mjs` (EmDash 1.4+). It has to be a plain `https://` address with no path, on a domain of the site's zone (an `r2.dev` address can't resize, so it's never used as the media host; its URLs are still recognized). With it, EmDash's own components (Image, Gallery, Video) print media at the same host, and newer EmDash releases give the site settings' logo, favicon and default social image there too, so one setting covers EmDash and the pack. The Clean Image URLs page shows the host as coming from EmDash's setting, and it's changed in `astro.config.mjs` only.
 2. **The host saved on the Clean Image URLs page** (takes effect within a minute, no deploy).
 3. **The pack's option**, `coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })`: the fallback, from before EmDash had `publicUrl`.
+
+`publicUrl` is used when the pack has no host of its own (2 or 3), or the same one. When the pack has a different working host, that one stays in use (`publicUrl` may not have the `/s/` rules), and the Clean Image URLs page says so: make `publicUrl` the same host, or, once **Check** passes on it, remove the pack's own host so `publicUrl` takes over.
 
 **Media URLs in every form.** Wherever the pack takes an image (`cleanImageUrl()`, `originalImageUrl()`, `imageInfo()`, `responsiveImage()`, `croppedImage()`, the og:image and JSON-LD images, the default social image from **Settings → SEO**), it accepts EmDash's `/_emdash/api/media/file/<file>`, the original under EmDash's `publicUrl` (`https://media.coywolf.com/<file>`, the form EmDash prints when it's set, also when `publicUrl` has a path and can't be the media host), and the original on the media host. Stored content keeps EmDash's `/_emdash/api/media/file/<file>` addresses, and those keep working.
 
@@ -45,7 +47,7 @@ A site that sets `images.cdn` (all eight Coywolf sites today) can move the host 
    });
    ```
 
-   Removing `cdn` is optional: with the same host it changes nothing, and it's only used when `publicUrl` isn't set. A host saved on the Clean Image URLs page is ignored while `publicUrl` is set (it stays saved).
+   Removing `cdn` is optional: with the same host it changes nothing. If a different host is saved on the Clean Image URLs page, clear it there (that page warns while `publicUrl` and the pack's host differ, and keeps the pack's).
 3. **Deploy.** A deploy starts with an empty page cache (Workers Cache is per Worker version), so pages pick up the change at once.
 4. **Check.** Open **Clean Image URLs**: it says the host comes from EmDash's media setting, and **Check** passes. On a page, images EmDash renders itself (its `Image` component, for example) now load from `https://media.coywolf.com/<file>` instead of `/_emdash/api/media/file/<file>`; the theme's images were already on the media host.
 
@@ -96,7 +98,7 @@ or on the Clean Image URLs page (takes effect within a minute, no deploy), or wi
 coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })
 ```
 
-EmDash's `publicUrl` wins over both; a host saved on the page wins over the option, and clearing it there falls back to the option. The host must be an `https://` origin with no path.
+EmDash's `publicUrl` is used when the pack has no host of its own or the same one (see above); a host saved on the page wins over the option, and clearing it there falls back to the option. The host must be an `https://` origin with no path.
 
 **Quota.** Cloudflare's Free plan includes 5,000 unique image transformations a month (each new size of each image counts once a month; repeat views come from the cache). Beyond that, transformations need a paid Cloudflare Images plan.
 

@@ -99,6 +99,8 @@ async function adminSettings(ctx: PluginContext) {
 		hostSource: source.from ?? "",
 		/** EmDash's publicUrl as written, when it's set (also when it can't be the media host: a path, or http). */
 		storageUrl: source.storageUrl ?? "",
+		/** EmDash's publicUrl as a host, when it differs from the one in use (the pack's own wins until they match). */
+		storageConflict: source.conflict ? (source.storage ?? "") : "",
 		accountId: accountId ?? "",
 		bucket: bucket ?? "",
 		tokenSet: Boolean(token?.trim()),

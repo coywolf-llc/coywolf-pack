@@ -9,15 +9,19 @@
  * imports) so tests can load them; the middleware is in pack.ts.
  *
  * The media host is an R2 custom domain on the media bucket, with Cloudflare
- * Image Transformations and the zone's /s/ rewrite rules. Where it comes from,
- * first match wins:
+ * Image Transformations and the zone's /s/ rewrite rules. Where it comes from:
  *
- *  1. EmDash's own setting: `storage: r2({ binding, publicUrl })` in
- *     astro.config.mjs, when publicUrl is a plain https origin. EmDash's own
- *     components (Image, Gallery, site-settings logo and favicon…) print
- *     media there too, so it's one setting for both.
- *  2. The host saved on the Clean Image URLs page.
- *  3. The pack's `images: { cdn }` option (the fallback before EmDash had publicUrl).
+ *  - EmDash's own setting: `storage: r2({ binding, publicUrl })` in
+ *    astro.config.mjs, when publicUrl is a plain https origin (not r2.dev).
+ *    EmDash's own components (Image, Gallery, site-settings logo and
+ *    favicon…) print media there too, so it's one setting for both.
+ *  - The host saved on the Clean Image URLs page, else the pack's
+ *    `images: { cdn }` option (the pack's own host).
+ *
+ * When only one is set, that's the host. When both are and they differ, the
+ * pack's own host wins (it's the one known to have the /s/ rules), and the
+ * Clean Image URLs page says so: publicUrl takes over once it's the same
+ * host, or once the pack's own is removed (after Check passes on it).
  *
  * Media URLs are recognized in each form EmDash and the pack print them:
  * /_emdash/api/media/file/<file> (EmDash without publicUrl), <publicUrl>/<file>
@@ -103,7 +107,10 @@ export function setStoragePublicUrl(url: string | null | undefined): void {
 
 /** The media host in use (https origin, no trailing slash), or null when there's none. */
 export function imageCdn(): string | null {
-	return storageBase ?? savedBase ?? optionBase;
+	const packHost = savedBase ?? optionBase;
+	// A publicUrl that isn't the pack's own working host doesn't take over unannounced: it may lack the /s/ rules.
+	if (storageBase && packHost && storageBase !== packHost) return packHost;
+	return storageBase ?? packHost;
 }
 
 /** Every base under which a media-library file can appear as <base>/<file>, the host in use first. */
@@ -139,9 +146,19 @@ export function withMediaPreconnect(response: Response, host: string | null = im
  * Where the media host comes from: EmDash's publicUrl (`storage`, as a plain
  * origin; `storageUrl` as written), the admin setting, the plugin option, or nowhere.
  */
-export function imageCdnSource(): { host: string | null; option: string | null; saved: string | null; storage: string | null; storageUrl: string | null; from: "storage" | "saved" | "option" | null } {
-	const from = storageBase ? "storage" : savedBase ? "saved" : optionBase ? "option" : null;
-	return { host: imageCdn(), option: optionBase, saved: savedBase, storage: storageBase, storageUrl: storagePrefix, from };
+export function imageCdnSource(): {
+	host: string | null;
+	option: string | null;
+	saved: string | null;
+	storage: string | null;
+	storageUrl: string | null;
+	from: "storage" | "saved" | "option" | null;
+	/** EmDash's publicUrl is a usable host but not the one in use (the pack's own differs). */
+	conflict: boolean;
+} {
+	const host = imageCdn();
+	const from = host && host === storageBase ? "storage" : savedBase ? "saved" : optionBase ? "option" : null;
+	return { host, option: optionBase, saved: savedBase, storage: storageBase, storageUrl: storagePrefix, from, conflict: Boolean(storageBase && host && storageBase !== host) };
 }
 
 export interface ImageRequest {

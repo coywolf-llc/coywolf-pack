@@ -65,12 +65,26 @@ test("parses old Worker-route paths (they redirect to the media host)", () => {
 	assert.equal(parseImagePath("/media/ABC.webp"), null);
 });
 
-test("EmDash's storage publicUrl is the media host, ahead of the saved host and images.cdn", () => {
-	withHost("https://media.example.com", "https://img.example.com", () => {
+test("EmDash's storage publicUrl is the media host when the pack has none of its own (or the same one); a different one doesn't take over unannounced", () => {
+	withHost(null, null, () => {
 		assert.equal(imageCdn(), "https://cdn.example.com");
 		assert.equal(imageCdnSource().from, "storage");
 		assert.equal(imageCdnSource().storage, "https://cdn.example.com");
+		assert.equal(imageCdnSource().conflict, false);
 		assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.jpg", { width: 400 }), "https://cdn.example.com/s/400/ABC.jpg");
+	}, "https://cdn.example.com/");
+	withHost("https://cdn.example.com", null, () => {
+		assert.equal(imageCdnSource().from, "storage", "the same host as images.cdn");
+		assert.equal(imageCdnSource().conflict, false);
+	}, "https://cdn.example.com");
+	// A publicUrl that differs from the pack's working host: the pack's wins, and the admin is told.
+	withHost("https://media.example.com", "https://img.example.com", () => {
+		assert.equal(imageCdn(), "https://img.example.com");
+		assert.equal(imageCdnSource().from, "saved");
+		assert.equal(imageCdnSource().conflict, true);
+		assert.equal(imageCdnSource().storage, "https://cdn.example.com");
+		// Its URLs are still recognized as media-library files.
+		assert.equal(cdnOriginalUrl("https://cdn.example.com/ABC.jpg"), "https://img.example.com/ABC.jpg");
 	}, "https://cdn.example.com/");
 	withHost("https://media.example.com", "https://img.example.com", () => assert.equal(imageCdnSource().from, "saved"));
 	withHost("https://media.example.com", null, () => assert.equal(imageCdnSource().from, "option"));
@@ -110,9 +124,10 @@ test("media URLs EmDash prints with publicUrl set (<publicUrl>/<file>) are media
 		assert.deepEqual(parseCdnUrl("https://bucket.example.com/media/ABC.jpg"), { id: "ABC", ext: "jpg", width: undefined, height: undefined });
 		assert.equal(mediaFile("https://bucket.example.com/ABC.jpg"), null);
 	}, "https://bucket.example.com/media");
-	// A host that was set before (images.cdn) keeps being recognized after the switch to publicUrl.
-	withHost("https://old-media.example.com", null, () => {
-		assert.equal(cdnOriginalUrl("https://old-media.example.com/ABC.jpg"), "https://media.example.com/ABC.jpg");
+	// A host saved before keeps being recognized once publicUrl is the same host as images.cdn.
+	withHost("https://media.example.com", null, () => {
+		assert.equal(imageCdn(), "https://media.example.com");
+		assert.equal(cdnOriginalUrl("https://media.example.com/ABC.jpg"), "https://media.example.com/ABC.jpg");
 	}, "https://media.example.com");
 });
 

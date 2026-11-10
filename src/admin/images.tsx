@@ -29,6 +29,8 @@ interface Settings {
 	hostSource?: string;
 	/** EmDash's publicUrl as written, when set. */
 	storageUrl?: string;
+	/** EmDash's publicUrl host, when it differs from the media host in use. */
+	storageConflict?: string;
 	accountId: string;
 	bucket: string;
 	tokenSet: boolean;
@@ -682,7 +684,14 @@ export function ImagesPage() {
 							</>
 						}
 					>
-						{saved.storageUrl && !hostFromStorage && (
+						{saved.storageConflict && (
+							<Banner
+								variant="alert"
+								title="EmDash's media setting names another host"
+								description={`EmDash's storage publicUrl is ${saved.storageConflict}, but the pack uses ${saved.activeHost}, which it knows serves resized images. EmDash's own components print media at ${saved.storageConflict}. Make publicUrl ${saved.activeHost} in astro.config.mjs, or, after Check passes on ${saved.storageConflict}, remove the pack's own host (images.cdn, or the one saved here) so publicUrl takes over.`}
+							/>
+						)}
+						{saved.storageUrl && !hostFromStorage && !saved.storageConflict && (
 							<Banner
 								variant="default"
 								description={`EmDash's storage setting has publicUrl ${saved.storageUrl}, which can't be the media host (it needs a plain https address with no path, like https://media.example.com). Images under it are still recognized.`}
