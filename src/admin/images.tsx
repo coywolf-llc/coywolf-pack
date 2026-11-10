@@ -2,7 +2,7 @@
  * Clean Image URLs page: the media host (status, a live check, the setting),
  * a step-by-step guide for setting it up by hand on Cloudflare, and Set up
  * media host, which does the same through the Cloudflare API (review, then
- * apply). The feature itself is turned on or off on the Coywolf Pack page.
+ * apply). The feature itself is turned on or off on the Features page.
  */
 import { Banner, Button, Checkbox, Input } from "@cloudflare/kumo";
 import { ArrowsClockwise, CheckCircle, Info, MagnifyingGlass, Wrench, XCircle } from "@phosphor-icons/react";

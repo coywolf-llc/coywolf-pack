@@ -214,7 +214,7 @@ export async function cachedCtxFeatures(ctx: SettingsCtx): Promise<FeatureMap> {
 export async function requireCachedFeature(ctx: SettingsCtx, id: string): Promise<void> {
 	if (!isOn(await cachedCtxFeatures(ctx), id)) {
 		const { PluginRouteError } = await import("emdash");
-		throw PluginRouteError.notFound("This feature is turned off (Plugins → Coywolf Pack).");
+		throw PluginRouteError.notFound("This feature is turned off (Coywolf Pack → Features).");
 	}
 }
 
@@ -492,6 +492,6 @@ export async function siteFeatureOn(id: string, database?: string): Promise<bool
 export async function requireFeature(ctx: SettingsCtx, id: string): Promise<void> {
 	if (!isOn(await ctxFeatures(ctx), id)) {
 		const { PluginRouteError } = await import("emdash");
-		throw PluginRouteError.notFound("This feature is turned off (Plugins → Coywolf Pack).");
+		throw PluginRouteError.notFound("This feature is turned off (Coywolf Pack → Features).");
 	}
 }

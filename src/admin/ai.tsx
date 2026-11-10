@@ -8,7 +8,7 @@ import { ArrowClockwise, Check, DownloadSimple, Play, Sparkle, Stop, X } from "@
 import * as React from "react";
 
 import { apiGet, apiPost, errorText } from "./api.js";
-import { PageHeader, Loading } from "./page.js";
+import { DocsLink, FeaturesLink, Loading, PageHeader } from "./page.js";
 import { entitiesToCsv } from "../ai/export.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { CredentialGuide } from "./guides.js";
@@ -147,7 +147,7 @@ function BulkRow(props: { kind: "entries" | "media"; label: string; enabled: boo
 				<div className="text-sm font-medium">{props.label}</div>
 				<div className="mt-0.5 text-sm text-kumo-subtle">
 					{!props.enabled
-						? "Turn the feature on under Plugins → Coywolf Pack first."
+						? "Turn this part on first (Turn parts on or off, at the top of this page)."
 						: props.bulk
 							? `${props.bulk.finished ? "Scanned" : "Scanning"}: ${props.bulk.queued} queued, ${props.bulk.skipped} already done or not needed${props.bulk.finished ? ` (finished ${dateTime.format(new Date(props.bulk.finished))})` : "…"}`
 							: "No bulk run yet."}
@@ -398,7 +398,13 @@ function SettingsPanel(props: { status: Status; reload: () => Promise<void>; set
 							/>
 						) : (
 							<p className="self-end text-sm text-kumo-subtle">
-								{status.settings.bindingAvailable ? "The Workers AI binding is connected." : "Add an \"ai\" binding to wrangler.jsonc (see docs/ai.md in the Coywolf Pack repository) to use Workers AI."}
+								{status.settings.bindingAvailable ? (
+									"The Workers AI binding is connected."
+								) : (
+									<>
+										Add an <code>ai</code> binding to wrangler.jsonc (see <DocsLink doc="ai">the AI Enrichment docs</DocsLink>) to use Workers AI.
+									</>
+								)}
 							</p>
 						)}
 						<div style={{ gridColumn: "1 / -1" }}>
@@ -877,7 +883,17 @@ export function AiPage() {
 				{error && <Banner variant="error" role="alert" title="Something went wrong" description={error} />}
 			</div>
 
-			{status && !status.features.ai && <Banner variant="default" title="AI Enrichment is off. Turn it and its features on under Plugins → Coywolf Pack." />}
+			{status && !status.features.ai && (
+				<Banner
+					variant="default"
+					title="AI Enrichment is off."
+					description={
+						<>
+							Turn it on on <FeaturesLink />, then turn on its parts here.
+						</>
+					}
+				/>
+			)}
 
 			{!status && !error ? (
 				<Loading />

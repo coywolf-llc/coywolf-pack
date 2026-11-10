@@ -1,5 +1,5 @@
 /**
- * Redirects admin page, styled like the EmDash admin's own Redirects page.
+ * Redirect Manager admin page, styled like the EmDash admin's own Redirects page.
  */
 import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea, Select } from "@cloudflare/kumo";
 import { ArrowRight, ArrowsSplit, DotsThree, DownloadSimple, FileArrowUp, PencilSimple, Plus, Trash, UploadSimple } from "@phosphor-icons/react";
@@ -8,7 +8,7 @@ import * as React from "react";
 
 import { useConfirm } from "./confirm-dialog.js";
 import { apiPost, errorText } from "./api.js";
-import { PageHeader, Loading } from "./page.js";
+import { AdminLink, Loading, PageHeader } from "./page.js";
 import { parseRedirectsImport, redirectsToCsv, redirectsToJson } from "../redirects/transfer.js";
 import type { RedirectRule } from "../redirects/rules.js";
 import { saveFile, siteSlug, today } from "./download.js";
@@ -310,7 +310,7 @@ export function RedirectsPage() {
 				}
 				description={
 					<>
-						For redirects EmDash's built-in Redirects can't handle: external destinations (affiliate links, moved
+						For redirects <AdminLink to="/redirects">EmDash's built-in Redirects</AdminLink> can't handle: external destinations (affiliate links, moved
 						articles) and file paths such as old <code>/wp-content/</code> URLs. Changes apply within a minute.
 					</>
 				}

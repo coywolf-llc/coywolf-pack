@@ -16,7 +16,7 @@ import {
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
-import { PageHeader, Loading } from "./page.js";
+import { DocsLink, Loading, PageHeader } from "./page.js";
 import { type Backup, type ListResponse, type UndoPoint, ago, isStale, sourceLabel, useBackups } from "./backups-widget.js";
 import { SaveBar } from "./save-bar.js";
 import { SettingsSection } from "./settings-ui.js";
@@ -357,7 +357,15 @@ export function BackupsPage() {
 				/>
 			)}
 			{data && !data.restore.enabled && (
-				<Banner variant="default" title="Restore isn't set up yet." description={`${data.restore.reason} See docs/backups.md in the Coywolf Pack repository.`} />
+				<Banner
+					variant="default"
+					title="Restore isn't set up yet."
+					description={
+						<>
+							{data.restore.reason} See <DocsLink doc="backups">the Backups docs</DocsLink>.
+						</>
+					}
+				/>
 			)}
 
 			{!data && !error ? (

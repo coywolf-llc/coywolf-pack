@@ -129,7 +129,7 @@ export interface Deps {
 	bucket(): Promise<R2Bucket | undefined>;
 	mediaBucket(): Promise<R2Bucket | undefined>;
 	database(): Promise<D1Database | undefined>;
-	/** The "Private form uploads" switch on the Coywolf Pack page. */
+	/** The "Private Form Uploads" switch on the Features page. */
 	enabled(): Promise<boolean>;
 }
 
@@ -536,7 +536,7 @@ function adminRoutes(deps: Deps) {
 			request: { body: "json" },
 			handler: async (ctx: FormsCtx) => {
 				const input = parseInput(z.object({ limit: z.number().int().min(1).max(50).default(20) }), ctx.input ?? {});
-				if (!(await deps.enabled())) throw PluginRouteError.badRequest("Turn on Private form uploads on the Coywolf Pack page first.");
+				if (!(await deps.enabled())) throw PluginRouteError.badRequest("Turn on Private Form Uploads first (Coywolf Pack → Features).");
 				return migrateBatch(ctx, deps, input.limit);
 			},
 		}),

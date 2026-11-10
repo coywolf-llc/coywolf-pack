@@ -9,7 +9,7 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
-import { PageHeader, Loading } from "./page.js";
+import { DocsLink, Loading, PageHeader } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { DEFAULT_ACCENT, MAX_CUSTOM_CSS, SAMPLE_REVIEW, isAccent, pageCss, renderReviewHtml, sanitizeCustomCss } from "../reviews/lib.js";
 import { PartSwitches } from "./feature-switches.js";
@@ -179,7 +179,7 @@ export function ReviewsPage() {
 							/>
 							<p id="cw-reviews-css-limit" className={`text-xs ${tooLong ? "text-kumo-danger" : "text-kumo-subtle"}`}>
 								{style.css.length.toLocaleString()} / {MAX_CUSTOM_CSS.toLocaleString()} characters. Added after the built-in styles on pages
-								with a review. Start rules with <code>.cw-review</code> and set the <code>--cw-review-*</code> properties (see docs/reviews.md in the Coywolf Pack repository) to
+								with a review. Start rules with <code>.cw-review</code> and set the <code>--cw-review-*</code> properties (see <DocsLink doc="reviews">the Reviews docs</DocsLink>) to
 								change colors and layout.
 							</p>
 						</div>

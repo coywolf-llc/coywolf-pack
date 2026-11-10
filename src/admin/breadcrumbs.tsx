@@ -9,7 +9,7 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { errorText } from "./api.js";
-import { PageHeader, Loading } from "./page.js";
+import { FeaturesLink, Loading, PageHeader } from "./page.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { useSaveResult } from "./toast.js";
 
@@ -410,7 +410,12 @@ export function BreadcrumbsPage() {
 			<Section
 				collapsed
 				title="Add the breadcrumb nav to your Astro theme"
-				description="Put the Breadcrumbs component in a layout once and every page that uses the layout gets a trail. Nothing renders while Breadcrumb Nav is turned off under Plugins → Coywolf Pack."
+				description={
+					<>
+						Put the Breadcrumbs component in a layout once and every page that uses the layout gets a trail. Nothing renders while Breadcrumb Nav is turned
+						off on <FeaturesLink />.
+					</>
+				}
 			>
 				<ol className="grid gap-8">
 					<Step n={1} title="Import the component">

@@ -125,7 +125,7 @@ export function HeadingsPage() {
 				title="Headings & TOC"
 				description={
 					<>
-					Defaults for heading anchors and the Table of Contents block. Turn each one on under Plugins → Coywolf Pack. Anchors
+					Defaults for heading anchors and the Table of Contents block. Anchors
 					are saved with the content, so they stay the same when a heading is reworded.
 					</>
 				}

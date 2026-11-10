@@ -371,7 +371,7 @@ function SettingsDialog(props: { open: boolean; onClose: () => void; onSaved: (m
 			<Dialog className="p-6" size="lg">
 				<Dialog.Title className="text-lg font-semibold">Link checking settings</Dialog.Title>
 				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
-					Nothing runs in the background until Scheduled link checking is on under Plugins → Coywolf Pack. Then a scheduled run scans your content
+					Nothing runs in the background until Scheduled link checking is on (Turn parts on or off, at the top of this page). Then a scheduled run scans your content
 					and checks the links that are due (broken links daily, the rest weekly), continuing hourly until it's done.
 				</Dialog.Description>
 				{!draft && !error ? (
@@ -675,7 +675,7 @@ export function LinksPage() {
 							variant="primary"
 							icon={<ArrowClockwise />}
 							disabled={!data?.checking || Boolean(busy)}
-							title={data?.checking ? undefined : "Turn on Scheduled link checking under Plugins → Coywolf Pack"}
+							title={data?.checking ? undefined : "Turn on Scheduled link checking first (Turn parts on or off, below)"}
 							onClick={() => void recheck()}
 						>
 							Check now
@@ -686,7 +686,7 @@ export function LinksPage() {
 					<>
 						Every link in your content, where it's used, and whether it still works. Blocked means the destination refused a server (a bot wall such
 						as LinkedIn's 999 or Cloudflare's challenge): the link is probably fine.
-						{!data?.checking && " Turn on Scheduled link checking under Plugins → Coywolf Pack to check links (weekly by default; change it in Settings)."}
+						{!data?.checking && " Turn on Scheduled link checking below to check links (weekly by default; change it in Settings)."}
 					</>
 				}
 			>

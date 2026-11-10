@@ -12,7 +12,7 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
-import { PageHeader } from "./page.js";
+import { DocsLink, PageHeader } from "./page.js";
 import { UsageCard } from "./usage.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/cache";
@@ -194,7 +194,7 @@ export function PerformancePage() {
 					Cloudflare keeps copies of your public pages at its edge (Workers Cache), so visitors get them without waiting for the
 					site to build them. EmDash clears the pages that change when you publish or edit content, menus or settings; Coywolf
 					Pack clears the pages its settings change. Each deploy starts with an empty cache. These settings take effect on sites that
-					turn on Workers Cache (Astro's cacheCloudflare(); see docs/performance.md in the Coywolf Pack repository).
+					turn on Workers Cache (Astro's cacheCloudflare(); see <DocsLink doc="performance">the Performance docs</DocsLink>).
 					</>
 				}
 			/>

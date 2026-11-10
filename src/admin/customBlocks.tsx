@@ -1,7 +1,7 @@
 /**
  * Custom Blocks page: the site's affiliate disclosure wording and podcast
  * links, and live previews of every block (rendered by the same code as the
- * site). Turning blocks on or off happens on the Coywolf Pack page.
+ * site). Each block is turned on or off in Turn parts on or off on this page (or on the Features page).
  */
 import { Banner, Button, Checkbox, Input, InputArea, Select } from "@cloudflare/kumo";
 import { FloppyDisk } from "@phosphor-icons/react";
@@ -161,7 +161,7 @@ export function CustomBlocksPage() {
 				}
 				description={
 					<>
-						Adds Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks to the editor (turn each one on on the Coywolf Pack page). Their text fields take
+						Adds Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks to the editor (turn each one on below). Their text fields take
 						plain text: a blank line starts a new paragraph, <code>[link text](https://…)</code> makes a link and <code>**text**</code> is bold. Simple
 						HTML (links, bold, italics, code, lists) works too. The blocks are styled with a little CSS sent only on pages that use them; no script.
 					</>

@@ -14,7 +14,7 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
-import { PageHeader, Loading } from "./page.js";
+import { DocsLink, FeaturesLink, Loading, PageHeader } from "./page.js";
 import { formatBytes, totalFromContentRange, type FormUploadsConfig, type UploadEntry } from "../formUploads/lib.js";
 import { saveFile } from "./download.js";
 import { SaveBar, isDirty } from "./save-bar.js";
@@ -343,7 +343,7 @@ export function FormUploadsPage() {
 					description={
 						<>
 							Wrap the Forms plugin in astro.config.mjs with <code>privateFormUploads(formsPlugin())</code> (imported from @coywolf/emdash), add an R2
-							bucket binding named FORM_UPLOADS in wrangler.jsonc (a bucket with no public access), and deploy. See docs/form-uploads.md in the Coywolf Pack repository.
+							bucket binding named FORM_UPLOADS in wrangler.jsonc (a bucket with no public access), and deploy. See <DocsLink doc="form-uploads">the Private Form Uploads docs</DocsLink>.
 						</>
 					}
 				/>
@@ -373,7 +373,11 @@ export function FormUploadsPage() {
 				<Banner
 					variant="alert"
 					title="Private form uploads is off"
-					description="New files go to the public media library. Turn on Private form uploads on the Coywolf Pack page. Files already here stay private."
+					description={
+						<>
+							New files go to the public media library. Turn on Private Form Uploads on <FeaturesLink />. Files already here stay private.
+						</>
+					}
 				/>
 			)}
 

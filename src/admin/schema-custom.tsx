@@ -289,7 +289,7 @@ export function CustomTab(props: { site: CustomSite; graphOn: boolean; customOn:
 				</p>
 			</div>
 			{!props.customOn && (
-				<Banner variant="default" role="status" description="Turn on Custom markup (above, or on the Coywolf Pack page) to save markup and add it to pages." />
+				<Banner variant="default" role="status" description="Turn on Custom markup (above, or on the Features page) to save markup and add it to pages." />
 			)}
 			<div className="flex justify-end">
 				<Button variant="primary" icon={<Plus aria-hidden="true" />} disabled={!props.customOn} onClick={() => setEditing({ ...EMPTY_RULE })}>

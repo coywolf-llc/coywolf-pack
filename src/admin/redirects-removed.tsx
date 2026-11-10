@@ -1,5 +1,5 @@
 /**
- * "Removed content" panel on the Redirects page (feature
+ * "Removed content" panel on the Redirect Manager page (feature
  * "redirects.trashPrompt"): published entries that were deleted or
  * unpublished, with what to do about their old URLs. Renders nothing while
  * the feature is off.

@@ -1243,7 +1243,7 @@ export function SchemaPage() {
 				<Banner
 					variant="default"
 					role="status"
-					description={`Off on the Coywolf Pack page: ${off.map(([, label]) => label).join(", ")}. Settings here are kept but not used until they're on.`}
+					description={`Off: ${off.map(([, label]) => label).join(", ")}. Settings here are kept but not used until they're on.`}
 				/>
 			)}
 

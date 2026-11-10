@@ -4,7 +4,7 @@
  * Coywolf's WordPress plugins. Reading the export runs in the browser (the
  * file never leaves the computer until it's imported); converting stored
  * content runs on the site, a dry run first. Turning the module on or off
- * happens on the Coywolf Pack page.
+ * happens on the Features page.
  */
 import { Banner, Button, Input, InputArea, Loader } from "@cloudflare/kumo";
 import {
@@ -23,7 +23,7 @@ import * as React from "react";
 
 import { useConfirm } from "./confirm-dialog.js";
 import { apiPost, errorText, getJson as getJsonFrom } from "./api.js";
-import { PageHeader } from "./page.js";
+import { DocsLink, FeaturesLink, PackLink, PageHeader } from "./page.js";
 import { type GuestAuthor, type GuestByline, type PostCredit, groupGuests, postCredits, sameName, wxrGuestAuthors } from "../wpImport/guests.js";
 import { type ParentPlan, type SiteTerm, type WxrCategory, type WxrPage, optionSnippet, parentsMap, planCategoryParents, wxrCategories, wxrPages } from "../wpImport/parents.js";
 import { type PrepareWxrResult, prepareWxr, wxrAttachments } from "../wpImport/prepare.js";
@@ -185,7 +185,7 @@ function BeforeImport() {
 						module's page) before importing, so imported content comes over connected.
 					</li>
 					<li>
-						Turn on the modules imported content needs, under <strong>Plugins → Coywolf Pack</strong>: <strong>WordPress import</strong>,{" "}
+						Turn on the modules imported content needs, on <FeaturesLink />: <strong>WordPress Migration</strong>,{" "}
 						<strong>Headings &amp; TOC</strong> with Heading anchors (WordPress heading ids), <strong>Custom Blocks</strong> with the Details block (core
 						Details blocks), and <strong>Redirects</strong> (old URLs). Sites that used Coywolf's WordPress plugins turn on more; see “Coywolf
 						WordPress plugins” below.
@@ -408,7 +408,7 @@ function ScanPanel({ urlMap, applyLabel, confirmTitle, confirmText }: { urlMap?:
 							<p className="mb-1 text-xs text-kumo-subtle">
 								No Coywolf Pack block for these (yet), or the block is turned off (notes, details, quotes, disclosures, testimonials and podcast links
 								convert once their Custom Blocks switch is on: run this again). Their content is kept; “marker:gravity-form” is an empty placeholder
-								for the theme. See docs/wordpress-import.md in the Coywolf Pack repository.
+								for the theme. See <DocsLink doc="wordpress-import">the WordPress Migration docs</DocsLink>.
 							</p>
 							<CountsTable counts={report.leftovers} />
 						</div>
@@ -788,7 +788,7 @@ function ParentsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 					EmDash's importer creates every category at the top level and drops page parents, so WordPress URLs with parent categories
 					(<Code>/news/local/a-post/</Code>) or parent pages (<Code>/about/team/</Code>) are lost. This sets each category's parent the way WordPress had
 					it, with EmDash's own taxonomy API and your account, a dry run first. Running it again changes nothing. EmDash pages have no parent, so page
-					parents are listed as a <Code>pageParents</Code> option to paste into <Code>coywolfPlugin()</Code> (see docs/content-urls.md in the Coywolf Pack repository).
+					parents are listed as a <Code>pageParents</Code> option to paste into <Code>coywolfPlugin()</Code> (see <DocsLink doc="content-urls">Content URLs</DocsLink>).
 				</>
 			}
 		>
@@ -1215,7 +1215,7 @@ function RedirectsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 					WordPress redirects a post's old slugs by itself, and redirect plugins keep their rules in the database; none of it comes over in the export.
 					This turns old slugs (from the export) and the rules of Redirection, Rank Math, Yoast SEO Premium or Coywolf SEO (paste the output of the
 					command under each box, run on the WordPress server with WP-CLI; change <Code>wp_</Code> if your tables use another prefix) into Redirects
-					module rules. Old-slug redirects point at the URLs WordPress used: if your EmDash URLs differ, fix them on the Redirects page.
+					module rules. Old-slug redirects point at the URLs WordPress used: if your EmDash URLs differ, fix them on <PackLink page="/redirects">Redirect Manager</PackLink>.
 				</>
 			}
 		>
@@ -1493,7 +1493,7 @@ export function WpImportPage() {
 					<>
 					Finish moving a WordPress site to EmDash. EmDash's own importer brings over posts, pages, categories, tags, authors and media; these steps
 					keep what it drops or misses: heading ids, reusable blocks, Details blocks, co-authors and guest authors, category and page parents, old media
-					URLs, and redirects. Work through them in order. docs/wordpress-import.md in the Coywolf Pack repository has the full checklist.
+					URLs, and redirects. Work through them in order. <DocsLink doc="wordpress-import">The WordPress Migration docs</DocsLink> have the full checklist.
 					</>
 				}
 			/>

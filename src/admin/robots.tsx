@@ -10,7 +10,7 @@ import { CheckCircle, Copy, DotsThree, DownloadSimple, FileArrowUp, Info, Pencil
 import * as React from "react";
 
 import { errorText } from "./api.js";
-import { PageHeader, Loading } from "./page.js";
+import { FeaturesLink, Loading, PageHeader } from "./page.js";
 import type { BotEntry } from "../robots/bots.js";
 import { describeRule, summarize } from "../robots/explain.js";
 import { evaluate } from "../robots/rep.js";
@@ -206,7 +206,9 @@ function ServedFile(props: { text: string; emdash: PageData["emdash"]; config: R
 				</div>
 			)}
 			<textarea readOnly aria-label="robots.txt being served" className="w-full resize-none rounded-lg border bg-kumo-tint/40 p-3 font-mono text-xs" rows={rows} value={props.text} />
-			<p className="text-xs text-kumo-subtle">Turn the Robots.txt Rules feature off (on Plugins → Coywolf Pack) to serve EmDash's own robots.txt again. Your rules are kept for next time.</p>
+			<p className="text-xs text-kumo-subtle">
+				Turn Robots.txt off on <FeaturesLink /> to serve EmDash's own robots.txt again. Your rules are kept for next time.
+			</p>
 			<details className="rounded-lg border border-kumo-line px-3 py-2">
 				<summary className="cursor-pointer text-sm font-medium">EmDash's original robots.txt (for reference)</summary>
 				<p className="mt-2 text-xs text-kumo-subtle">
