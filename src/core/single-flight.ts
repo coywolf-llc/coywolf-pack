@@ -103,6 +103,13 @@ export const DEADLINES = {
 	 * 8 s keeps a stalled call from holding the admin page.
 	 */
 	cloudflareReadMs: 8_000,
+	/**
+	 * Any other Cloudflare API call (src/core/cloudflare-api.ts): media host
+	 * setup steps, usage readings, Stream and D1 restore calls. Each answers in
+	 * well under a few seconds; 30 s ends a stalled call long before the
+	 * platform would, with an error the page can show.
+	 */
+	cloudflareApiMs: 30_000,
 };
 
 /** Work that didn't finish within its deadline. */

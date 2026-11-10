@@ -5,7 +5,9 @@
  * credentials from env at import time and has no captions, downloads or
  * webhook calls.
  */
-const API = "https://api.cloudflare.com/client/v4";
+import { CLOUDFLARE_API, CloudflareApiError, cloudflareApi, errorDetail } from "../core/cloudflare-api.js";
+
+const API = CLOUDFLARE_API;
 
 export interface StreamCredentials {
 	accountId: string;
@@ -57,25 +59,18 @@ export function streamClient(creds: StreamCredentials) {
 	const base = `${API}/accounts/${encodeURIComponent(creds.accountId)}/stream`;
 	const auth = { Authorization: `Bearer ${creds.token}` };
 
+	/**
+	 * One API call through the shared client (src/core/cloudflare-api.ts): a deadline, and no token in errors.
+	 * Stream keeps the global fetch (not ctx.http): its tus and caption calls rely on headers and multipart
+	 * bodies that ctx.http's redirect handling and request buffering weren't checked against.
+	 */
 	async function call<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
-		const init: RequestInit = { method, headers: { ...auth, ...headers } };
-		if (body instanceof FormData) init.body = body;
-		else if (body !== undefined) {
-			init.body = JSON.stringify(body);
-			(init.headers as Record<string, string>)["Content-Type"] = "application/json";
-		}
-		const res = await fetch(`${base}${path}`, init);
-		let data: Envelope<T> | null = null;
 		try {
-			data = (await res.json()) as Envelope<T>;
-		} catch {
-			data = null;
+			return (await cloudflareApi<T>(`/accounts/${encodeURIComponent(creds.accountId)}/stream${path}`, { token: creds.token, method, body, headers })).result;
+		} catch (error) {
+			if (!(error instanceof CloudflareApiError)) throw error;
+			throw new StreamError(errorDetail(error.errors).replaceAll("; ", " ") || `Cloudflare Stream returned HTTP ${error.status}.`, error.status);
 		}
-		if (!res.ok || data?.success === false) {
-			const message = data?.errors?.map((e) => e.message).filter(Boolean).join(" ") || `Cloudflare Stream returned HTTP ${res.status}.`;
-			throw new StreamError(message, res.status);
-		}
-		return (data?.result ?? null) as T;
 	}
 
 	const id = (uid: string) => `/${encodeURIComponent(uid)}`;
