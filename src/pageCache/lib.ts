@@ -247,8 +247,22 @@ export async function noteNewVersion(db: D1Database, id: string, known: string |
 /** Astro's per-request cache controls (route caching), as far as the pack uses them. */
 interface RouteCache {
 	enabled?: boolean;
-	options?: { maxAge?: number };
-	set(options: { maxAge?: number; swr?: number } | false): void;
+	options?: { maxAge?: number; tags?: string[] };
+	set(options: { maxAge?: number; swr?: number; tags?: string[] } | false): void;
+}
+
+/**
+ * Tag a response that's going to the edge cache with the settings generation
+ * it was rendered with (src/core/generation.ts currentGenerationTag), so a
+ * settings save can later clear just the pages rendered with old settings.
+ * Called by the pack middleware once the response is final. Never turns
+ * caching on: a response without a lifetime, or turned off, is left alone
+ * (Astro's set() would re-enable it).
+ */
+export function tagGeneration(cache: RouteCache | undefined, tag: string): void {
+	const maxAge = cache?.enabled ? cache.options?.maxAge : undefined;
+	if (maxAge === undefined || maxAge <= 0) return;
+	cache!.set({ tags: [tag] });
 }
 
 /**

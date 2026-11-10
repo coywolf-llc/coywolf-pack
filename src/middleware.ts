@@ -19,7 +19,7 @@
 import type { MiddlewareHandler } from "astro";
 
 import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOption, siteFeatures, siteOption, siteSetting, isOn } from "./core/features.js";
-import { claimSettle, recordSettingsChange } from "./core/generation.js";
+import { claimSettle, currentGenerationTag, mergeScopes, recordSettingsChange } from "./core/generation.js";
 import { invalidateRobotsCache } from "./robots/middleware.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
 import { DEADLINES } from "./core/single-flight.js";
@@ -28,7 +28,7 @@ import type { PackMiddleware } from "./core/module.js";
 import { MIDDLEWARE } from "./modules.js";
 import { ALWAYS, LIFETIME_DEFAULTS, LIFETIME_SETTINGS } from "./pageCache/pack.js";
 import { ROBOTS_EDGE_MAX_AGE } from "./robots/pack.js";
-import { type PurgeScope, ROBOTS_TAG, applyPageLifetime, keepAtEdge, isRedirectSave, purgePageCache, purgeScope, purgesAfter, redirectPagesScope, settlePage, watchInvalidation } from "./pageCache/lib.js";
+import { type PurgeScope, ROBOTS_TAG, applyPageLifetime, keepAtEdge, isRedirectSave, purgePageCache, purgeScope, purgesAfter, redirectPagesScope, settlePage, tagGeneration, watchInvalidation } from "./pageCache/lib.js";
 import { STOPGAP_HEADER, WARMER_AGENT, WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, scheduleRewarm, startWarm, warmMayHaveWork, warmStep } from "./pageCache/warm.js";
 import { prefetchRedirects } from "./redirects/middleware.js";
 import { notePackMiddleware } from "./search/live-serve.js";
@@ -115,6 +115,9 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		const known = knownFeatures();
 		if (!known || isOn(known, "redirects")) prefetchRedirects(context.url, env, { database: options.database });
 		const features = await siteFeatures(options.database, context.url.pathname === ADMIN_MANIFEST);
+		// The settings generation this request renders with (read with the switches): its tag goes on
+		// whatever this response leaves in the edge cache, so a settings save can clear just those.
+		const generation = currentGenerationTag();
 		const db = env[options.database ?? "DB"] as D1Database | undefined;
 		/** Clear cached pages, then (for a full purge, when warming is on) start warming them again. */
 		const purge = (scope: PurgeScope) =>
@@ -132,13 +135,14 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 					: null;
 			const response = await next();
 			if (response.status < 400) {
-				const pages = redirectPagesScope(await redirectBody);
-				const scope = pages && "purgeEverything" in pages ? pages : purgeScope(context.url.pathname);
-				if (pages && !("purgeEverything" in pages)) waitUntil(purge(pages).catch((error) => console.error("coywolf-pack: could not clear pages at redirect sources", error)));
+				// One purge for both: the cached redirects (their tag) and the pages cached at the new sources.
+				// The settling purge repeats both: an isolate that hasn't seen the edit yet may render (and cache)
+				// a source's page instead of redirecting.
+				const scope = mergeScopes(purgeScope(context.url.pathname), redirectPagesScope(await redirectBody));
 				// This isolate's settings caches go now; other isolates drop theirs when they see the new generation.
 				invalidateFeatures();
 				const recorded = db
-					? recordSettingsChange(db, scope).catch((error) => console.error("coywolf-pack: could not record the settings change", error))
+					? recordSettingsChange(db, scope, undefined, { byGeneration: true }).catch((error) => console.error("coywolf-pack: could not record the settings change", error))
 					: Promise.resolve();
 				if (scope) waitUntil(recorded.then(() => purge(scope)));
 				else waitUntil(recorded);
@@ -257,6 +261,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 					// Without this, a site route rule (e.g. on a catch-all page route) would add
 					// its edge lifetime to them too. Redirects set their own edge caching.
 					if (!handler.ownsCache || readFailed()) routeCache?.set?.(false);
+					else tagGeneration(routeCache, generation);
 					return response;
 				}
 			} catch (error) {
@@ -284,6 +289,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				label: `${method} ${context.url.pathname}`,
 				reason: lastReadFailure,
 			});
+			tagGeneration(routeCache, generation);
 			return context.url.pathname.startsWith("/_emdash/") ? settled : withMediaPreconnect(settled);
 		}
 		return afterWrite(await next());

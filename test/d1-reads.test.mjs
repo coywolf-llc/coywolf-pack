@@ -253,7 +253,13 @@ test("a save keeps a settling purge still pending from an earlier one", async ()
 	assert.deepEqual(mergeScopes({ pathPrefixes: ["/a"] }, { pathPrefixes: ["/b", "/a"] }), { pathPrefixes: ["/a", "/b"] });
 	assert.deepEqual(mergeScopes(null, { pathPrefixes: ["/a"] }), { pathPrefixes: ["/a"] });
 	assert.deepEqual(mergeScopes({ tags: ["coywolf-redirects"] }, { tags: ["coywolf-redirects"] }), { tags: ["coywolf-redirects"] });
-	assert.deepEqual(mergeScopes({ tags: ["coywolf-redirects"] }, { pathPrefixes: ["/robots.txt"] }), { purgeEverything: true });
+	// Workers Cache takes both kinds in one call (it clears whatever matches either).
+	assert.deepEqual(mergeScopes({ tags: ["coywolf-redirects"] }, { pathPrefixes: ["/robots.txt"] }), { pathPrefixes: ["/robots.txt"], tags: ["coywolf-redirects"] });
+	assert.deepEqual(mergeScopes({ tags: ["a"], pathPrefixes: ["/x"] }, { tags: ["a", "b"] }), { pathPrefixes: ["/x"], tags: ["a", "b"] });
+	assert.deepEqual(mergeScopes({ tags: ["a"] }, { purgeEverything: true }), { purgeEverything: true });
+	// Over Cloudflare's 100 operations per purge: everything instead.
+	const many = Array.from({ length: 60 }, (_, i) => `/p${i}`);
+	assert.deepEqual(mergeScopes({ pathPrefixes: many }, { tags: many.map((p) => `t${p}`) }), { purgeEverything: true });
 });
 
 // ── Redirects ────────────────────────────────────────────────────
