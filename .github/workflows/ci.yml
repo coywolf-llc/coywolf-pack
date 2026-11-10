@@ -46,9 +46,9 @@ jobs:
       # another latest row tests its pin, so the newest EmDash can never be skipped untested.
       LATEST_KUMO_ROWS: "2.6.0 2.15.0"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
