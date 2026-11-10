@@ -24,7 +24,8 @@ import { z } from "zod";
 
 import { requireCachedFeature, requireFeature } from "../core/features.js";
 import { COLLECTION_SLUG, readCollections } from "../core/content-url.js";
-import { parseInput, workerEnv } from "../shared.js";
+import { noteSearch } from "../insights/search.js";
+import { afterResponse, parseInput, workerEnv } from "../shared.js";
 import { liveSearchD1, loadSearchMeta } from "./engine.js";
 import { normalizeCollections, normalizeLiveQuery, normalizeLocale } from "./live-cache.js";
 import { INDEX_ENDPOINT, LIVE_ENDPOINT, bumpSearchVersion, configureSearchLive, liveScriptFragment, searchVersion } from "./live-serve.js";
@@ -167,13 +168,17 @@ export function searchModule(options: SearchOptions) {
 					return { items: [], fallback: false };
 				}
 				const input = parseInput(liveInput, raw);
-				return liveSearchD1(await db(), normalizeLiveQuery(input.q), {
+				const d1 = await db();
+				const query = normalizeLiveQuery(input.q);
+				const found = await liveSearchD1(d1, query, {
 					collections: normalizeCollections(input.collections),
 					locale: normalizeLocale(input.locale),
 					limit: input.limit ?? live.limit,
 					database,
 					version,
 				});
+				noteSearch(d1, query, found.items.length, "live", afterResponse);
+				return found;
 			},
 		}),
 

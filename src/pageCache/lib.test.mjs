@@ -301,6 +301,8 @@ const READ_ONLY_ROUTES = [
 	"files/options",
 	"images/check",
 	"images/setup/plan",
+	"insights/searches/clear",
+	"insights/settings/save",
 	"links/list",
 	"redirects/test",
 	"schema/entries/bylines",

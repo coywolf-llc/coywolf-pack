@@ -25,6 +25,7 @@
 import { contentUrlFingerprint } from "../core/content-url.js";
 import { isOn, registerSiteSetting, rememberSiteSetting, siteFeatures, siteSetting } from "../core/features.js";
 import type { PackMiddleware } from "../core/module.js";
+import { liveAnswerCount, noteSearch } from "../insights/search.js";
 import { keepAtEdge, keepOffEdge } from "../pageCache/lib.js";
 import { type QueryStats, countingD1, liveSearchD1, loadSearchMeta } from "./engine.js";
 import { Lru, effectiveVersion, fingerprint, indexCacheKey, liveCacheKey, newContentVersion, normalizeCollections, normalizeLiveQuery, normalizeLocale } from "./live-cache.js";
@@ -173,13 +174,18 @@ async function serveLive(context: Context, env: Record<string, unknown>, waitUnt
 	const browser = { "Cache-Control": `public, max-age=${LIVE_BROWSER_TTL}` };
 	const edge = edgeCaching(context);
 	const hit = edge ? null : await cachedBody(liveMemory, key);
-	if (hit) return jsonResponse(hit.body, 200, { ...browser, "Server-Timing": timing(hit.where, started), "X-Coywolf-Cache": "HIT" });
+	if (hit) {
+		// Search insights (when on) count the searches the site answers, from this isolate's or the location's cache too.
+		noteSearch(db, query, () => liveAnswerCount(hit.body), "live", waitUntil);
+		return jsonResponse(hit.body, 200, { ...browser, "Server-Timing": timing(hit.where, started), "X-Coywolf-Cache": "HIT" });
+	}
 
 	const limited = await rateLimited(context, env);
 	if (limited) return limited;
 
 	const stats: QueryStats = { statements: 0, roundTrips: 0 };
 	const data = await liveSearchD1(countingD1(db, stats), query, { collections, locale, limit, database: config.database, version });
+	noteSearch(db, query, data.items.length, "live", waitUntil);
 	const body = JSON.stringify({ success: true, data });
 	if (edge) {
 		keepAtEdge(context, LIVE_EDGE_TTL, await searchTags(db, version));

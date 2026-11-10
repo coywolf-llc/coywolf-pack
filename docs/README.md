@@ -19,6 +19,7 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 
 ## Modules
 
+- [Insights](insights.md): edge errors and crawlers, Core Web Vitals, Fathom traffic, Google Search Console, search insights
 - [Clean Image URLs](images.md)
 - [Backups](backups.md)
 - [Redirect Manager](redirects.md)

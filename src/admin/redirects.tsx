@@ -14,6 +14,7 @@ import type { RedirectRule } from "../redirects/rules.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { RemovedContentPanel } from "./redirects-removed.js";
 import { PartSwitches } from "./feature-switches.js";
+import { PREFILL_PARAM, readRedirectPrefill } from "./redirect-prefill.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/redirects";
 
@@ -235,6 +236,15 @@ export function RedirectsPage() {
 	React.useEffect(() => {
 		void load();
 	}, [load]);
+	// Opened from a "Create redirect" link (Insights → Edge errors): the New redirect dialog with the source filled in.
+	React.useEffect(() => {
+		const source = readRedirectPrefill(window.location.search);
+		if (!source) return;
+		setEditing({ source });
+		const url = new URL(window.location.href);
+		url.searchParams.delete(PREFILL_PARAM);
+		window.history.replaceState(window.history.state, "", url);
+	}, []);
 
 	const remove = async (rule: Rule) => {
 		if (!(await confirm({ title: "Delete this redirect?", description: `${rule.source} stops redirecting.`, confirmLabel: "Delete" }))) return;

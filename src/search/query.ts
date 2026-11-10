@@ -14,7 +14,8 @@
 import { type SearchResult, search } from "emdash";
 
 import { COLLECTION_SLUG, type CollectionInfo, createEntryUrlResolver, interpolateUrlPattern, readCollections } from "../core/content-url.js";
-import { workerEnv } from "../shared.js";
+import { noteSearch } from "../insights/search.js";
+import { afterResponse, workerEnv } from "../shared.js";
 import { buildOrQuery, rankByCoverage } from "./fallback.js";
 import { type LiveSearchResponse, liveSearchD1 } from "./engine.js";
 
@@ -48,6 +49,18 @@ export interface PackSearchOptions {
 const FALLBACK_POOL = 50;
 
 export async function searchWithFallback(query: string, options: PackSearchOptions = {}): Promise<PackSearchResponse> {
+	const result = await searchOrFallback(query, options);
+	// A full search (the site's search page, or search/query in search mode), first page only: Search insights count it when on.
+	if (options.mode !== "suggest" && !options.cursor) {
+		const database = options.database ?? "DB";
+		void workerEnv()
+			.then((env) => noteSearch(env[database] as D1Database | undefined, query, result.items.length, "page", afterResponse))
+			.catch(() => undefined);
+	}
+	return result;
+}
+
+async function searchOrFallback(query: string, options: PackSearchOptions): Promise<PackSearchResponse> {
 	const limit = Math.min(Math.max(options.limit ?? 10, 1), 50);
 	const base = {
 		collections: options.collections ? [...new Set(options.collections)].filter((c) => COLLECTION_SLUG.test(c)).slice(0, 10) : undefined,
