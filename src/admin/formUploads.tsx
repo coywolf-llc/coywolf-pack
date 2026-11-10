@@ -8,11 +8,12 @@
  * The routes live on the Forms plugin, which privateFormUploads() wraps
  * (see src/formUploads/wrap.ts).
  */
-import { Badge, Banner, Button, Checkbox, Dialog, Input, Select } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Input, Select } from "@cloudflare/kumo";
 import { ArrowClockwise, DownloadSimple, Trash } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { ConfirmDialog } from "./confirm-dialog.js";
 import { apiPost, errorText } from "./api.js";
 import { DocsLink, FeaturesLink, Loading, PageHeader } from "./page.js";
 import { formatBytes, totalFromContentRange, type FormUploadsConfig, type UploadEntry } from "../formUploads/lib.js";
@@ -104,23 +105,17 @@ function DeleteDialog(props: { item: Item | null; onClose: () => void; onDeleted
 		}
 	};
 	return (
-		<Dialog.Root open={item !== null} onOpenChange={(open) => !open && !pending && props.onClose()}>
-			<Dialog className="p-6" size="lg">
-				<Dialog.Title className="text-lg font-semibold">Delete {item?.filename}?</Dialog.Title>
-				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
-					The file is removed from the private bucket and can't be recovered. The submission stays, and still shows the file name.
-				</Dialog.Description>
-				{error && <Banner className="mt-3" variant="error" role="alert" description={error} />}
-				<div className="mt-6 flex justify-end gap-2">
-					<Button variant="secondary" disabled={pending} onClick={props.onClose}>
-						Cancel
-					</Button>
-					<Button variant="destructive" disabled={pending} onClick={() => void run()}>
-						{pending ? "Deleting…" : "Delete file"}
-					</Button>
-				</div>
-			</Dialog>
-		</Dialog.Root>
+		<ConfirmDialog
+			open={item !== null}
+			onClose={props.onClose}
+			title={`Delete ${item?.filename ?? "this file"}?`}
+			description="The file is removed from the private bucket and can't be recovered. The submission stays, and still shows the file name."
+			confirmLabel="Delete file"
+			pendingLabel="Deleting…"
+			isPending={pending}
+			error={error}
+			onConfirm={() => void run()}
+		/>
 	);
 }
 

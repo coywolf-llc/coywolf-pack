@@ -3,11 +3,12 @@
  * with downloads, where each is used, a large-file uploader (through the site to
  * R2), and delete.
  */
-import { Badge, Banner, Button, Dialog, DropdownMenu, Input, Meter, Select, Tabs } from "@cloudflare/kumo";
+import { Badge, Banner, Button, DropdownMenu, Input, Meter, Select, Tabs } from "@cloudflare/kumo";
 import { ArrowsClockwise, CloudArrowUp, DotsThree, DownloadSimple, FileArrowDown, LinkSimple, Trash, X } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { ConfirmDialog } from "./confirm-dialog.js";
 import { apiPost, errorText } from "./api.js";
 import { PageHeader, Loading } from "./page.js";
 import { FILE_CSS, SAMPLE_FILE, renderFileCardHtml } from "../files/card.js";
@@ -210,15 +211,19 @@ function DeleteDialog(props: { file: FileItem | null; onClose: () => void; onDel
 		}
 	};
 	return (
-		<Dialog.Root open={file !== null} onOpenChange={(open) => !open && !pending && props.onClose()}>
-			<Dialog className="p-6" size="lg">
-				<Dialog.Title className="text-lg font-semibold">{file?.status === "uploading" ? "Discard incomplete upload?" : `Delete ${file?.name}?`}</Dialog.Title>
-				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
-					The file is removed from the R2 bucket and can't be recovered. Its download link stops working.
-				</Dialog.Description>
+		<ConfirmDialog
+			open={file !== null}
+			onClose={props.onClose}
+			title={file?.status === "uploading" ? "Discard incomplete upload?" : `Delete ${file?.name ?? "this file"}?`}
+			description="The file is removed from the R2 bucket and can't be recovered. Its download link stops working."
+			confirmLabel="Delete file"
+			pendingLabel="Deleting…"
+			isPending={pending}
+			error={error}
+			onConfirm={() => void run()}
+		>
 				{file && file.usedIn.length > 0 && (
 					<Banner
-						className="mt-4"
 						variant="alert"
 						title={`Used in ${file.usedIn.length} ${file.usedIn.length === 1 ? "entry" : "entries"}`}
 						description={
@@ -229,17 +234,7 @@ function DeleteDialog(props: { file: FileItem | null; onClose: () => void; onDel
 						}
 					/>
 				)}
-				{error && <Banner className="mt-3" variant="error" role="alert" description={error} />}
-				<div className="mt-6 flex justify-end gap-2">
-					<Button variant="secondary" disabled={pending} onClick={props.onClose}>
-						Cancel
-					</Button>
-					<Button variant="destructive" disabled={pending} onClick={() => void run()}>
-						{pending ? "Deleting…" : "Delete file"}
-					</Button>
-				</div>
-			</Dialog>
-		</Dialog.Root>
+		</ConfirmDialog>
 	);
 }
 
