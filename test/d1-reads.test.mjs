@@ -374,6 +374,18 @@ test("cold isolate: the redirect lookup and the feature switches are one D1 roun
 
 // ── Stored image sizes ──────────────────────────────────────────
 
+test("file records are cached per isolate until the settings epoch moves (a save elsewhere), not only for their minute", async () => {
+	const { resolveFile, invalidateSiteCache } = await import("../src/files/site.ts");
+	const db = d1("CREATE TABLE media (id TEXT PRIMARY KEY, filename TEXT, mime_type TEXT, size INTEGER, storage_key TEXT, created_at TEXT, status TEXT);");
+	db.sqlite.prepare("INSERT INTO media VALUES ('01F', 'guide.pdf', 'application/pdf', 10, 'k', '2026-01-01', 'ready')").run();
+	invalidateSiteCache("01F");
+	assert.equal((await resolveFile(db, "01F")).name, "guide.pdf");
+	db.sqlite.prepare("UPDATE media SET filename = 'guide-v2.pdf' WHERE id = '01F'").run();
+	assert.equal((await resolveFile(db, "01F")).name, "guide.pdf", "cached");
+	features.invalidateFeatures(); // A new settings generation seen (or a save here): the epoch moves.
+	assert.equal((await resolveFile(db, "01F")).name, "guide-v2.pdf", "a page tagged with the new generation never shows the old record");
+});
+
 test("imageInfo: one statement for all of a page's images, cached, read again after a settings change", async () => {
 	const MEDIA = "CREATE TABLE media (id TEXT PRIMARY KEY, storage_key TEXT, width INTEGER, height INTEGER, mime_type TEXT, size INTEGER, status TEXT, focal_x REAL, focal_y REAL, created_at TEXT);";
 	const db = d1(MEDIA);

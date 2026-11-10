@@ -519,7 +519,8 @@ export interface EmbedEntry {
 export const embedStore = (ctx: Ctx) => coll<EmbedEntry>(ctx, COLLECTIONS.embeds);
 export const embedKey = (collection: string, id: string) => `${collection}:${id}`;
 
-let embedsMemo: { items: EmbedEntry[]; at: number } | null = null;
+/** Keyed on the settings epoch too: a reindex (a pack admin save) in another isolate reaches this one with the settings generation. */
+let embedsMemo: { items: EmbedEntry[]; at: number; epoch: number } | null = null;
 const EMBEDS_TTL = 60_000;
 
 export function invalidateEmbeds(): void {
@@ -528,7 +529,8 @@ export function invalidateEmbeds(): void {
 
 /** Every indexed entry (paged through plugin storage; cached per isolate for a minute). */
 export async function allEmbeds(ctx: Ctx): Promise<EmbedEntry[]> {
-	if (embedsMemo && Date.now() - embedsMemo.at < EMBEDS_TTL) return embedsMemo.items;
+	if (embedsMemo && isCurrent(embedsMemo, EMBEDS_TTL)) return embedsMemo.items;
+	const epoch = settingsEpoch();
 	const store = embedStore(ctx);
 	const items: EmbedEntry[] = [];
 	let cursor: string | undefined;
@@ -538,7 +540,7 @@ export async function allEmbeds(ctx: Ctx): Promise<EmbedEntry[]> {
 		if (!res.hasMore || !res.cursor) break;
 		cursor = res.cursor;
 	}
-	embedsMemo = { items, at: Date.now() };
+	if (epoch === settingsEpoch()) embedsMemo = { items, at: Date.now(), epoch };
 	return items;
 }
 
