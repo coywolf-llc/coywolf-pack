@@ -1,5 +1,5 @@
 /**
- * Backups admin page and dashboard widget. Layout and components follow the
+ * Backups admin page (the dashboard widget is in backups-widget.tsx). Layout and components follow the
  * EmDash admin's own list pages (Redirects, Bylines): Kumo controls, a bordered
  * row list, and confirmation dialogs.
  */
@@ -16,37 +16,11 @@ import {
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { type Backup, type ListResponse, type UndoPoint, ago, isStale, sourceLabel, useBackups } from "./backups-widget.js";
 import { SaveBar } from "./save-bar.js";
 import { SettingsSection } from "./settings-ui.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/backups";
-
-interface Backup {
-	stamp: string;
-	createdAt: string;
-	file: string;
-	bytes: number;
-	source?: string;
-	tables?: number;
-	rows?: number;
-	media?: { copied: number; preserved: number; total: number; pending?: number };
-	uploads?: { copied: number; preserved: number; total: number; pending?: number };
-}
-
-interface UndoPoint {
-	bookmark: string;
-	rewoundAt: string;
-	rewoundTo: string;
-}
-
-interface ListResponse {
-	items: Backup[];
-	scheduled: boolean;
-	retentionDays: number;
-	staleAfterHours: number;
-	restore: { enabled: true } | { enabled: false; reason: string };
-	undo: UndoPoint | null;
-}
 
 interface NewDatabaseResult {
 	databaseId: string;
@@ -66,47 +40,12 @@ function formatBytes(bytes: number): string {
 	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function ago(iso: string): string {
-	const hours = (Date.now() - new Date(iso).getTime()) / 3_600_000;
-	if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} min ago`;
-	if (hours < 48) return `${Math.round(hours)} h ago`;
-	return `${Math.round(hours / 24)} days ago`;
-}
-
-function sourceLabel(source?: string): string {
-	if (source === "admin") return "Manual";
-	if (source === "scheduled") return "Scheduled";
-	return "Nightly job";
-}
-
 async function post<T>(path: string, body?: unknown): Promise<T> {
 	const response = await apiFetch(`${API}/${path}`, {
 		method: "POST",
 		...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
 	});
 	return parseApiResponse<T>(response, "The request failed");
-}
-
-function useBackups() {
-	const [data, setData] = React.useState<ListResponse>();
-	const [error, setError] = React.useState<string>();
-	const load = React.useCallback(async () => {
-		setError(undefined);
-		try {
-			setData(await parseApiResponse<ListResponse>(await apiFetch(`${API}/list`), "Could not load backups"));
-		} catch (cause) {
-			setError(errorText(cause, "Could not load backups"));
-		}
-	}, []);
-	React.useEffect(() => {
-		void load();
-	}, [load]);
-	return { data, error, load };
-}
-
-function isStale(data: ListResponse): boolean {
-	const latest = data.items[0];
-	return !latest || (Date.now() - new Date(latest.createdAt).getTime()) / 3_600_000 > data.staleAfterHours;
 }
 
 /**
@@ -594,20 +533,3 @@ export function BackupsPage() {
 		</div>
 	);
 }
-
-export function BackupStatusWidget() {
-	const { data, error } = useBackups();
-	if (error) return <p className="text-sm text-kumo-danger">{error}</p>;
-	if (!data) return <Loader />;
-	const latest = data.items[0];
-	if (!latest) return <p className="text-sm text-kumo-danger">No backups yet.</p>;
-	return (
-		<div className="space-y-1 text-sm">
-			<p className={isStale(data) ? "font-medium text-kumo-danger" : "font-medium"}>Last backup {ago(latest.createdAt)}</p>
-			<p className="text-kumo-subtle">
-				{sourceLabel(latest.source)} · {data.items.length} kept
-			</p>
-		</div>
-	);
-}
-

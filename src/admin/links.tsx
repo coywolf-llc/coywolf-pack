@@ -27,7 +27,7 @@ import { PartSwitches } from "./feature-switches.js";
 const API = "/_emdash/api/plugins/coywolf-pack/links";
 const ADMIN = "/_emdash/admin";
 
-type LinkStatus = "unchecked" | "ok" | "redirect" | "broken" | "blocked" | "error";
+export type LinkStatus = "unchecked" | "ok" | "redirect" | "broken" | "blocked" | "error";
 type StatusFilter = "all" | "ignored" | LinkStatus;
 type BadgeVariant = "secondary" | "error" | "warning" | "success" | "info" | "outline";
 
@@ -64,7 +64,7 @@ interface IgnoreRule {
 	value: string;
 }
 
-interface ScanState {
+export interface ScanState {
 	status: "idle" | "running";
 	startedAt: string | null;
 	finishedAt: string | null;
@@ -948,33 +948,6 @@ export function LinksPage() {
 					void load();
 				}}
 			/>
-		</div>
-	);
-}
-
-export function LinksWidget() {
-	const [data, setData] = React.useState<{ counts: Record<LinkStatus, number>; scan: ScanState }>();
-	const [error, setError] = React.useState<string>();
-	React.useEffect(() => {
-		apiFetch(`${API}/summary`)
-			.then((r) => parseApiResponse<{ counts: Record<LinkStatus, number>; scan: ScanState }>(r, "Could not load links"))
-			.then(setData)
-			.catch((cause) => setError(errorText(cause, "Could not load links")));
-	}, []);
-	if (error) return <p className="text-sm text-kumo-subtle">{error}</p>;
-	if (!data) return <Loader />;
-	const problems = data.counts.broken + data.counts.error;
-	const total = Object.values(data.counts).reduce((a, b) => a + b, 0);
-	return (
-		<div className="space-y-1 text-sm">
-			<p className={problems ? "font-medium text-kumo-danger" : "font-medium"}>{problems ? `${plural(problems, "broken link")}` : "No broken links"}</p>
-			<p className="text-kumo-subtle">
-				{plural(total, "link")} · {data.counts.blocked.toLocaleString()} blocked · {data.counts.redirect.toLocaleString()} redirected
-				{data.counts.unchecked ? ` · ${data.counts.unchecked.toLocaleString()} not checked` : ""}
-			</p>
-			<a className="text-kumo-link hover:underline" href={`${ADMIN}/plugins/coywolf-pack/links`}>
-				Open Link Manager
-			</a>
 		</div>
 	);
 }

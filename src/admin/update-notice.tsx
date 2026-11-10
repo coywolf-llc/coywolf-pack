@@ -1,7 +1,7 @@
 /**
  * "Coywolf Pack x.y.z is available": a card on EmDash's dashboard (listed by
  * the server only while an update is waiting) and a notice at the top of
- * every pack page, each with the command to install it. The server asks npm
+ * every pack page (packPage in page.tsx), each with the command to install it. The server asks npm
  * at most once a day; the pages read the answer once per admin visit.
  * Dismissing hides both for everyone on the site until a newer version.
  */
@@ -181,18 +181,4 @@ export function UpdateWidget() {
 			<UpdateDetails update={update} dismiss={dismiss} error={error} />
 		</div>
 	);
-}
-
-/** A pack page with the notice above it. */
-export function withUpdateNotice(Page: React.ComponentType): React.ComponentType {
-	function PageWithUpdateNotice() {
-		return (
-			<>
-				<UpdateNotice />
-				<Page />
-			</>
-		);
-	}
-	PageWithUpdateNotice.displayName = `WithUpdateNotice(${Page.displayName ?? Page.name ?? "Page"})`;
-	return PageWithUpdateNotice;
 }
