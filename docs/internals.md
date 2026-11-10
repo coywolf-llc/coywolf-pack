@@ -62,7 +62,7 @@ Redirect Manager, its Slug changes part and Backups were on by default until 0.3
 
 `recordDefaults` (`src/core/features.ts`) records them once, by compare-and-set on the switches:
 
-- In `plugin:install`, which EmDash runs only when it first records the plugin on a site: if the pack has nothing stored (no switches, no setting or KV row, no storage document), it's a new site, so only the marker is stored and the new defaults apply.
+- In `plugin:install`, which EmDash runs only when it first records the plugin on a site: if the pack has nothing stored (no switches, no setting or KV row other than its housekeeping rows, no storage document), it's a new site, so only the marker is stored and the new defaults apply. Install first leaves a flag (`state:freshInstall`, and one in the isolate), so if its recording fails, a later call still records the site as new while it has no pack data; the flag goes once the defaults are recorded. The housekeeping rows, which the pack writes on any site by itself, are the flag, `pageCache:version`, `pageCache:warmState` and `state:discovery:indexnowRetired`.
 - Everywhere else (`plugin:activate`, the Features page's list, a save of the switches), and on any doubt (stored switches, any pack data, a read that fails): it's an existing site, so `legacyDefault` is stored for each of those features the site hadn't chosen, then the marker.
 
 A new feature that starts off needs none of this. Use `legacyDefault` only when changing a default an existing feature already had.
