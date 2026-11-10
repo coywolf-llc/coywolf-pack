@@ -15,6 +15,17 @@ updates:
     # Raise the ranges in package.json too, so they say what's tested.
     versioning-strategy: increase
     ignore:
+      # The site stack: these match what the 8 sites run and move by hand when the sites do (CI's "latest"
+      # rows already test the newest EmDash). Bumping EmDash alone would also break the Kumo pin check below.
+      - dependency-name: emdash
+      - dependency-name: "@emdash-cms/*"
+      - dependency-name: astro
+      - dependency-name: "@astrojs/*"
+      - dependency-name: react
+      - dependency-name: react-dom
+      - dependency-name: "@types/react"
+      - dependency-name: "@types/react-dom"
+      - dependency-name: zod
       # Follows the exact version EmDash's admin pins (CI fails when they differ): changed by hand with EmDash.
       - dependency-name: "@cloudflare/kumo"
       # A new TypeScript major is its own change.

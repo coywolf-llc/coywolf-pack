@@ -28,7 +28,7 @@ A latest job whose Kumo isn't the newest release's pin ends early with a notice,
 **When EmDash moves.**
 
 - When the sites move to a new EmDash, change the sites job's `emdash` (and `kumo`, if the pin changed) in `ci.yml`.
-- When EmDash's admin pins a new Kumo, set the `@cloudflare/kumo` devDependency to that exact version. Dependabot doesn't update Kumo, and CI fails until it matches. Then add a job for the new pin (and to `KUMO_ROWS`), and drop the one no release pins anymore.
+- When EmDash's admin pins a new Kumo, set the `@cloudflare/kumo` devDependency to that exact version. Dependabot doesn't update Kumo, and CI fails until it matches. Then add a `latest` job for the new pin (and its Kumo to `LATEST_KUMO_ROWS`), and drop the `latest` job no release pins anymore. When the sites move to a new EmDash, update the sites job and the site-stack devDependencies (EmDash, Astro, React, Zod, Kumo) by hand: Dependabot leaves them alone.
 
 **What the tests check against EmDash.** `test/admin-classes.test.mjs` checks the admin pages' class names against the installed EmDash's admin stylesheet. `test/emdash-contract.test.mjs` checks the EmDash internals the pack relies on: its tables and columns, plugin APIs, admin patches and page metadata (the list is in [Internals](internals.md#emdash-internals-the-pack-relies-on)).
 

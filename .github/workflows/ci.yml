@@ -17,7 +17,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A pull request's runs replace each other; every push to main gets its own group (by commit), so a quick
+  # second merge can't cancel the first merge's pending run.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -40,8 +42,9 @@ jobs:
           - emdash: latest
             kumo: "2.15.0"
     env:
-      # Every Kumo version in the matrix above.
-      KUMO_ROWS: "2.6.0 2.15.0"
+      # The Kumo versions of the "latest" rows only (not the sites row's): a latest release is skipped only when
+      # another latest row tests its pin, so the newest EmDash can never be skipped untested.
+      LATEST_KUMO_ROWS: "2.6.0 2.15.0"
     steps:
       - uses: actions/checkout@v5
 
@@ -83,12 +86,12 @@ jobs:
               echo "::error::Not a valid row: EmDash $version pins Kumo $pin, not $KUMO. Fix the matrix in .github/workflows/ci.yml."
               exit 1
             fi
-            if [[ " $KUMO_ROWS " == *" $pin "* ]]; then
-              echo "::notice::Skipped: EmDash $version pins Kumo $pin, not $KUMO. The Kumo $pin row tests it."
+            if [[ " $LATEST_KUMO_ROWS " == *" $pin "* ]]; then
+              echo "::notice::Skipped: EmDash $version pins Kumo $pin, not $KUMO. The latest, Kumo $pin row tests it."
               echo "run=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "::error::EmDash $version pins Kumo $pin, which no row of the matrix tests: add it to .github/workflows/ci.yml (matrix and KUMO_ROWS)."
+            echo "::error::EmDash $version pins Kumo $pin, which no row of the matrix tests: add a "latest" row for it to .github/workflows/ci.yml (matrix and LATEST_KUMO_ROWS)."
             exit 1
           fi
           if [ "$(installed emdash)" != "$version" ] || [ "$(installed @cloudflare/kumo)" != "$KUMO" ]; then
