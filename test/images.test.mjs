@@ -96,6 +96,12 @@ test("media URLs EmDash prints with publicUrl set (<publicUrl>/<file>) are media
 		assert.equal(cleanImagePath("https://media.example.com/DEF.jpg", { width: 1200, height: 630 }), "https://media.example.com/s/1200x630/DEF.jpg");
 		assert.equal(cdnOriginalUrl("https://media.example.com/DEF.jpg"), "https://media.example.com/DEF.jpg");
 	}, "https://media.example.com");
+	// An r2.dev publicUrl can't resize: recognized, never the media host.
+	withHost("https://media.example.com", null, () => {
+		assert.equal(imageCdn(), "https://media.example.com");
+		assert.deepEqual(mediaFile("https://pub-abc123.r2.dev/ABC.jpg"), { id: "ABC", ext: "jpg" });
+		assert.equal(cleanImagePath("https://pub-abc123.r2.dev/ABC.jpg", { width: 300 }), "https://media.example.com/s/300/ABC.jpg");
+	}, "https://pub-abc123.r2.dev");
 	// With a path in publicUrl, its URLs are still recognized, and the media host (here images.cdn) serves them.
 	withHost("https://img.example.com", null, () => {
 		assert.deepEqual(mediaFile("https://bucket.example.com/media/ABC.jpg"), { id: "ABC", ext: "jpg" });

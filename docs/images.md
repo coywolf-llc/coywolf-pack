@@ -18,7 +18,7 @@ https://media.coywolf.com/s/<w>/<file>         width only, keeps the ratio
 
 **Where the host comes from**, first match wins:
 
-1. **EmDash's own media setting**: `storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" })` in `astro.config.mjs` (EmDash 1.4+). It has to be a plain `https://` address with no path. With it, EmDash's own components (Image, Gallery, Video) print media at the same host, and newer EmDash releases give the site settings' logo, favicon and default social image there too, so one setting covers EmDash and the pack. The Clean Image URLs page shows the host as coming from EmDash's setting, and it's changed in `astro.config.mjs` only.
+1. **EmDash's own media setting**: `storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" })` in `astro.config.mjs` (EmDash 1.4+). It has to be a plain `https://` address with no path, on a domain of the site's zone (an `r2.dev` address can't resize, so it's never used as the media host; its URLs are still recognized). With it, EmDash's own components (Image, Gallery, Video) print media at the same host, and newer EmDash releases give the site settings' logo, favicon and default social image there too, so one setting covers EmDash and the pack. The Clean Image URLs page shows the host as coming from EmDash's setting, and it's changed in `astro.config.mjs` only.
 2. **The host saved on the Clean Image URLs page** (takes effect within a minute, no deploy).
 3. **The pack's option**, `coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })`: the fallback, from before EmDash had `publicUrl`.
 

@@ -96,7 +96,9 @@ export function setSavedImageCdn(url: string | null | undefined): void {
 export function setStoragePublicUrl(url: string | null | undefined): void {
 	const raw = String(url ?? "").trim().replace(/\/+$/, "");
 	storagePrefix = /^https?:\/\/[^/?#\s]+(?:\/[^?#\s]*)?$/i.test(raw) ? raw : null;
-	storageBase = normalizeMediaHost(raw);
+	const host = normalizeMediaHost(raw);
+	// An r2.dev address isn't in a zone, so it can't have Image Transformations or the /s/ rules: never the media host.
+	storageBase = host && !/\.r2\.dev$/i.test(host) ? host : null;
 }
 
 /** The media host in use (https origin, no trailing slash), or null when there's none. */
