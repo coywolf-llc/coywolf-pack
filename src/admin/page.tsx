@@ -11,8 +11,12 @@ import { adminHref, goTo, isPlainClick, packPagePath } from "./router.js";
 import { ToastProvider } from "./toast.js";
 import { UpdateNotice } from "./update-notice.js";
 
-/** The page header, as EmDash's PageHeader draws it: the title, actions at its end, and a description below. */
-export function PageHeader(props: { title: React.ReactNode; description?: React.ReactNode; actions?: React.ReactNode }) {
+/**
+ * The page header, as EmDash's PageHeader draws it: the title, actions at its
+ * end, a description below, then any further rows (`children`: filters, a
+ * search box) inside the header.
+ */
+export function PageHeader(props: { title: string; description?: React.ReactNode; actions?: React.ReactNode; children?: React.ReactNode }) {
 	return (
 		<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
 			<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
@@ -20,6 +24,7 @@ export function PageHeader(props: { title: React.ReactNode; description?: React.
 				{props.actions && <div className="flex shrink-0 flex-wrap justify-end gap-2">{props.actions}</div>}
 				{props.description && <div className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">{props.description}</div>}
 			</div>
+			{props.children}
 		</header>
 	);
 }

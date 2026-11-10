@@ -2,12 +2,13 @@
  * Discovery admin page: Crawler Hints (read from Cloudflare), and the news sitemap, the RSS
  * feed, and llms.txt settings and status.
  */
-import { Badge, Banner, Button, Checkbox, Input, InputArea, Loader } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Input, InputArea } from "@cloudflare/kumo";
 import { ArrowClockwise, ArrowSquareOut } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { FEATURES_CHANGED, PartSwitch, useParts } from "./feature-switches.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
@@ -251,9 +252,7 @@ export function DiscoveryPage() {
 				{error ? (
 					<Banner variant="error" role="alert" description={error} />
 				) : (
-					<div className="flex justify-center py-12">
-						<Loader />
-					</div>
+					<Loading />
 				)}
 			</div>
 		);
@@ -429,12 +428,14 @@ export function DiscoveryPage() {
 
 function Header() {
 	return (
-		<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-			<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Discovery</h1>
-			<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+		<PageHeader
+			title="Discovery"
+			description={
+				<>
 				Help search engines, feed readers and AI agents find your content: Cloudflare's Crawler Hints, a Google News sitemap, an RSS feed, and llms.txt with Markdown
 				versions of your entries.
-			</p>
-		</header>
+				</>
+			}
+		/>
 	);
 }

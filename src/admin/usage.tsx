@@ -4,11 +4,12 @@
  * estimated bill, and the cache warmer's share (an estimate from sampled
  * Workers Logs). Data from cache/usage (kept an hour; Refresh reads again).
  */
-import { Banner, Button, Loader } from "@cloudflare/kumo";
+import { Banner, Button } from "@cloudflare/kumo";
 import { ArrowsClockwise } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { Loading } from "./page.js";
 import { errorText } from "./api.js";
 import { FREE, PAID } from "../pageCache/usage-core.js";
 import type { UsageResult } from "../pageCache/usage.js";
@@ -142,9 +143,7 @@ export function UsageCard() {
 				</p>
 				{error && <Banner variant="error" role="alert" description={error} />}
 				{!data && !error && (
-					<div className="flex justify-center py-6">
-						<Loader />
-					</div>
+					<Loading className="flex justify-center py-6" />
 				)}
 				{data && !data.configured && <Setup reason={data.reason} />}
 				{data?.configured && <Details r={data} />}
@@ -170,19 +169,19 @@ function Details(props: { r: Report }) {
 				<h3 className="text-sm font-medium">The account</h3>
 				<p className="text-sm text-kumo-subtle">All Workers and databases in the account, {plan.window}.</p>
 				<div className="mt-2 overflow-x-auto">
-					<table className="w-full text-left text-sm">
+					<table className="w-full text-start text-sm">
 						<thead className="text-kumo-subtle">
 							<tr>
-								<th scope="col" className="py-1 pr-4 font-medium">
+								<th scope="col" className="py-1 cw-pe-4 font-medium">
 									Usage
 								</th>
-								<th scope="col" className="py-1 pr-4 font-medium">
+								<th scope="col" className="py-1 cw-pe-4 font-medium">
 									Used
 								</th>
-								<th scope="col" className="py-1 pr-4 font-medium">
+								<th scope="col" className="py-1 cw-pe-4 font-medium">
 									Included
 								</th>
-								<th scope="col" className="py-1 pr-4 font-medium">
+								<th scope="col" className="py-1 cw-pe-4 font-medium">
 									Share
 								</th>
 							</tr>
@@ -190,12 +189,12 @@ function Details(props: { r: Report }) {
 						<tbody className="divide-y divide-kumo-line">
 							{plan.rows.map((row) => (
 								<tr key={row.label}>
-									<th scope="row" className="py-2 pr-4 font-normal">
+									<th scope="row" className="py-2 cw-pe-4 font-normal">
 										{row.label}
 									</th>
-									<td className="py-2 pr-4">{row.show(row.used)}</td>
-									<td className="py-2 pr-4">{row.show(row.of)}</td>
-									<td className="py-2 pr-4">
+									<td className="py-2 cw-pe-4">{row.show(row.used)}</td>
+									<td className="py-2 cw-pe-4">{row.show(row.of)}</td>
+									<td className="py-2 cw-pe-4">
 										<span className="inline-flex items-center gap-2">
 											<meter min={0} max={1} low={0.5} high={0.8} optimum={0} value={Math.min(1, row.of ? row.used / row.of : 0)} aria-label={`${row.label}: ${pct(row.used, row.of)} of the allowance`} />
 											{pct(row.used, row.of)}
@@ -216,19 +215,19 @@ function Details(props: { r: Report }) {
 				</p>
 				{r.worker && (
 					<div className="mt-2 overflow-x-auto">
-						<table className="w-full text-left text-sm">
+						<table className="w-full text-start text-sm">
 							<thead className="text-kumo-subtle">
 								<tr>
-									<th scope="col" className="py-1 pr-4 font-medium">
+									<th scope="col" className="py-1 cw-pe-4 font-medium">
 										Usage
 									</th>
-									<th scope="col" className="py-1 pr-4 font-medium">
+									<th scope="col" className="py-1 cw-pe-4 font-medium">
 										Today (UTC)
 									</th>
-									<th scope="col" className="py-1 pr-4 font-medium">
+									<th scope="col" className="py-1 cw-pe-4 font-medium">
 										Last 7 days
 									</th>
-									<th scope="col" className="py-1 pr-4 font-medium">
+									<th scope="col" className="py-1 cw-pe-4 font-medium">
 										Last 30 days
 									</th>
 								</tr>
@@ -236,12 +235,12 @@ function Details(props: { r: Report }) {
 							<tbody className="divide-y divide-kumo-line">
 								{SITE_ROWS.filter((row) => r.databaseId || !row.label.startsWith("D1")).map((row) => (
 									<tr key={row.label}>
-										<th scope="row" className="py-2 pr-4 font-normal">
+										<th scope="row" className="py-2 cw-pe-4 font-normal">
 											{row.label}
 										</th>
-										<td className="py-2 pr-4">{row.value(r.periods.day.site)}</td>
-										<td className="py-2 pr-4">{row.value(r.periods.week.site)}</td>
-										<td className="py-2 pr-4">{row.value(r.periods.month.site)}</td>
+										<td className="py-2 cw-pe-4">{row.value(r.periods.day.site)}</td>
+										<td className="py-2 cw-pe-4">{row.value(r.periods.week.site)}</td>
+										<td className="py-2 cw-pe-4">{row.value(r.periods.month.site)}</td>
 									</tr>
 								))}
 							</tbody>
@@ -270,7 +269,7 @@ function Details(props: { r: Report }) {
 export function UsageWidget() {
 	const { data, error } = useUsage();
 	if (error) return <p className="text-sm text-kumo-subtle">{error}</p>;
-	if (!data) return <Loader />;
+	if (!data) return <Loading className="" />;
 	const link = (
 		<a className="text-kumo-link hover:underline" href={`${ADMIN}/plugins/coywolf-pack/performance`}>
 			{data.configured ? "Open Performance" : "Set it up on Performance"}

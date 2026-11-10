@@ -3,12 +3,13 @@
  * with downloads, where each is used, a large-file uploader (through the site to
  * R2), and delete.
  */
-import { Badge, Banner, Button, Dialog, DropdownMenu, Input, Loader, Meter, Select, Tabs } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Dialog, DropdownMenu, Input, Meter, Select, Tabs } from "@cloudflare/kumo";
 import { ArrowsClockwise, CloudArrowUp, DotsThree, DownloadSimple, FileArrowDown, LinkSimple, Trash, X } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { FILE_CSS, SAMPLE_FILE, renderFileCardHtml } from "../files/card.js";
 import { filesToCsv } from "../files/export.js";
 import { formatSize, iconFor } from "../files/format.js";
@@ -291,9 +292,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 		return error ? (
 			<Banner variant="error" role="alert" title="Could not load the settings" description={error} />
 		) : (
-			<div className="py-12 text-center">
-				<Loader />
-			</div>
+			<Loading className="py-12 text-center" />
 		);
 
 	const field = (key: "filesBase" | "filesPublicBaseUrl" | "filesAccent" | "filesR2AccountId" | "filesR2AccessKeyId" | "filesR2Bucket") => ({
@@ -498,10 +497,10 @@ export function FilesPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Files</h1>
-					<div className="flex shrink-0 flex-wrap justify-end gap-2">
+			<PageHeader
+				title="File Downloads"
+				actions={
+					<>
 						{tab === "files" && (
 							<Button variant="secondary" icon={<DownloadSimple />} disabled={!data?.items.length} title="Download the list of files, with download counts and where each is used, as a CSV file" onClick={exportCsv}>
 								Export CSV
@@ -531,8 +530,10 @@ export function FilesPage() {
 								/>
 							</>
 						)}
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Files offered for download with the File download block: Media Library files used in blocks, and large uploads.
 						{data ? (
 							<>
@@ -541,8 +542,9 @@ export function FilesPage() {
 							</>
 						) : null}
 						{data && !data.largeUploadsEnabled ? " Turn on Large uploads (Plugins → Coywolf Pack) to upload files over 50 MB or of any type." : ""}
-					</p>
-				</div>
+					</>
+				}
+			>
 				{tab === "files" && (
 				<div className="flex flex-col gap-2 sm:flex-row sm:items-end">
 					<div className="sm:w-72">
@@ -567,7 +569,7 @@ export function FilesPage() {
 					</div>
 				</div>
 				)}
-			</header>
+			</PageHeader>
 
 			<PartSwitches module="files" />
 
@@ -619,9 +621,7 @@ export function FilesPage() {
 			)}
 
 			{tab !== "files" ? null : !data && !error ? (
-				<div className="py-12 text-center text-kumo-subtle">
-					<Loader />
-				</div>
+				<Loading className="py-12 text-center text-kumo-subtle" />
 			) : data && data.items.length === 0 ? (
 				<div className="py-10 text-center text-kumo-subtle">
 					<FileArrowDown size={40} className="mx-auto mb-3 opacity-30" aria-hidden="true" />
@@ -724,14 +724,14 @@ export function FilesPage() {
 											<>
 												<DropdownMenu.Item
 													className="py-1 data-highlighted:bg-kumo-fill"
-													icon={<LinkSimple className="me-1.5 size-3.5" aria-hidden="true" />}
+													icon={LinkSimple}
 													onClick={() => void copy(file)}
 												>
 													Copy download link
 												</DropdownMenu.Item>
 												<DropdownMenu.Item
 													className="py-1 data-highlighted:bg-kumo-fill"
-													icon={<FileArrowDown className="me-1.5 size-3.5" aria-hidden="true" />}
+													icon={FileArrowDown}
 													onClick={() => window.open(file.url!, "_blank", "noopener")}
 												>
 													Download
@@ -741,9 +741,9 @@ export function FilesPage() {
 										{file.source === "upload" && (
 											<>
 												{file.url && <DropdownMenu.Separator className="my-0.5" />}
-												<DropdownMenu.Item
-													className="py-1 data-highlighted:bg-kumo-fill"
-													icon={<Trash className="me-1.5 size-3.5" aria-hidden="true" />}
+												<DropdownMenu.Item variant="danger"
+													className="py-1"
+													icon={Trash}
 													onClick={() => setDeleting(file)}
 												>
 													{file.status === "uploading" ? "Discard" : "Delete"}

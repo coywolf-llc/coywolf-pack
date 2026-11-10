@@ -21,7 +21,9 @@ import {
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
 import { apiPost, errorText, getJson as getJsonFrom } from "./api.js";
+import { PageHeader } from "./page.js";
 import { type GuestAuthor, type GuestByline, type PostCredit, groupGuests, postCredits, sameName, wxrGuestAuthors } from "../wpImport/guests.js";
 import { type ParentPlan, type SiteTerm, type WxrCategory, type WxrPage, optionSnippet, parentsMap, planCategoryParents, wxrCategories, wxrPages } from "../wpImport/parents.js";
 import { type PrepareWxrResult, prepareWxr, wxrAttachments } from "../wpImport/prepare.js";
@@ -74,7 +76,7 @@ function CountsTable({ counts, label = "Block" }: { counts: Record<string, numbe
 	if (!rows.length) return <p className="text-sm text-kumo-subtle">Nothing to change.</p>;
 	return (
 		<div className="overflow-x-auto">
-			<table className="w-full text-left text-sm">
+			<table className="w-full text-start text-sm">
 				<thead className="text-kumo-subtle">
 					<tr>
 						<th className="py-1 pe-3 font-medium">{label}</th>
@@ -324,7 +326,8 @@ const RESULT_LABEL: Record<string, string> = {
 };
 
 /** Dry run and apply of the content scan; with `urlMap`, it also rewrites old-site URLs. */
-function ScanPanel({ urlMap, applyLabel, confirmText }: { urlMap?: Record<string, string>; applyLabel: string; confirmText: string }) {
+function ScanPanel({ urlMap, applyLabel, confirmTitle, confirmText }: { urlMap?: Record<string, string>; applyLabel: string; confirmTitle: string; confirmText: string }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const [report, setReport] = React.useState<ScanReport | null>(null);
 	const [running, setRunning] = React.useState<false | "dry" | "apply">(false);
 	const [progress, setProgress] = React.useState("");
@@ -337,7 +340,7 @@ function ScanPanel({ urlMap, applyLabel, confirmText }: { urlMap?: Record<string
 	}, [urlMap]);
 
 	const run = async (apply: boolean) => {
-		if (apply && !window.confirm(confirmText)) return;
+		if (apply && !(await confirm({ title: confirmTitle, description: confirmText, confirmLabel: applyLabel }))) return;
 		setRunning(apply ? "apply" : "dry");
 		setError(undefined);
 		const acc: ScanReport = { apply, scanned: 0, entries: [], leftovers: {}, videosAdded: 0, done: false };
@@ -371,6 +374,7 @@ function ScanPanel({ urlMap, applyLabel, confirmText }: { urlMap?: Record<string
 
 	return (
 		<div className="space-y-4">
+			{confirmDialog}
 			<div className="flex flex-wrap gap-2">
 				<Button variant="secondary" icon={<MagnifyingGlass />} disabled={Boolean(running)} onClick={() => void run(false)}>
 					{running === "dry" ? "Checking…" : "Dry run"}
@@ -411,7 +415,7 @@ function ScanPanel({ urlMap, applyLabel, confirmText }: { urlMap?: Record<string
 					)}
 					{report.entries.length > 0 && (
 						<div className="overflow-x-auto">
-							<table className="w-full text-left text-sm">
+							<table className="w-full text-start text-sm">
 								<thead className="text-kumo-subtle">
 									<tr>
 										<th className="py-1 pe-3 font-medium">Entry</th>
@@ -462,7 +466,8 @@ function ConvertStep() {
 		>
 			<ScanPanel
 				applyLabel="Convert"
-				confirmText="Convert the blocks listed in the dry run? Each entry is saved (published entries are republished). Make a backup first."
+				confirmTitle="Convert the blocks listed in the dry run?"
+				confirmText="Each entry is saved (published entries are republished). Make a backup first."
 			/>
 		</Section>
 	);
@@ -558,6 +563,7 @@ async function createByline(plan: BylinePlan): Promise<BylineSummary> {
 }
 
 function BylinesStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInfo) => void }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const guests = wxr?.guests ?? null;
 	const [plan, setPlan] = React.useState<{ bylines: BylinePlan[]; posts: PostPlan[] } | null>(null);
 	const [running, setRunning] = React.useState<false | "dry" | "apply">(false);
@@ -586,7 +592,7 @@ function BylinesStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 
 	const apply = async () => {
 		if (!plan) return;
-		if (!window.confirm("Create the bylines and credit the posts listed? Each post's current bylines are replaced by its authors, in order.")) return;
+		if (!(await confirm({ title: "Create the bylines and credit the posts listed?", description: "Each post's current bylines are replaced by its authors, in order.", confirmLabel: "Create and credit" }))) return;
 		setRunning("apply");
 		setError(undefined);
 		const bylines = plan.bylines.map((b) => ({ ...b }));
@@ -639,6 +645,7 @@ function BylinesStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 				</>
 			}
 		>
+			{confirmDialog}
 			<div className="flex flex-wrap items-center gap-2">
 				{wxr === null && <ChooseExport disabled={Boolean(running)} onXml={(xml) => onWxr(readWxr(xml))} />}
 				<Button variant="secondary" icon={<MagnifyingGlass />} disabled={Boolean(running) || !credits.length} onClick={() => void dryRun()}>
@@ -676,7 +683,7 @@ function BylinesStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 			)}
 			{plan && plan.posts.length > 0 && (
 				<div className="overflow-x-auto">
-					<table className="w-full text-left text-sm">
+					<table className="w-full text-start text-sm">
 						<thead className="text-kumo-subtle">
 							<tr>
 								<th className="py-1 pe-3 font-medium">Post</th>
@@ -718,6 +725,7 @@ function BylinesStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 // ── 4. Category and page parents ─────────────────────────────────
 
 function ParentsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInfo) => void }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const parents = wxr?.parents ?? null;
 	const [plans, setPlans] = React.useState<ParentPlan[] | null>(null);
 	const [running, setRunning] = React.useState<false | "dry" | "apply">(false);
@@ -748,7 +756,7 @@ function ParentsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 
 	const apply = async () => {
 		if (!plans) return;
-		if (!window.confirm("Set the parent of each category listed as “Set”? Category archive and post URLs that include parent categories change to match WordPress.")) return;
+		if (!(await confirm({ title: "Set the category parents?", description: "Each category listed as “Set” gets its WordPress parent. Category archive and post URLs that include parent categories change to match WordPress.", confirmLabel: "Set parents" }))) return;
 		setRunning("apply");
 		setError(undefined);
 		const next = plans.map((p) => ({ ...p }));
@@ -784,6 +792,7 @@ function ParentsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 				</>
 			}
 		>
+			{confirmDialog}
 			<div className="flex flex-wrap items-center gap-2">
 				{wxr === null && <ChooseExport disabled={Boolean(running)} onXml={(xml) => onWxr(readWxr(xml))} />}
 				<Button variant="secondary" icon={<MagnifyingGlass />} disabled={Boolean(running) || !withParent} onClick={() => void dryRun()}>
@@ -804,7 +813,7 @@ function ParentsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 			)}
 			{plans && plans.length > 0 && (
 				<div className="overflow-x-auto">
-					<table className="w-full text-left text-sm">
+					<table className="w-full text-start text-sm">
 						<thead className="text-kumo-subtle">
 							<tr>
 								<th className="py-1 pe-3 font-medium">Category</th>
@@ -889,6 +898,7 @@ function fileName(url: string): string {
 const STATUS_LABEL: Record<SiteUrlPlan["status"], string> = { matched: "In the media library", missing: "Not in the media library", ambiguous: "Several files fit" };
 
 function MediaUrlsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInfo) => void }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const [hosts, setHosts] = React.useState("");
 	const [found, setFound] = React.useState<Map<string, number> | null>(null);
 	const [media, setMedia] = React.useState<MediaFile[] | null>(null);
@@ -958,7 +968,7 @@ function MediaUrlsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 
 	const importMissing = async () => {
 		if (!missing.length || !origin) return;
-		if (!window.confirm(`Download ${plural(missing.length, "file", "files")} from the old site into the media library? The old site must still be online.`)) return;
+		if (!(await confirm({ title: `Download ${plural(missing.length, "file", "files")} into the media library?`, description: "They come from the old site, which must still be online.", confirmLabel: "Download", variant: "primary" }))) return;
 		setRunning("import");
 		setError(undefined);
 		setMessage("");
@@ -1026,6 +1036,7 @@ function MediaUrlsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 				</>
 			}
 		>
+			{confirmDialog}
 			<div className="max-w-xl space-y-1">
 				<Input label="Old site host names" placeholder="example.com, www.example.com" value={hosts} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setHosts(e.target.value)} />
 				<p className="text-xs text-kumo-subtle">
@@ -1066,7 +1077,7 @@ function MediaUrlsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 						<details>
 							<summary className="cursor-pointer text-sm font-medium">URLs ({shown.length.toLocaleString()})</summary>
 							<div className="mt-2 max-h-96 cw-overflow-auto">
-								<table className="w-full text-left text-sm">
+								<table className="w-full text-start text-sm">
 									<thead className="text-kumo-subtle">
 										<tr>
 											<th className="py-1 pe-3 font-medium">URL</th>
@@ -1101,7 +1112,8 @@ function MediaUrlsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 							<ScanPanel
 								urlMap={urlMap}
 								applyLabel="Rewrite URLs"
-								confirmText="Rewrite the old URLs listed in the dry run? Each entry is saved (published entries are republished). Make a backup first."
+								confirmTitle="Rewrite the old URLs listed in the dry run?"
+								confirmText="Each entry is saved (published entries are republished). Make a backup first."
 							/>
 						)}
 					</div>
@@ -1257,7 +1269,7 @@ function RedirectsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 					</p>
 					{built.rules.length > 0 && (
 						<div className="max-h-96 cw-overflow-auto">
-							<table className="w-full text-left text-sm">
+							<table className="w-full text-start text-sm">
 								<thead className="text-kumo-subtle">
 									<tr>
 										<th className="py-1 pe-3 font-medium">From</th>
@@ -1475,14 +1487,16 @@ export function WpImportPage() {
 	const [wxr, setWxr] = React.useState<WxrInfo | null>(null);
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-2 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 items-center text-2xl font-semibold leading-tight">WordPress import</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="WordPress Migration"
+				description={
+					<>
 					Finish moving a WordPress site to EmDash. EmDash's own importer brings over posts, pages, categories, tags, authors and media; these steps
 					keep what it drops or misses: heading ids, reusable blocks, Details blocks, co-authors and guest authors, category and page parents, old media
 					URLs, and redirects. Work through them in order. docs/wordpress-import.md in the Coywolf Pack repository has the full checklist.
-				</p>
-			</header>
+					</>
+				}
+			/>
 			<BeforeImport />
 			<PrepareStep onWxr={setWxr} />
 			<ConvertStep />

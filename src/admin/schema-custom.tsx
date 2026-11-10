@@ -9,6 +9,7 @@ import { Badge, Banner, Button, Dialog, Input, InputArea, Select, Switch } from 
 import { PencilSimple, Plus, Trash } from "@phosphor-icons/react";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
 import { apiPost, errorText } from "./api.js";
 import {
 	type CustomMarkup,
@@ -79,6 +80,7 @@ export function MarkupEditor(props: {
 	pageUrl: string;
 	contributionId: string;
 }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const { value, onChange } = props;
 	const [template, setTemplate] = React.useState("Service");
 	const check = useMarkupCheck(value, props.site, props.graphOn, props.pageUrl);
@@ -89,13 +91,14 @@ export function MarkupEditor(props: {
 		return output ? `<script type="application/ld+json">\n${scriptJson(output.contribution.graph, "\t")}\n</script>` : null;
 	}, [check, props.graphOn, props.site, props.pageUrl, props.contributionId, value.mainEntity]);
 
-	const insert = () => {
-		if (value.markup.trim() && !window.confirm("Replace the markup with the template?")) return;
+	const insert = async () => {
+		if (value.markup.trim() && !(await confirm({ title: "Replace the markup with the template?", description: "What's in the editor now is replaced.", confirmLabel: "Replace" }))) return;
 		onChange({ ...value, markup: templateText(template) });
 	};
 
 	return (
 		<div className="space-y-4">
+			{confirmDialog}
 			<div className="flex flex-col gap-2 sm:flex-row sm:items-end">
 				<div className="sm:w-64">
 					<Select
@@ -257,13 +260,14 @@ function RuleDialog(props: {
 }
 
 export function CustomTab(props: { site: CustomSite; graphOn: boolean; customOn: boolean; onSaved: (rules: PathRule[]) => void }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const [editing, setEditing] = React.useState<Draft | null>(null);
 	const [notice, setNotice] = React.useState<string>();
 	const [error, setError] = React.useState<string>();
 	const rules = props.site.rules;
 
 	const remove = async (rule: PathRule) => {
-		if (!window.confirm(`Remove the custom markup "${rule.label}"?`)) return;
+		if (!(await confirm({ title: `Remove the custom markup “${rule.label}”?`, description: "Its pages stop getting this markup.", confirmLabel: "Remove" }))) return;
 		setError(undefined);
 		try {
 			const result = await post<{ rules: PathRule[] }>("custom/delete", { id: rule.id });
@@ -276,6 +280,7 @@ export function CustomTab(props: { site: CustomSite; graphOn: boolean; customOn:
 
 	return (
 		<section className="space-y-4 rounded-lg border border-kumo-line p-4">
+			{confirmDialog}
 			<div>
 				<h2 className="text-base font-semibold">Custom markup</h2>
 				<p className="mt-1 text-sm text-kumo-subtle">

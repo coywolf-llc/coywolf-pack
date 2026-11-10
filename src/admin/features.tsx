@@ -1,12 +1,13 @@
 /**
  * Features page: turn each Coywolf Pack module and sub-feature on or off.
  */
-import { Banner, Loader, Switch } from "@cloudflare/kumo";
+import { Banner, Switch } from "@cloudflare/kumo";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { resetUpdateStatus } from "./update-notice.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/features";
@@ -81,20 +82,20 @@ export function FeaturesPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Coywolf Pack</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="Features"
+				description={
+					<>
 					Turn Coywolf Pack features on or off. A feature that's off stops running everywhere: on the site, in the editor, and in
 					scheduled jobs, and its pages leave the sidebar. Its settings and data are kept.
-				</p>
-			</header>
+					</>
+				}
+			/>
 
 			{error && <Banner variant="error" role="alert" description={error} />}
 
 			{!modules && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{modules?.map((module) => {
@@ -118,7 +119,7 @@ export function FeaturesPage() {
 						{subs.length > 0 && (
 							<ul className="divide-y divide-kumo-line border-t border-kumo-line">
 								{subs.map((feature) => (
-									<li key={feature.id} className="flex items-start justify-between gap-4 px-4 py-3 pl-8">
+									<li key={feature.id} className="flex items-start justify-between gap-4 px-4 py-3 ps-8">
 										<div className="min-w-0">
 											<h3 className="text-sm font-medium">{feature.label}</h3>
 											<p className="mt-0.5 text-sm text-kumo-subtle">{feature.description}</p>

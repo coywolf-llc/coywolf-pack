@@ -3,12 +3,13 @@
  * preview of a sample review (rendered by the same code as the site).
  * Turning Reviews on or off happens on the Features page.
  */
-import { Banner, Button, Input, InputArea, Loader } from "@cloudflare/kumo";
+import { Banner, Button, Input, InputArea } from "@cloudflare/kumo";
 import { ArrowCounterClockwise, FloppyDisk } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { DEFAULT_ACCENT, MAX_CUSTOM_CSS, SAMPLE_REVIEW, isAccent, pageCss, renderReviewHtml, sanitizeCustomCss } from "../reviews/lib.js";
 import { PartSwitches } from "./feature-switches.js";
@@ -101,20 +102,22 @@ export function ReviewsPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Reviews</h1>
-					<div className="flex shrink-0 justify-end">
+			<PageHeader
+				title="Reviews"
+				actions={
+					<>
 						<Button variant="primary" icon={<FloppyDisk />} disabled={!dirty || saving || !accentValid || tooLong} onClick={() => void save()}>
 							Save
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Add a review to an entry with the Coywolf Review block: a rating badge, what you liked most, and what could be better.
 						The box is styled with plain CSS sent only on pages with a review; no script.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="reviews" />
 
@@ -125,9 +128,7 @@ export function ReviewsPage() {
 			{status && !saving && <p className="text-sm text-kumo-subtle">{status}</p>}
 
 			{!saved && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{saved && (

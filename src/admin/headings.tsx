@@ -3,11 +3,12 @@
  * of Contents block. Blocks can override most of them. (Breadcrumbs have
  * their own page, Breadcrumb Nav.)
  */
-import { Banner, Checkbox, Input, Loader, Select } from "@cloudflare/kumo";
+import { Banner, Checkbox, Input, Select } from "@cloudflare/kumo";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { SAMPLE_TOC_HEADINGS, TOC_CSS, renderTocHtml } from "../headings/render.js";
 import { buildTocTree, countToc } from "../headings/toc.js";
 import { PreviewSection } from "./preview.js";
@@ -120,13 +121,15 @@ export function HeadingsPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Headings &amp; TOC</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="Headings & TOC"
+				description={
+					<>
 					Defaults for heading anchors and the Table of Contents block. Turn each one on under Plugins → Coywolf Pack. Anchors
 					are saved with the content, so they stay the same when a heading is reworded.
-				</p>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="headings" />
 
@@ -134,9 +137,7 @@ export function HeadingsPage() {
 			{error && <Banner variant="error" role="alert" description={error} />}
 
 			{!settings && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{settings && (

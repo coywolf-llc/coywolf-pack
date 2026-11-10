@@ -23,6 +23,7 @@ import { type Area, type Draft, FILE_TYPES, blankDraft, PARAMS, type Who, draftT
 import { evaluateParsed, matchRaw, parse } from "../robots/rep.js";
 import { CRAWLER_GROUPS, PROBE_AGENT, type RobotsConfig, type RobotsRule, directives, generate, groupTokens, normalizePathInput } from "../robots/rules.js";
 import { type Finding, analyzeRule, selfCheck } from "../robots/validate.js";
+import { useConfirm } from "./confirm-dialog.js";
 import { BotPicker } from "./robots-bots.js";
 
 const STEPS = ["What to do", "Which part", "Which crawlers", "Review"];
@@ -148,6 +149,7 @@ function Chip(props: { on: boolean; onToggle: () => void; children: React.ReactN
 }
 
 export function RuleWizard(props: WizardProps) {
+	const [confirm, confirmDialog] = useConfirm();
 	const startAtReview = Boolean(props.initial?.rule);
 	const isEdit = Boolean(props.initial?.rule && props.config.rules.some((r) => r.id === props.initial?.rule?.id));
 	const start = React.useMemo(() => {
@@ -196,8 +198,8 @@ export function RuleWizard(props: WizardProps) {
 	}, [rule, props.config, patch, props.siteUrl, props.bots]);
 
 	const dirty = JSON.stringify(draft) !== JSON.stringify(start);
-	const close = () => {
-		if (dirty && !window.confirm(isEdit ? "Discard your changes to this rule?" : "Discard this new rule?")) return;
+	const close = async () => {
+		if (dirty && !(await confirm({ title: isEdit ? "Discard your changes to this rule?" : "Discard this new rule?", confirmLabel: "Discard", cancelLabel: "Keep editing" }))) return;
 		props.onClose();
 	};
 
@@ -224,7 +226,7 @@ export function RuleWizard(props: WizardProps) {
 			set({ who: "specific", agents: [...new Set([...current, ...a.agents])] });
 		} else if (a.type === "turnOnInherit") setPatch((p) => ({ ...p, inheritGeneral: true }));
 		else if (a.type === "editRule") {
-			if (!dirty || window.confirm("Leave this rule and edit the other one? This rule won't be saved.")) props.onEditRule(a.ruleId);
+			if (!dirty || (await confirm({ title: "Leave this rule and edit the other one?", description: "This rule won't be saved.", confirmLabel: "Edit the other rule", cancelLabel: "Stay" }))) props.onEditRule(a.ruleId);
 		} else if (a.type === "mergeInto") {
 			setSaving(true);
 			try {
@@ -262,6 +264,7 @@ export function RuleWizard(props: WizardProps) {
 	return (
 		<Dialog.Root open onOpenChange={(open) => !open && close()}>
 			<Dialog className="flex max-h-[90vh] flex-col p-0" size="xl">
+				{confirmDialog}
 				<div className="border-b border-kumo-line px-6 pt-5 pb-3">
 					<Dialog.Title className="text-lg font-semibold">{isEdit ? "Edit rule" : "Add a rule"}</Dialog.Title>
 					<Dialog.Description className="sr-only">A guided form in four steps: what to do, which part of the site, which crawlers, and review.</Dialog.Description>

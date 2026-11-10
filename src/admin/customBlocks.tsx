@@ -3,12 +3,13 @@
  * links, and live previews of every block (rendered by the same code as the
  * site). Turning blocks on or off happens on the Coywolf Pack page.
  */
-import { Banner, Button, Checkbox, Input, InputArea, Loader, Select } from "@cloudflare/kumo";
+import { Banner, Button, Checkbox, Input, InputArea, Select } from "@cloudflare/kumo";
 import { FloppyDisk } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { PreviewSection } from "./preview.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import {
@@ -149,21 +150,23 @@ export function CustomBlocksPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Custom Blocks</h1>
-					<div className="flex shrink-0 justify-end">
+			<PageHeader
+				title="Custom Blocks"
+				actions={
+					<>
 						<Button variant="primary" icon={<FloppyDisk />} disabled={!dirty || saving || !canSave} onClick={() => void save()}>
 							Save
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Adds Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks to the editor (turn each one on on the Coywolf Pack page). Their text fields take
 						plain text: a blank line starts a new paragraph, <code>[link text](https://…)</code> makes a link and <code>**text**</code> is bold. Simple
 						HTML (links, bold, italics, code, lists) works too. The blocks are styled with a little CSS sent only on pages that use them; no script.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="customBlocks" />
 
@@ -174,9 +177,7 @@ export function CustomBlocksPage() {
 			{status && !saving && <p className="text-sm text-kumo-subtle">{status}</p>}
 
 			{!saved && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{saved && (

@@ -4,12 +4,13 @@
  * media host, which does the same through the Cloudflare API (review, then
  * apply). The feature itself is turned on or off on the Coywolf Pack page.
  */
-import { Banner, Button, Checkbox, Input, Loader } from "@cloudflare/kumo";
+import { Banner, Button, Checkbox, Input } from "@cloudflare/kumo";
 import { ArrowsClockwise, CheckCircle, Info, MagnifyingGlass, Wrench, XCircle } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { type LibrarySummary, monthlyWithoutMax, oneTimeCost, paybackMonths, storageCost, trafficEstimate } from "../images/variants-estimate.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
@@ -230,23 +231,23 @@ function CostEstimate({ estimate }: { estimate: Estimate }) {
 					<table className="w-full text-sm" aria-live="polite">
 						<tbody>
 							<tr className="border-b border-kumo-line">
-								<th scope="row" className="py-1.5 pr-3 text-left font-normal text-kumo-subtle">Without stored sizes</th>
+								<th scope="row" className="py-1.5 pe-3 text-start font-normal text-kumo-subtle">Without stored sizes</th>
 								<td className="py-1.5 font-medium">
 									{money(traffic.withoutCost)} a month <span className="font-normal text-kumo-subtle">({count(traffic.withoutTransforms)} transformations)</span>
 								</td>
 							</tr>
 							<tr className="border-b border-kumo-line">
-								<th scope="row" className="py-1.5 pr-3 text-left font-normal text-kumo-subtle">With stored sizes</th>
+								<th scope="row" className="py-1.5 pe-3 text-start font-normal text-kumo-subtle">With stored sizes</th>
 								<td className="py-1.5 font-medium">
 									{money(traffic.withCost)} a month <span className="font-normal text-kumo-subtle">(storage, plus {count(traffic.withTransforms)} Open Graph images)</span>
 								</td>
 							</tr>
 							<tr className="border-b border-kumo-line">
-								<th scope="row" className="py-1.5 pr-3 text-left font-normal text-kumo-subtle">One-time fee</th>
+								<th scope="row" className="py-1.5 pe-3 text-start font-normal text-kumo-subtle">One-time fee</th>
 								<td className="py-1.5 font-medium">{estimate.transforms ? about(range(oneTime)) : "none left"}</td>
 							</tr>
 							<tr>
-								<th scope="row" className="py-1.5 pr-3 text-left font-normal text-kumo-subtle">Payback</th>
+								<th scope="row" className="py-1.5 pe-3 text-start font-normal text-kumo-subtle">Payback</th>
 								<td className="py-1.5 font-medium">
 									{!estimate.transforms
 										? "—"
@@ -401,7 +402,7 @@ function StoredSizes() {
 			}
 		>
 			{error && <Banner variant="error" role="alert" description={error} />}
-			{!status && !error && <Loader />}
+			{!status && !error && <Loading className="" />}
 			{status && !status.available && <p className="text-sm text-kumo-subtle">{status.reason}</p>}
 			{status?.available && (
 				<p className="text-sm" aria-live="polite">
@@ -614,17 +615,16 @@ export function ImagesPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Clean Image URLs</h1>
-					<div />
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="Clean Image URLs"
+				description={
+					<>
 						Resized images at short, cacheable addresses. With a media host, images are served and resized by Cloudflare at
 						addresses like media.example.com/s/600x315/&lt;file&gt; and never touch the site's Worker. Without one, they're
 						served at /media/&lt;id&gt;-600x315.webp.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<p className="sr-only" role="status" aria-live="polite">
@@ -633,9 +633,7 @@ export function ImagesPage() {
 			{notice && !busy && <p className="text-sm text-kumo-subtle">{notice}</p>}
 
 			{!saved && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{saved && (

@@ -3,7 +3,7 @@
  * EmDash admin's own list pages (Redirects, Bylines): Kumo controls, a bordered
  * row list, and confirmation dialogs.
  */
-import { Badge, Banner, Button, Dialog, DropdownMenu, Input, Loader, Switch } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Dialog, DropdownMenu, Input, Switch } from "@cloudflare/kumo";
 import {
 	ArrowCounterClockwise,
 	ClockCounterClockwise,
@@ -16,6 +16,7 @@ import {
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { type Backup, type ListResponse, type UndoPoint, ago, isStale, sourceLabel, useBackups } from "./backups-widget.js";
 import { SaveBar } from "./save-bar.js";
 import { SettingsSection } from "./settings-ui.js";
@@ -298,21 +299,23 @@ export function BackupsPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Backups</h1>
-					<div className="flex shrink-0 justify-end gap-2">
+			<PageHeader
+				title="Backups"
+				actions={
+					<>
 						<Button variant="primary" icon={<Plus />} onClick={() => void runBackup()} disabled={running}>
 							{running ? "Backing up…" : "Back up now"}
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Each backup is a full copy of the database (content, users, settings, menus, redirects) plus a mirror of the
 						media library and of private form uploads{data ? `, kept for ${data.retentionDays} days` : ""}. Theme code lives in your Git repository. Download
 						any backup to keep your own copy: it's a standard SQL file that restores into any D1 database.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			{notice && (
 				<Banner
@@ -358,9 +361,7 @@ export function BackupsPage() {
 			)}
 
 			{!data && !error ? (
-				<div className="py-12 text-center text-kumo-subtle">
-					<Loader />
-				</div>
+				<Loading className="py-12 text-center text-kumo-subtle" />
 			) : data && data.items.length === 0 ? (
 				<div className="py-10 text-center text-kumo-subtle">
 					<Database size={40} className="mx-auto mb-3 opacity-30" aria-hidden="true" />
@@ -407,7 +408,7 @@ export function BackupsPage() {
 									<DropdownMenu.Content className="p-1">
 										<DropdownMenu.Item
 											className="py-1 data-highlighted:bg-kumo-fill"
-											icon={<DownloadSimple className="me-1.5 size-3.5" aria-hidden="true" />}
+											icon={DownloadSimple}
 											onClick={() =>
 												void download(backup).catch((cause) =>
 													setNotice({ variant: "error", title: "Download failed", description: errorText(cause, "") }),
@@ -420,7 +421,7 @@ export function BackupsPage() {
 										<DropdownMenu.Item
 											className="py-1 data-highlighted:bg-kumo-fill"
 											disabled={!restoreEnabled}
-											icon={<ClockCounterClockwise className="me-1.5 size-3.5" aria-hidden="true" />}
+											icon={ClockCounterClockwise}
 											onClick={() => {
 												setActionError(undefined);
 												setAction({ kind: "rewind", backup });
@@ -431,7 +432,7 @@ export function BackupsPage() {
 										<DropdownMenu.Item
 											className="py-1 data-highlighted:bg-kumo-fill"
 											disabled={!restoreEnabled}
-											icon={<Database className="me-1.5 size-3.5" aria-hidden="true" />}
+											icon={Database}
 											onClick={() => {
 												setActionError(undefined);
 												setAction({ kind: "restore-new", backup });

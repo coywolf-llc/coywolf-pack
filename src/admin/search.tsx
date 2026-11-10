@@ -5,12 +5,14 @@
  * EmDash's permission checks apply. The pack route only reads the current
  * configuration, which EmDash has no endpoint for.
  */
-import { Badge, Banner, Button, Input, Loader, Meter, Select, Switch } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Input, Meter, Select, Switch } from "@cloudflare/kumo";
 import { ArrowsClockwise, MagnifyingGlass } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
 import { errorText, postJson } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
 
@@ -170,6 +172,7 @@ function CollectionCard(props: {
 }
 
 export function SearchPage() {
+	const [confirm, confirmDialog] = useConfirm();
 	const [collections, setCollections] = React.useState<CollectionConfig[]>();
 	const [stats, setStats] = React.useState<Stats>({});
 	const [error, setError] = React.useState<string>();
@@ -251,10 +254,11 @@ export function SearchPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Search</h1>
-					<div className="flex shrink-0 justify-end gap-2">
+			{confirmDialog}
+			<PageHeader
+				title="Search"
+				actions={
+					<>
 						<Button
 							variant="secondary"
 							icon={<ArrowsClockwise />}
@@ -271,14 +275,16 @@ export function SearchPage() {
 						>
 							Rebuild all
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						EmDash's full-text search: choose which collections are searchable, how much each field counts, and how words
 						are matched. Changing weights or the tokenizer rebuilds that collection's index. Fields are made searchable in
 						each collection's schema.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="search" />
 
@@ -295,9 +301,7 @@ export function SearchPage() {
 			{error && <Banner variant="error" role="alert" title="Something went wrong" description={error} />}
 
 			{!collections && !error ? (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			) : collections && collections.length === 0 ? (
 				<div className="py-10 text-center text-kumo-subtle">
 					<MagnifyingGlass size={40} className="mx-auto mb-3 opacity-30" aria-hidden="true" />
@@ -313,7 +317,7 @@ export function SearchPage() {
 						indexed={stats[c.slug]?.indexed}
 						busy={busy}
 						onEnable={async (on) => {
-							if (!on && !window.confirm(`Turn off search for ${c.label}? Its search index is deleted; your settings are kept.`)) return;
+							if (!on && !(await confirm({ title: `Turn off search for ${c.label}?`, description: "Its search index is deleted; your settings are kept.", confirmLabel: "Turn off" }))) return;
 							await run(
 								[
 									{

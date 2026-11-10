@@ -7,6 +7,7 @@ import { Badge, Banner, Button, Dialog, DropdownMenu, Input, InputArea, Select }
 import { ArrowsClockwise, CaretDown, CaretRight, DotsThree, MagnifyingGlass, Plus, XCircle } from "@phosphor-icons/react";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
 import { errorText } from "./api.js";
 import { type BotEntry, type BotPurpose, CATEGORY_LABELS, PURPOSE_LABELS, categoryLabel } from "../robots/bots.js";
 import type { RobotsRule } from "../robots/rules.js";
@@ -72,7 +73,7 @@ export function BotPicker(props: { bots: BotEntry[]; selected: string[]; onChang
 					value={query}
 					onChange={(e: React.ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
 				/>
-				<MagnifyingGlass className="pointer-events-none absolute right-3 cw-field-icon text-kumo-subtle" aria-hidden="true" />
+				<MagnifyingGlass className="pointer-events-none absolute end-3 cw-field-icon text-kumo-subtle" aria-hidden="true" />
 			</div>
 			<div className="max-h-80 overflow-y-auto rounded border border-kumo-line">
 				{categories.map((cat) => {
@@ -91,7 +92,7 @@ export function BotPicker(props: { bots: BotEntry[]; selected: string[]; onChang
 								/>
 								<button
 									type="button"
-									className="flex flex-1 items-center gap-1 text-left text-sm font-medium"
+									className="flex flex-1 items-center gap-1 text-start text-sm font-medium"
 									aria-expanded={expanded}
 									aria-controls={panelId}
 									onClick={() => setOpen((s) => (s.has(cat) ? new Set([...s].filter((x) => x !== cat)) : new Set([...s, cat])))}
@@ -194,6 +195,7 @@ export function BotsTab(props: {
 	onRadar: (radar: Partial<RadarInfo>) => void;
 	onReload: () => Promise<void>;
 }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const [query, setQuery] = React.useState("");
 	const [category, setCategory] = React.useState("all");
 	const [operator, setOperator] = React.useState("all");
@@ -238,6 +240,7 @@ export function BotsTab(props: {
 
 	return (
 		<div className="space-y-4">
+			{confirmDialog}
 			<div className="flex flex-wrap items-start justify-between gap-2">
 				<p className="max-w-2xl text-sm text-kumo-subtle">
 					{props.bots.length} crawlers from Cloudflare Radar's bot directory and operators' documentation. A crawler only follows a rule if it uses that exact
@@ -292,7 +295,7 @@ export function BotsTab(props: {
 			</label>
 
 			<div className="overflow-x-auto rounded-lg border">
-				<table className="w-full text-left text-sm">
+				<table className="w-full text-start text-sm">
 					<caption className="sr-only">Crawler directory</caption>
 					<thead className="border-b bg-kumo-tint/40 text-xs text-kumo-subtle">
 						<tr>
@@ -335,7 +338,7 @@ export function BotsTab(props: {
 										)}
 									</td>
 									<td className="hidden px-3 py-2 text-xs lg:table-cell">{used.length ? used.map((r) => r.name).join(", ") : "—"}</td>
-									<td className="px-3 py-2 text-right">
+									<td className="px-3 py-2 text-end">
 										<DropdownMenu>
 											<DropdownMenu.Trigger render={<Button type="button" variant="ghost" shape="square" icon={<DotsThree aria-hidden="true" />} aria-label={`Actions for ${bot.name}`} />} />
 											<DropdownMenu.Content className="p-1">
@@ -356,9 +359,9 @@ export function BotsTab(props: {
 														</DropdownMenu.Item>
 														<DropdownMenu.Item
 															className="py-1 data-highlighted:bg-kumo-fill"
-															onClick={() => {
-																const inUse = used.length ? ` It's used in ${used.length} rule${used.length === 1 ? "" : "s"}, which keep the token.` : "";
-																if (window.confirm(`Delete ${bot.name}?${inUse}`)) void act({ action: "delete", slug: bot.slug }, `${bot.name} deleted.`).catch(() => undefined);
+															onClick={async () => {
+																const inUse = used.length ? `It's used in ${used.length} rule${used.length === 1 ? "" : "s"}, which keep the token.` : undefined;
+																if (await confirm({ title: `Delete ${bot.name}?`, description: inUse, confirmLabel: "Delete" })) void act({ action: "delete", slug: bot.slug }, `${bot.name} deleted.`).catch(() => undefined);
 															}}
 														>
 															Delete

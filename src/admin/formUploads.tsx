@@ -8,12 +8,13 @@
  * The routes live on the Forms plugin, which privateFormUploads() wraps
  * (see src/formUploads/wrap.ts).
  */
-import { Badge, Banner, Button, Checkbox, Dialog, Input, Loader, Select } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Dialog, Input, Select } from "@cloudflare/kumo";
 import { ArrowClockwise, DownloadSimple, Trash } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { formatBytes, totalFromContentRange, type FormUploadsConfig, type UploadEntry } from "../formUploads/lib.js";
 import { saveFile } from "./download.js";
 import { SaveBar, isDirty } from "./save-bar.js";
@@ -130,12 +131,12 @@ function UploadsTable(props: { items: Item[]; onDelete: (item: Item) => void }) 
 		<div className="space-y-3">
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<div className="overflow-x-auto">
-				<table className="w-full text-left text-sm">
+				<table className="w-full text-start text-sm">
 					<thead className="text-kumo-subtle">
 						<tr className="border-b border-kumo-line">
-							<th className="py-2 pr-4 font-medium">File</th>
-							<th className="py-2 pr-4 font-medium">Form</th>
-							<th className="py-2 pr-4 font-medium">Submission</th>
+							<th className="py-2 cw-pe-4 font-medium">File</th>
+							<th className="py-2 cw-pe-4 font-medium">Form</th>
+							<th className="py-2 cw-pe-4 font-medium">Submission</th>
 							<th className="py-2 font-medium">
 								<span className="sr-only">Actions</span>
 							</th>
@@ -144,7 +145,7 @@ function UploadsTable(props: { items: Item[]; onDelete: (item: Item) => void }) 
 					<tbody>
 						{props.items.map((item) => (
 							<tr key={item.id} className="border-b border-kumo-line align-top">
-								<td className="py-3 pr-4" style={{ minWidth: 200, maxWidth: 320 }}>
+								<td className="py-3 cw-pe-4" style={{ minWidth: 200, maxWidth: 320 }}>
 									<div className="font-medium" style={{ overflowWrap: "anywhere" }}>
 										{item.filename}
 									</div>
@@ -154,11 +155,11 @@ function UploadsTable(props: { items: Item[]; onDelete: (item: Item) => void }) 
 									<div className="text-kumo-subtle">Uploaded {dateTime(item.uploadedAt)}</div>
 									{item.source === "media-library" && <Badge variant="secondary">Moved from the media library</Badge>}
 								</td>
-								<td className="py-3 pr-4" style={{ minWidth: 140 }}>
+								<td className="py-3 cw-pe-4" style={{ minWidth: 140 }}>
 									<div>{item.formName || item.formSlug || "Unknown form"}</div>
 									{item.fieldLabel && <div className="text-kumo-subtle">{item.fieldLabel}</div>}
 								</td>
-								<td className="py-3 pr-4" style={{ minWidth: 200, maxWidth: 360 }}>
+								<td className="py-3 cw-pe-4" style={{ minWidth: 200, maxWidth: 360 }}>
 									{item.submission ? (
 										<>
 											<div>
@@ -313,20 +314,22 @@ export function FormUploadsPage() {
 	}
 
 	const header = (
-		<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-			<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-				<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Form uploads</h1>
-				<div className="flex shrink-0 justify-end">
+		<PageHeader
+			title="Private Form Uploads"
+			actions={
+				<>
 					<Button variant="secondary" icon={<ArrowClockwise />} onClick={() => void load()} aria-label="Refresh the list">
 						Refresh
 					</Button>
-				</div>
-				<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+				</>
+			}
+			description={
+				<>
 					Files people send with your forms are kept in a private storage bucket, not the public media library. Only admins can download them,
 					here. Deleting a submission in Forms deletes its files too.
-				</p>
-			</div>
-		</header>
+				</>
+			}
+		/>
 	);
 
 	if (missing) {
@@ -355,9 +358,7 @@ export function FormUploadsPage() {
 			</p>
 
 			{!status && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{status && !status.bucketBound && (
@@ -419,7 +420,7 @@ export function FormUploadsPage() {
 
 			{status && (
 				<SettingsSection id="cw-form-uploads-list" title="Private uploads" description="Newest first. Downloads are saved as files and never open in the browser.">
-					{items === null ? <Loader /> : <UploadsTable items={items} onDelete={setDeleting} />}
+					{items === null ? <Loading className="" /> : <UploadsTable items={items} onDelete={setDeleting} />}
 				</SettingsSection>
 			)}
 

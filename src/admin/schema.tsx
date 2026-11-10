@@ -3,11 +3,13 @@
  * collection, author profiles, per-entry overrides, custom markup, robots /
  * Open Graph settings, and a JSON-LD preview.
  */
-import { Badge, Banner, Button, Checkbox, Dialog, Input, Loader, Select, Switch, Tabs } from "@cloudflare/kumo";
-import { ImageSquare, MagnifyingGlass, PencilSimple, Plus, Trash, TreeStructure } from "@phosphor-icons/react";
+import { Badge, Banner, Button, Checkbox, Dialog, Input, Select, Switch, Tabs } from "@cloudflare/kumo";
+import { ImageSquare, MagnifyingGlass, PencilSimple, Plus, Trash } from "@phosphor-icons/react";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
 import { apiGet, apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { FEATURES_CHANGED, PartSwitches } from "./feature-switches.js";
 import { type CustomSite, CustomTab, MarkupEditor, WarningList, useMarkupCheck } from "./schema-custom.js";
@@ -168,9 +170,7 @@ function MediaDialog(props: { open: boolean; onClose: () => void; onPick: (item:
 					))}
 				</ul>
 				{loading && (
-					<div className="flex justify-center py-4">
-						<Loader />
-					</div>
+					<Loading className="flex justify-center py-4" />
 				)}
 				{!loading && !items.length && !error && <p className="py-6 text-center text-sm text-kumo-subtle">No images yet.</p>}
 				<div className="mt-4 flex justify-end gap-2">
@@ -361,7 +361,7 @@ function SiteTab(props: { config: Config; bylines: Byline[] | undefined; onSaved
 				) : (
 					<div className="space-y-2">
 						{props.bylines === undefined ? (
-							<Loader />
+							<Loading className="" />
 						) : props.bylines.length === 0 ? (
 							<p className="text-sm text-kumo-subtle">Create a byline first (Content → Bylines).</p>
 						) : (
@@ -522,9 +522,7 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 
 	if (props.bylines === undefined)
 		return (
-			<div className="flex justify-center py-12">
-				<Loader />
-			</div>
+			<Loading />
 		);
 
 	return (
@@ -639,7 +637,7 @@ function EntryPicker(props: { collections: Collection[]; onPick: (collection: st
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<div aria-live="polite">
 				{loading ? (
-					<Loader />
+					<Loading className="" />
 				) : items && items.length === 0 ? (
 					<p className="text-sm text-kumo-subtle">No entries match (searches the 100 most recently updated).</p>
 				) : (
@@ -848,6 +846,7 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 }
 
 function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const [items, setItems] = React.useState<Override[]>();
 	const [error, setError] = React.useState<string>();
 	const [editing, setEditing] = React.useState<Override | null>(null);
@@ -871,7 +870,7 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) 
 	}, [load]);
 
 	const remove = async (item: Override) => {
-		if (!window.confirm(`Remove the override for ${item.title ?? item.entryId}?`)) return;
+		if (!(await confirm({ title: `Remove the override for ${item.title ?? item.entryId}?`, confirmLabel: "Remove" }))) return;
 		try {
 			await post("entries/delete", { collection: item.collection, entryId: item.entryId });
 			setNotice("Override removed.");
@@ -886,6 +885,7 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) 
 			title="Per-entry overrides"
 			description="Give a single entry a different page or article type than its collection, say who or what it's about (its main subject), or add your own JSON-LD."
 		>
+			{confirmDialog}
 			<div className="flex justify-end">
 				<Button variant="primary" icon={<Plus aria-hidden="true" />} onClick={() => setEditing({ collection: "", entryId: "" })}>
 					New override
@@ -894,7 +894,7 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) 
 			<div aria-live="polite">{notice && <Banner variant="default" role="status" title={notice} />}</div>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!items && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : items && items.length === 0 ? (
 				<p className="py-6 text-center text-sm text-kumo-subtle">No overrides. Every entry uses its collection's types.</p>
 			) : (
@@ -1116,7 +1116,7 @@ function PreviewTab(props: { config: Config }) {
 			)}
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<div aria-live="polite" aria-busy={pending}>
-				{pending && <Loader />}
+				{pending && <Loading className="" />}
 				{result && !pending && (
 					<div className="space-y-4">
 						<p className="text-sm text-kumo-subtle">
@@ -1235,15 +1235,15 @@ export function SchemaPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 min-w-0 items-center gap-2 text-2xl font-semibold leading-tight">
-					<TreeStructure aria-hidden="true" /> Schema
-				</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="Schema & Social"
+				description={
+					<>
 					Schema.org structured data, robots directives and Open Graph extras. The graph replaces EmDash's built-in JSON-LD and
 					keeps everything it had: headline, description, image, dates, author and publisher.
-				</p>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="schema" />
 
@@ -1257,9 +1257,7 @@ export function SchemaPage() {
 			)}
 
 			{!config && !error ? (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			) : config ? (
 				<>
 					<Tabs value={tab} onValueChange={setTab} tabs={SCHEMA_TABS} />

@@ -3,11 +3,12 @@
  * review of meta-description and image-text suggestions, entities, and the
  * usage log.
  */
-import { Badge, Banner, Button, Checkbox, Input, InputArea, Loader, Select, Tabs } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Input, InputArea, Select, Tabs } from "@cloudflare/kumo";
 import { ArrowClockwise, Check, DownloadSimple, Play, Sparkle, Stop, X } from "@phosphor-icons/react";
 import * as React from "react";
 
 import { apiGet, apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { entitiesToCsv } from "../ai/export.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { CredentialGuide } from "./guides.js";
@@ -552,7 +553,7 @@ function DescriptionsPanel(props: { setNotice: (s: string) => void; setError: (s
 		<Section title="Meta description suggestions" description="Edit if needed, then apply. Apply only fills an empty description; Replace overwrites one." actions={<Button variant="ghost" shape="square" icon={<ArrowClockwise />} aria-label="Reload" onClick={() => void load()} />}>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!items && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : items?.length ? (
 				<ul className="divide-y divide-kumo-line">
 					{items.map((entry) => (
@@ -656,7 +657,7 @@ function ImagesPanel(props: { setNotice: (s: string) => void; setError: (s: stri
 		>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!items && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : items?.length ? (
 				<ul className="divide-y divide-kumo-line">
 					{items.map((item) => (
@@ -736,7 +737,7 @@ function EntitiesPanel(props: { setNotice: (s: string) => void; setError: (s: st
 		>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!items && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : items?.length ? (
 				<ul className="divide-y divide-kumo-line">
 					{items.map((entry) => (
@@ -787,11 +788,11 @@ function UsagePanel() {
 		<Section title="Usage log" description={`The latest 100 model calls (kept 30 days). Tokens shown: ${totals.input.toLocaleString()} in, ${totals.output.toLocaleString()} out.`}>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!rows && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : rows?.length ? (
 				<div className="overflow-x-auto">
 					<table className="w-full text-sm">
-						<thead className="text-left text-kumo-subtle">
+						<thead className="text-start text-kumo-subtle">
 							<tr>
 								<th className="py-1 pe-3 font-medium">Time</th>
 								<th className="py-1 pe-3 font-medium">Feature</th>
@@ -857,12 +858,14 @@ export function AiPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">AI Enrichment</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="AI Enrichment"
+				description={
+					<>
 					Entities for Schema.org verified against Wikidata, meta descriptions, and image alt text. Everything runs in the background after saves and uploads, within your daily call limit.
-				</p>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="ai" />
 
@@ -874,9 +877,7 @@ export function AiPage() {
 			{status && !status.features.ai && <Banner variant="default" title="AI Enrichment is off. Turn it and its features on under Plugins → Coywolf Pack." />}
 
 			{!status && !error ? (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			) : status ? (
 				<>
 					<Tabs

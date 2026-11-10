@@ -5,11 +5,12 @@
  * dialog (./robots-wizard.tsx); every change is checked in the browser and
  * again on the server (including the self-check) before it's saved.
  */
-import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea, Loader, Switch, Tabs } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea, Switch, Tabs } from "@cloudflare/kumo";
 import { CheckCircle, Copy, DotsThree, DownloadSimple, FileArrowUp, Info, PencilSimple, Plus, Robot, Sparkle, Trash, Warning, X, XCircle } from "@phosphor-icons/react";
 import * as React from "react";
 
 import { errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import type { BotEntry } from "../robots/bots.js";
 import { describeRule, summarize } from "../robots/explain.js";
 import { evaluate } from "../robots/rep.js";
@@ -377,14 +378,14 @@ function RulesList(props: {
 						<DropdownMenu>
 							<DropdownMenu.Trigger render={<Button type="button" variant="ghost" shape="square" icon={<DotsThree aria-hidden="true" />} aria-label={`Actions for ${rule.name}`} />} />
 							<DropdownMenu.Content className="p-1">
-								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<PencilSimple className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => props.onEdit(rule)}>
+								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={PencilSimple} onClick={() => props.onEdit(rule)}>
 									Edit
 								</DropdownMenu.Item>
-								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<Plus className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => props.onDuplicate(rule)}>
+								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={Plus} onClick={() => props.onDuplicate(rule)}>
 									Duplicate and edit
 								</DropdownMenu.Item>
 								<DropdownMenu.Separator className="my-0.5" />
-								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<Trash className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => props.onDelete(rule)}>
+								<DropdownMenu.Item variant="danger" className="py-1" icon={Trash} onClick={() => props.onDelete(rule)}>
 									Delete
 								</DropdownMenu.Item>
 							</DropdownMenu.Content>
@@ -638,9 +639,7 @@ export function RobotsPage() {
 		return error ? (
 			<Banner variant="error" role="alert" title="Something went wrong" description={error} />
 		) : (
-			<div className="py-12 text-center text-kumo-subtle">
-				<Loader />
-			</div>
+			<Loading className="py-12 text-center text-kumo-subtle" />
 		);
 	}
 
@@ -676,10 +675,10 @@ export function RobotsPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Robots.txt</h1>
-					<div className="flex shrink-0 justify-end gap-2">
+			<PageHeader
+				title="Robots.txt"
+				actions={
+					<>
 						<DropdownMenu>
 							<DropdownMenu.Trigger render={<Button variant="secondary" icon={<Sparkle />}>Templates</Button>} />
 							<DropdownMenu.Content className="max-w-sm p-1">
@@ -694,12 +693,14 @@ export function RobotsPage() {
 						<Button variant="primary" icon={<Plus />} onClick={() => setWizard({ rule: null, id: newId() })}>
 							Add rule
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Decide which crawlers can visit which parts of your site, in plain English. Every change is checked before it's saved, and the file below is what crawlers get.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="robots" />
 
