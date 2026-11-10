@@ -28,8 +28,27 @@ export const VERSION_OPTION = "plugin:coywolf-pack:pageCache:version";
  */
 const PUBLIC_ROUTE = /^\/_emdash\/api\/plugins\/coywolf-pack\/(search\/|discovery\/public\/|videos\/((like|play|caption|embed|sitemap)(\/|$)|webhook$))/;
 const PACK_API = "/_emdash/api/plugins/coywolf-pack/";
-/** Admin writes that change nothing a page or a cache shows: no purge and no new settings generation. */
-const NO_SETTINGS_CHANGE = /^\/_emdash\/api\/plugins\/coywolf-pack\/updates\//;
+/**
+ * Admin writes that change no settings: no purge here and no new settings
+ * generation (so no settling purge, no isolate dropping its caches, no
+ * re-warm).
+ * - updates/…: the update check.
+ * - Upload progress. videos/upload and videos/upload-chunk start and feed a
+ *   new Stream video, which is on no page until an entry embeds it (and that
+ *   entry's save clears its own pages). The large-file steps
+ *   files/upload-start, -part, -complete and -abort make a new file the
+ *   file picker lists only once it's finished (files/options), so no page
+ *   can show it before then. Each 5–6 MiB piece used to count as a settings
+ *   save: a 500 MB video was about 100 full purges, most of them refused by
+ *   the purge rate limit (along with purges that mattered).
+ * - Changes to one video (videos/update, videos/delete, videos/captions/…):
+ *   their routes clear only the pages that embed the video themselves, as the
+ *   Stream webhook does (src/videos/module.ts clearVideoPages). Video details
+ *   are read from D1 on every render, so no isolate holds an old copy and
+ *   nothing needs a settling purge.
+ */
+const NO_SETTINGS_CHANGE =
+	/^\/_emdash\/api\/plugins\/coywolf-pack\/(updates\/|videos\/(upload|upload-chunk|update|delete|captions\/(upload|generate|delete|refresh))$|files\/upload-(start|part|complete|abort)$)/;
 
 /**
  * Routes declared read-only where they're defined (readOnlyRoute in
@@ -101,7 +120,8 @@ export function purgeScope(pathname: string): PurgeScope | null {
 	// Stored image sizes: new uploads and crops are picked up after a short stopgap lifetime; a backfill run clears the cache itself once when it is done.
 	if (/^images\/variants\/(settings|run|bulk|estimate)$/.test(route)) return null;
 	// (Un)subscribing the Stream webhook changes no page (its secret is on no page). The videos admin reads
-	// (library, details, storage, captions list…) are declared read-only where they're defined (readOnlyRoute) and never get here.
+	// (status, library, details, storage, captions list…) are declared read-only where they're defined (readOnlyRoute)
+	// and never get here; uploads and changes to one video aren't settings saves at all (NO_SETTINGS_CHANGE).
 	if (/^videos\/(status|settings|webhook\/(subscribe|unsubscribe))$/.test(route)) return null;
 	if (/^robots\//.test(route)) return { pathPrefixes: ["/robots.txt"] };
 	return { purgeEverything: true };

@@ -241,9 +241,12 @@ async function unindexEntry(ctx: Ctx, collection: string, id: string): Promise<v
 }
 
 /**
- * After a Stream webhook call: clear the cached pages that embed the video
+ * After a Stream webhook call, or an admin change to one video (details,
+ * deletion, captions): clear the cached pages that embed the video
  * (videoPagesScope: by path, the home page by its entry's tag, at most
- * MAX_WEBHOOK_PAGES paths), within DEADLINES.purgeMs. Never fails the webhook.
+ * MAX_WEBHOOK_PAGES paths), within DEADLINES.purgeMs. Never fails the caller.
+ * These aren't settings saves (src/pageCache/lib.ts NO_SETTINGS_CHANGE): the
+ * video's details are read from D1 on every render, so one purge is enough.
  */
 async function clearVideoPages(ctx: Ctx, uid: string): Promise<void> {
 	try {
@@ -503,7 +506,8 @@ export function videosModule(options: VideosOptions) {
 	const routes = {
 		// ── Admin ───────────────────────────────────────────────
 
-		"videos/status": {
+		// A read (the Videos page asks for it with any method): it clears nothing and records no settings change.
+		"videos/status": readOnlyRoute({
 			permission: "media:upload" as const,
 			handler: async (ctx: Ctx) => {
 				await requireFeature(ctx, F.main);
@@ -516,7 +520,7 @@ export function videosModule(options: VideosOptions) {
 					sitemapUrl: ctx.url("/coywolf-video-sitemap.xml"),
 				};
 			},
-		},
+		}),
 
 		/** The Videos page's Settings tab (the token is reported as set or not, never returned). */
 		"videos/settings": {
@@ -682,6 +686,8 @@ export function videosModule(options: VideosOptions) {
 				const meta = await stream(() => refreshVideo(ctx, input.uid, api));
 				await invalidateLibrary(ctx);
 				await invalidateSitemap(ctx);
+				// Only the pages that show this video (its name, description, poster or download changed), not every page.
+				afterResponse(clearVideoPages(ctx, input.uid));
 				ctx.log.info("Video updated", { uid: input.uid });
 				return { meta, download };
 			},
@@ -785,6 +791,8 @@ export function videosModule(options: VideosOptions) {
 					}
 				});
 				await removeLocal(ctx, uid);
+				// Pages that still embed it (deleted anyway) lose its schema and player details.
+				if (used.length) afterResponse(clearVideoPages(ctx, uid));
 				ctx.log.info("Video deleted", { uid, usedIn: used.length });
 				return { deleted: true, usedIn: used.length };
 			},
@@ -882,6 +890,8 @@ export function videosModule(options: VideosOptions) {
 				const api = await requireClient(ctx);
 				await stream(() => api.uploadCaption(uid, lang, vtt));
 				await stream(() => refreshCaptions(ctx, uid, api));
+				// The video's schema lists its captions and transcript: clear the pages that show it.
+				afterResponse(clearVideoPages(ctx, uid));
 				return { captions: await stream(() => api.listCaptions(uid)) };
 			},
 		}),
@@ -910,6 +920,7 @@ export function videosModule(options: VideosOptions) {
 				const api = await requireClient(ctx);
 				await stream(() => api.deleteCaption(uid, lang));
 				await stream(() => refreshCaptions(ctx, uid, api));
+				afterResponse(clearVideoPages(ctx, uid));
 				return { captions: await stream(() => api.listCaptions(uid)) };
 			},
 		}),
@@ -923,6 +934,7 @@ export function videosModule(options: VideosOptions) {
 				await requireFeature(ctx, F.captions);
 				const { uid } = parseInput(z.object({ uid: uidSchema }), ctx.input);
 				const meta = await stream(() => refreshCaptions(ctx, uid));
+				afterResponse(clearVideoPages(ctx, uid));
 				return { meta };
 			},
 		}),
@@ -1165,7 +1177,10 @@ export function videosModule(options: VideosOptions) {
 				if (!api) return;
 				for (const item of pending.items) {
 					try {
-						await refreshCaptions(ctx, item.id, api);
+						const before = JSON.stringify(item.data.captions ?? []);
+						const meta = await refreshCaptions(ctx, item.id, api);
+						// Generated captions arrived (or changed): the pages that show the video list them in their schema.
+						if (meta && JSON.stringify(meta.captions ?? []) !== before) await clearVideoPages(ctx, item.id);
 					} catch (error) {
 						ctx.log.warn("Videos: caption refresh failed", { uid: item.id, error: String(error) });
 					}
