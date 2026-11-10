@@ -76,6 +76,12 @@ export const SECRET_SETTINGS = {
 		description:
 			"Optional. Only for Retention on Cloudflare on the Backups page, which sets the backup bucket's lifecycle rule (and an optional lock) to match the retention days. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Workers R2 Storage → Edit (and D1 → Edit to use the same token for restores); (3) create it, copy the token (shown once), paste it here and save. The Backups page has a pre-filled form. Or add Workers R2 Storage → Edit to the BACKUPS_API_TOKEN Worker secret's token.",
 	},
+	socialImagesApiToken: {
+		type: "secret",
+		label: "Social Images — Cloudflare Browser Run API token",
+		description:
+			"Optional with a BROWSER binding. Makes the social images with Cloudflare Browser Run. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Browser Run → Edit; (3) create it, copy the token (shown once), paste it here and save. The Social Images page has a pre-filled form and the account ID field. Or set the BROWSER_RUN_API_TOKEN Worker secret.",
+	},
 	robotsRadarToken: {
 		type: "secret",
 		label: "Robots.txt — Cloudflare Radar API token",

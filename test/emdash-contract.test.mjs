@@ -327,6 +327,8 @@ const EXPRESSIONS = {
 	"src/search/engine.ts::select": 'c."content" AS f0',
 	// src/links/store.ts: refsWhereSql(field)
 	field: ["entryKey", "urlId"],
+	// src/links/inbound.ts: publishedEntriesSql (the collection's title field, else the slug)
+	"src/links/inbound.ts::titleColumn": ['content."title"', "content.slug"],
 	// src/schema/module.ts: a media reference by id or storage key
 	'ref.by === "id" ? "id" : "storage_key"': ["id", "storage_key"],
 };
@@ -599,6 +601,50 @@ test("rows the pack writes straight into _plugin_storage are valid EmDash storag
 	assert.equal(await hasCurrentVariants(d1, "media1"), true);
 	// EmDash's compare-and-set sees the pack's raw writes as new revisions.
 	assert.equal((await ctx.storage.imageVariants.compareAndSet("media1", versioned.revision, doc)).applied, false);
+});
+
+test("ctx.email and ctx.users: no ctx.email until a provider is selected, then send() reaches it from the pack; admins are role 50 (src/alerts)", async () => {
+	const { createHookPipeline, definePlugin, UserRepository } = await import("emdash");
+	const EmailPipeline = await distClass("EmailPipeline", "new EmailNotConfiguredError()");
+	const delivered = [];
+	const provider = definePlugin({
+		id: "contract-email-provider",
+		version: "0.0.0",
+		capabilities: ["hooks.email-transport:register"],
+		hooks: { "email:deliver": { exclusive: true, handler: async (event) => void delivered.push(event) } },
+	});
+	let packCtx;
+	const pack = definePlugin({
+		id: PLUGIN_ID,
+		version: "0.0.0",
+		// What the Alerts module declares (src/alerts/pack.ts).
+		capabilities: ["email:send", "users:read"],
+		hooks: { cron: { handler: async (_event, context) => void (packCtx = context) } },
+	});
+	const pipeline = createHookPipeline([provider, pack], { db });
+	pipeline.setContextFactory({ emailPipeline: new EmailPipeline(pipeline) });
+	const tick = () => pipeline.invokeCronHook(PLUGIN_ID, { name: "contract", scheduledAt: new Date().toISOString() });
+
+	// No provider selected (Settings → Email): the Alerts page shows the setup steps.
+	await tick();
+	assert.equal(packCtx.email, undefined, "ctx.email exists without a selected provider: Alerts would think email is set up");
+	assert.deepEqual(pipeline.getExclusiveHookProviders("email:deliver").map((p) => p.pluginId), ["contract-email-provider"]);
+
+	pipeline.setExclusiveSelection("email:deliver", "contract-email-provider");
+	await tick();
+	assert.equal(typeof packCtx.email?.send, "function");
+	await packCtx.email.send({ to: "owner@example.com", subject: "Example: Backup failed", text: "Plain text", html: "<p>HTML</p>" });
+	assert.equal(delivered.length, 1);
+	assert.deepEqual(delivered[0].message, { to: "owner@example.com", subject: "Example: Backup failed", text: "Plain text", html: "<p>HTML</p>" });
+	assert.equal(delivered[0].source, PLUGIN_ID, "plugin email goes out with the plugin's id as its source");
+
+	// ctx.users.list({ role: 50 }): the site's admins, the default recipients.
+	const users = new UserRepository(db);
+	await users.create({ email: "admin@example.com", name: "Admin", role: 50 });
+	await users.create({ email: "editor@example.com", name: "Editor", role: 40 });
+	const { items } = await packCtx.users.list({ role: 50, limit: 50 });
+	assert.deepEqual(items.map((u) => u.email), ["admin@example.com"]);
+	assert.deepEqual(Object.keys(items[0]).sort(), ["createdAt", "email", "id", "name", "role"]);
 });
 
 test("ctx.cron: schedule, list and cancel by name", async () => {

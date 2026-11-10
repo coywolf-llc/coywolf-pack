@@ -31,7 +31,9 @@ import {
 import { WARMER_AGENT } from "./warm.js";
 
 export const USAGE_TOKEN_SETTING = "usageApiToken";
-const CACHE_KEY = "cache:usage";
+/** The last reading (read by Alerts for the bill estimate, without asking Cloudflare). */
+export const USAGE_CACHE_KEY = "cache:usage";
+const CACHE_KEY = USAGE_CACHE_KEY;
 const TARGET_KEY = "state:usage:target";
 /** After a failed read, wait this long before asking Cloudflare again (rate limits). */
 const FAILED_KEY = "state:usage:failed";

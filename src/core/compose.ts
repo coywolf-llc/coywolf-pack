@@ -7,6 +7,7 @@ import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn, recordDefaults }
 import type { PackModule, TaskDef } from "./module.js";
 import { noteReadFailure } from "./read-failures.js";
 import { requestStore } from "./request-memo.js";
+import { withOutcome } from "./task-health.js";
 import { afterResponse } from "../shared.js";
 
 /**
@@ -210,7 +211,7 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 		// Features page loads (features/list), and module steps run again on the next activation.
 		handler: async (event, ctx) => {
 			try {
-				await ensureTasks(ctx, tasks);
+				await ensureTasks(ctx, tasks, await ctxFeatures(ctx).catch(() => null));
 			} catch (error) {
 				ctx.log.error("plugin:activate: scheduling tasks failed; they're scheduled again when the Features page opens", { error: String(error) });
 			}
@@ -241,8 +242,13 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 				return;
 			}
 			const features: FeatureMap = await ctxFeatures(ctx);
-			if (task.feature && !isOn(features, task.feature)) return;
-			await task.handler(ctx);
+			if (task.feature && !isOn(features, task.feature)) {
+				// Off: a task that runs only while on stops firing until the switch is turned on again (features/save schedules it).
+				if (task.onlyWhileOn) await ctx.cron?.cancel(task.name).catch(() => undefined);
+				return;
+			}
+			if (task.recordOutcome) await withOutcome(ctx.kv, task.name, () => task.handler(ctx));
+			else await task.handler(ctx);
 		},
 	};
 
@@ -251,20 +257,31 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 
 /**
  * Config-registered native plugins don't get plugin:activate at boot, so
- * routes call this too. schedule() is an upsert.
+ * routes call this too. schedule() is an upsert. A task marked `onlyWhileOn`
+ * is scheduled only while its feature is on and cancelled while it's off,
+ * when `features` is known (unknown: scheduled, and its handler stays gated).
  */
 export async function ensureTasks(
-	ctx: { cron?: { schedule(name: string, opts: { schedule: string }): Promise<void> }; log?: { error(msg: string, data?: unknown): void } },
+	ctx: {
+		cron?: { schedule(name: string, opts: { schedule: string }): Promise<void>; cancel?(name: string): Promise<void> };
+		log?: { error(msg: string, data?: unknown): void };
+	},
 	tasks: TaskDef[],
-) {
-	// One bad task must not break the routes that call this (e.g. the Features page).
+	features?: FeatureMap | null,
+): Promise<Array<{ task: string; scheduling: boolean; error: string }>> {
+	// One bad task must not break the routes that call this (e.g. the Features page): failures are logged and returned.
+	const failures: Array<{ task: string; scheduling: boolean; error: string }> = [];
 	for (const task of tasks) {
+		const cancel = Boolean(task.onlyWhileOn && features && task.feature && !isOn(features, task.feature));
 		try {
-			await ctx.cron?.schedule(task.name, { schedule: task.schedule });
+			if (cancel) await ctx.cron?.cancel?.(task.name);
+			else await ctx.cron?.schedule(task.name, { schedule: task.schedule });
 		} catch (error) {
-			ctx.log?.error(`coywolf-pack: could not schedule task ${task.name}`, { error: String(error) });
+			ctx.log?.error(`coywolf-pack: could not ${cancel ? "cancel" : "schedule"} task ${task.name}`, { error: String(error) });
+			failures.push({ task: task.name, scheduling: !cancel, error: error instanceof Error ? error.message : String(error) });
 		}
 	}
+	return failures;
 }
 
 /** EmDash's task-name rule (emdash/src/plugins/cron.ts validateTaskName). */

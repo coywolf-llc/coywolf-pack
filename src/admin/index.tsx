@@ -36,13 +36,16 @@ const PAGES: Record<string, ReturnType<typeof packPage>> = {
 	"/search": packPage("Search", () => import("./search.js").then((m) => m.SearchPage)),
 	"/ai": packPage("AI Enrichment", () => import("./ai.js").then((m) => m.AiPage)),
 	"/discovery": packPage("Discovery", () => import("./discovery.js").then((m) => m.DiscoveryPage)),
-	"/links": packPage("Link Manager", () => import("./links.js").then((m) => m.LinksPage)),
+	"/links": packPage("Link Manager", () => import("./links-entries.js").then((m) => m.LinkManagerPage)),
 	"/videos": packPage("Videos", () => import("./videos.js").then((m) => m.VideosPage)),
 	"/robots": packPage("Robots.txt", () => import("./robots.js").then((m) => m.RobotsPage)),
 	"/reviews": packPage("Reviews", () => import("./reviews.js").then((m) => m.ReviewsPage)),
 	"/custom-blocks": packPage("Custom Blocks", () => import("./customBlocks.js").then((m) => m.CustomBlocksPage)),
 	"/wordpress-import": packPage("WordPress Migration", () => import("./wpImport.js").then((m) => m.WpImportPage)),
 	"/images": packPage("Clean Image URLs", () => import("./images.js").then((m) => m.ImagesPage)),
+	"/content-audit": packPage("Content Audit", () => import("./content-audit.js").then((m) => m.ContentAuditPage)),
+	"/alerts": packPage("Alerts & Digest", () => import("./alerts.js").then((m) => m.AlertsPage)),
+	"/social-images": packPage("Social Images", () => import("./social-images.js").then((m) => m.SocialImagesPage)),
 };
 
 // Called Content Blocks until 0.12.0: old bookmarks still open the page.

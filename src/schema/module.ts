@@ -36,6 +36,7 @@ import { noteReadFailure, readFailures } from "../core/read-failures.js";
 import { requestMemo, requestStore } from "../core/request-memo.js";
 import { parseInput, workerEnv } from "../shared.js";
 import { type MediaRow, cleanDefaultOgImage, mediaHostImageInfo, ogImageTags, ownImageOnMediaHost, packOwnsOgImage } from "./og-image.js";
+import { generatedImage, isThemeDefault, themeDefaultImages } from "../social/store.js";
 import { ARTICLE_TYPES, ORGANIZATION_PROPERTIES, ORGANIZATION_TYPES, PAGE_TYPES, PERSON_PROPERTIES, PROPERTY_INPUTS } from "./catalog.js";
 import {
 	type BylineFacts,
@@ -696,7 +697,19 @@ export async function schemaContributions(
 	const cleanImages = isOn(on, "images");
 	// EmDash's publicUrl is read either way (once per isolate): media URLs under it are recognized for their sizes and alt text.
 	const [config, site] = await Promise.all([loadConfig(ctx, options.database), siteFacts(ctx, page), cleanImages ? refreshMediaHost() : loadStoragePublicUrl()]);
-	const imageRead = graphOn || ogOn ? primaryImage(options, page, site, cleanImages) : Promise.resolve(null);
+	// Social Images: an entry without an image of its own gets its generated one as og:image, only when the page passes no
+	// image (neither page.image nor an SEO image) or only one of the theme's site-wide defaults (Social Images → Theme
+	// default images; read with the switches, no query of its own). Any other image the theme passes (a body image, a
+	// file or reference field) wins. The record is ignored once the entry has an image field set (src/social/store.ts).
+	const socialOn = isOn(on, "socialImages") && Boolean(page.content);
+	const themeDefaults = socialOn && (page.seo?.ogImage || page.image) ? await themeDefaultImages(options.database) : [];
+	const noImage = (url: string | null | undefined) => !url || isThemeDefault(url, themeDefaults);
+	const generatedRead =
+		socialOn && page.content && noImage(page.seo?.ogImage) && noImage(page.image)
+			? generatedImage(ctx, page.content, site.origin, options.database).catch(() => null)
+			: Promise.resolve(null);
+	const imageRead =
+		graphOn || ogOn || isOn(on, "socialImages") ? generatedRead.then((generated) => generated ?? (graphOn || ogOn ? primaryImage(options, page, site, cleanImages) : null)) : Promise.resolve(null);
 	// With the graph on: its nodes, the publisher's @id and the entry's override, for the custom markup.
 	let packGraph: Node[] | null = null;
 	let packPublisherId: string | null = null;
@@ -815,7 +828,13 @@ export async function schemaContributions(
 		if (locale) out.push({ kind: "property", property: "og:locale", content: locale });
 		// The default OG image at its clean URL, or the page's image on the media host: these win over EmDash's own og:image/twitter:image (first contribution wins).
 		const own = Boolean(page.seo?.ogImage || page.image);
-		out.push(...ogImageTags(image, Boolean(image && cleanImages && packOwnsOgImage(image.url, site.origin, own))));
+		const generated = await generatedRead;
+		out.push(...ogImageTags(image, Boolean(generated) || Boolean(image && cleanImages && packOwnsOgImage(image.url, site.origin, own))));
+		if (generated) out.push({ kind: "meta", name: "twitter:card", content: "summary_large_image" });
+	} else {
+		// Open Graph extras off: the generated image's tags alone (it replaces EmDash's default og:image).
+		const generated = await generatedRead;
+		if (generated) out.push(...ogImageTags(generated, true), { kind: "meta", name: "twitter:card", content: "summary_large_image" });
 	}
 	return out;
 }

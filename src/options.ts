@@ -54,6 +54,12 @@ export interface CoywolfOptions {
 	contentBlocks?: Record<string, never> | false;
 	/** WordPress import tools (no options yet). `false` leaves the module out. */
 	wpImport?: Record<string, never> | false;
+	/** Content Audit (no options; settings are on its page). `false` leaves the module out. */
+	audit?: Record<string, never> | false;
+	/** Alerts & Digest (no options; settings are on its page). `false` leaves the module out. */
+	alerts?: Record<string, never> | false;
+	/** Social Images: the media bucket's binding (default "MEDIA"). `false` leaves the module out. */
+	socialImages?: import("./social/pack.js").SocialImagesOptions | false;
 	/**
 	 * Entry URL patterns for collections the theme routes differently from
 	 * EmDash's url_pattern, e.g. `{ posts: "/{term:category|uncategorized}/{slug}/" }`

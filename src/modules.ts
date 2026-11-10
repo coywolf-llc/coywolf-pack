@@ -4,6 +4,9 @@
  * MODULES (and MIDDLEWARE if it serves site URLs).
  */
 import { aiPack } from "./ai/pack.js";
+import { alertsPack } from "./alerts/pack.js";
+import { auditPack } from "./audit/pack.js";
+import { socialImagesPack } from "./social/pack.js";
 import { backupsDownloadMiddleware, backupsPack } from "./backups/pack.js";
 import { cloudflarePack } from "./cloudflare/pack.js";
 import { codeBlocksPack } from "./codeBlocks/pack.js";
@@ -58,6 +61,10 @@ export const MODULES: Factory[] = [
 	(o) => (o.cloudflare === false ? null : cloudflarePack()),
 	// Reports only: its one hook (page:fragments, the Web Analytics beacon) doesn't depend on the others.
 	(o) => (o.insights === false ? null : insightsPack(o.insights ?? {})),
+	// Phase 5C. No middleware; their hooks (Social Images' publish hook) don't depend on the modules above.
+	(o) => (o.audit === false ? null : auditPack()),
+	(o) => (o.alerts === false ? null : alertsPack()),
+	(o) => (o.socialImages === false ? null : socialImagesPack(o.socialImages ?? {})),
 ];
 
 export const MIDDLEWARE: PackMiddleware[] = [pageCacheMiddleware, strayRobotsMiddleware, imagesMiddleware, backupsDownloadMiddleware, redirectsMiddleware, robotsMiddleware, filesMiddleware, searchLiveMiddleware, searchRateLimitMiddleware, ...discoveryMiddleware, videosSitemapMiddleware, videosCaptionsMiddleware];

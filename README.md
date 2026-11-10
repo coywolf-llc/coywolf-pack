@@ -21,12 +21,15 @@ Every module starts off on a new site. Turn on only the ones you want on the **F
 | [Insights](docs/insights.md) | 404s (files and the media host too), server errors and crawlers from Cloudflare's analytics, real visitors' Core Web Vitals, Fathom traffic, Google Search Console, and what visitors search for |
 | [Clean Image URLs](docs/images.md) | Images from a `media.` subdomain on R2, resized to the sizes the theme uses, cached for a year |
 | [Backups](docs/backups.md) | Backups of the D1 database and R2 media, rewind with undo, restore to a new database |
+| [Alerts & Digest](docs/alerts.md) | Emails when a backup fails, links break, the Cloudflare bill estimate passes a threshold, an update is out or the content audit gets worse, plus a weekly digest |
 | [Redirect Manager](docs/redirects.md) | External, file-path and regex redirects, bulk import and export, and automatic redirects for slug changes and removed content (alongside EmDash's own Redirects page) |
 | [Schema & Social](docs/schema.md) | One Schema.org graph per page (publisher, articles, authors), breadcrumbs, robots directives, Open Graph, custom JSON-LD |
+| [Social Images](docs/social-images.md) | A generated Open Graph image (title, site name, logo, your colors) for entries without one, made with Cloudflare Browser Run |
 | [Discovery](docs/discovery.md) | An RSS feed, a Google News sitemap, llms.txt with Markdown versions of entries, a self-renewing security.txt, and whether Cloudflare's Crawler Hints is on |
 | [Robots.txt](docs/robots.md) | Plain-English robots.txt rules with a guided editor, a verified crawler directory, history and a URL tester |
 | [Search](docs/search.md) | Fast as-you-type results on EmDash's full-text search, a search box, and rate limiting |
-| [Link Manager](docs/links.md) | Every link in your content with its status, and bulk replace, unlink and ignore |
+| [Link Manager](docs/links.md) | Every link in your content with its status, bulk replace, unlink and ignore, and inbound link counts with orphans |
+| [Content Audit](docs/content-audit.md) | A weekly report of missing SEO titles and descriptions, alt text and social images, thin and stale entries, heading problems and broken internal links, with trends |
 | [Headings & TOC](docs/headings.md) | Linkable headings and a Table of Contents block |
 | [Breadcrumb Nav](docs/breadcrumbs.md) | An accessible breadcrumb trail for themes and as a block |
 | [Code Blocks](docs/code-blocks.md) | Server-side syntax highlighting, themes, language labels, copy buttons |

@@ -21,7 +21,8 @@ export function backupsPack(options: BackupsOptions): PackModule {
 		label: "Backups",
 		features: FEATURES,
 		routes: backups.routes,
-		tasks: [{ name: BACKUPS_TASK, schedule: "@daily", handler: (ctx: PluginContext) => backups.daily(ctx) }],
+		// recordOutcome: Alerts reports a failed run (src/core/task-health.ts).
+		tasks: [{ name: BACKUPS_TASK, schedule: "@daily", recordOutcome: true, handler: (ctx: PluginContext) => backups.daily(ctx) }],
 		adminPages: [{ path: "/backups", label: "Backups", icon: "database" }],
 		widgets: [{ id: "backup-status", title: "Backups", size: "third" }],
 		// Restores and Retention on Cloudflare call Cloudflare's API (through ctx.http where the route has it).

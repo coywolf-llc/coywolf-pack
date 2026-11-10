@@ -16,10 +16,11 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 			permission: "plugins:manage" as const,
 			// any: plugin context.
 			handler: async (ctx: any) => {
-				await ensureTasks(ctx, tasks);
 				// Sites set up before 0.36.0 keep their defaults (src/core/features.ts); a failure leaves them unrecorded, which reads the same.
 				await recordDefaults(ctx).catch((error: unknown) => ctx.log.warn("Could not record the feature defaults", { error: String(error) }));
 				const state = await ctxFeatures(ctx);
+				// Tasks that run only while their feature is on are scheduled or cancelled to match the switches.
+				await ensureTasks(ctx, tasks, state);
 				const known = new Set(featureCatalog().map((f) => f.id));
 				return {
 					modules: modules.map((m) => ({
@@ -46,7 +47,19 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 				await ctx.settings.set(FEATURES_SETTING, stored);
 				invalidateFeatures();
 				ctx.log.info("Features saved", stored);
-				return { features: await ctxFeatures(ctx) };
+				const now = await ctxFeatures(ctx);
+				// A switch turned on schedules its tasks that run only while on; turned off, cancels them (a task that
+				// fires while off cancels itself too). A task that couldn't be scheduled is reported, not just logged.
+				const failed = (await ensureTasks(ctx, tasks.filter((t) => t.onlyWhileOn), now)).filter((f) => f.scheduling);
+				if (failed.length) {
+					const { PluginRouteError } = await import("emdash");
+					throw new PluginRouteError(
+						"TASK_SCHEDULE_FAILED",
+						`The switches are saved, but ${failed.map((f) => f.task).join(", ")} couldn't be scheduled, so ${failed.length === 1 ? "it" : "they"} won't run yet: ${failed[0].error}. Open the Features page again to retry.`,
+						500,
+					);
+				}
+				return { features: now };
 			},
 		}),
 	};

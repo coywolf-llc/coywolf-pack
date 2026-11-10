@@ -25,7 +25,8 @@ test("settingsSchema contains only secret fields", () => {
 });
 
 test("the known secrets keep their stored keys", () => {
-	assert.deepEqual(Object.keys(SECRET_SETTINGS).sort(), ["aiApiKey", "backupsCloudflareToken", "cloudflareSetupToken", "filesR2SecretAccessKey", "imagesApiToken", "insightsFathomApiKey", "insightsGoogleServiceAccount", "robotsRadarToken", "usageApiToken", "videosApiToken", "videosWebhookSecret"]);
+	assert.deepEqual(Object.keys(SECRET_SETTINGS).sort(), ["aiApiKey", "backupsCloudflareToken", "cloudflareSetupToken", "filesR2SecretAccessKey", "imagesApiToken", "insightsFathomApiKey", "insightsGoogleServiceAccount", "robotsRadarToken", "socialImagesApiToken", "usageApiToken", "videosApiToken", "videosWebhookSecret"]);
+	assert.match(read("social/render.ts"), /TOKEN_SETTING = "socialImagesApiToken"/);
 	assert.match(read("ai/store.ts"), /aiApiKey: \{ type: "secret"/);
 	assert.match(read("files/module.ts"), /"filesR2SecretAccessKey"/);
 	assert.match(read("videos/store.ts"), /token: "videosApiToken"/);
