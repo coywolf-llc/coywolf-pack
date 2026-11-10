@@ -320,13 +320,46 @@ test("an exact rule added in another isolate is seen once this one reads the new
 
 test("patterns: nested repeats are refused on save; paths longer than MAX_PATTERN_PATH only match exact rules", async () => {
 	const { nestedRepeat, validate, RedirectValidationError, MAX_PATTERN_PATH } = await import("../src/redirects/rules.ts");
-	for (const slow of ["^/(a+)+$", "(\\w+\\s?)*", "^/((a)+)+$", "^/(a{2,})+$", "^/(x*y?)+z$", "^/(?:[a-z]+/)*end$"]) assert.ok(nestedRepeat(slow), slow);
-	for (const fine of ["^/a/(\\d+)/?$", "^/blog/(.*)$", "^/(?:news|blog)/(\\d{4})/(\\d{2})/(.*)$", "^/[(a+)+]$", "^/\\(a+\\)+$", "^/(a|b){2}$", "^/(ab)?c+$"]) assert.equal(nestedRepeat(fine), null, fine);
+	for (const slow of ["^/(a+)+$", "(\\w+\\s?)*", "^/((a)+)+$", "^/(a{2,})+$", "^/(x*y?)+z$", "^/(?:[a-z]+/)*end$", "^/(a|a)*$", "^/(a|ab)+$", "^/(?:x|(?:x))*$", "^/([^/]+a)+$"])
+		assert.ok(nestedRepeat(slow), slow);
+	for (const fine of [
+		"^/a/(\\d+)/?$",
+		"^/blog/(.*)$",
+		"^/(?:news|blog)/(\\d{4})/(\\d{2})/(.*)$",
+		"^/[(a+)+]$",
+		"^/\\(a+\\)+$",
+		"^/(a|b){2}$",
+		"^/(ab)?c+$",
+		"^/(?:[^/]+/)*feed/?$",
+		"^/(?:[^\\/]+\\/)*feed/?$",
+		"^/blog(?:/[^/]+)+$",
+		"^/img/[a-z0-9-]+\\.(?:jpg|png)+$",
+	])
+		assert.equal(nestedRepeat(fine), null, fine);
+	// The allowed shapes really are fast on a path that almost matches.
+	const started = performance.now();
+	assert.equal(new RegExp("^/(?:[^/]+/)*feed/?$").test(`/${"a/".repeat(500)}x`), false);
+	assert.equal(new RegExp("^/blog(?:/[^/]+)+$").test(`/blog${"/a".repeat(500)}/`), false);
+	assert.ok(performance.now() - started < 200);
 	assert.throws(() => validate({ source: "^/(a+)+$", target: "/x", isRegex: true }), (error) => error instanceof RedirectValidationError && /very slow/.test(error.message));
 	assert.doesNotThrow(() => validate({ source: "^/a/(\\d+)/?$", target: "/b/$1", isRegex: true }));
 	const compiled = compile([rule("^/(.*)$", "/all/$1")]);
 	assert.ok(match(compiled, "/x", ""));
 	assert.equal(match(compiled, `/${"x".repeat(MAX_PATTERN_PATH)}`, ""), null, "a crafted long path can't make every pattern run on it");
+});
+
+test("a pattern saved before the speed check can still be enabled, disabled or retargeted (its pattern unchanged), not changed into another slow one", async () => {
+	const db = sqliteD1();
+	await saveRule(db, { source: "/x", target: "/y" }); // creates the table
+	db.sqlite.prepare("INSERT INTO coywolf_redirects (id, source, target, type, is_regex, enabled, created_at, updated_at) VALUES ('old', '^/(a+)+$', '/a', 301, 1, 1, 'x', 'x')").run();
+	const disabled = await saveRule(db, { id: "old", source: "^/(a+)+$", target: "/a", isRegex: true, enabled: false });
+	assert.equal(disabled.enabled, false);
+	const moved = await saveRule(db, { id: "old", source: "^/(a+)+$", target: "/elsewhere", isRegex: true });
+	assert.equal(moved.target, "/elsewhere");
+	await assert.rejects(saveRule(db, { id: "old", source: "^/(b+)+$", target: "/a", isRegex: true }), /very slow/);
+	// Importing it again (an export) is fine too; a new slow pattern isn't.
+	await assert.doesNotReject(saveRule(db, { source: "^/(a+)+$", target: "/a", isRegex: true }));
+	await assert.rejects(saveRule(db, { source: "^/(c|c)*$", target: "/a", isRegex: true }), /very slow/);
 });
 
 test("serving from a database without the table: no rules, no error, no CREATE", async () => {

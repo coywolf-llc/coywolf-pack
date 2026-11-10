@@ -91,15 +91,17 @@ export function redirectsModule(options: RedirectsOptions) {
 			handler: async (ctx) => {
 				const { rules } = parseInput(z.object({ rules: z.array(ruleInput.omit({ id: true })).max(5000) }), ctx.input);
 				const errors: string[] = [];
+				// Patterns already saved as they are (an export imported again) skip the speed check, as editing them does.
+				const database = await db();
+				const saved = new Set((await listRules(database)).filter((r) => r.isRegex).map((r) => r.source));
 				rules.forEach((rule, i) => {
 					try {
-						validate(rule);
+						validate(rule, { unchangedPattern: rule.isRegex === true && saved.has(rule.source.trim()) });
 					} catch (error) {
 						errors.push(`Row ${i + 1} (${rule.source}): ${(error as Error).message}`);
 					}
 				});
 				if (errors.length) throw PluginRouteError.badRequest(errors.slice(0, 10).join("\n"));
-				const database = await db();
 				for (const rule of rules) await saveRule(database, rule);
 				invalidateRedirectCache();
 				ctx.log.info("Redirects imported", { count: rules.length });

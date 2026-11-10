@@ -99,29 +99,67 @@ export class RedirectValidationError extends Error {}
 /** Longest request path tried against pattern rules; longer paths match exact rules only (bounds a slow pattern's cost per request). */
 export const MAX_PATTERN_PATH = 1024;
 
+/** A literal character as written in a pattern (`\/` and `/` are the same). */
+const literal = (c: string) => (c.length === 2 && c.startsWith("\\") && !/[A-Za-z0-9]/.test(c[1] as string) ? c[1] : c);
+
 /**
- * A pattern that repeats a group which itself repeats, such as `(a+)+` or
- * `(\w+\s?)*`: on a path that almost matches, the regex engine tries every
- * way of splitting it between the two repeats, which takes exponential time,
- * and every request whose path has no exact rule runs every pattern. Found by
- * reading the pattern (escapes and character classes skipped). It also
- * refuses some nested repeats that happen to be fast, such as `(/[a-z]+)+`;
- * those can be written without one (`/[a-z/]+`). Returns the reason, or null
- * when the pattern is fine.
+ * A repeated group whose own repeat can't overlap between iterations: `[^X]+X`
+ * or `X[^X]+` (or `*`), where X is one literal character. Each iteration then
+ * ends (or starts) at the next X, so there's one way to split a path, such as
+ * the common `(?:[^/]+/)*` for "any number of path segments".
+ */
+function unambiguousRepeat(body: string): boolean {
+	const ends = /^\[\^(\\.|[^\\\]])\][+*](\\.|[^\\()[\]{}|*+?^$.])$/.exec(body);
+	if (ends && literal(ends[1] as string) === literal(ends[2] as string)) return true;
+	const starts = /^(\\.|[^\\()[\]{}|*+?^$.])\[\^(\\.|[^\\\]])\][+*]$/.exec(body);
+	return Boolean(starts && literal(starts[1] as string) === literal(starts[2] as string));
+}
+
+/** Alternatives that are plain words starting with different characters (`jpg|png`): each iteration has one way to match. */
+function distinctWords(body: string): boolean {
+	const words = body.split("|");
+	if (!words.every((w) => /^(?:[A-Za-z0-9_\-/]|\\[./-])+$/.test(w))) return false;
+	const firsts = words.map((w) => literal(w.startsWith("\\") ? w.slice(0, 2) : (w[0] as string)));
+	return new Set(firsts).size === firsts.length;
+}
+
+/**
+ * A pattern that can take exponential time on a path that almost matches,
+ * found by reading the pattern (escapes and character classes skipped):
+ * - a repeated group that itself repeats, such as `(a+)+` or `(\w+\s?)*`: the
+ *   engine tries every way of splitting the path between the two repeats.
+ *   Allowed when the inner repeat can't overlap (unambiguousRepeat), as in
+ *   `(?:[^/]+/)*`;
+ * - an unbounded repeat of a group with alternatives, such as `(a|a)*` or
+ *   `(a|ab)+` (`^/(a|a)*$` took 16 seconds on a 30-character path). Allowed
+ *   for plain words that start differently (`(?:jpg|png)+`).
+ * Every request whose path has no exact rule runs every pattern, so one such
+ * pattern lets anyone burn the Worker's CPU. Some fast patterns are refused
+ * too; they can be written another way. Returns the reason, or null.
  */
 export function nestedRepeat(source: string): string | null {
-	/** For each open group, whether what's before it in its parent repeats; `inner`: whether the current group contains a repeat. */
-	const stack: boolean[] = [];
-	let inner = false;
-	/** `*`, `+`, `{n,}` or `{n,m}` with m > 1 at i: its length, else 0 (`?`, `{1}` and `{0,1}` don't repeat). */
-	const repeatAt = (i: number): number => {
+	interface Group {
+		start: number;
+		/** Contains a repeat (directly or in a group inside it). */
+		repeat: boolean;
+		/** Contains alternatives (directly or in a group inside it). */
+		alt: boolean;
+	}
+	const stack: Group[] = [];
+	let top: Group = { start: -1, repeat: false, alt: false };
+	/** `*`, `+` or `{n,}` at i: its length, else 0. */
+	const unboundedAt = (i: number): number => {
 		const c = source[i];
 		if (c === "*" || c === "+") return 1;
-		if (c !== "{") return 0;
-		const m = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(i));
-		if (!m) return 0;
-		if (m[2] === undefined) return Number(m[1]) > 1 ? m[0].length : 0;
-		return m[3] === "" || Number(m[3]) > 1 ? m[0].length : 0;
+		const m = c === "{" ? /^\{\d+,\}/.exec(source.slice(i)) : null;
+		return m ? m[0].length : 0;
+	};
+	/** Any repeat at i (`*`, `+`, `{n,}`, or `{n}`/`{n,m}` above 1): its length, else 0 (`?`, `{1}` and `{0,1}` don't repeat). */
+	const repeatAt = (i: number): number => {
+		const unbounded = unboundedAt(i);
+		if (unbounded) return unbounded;
+		const m = source[i] === "{" ? /^\{(\d+)(?:,(\d+))?\}/.exec(source.slice(i)) : null;
+		return m && Number(m[2] ?? m[1]) > 1 ? m[0].length : 0;
 	};
 	for (let i = 0; i < source.length; i++) {
 		const c = source[i];
@@ -133,19 +171,26 @@ export function nestedRepeat(source: string): string | null {
 			for (; j < source.length && source[j] !== "]"; j++) if (source[j] === "\\") j++;
 			i = j;
 		} else if (c === "(") {
-			stack.push(inner);
-			inner = false;
+			stack.push(top);
+			top = { start: i, repeat: false, alt: false };
+		} else if (c === "|") {
+			top.alt = true;
 		} else if (c === ")") {
-			const groupRepeats = inner;
-			inner = stack.pop() ?? false;
+			const group = top;
+			top = stack.pop() ?? { start: -1, repeat: false, alt: false };
+			const body = source.slice(group.start + 1, i).replace(/^\?(?::|<[=!]|<[^>]*>|[=!])/, "");
 			const len = repeatAt(i + 1);
-			if (len && groupRepeats) return "it repeats a group that itself repeats (such as (a+)+)";
-			if (len || groupRepeats) inner = true;
-			i += len;
+			if (len) {
+				if (group.repeat && !unambiguousRepeat(body)) return "it repeats a group that itself repeats (such as (a+)+)";
+				if (unboundedAt(i + 1) && group.alt && !distinctWords(body)) return "it repeats a group of alternatives that can match the same text (such as (a|ab)+)";
+				top.repeat = true;
+				i += len;
+			} else if (group.repeat) top.repeat = true;
+			if (group.alt) top.alt = true;
 		} else {
 			const len = repeatAt(i);
 			if (len) {
-				inner = true;
+				top.repeat = true;
 				i += len - 1;
 			}
 		}
@@ -154,7 +199,11 @@ export function nestedRepeat(source: string): string | null {
 }
 
 /** Validate and normalize a rule; throws RedirectValidationError with a readable message. */
-export function validate(input: RedirectInput): Omit<RedirectInput, "type"> & { type: RedirectType; target: string } {
+/**
+ * `unchangedPattern`: the rule already exists with this very pattern (enabling, disabling, editing its target
+ * or note, re-importing an export), so the speed check is skipped: patterns saved before it existed stay editable.
+ */
+export function validate(input: RedirectInput, options: { unchangedPattern?: boolean } = {}): Omit<RedirectInput, "type"> & { type: RedirectType; target: string } {
 	const source = (input.source ?? "").trim();
 	const target = (input.target ?? "").trim();
 	const type = (input.type ?? 301) as RedirectType;
@@ -168,8 +217,8 @@ export function validate(input: RedirectInput): Omit<RedirectInput, "type"> & { 
 		} catch (error) {
 			throw new RedirectValidationError(`Invalid pattern: ${(error as Error).message}`);
 		}
-		const slow = nestedRepeat(source);
-		if (slow) throw new RedirectValidationError(`This pattern could make some requests very slow: ${slow}. Write it without the nested repeat, for example ^/blog/[a-z0-9/-]+$ instead of ^/blog(/[a-z0-9-]+)+$.`);
+		const slow = options.unchangedPattern ? null : nestedRepeat(source);
+		if (slow) throw new RedirectValidationError(`This pattern could make some requests very slow: ${slow}. Write it another way, for example ^/blog/[a-z0-9/-]+$ instead of ^/blog(/[a-z0-9-]+)+$, or (?:[^/]+/)* for any number of path segments.`);
 	} else if (!source.startsWith("/") || source.startsWith("//")) {
 		throw new RedirectValidationError("The source must be a path starting with /.");
 	}
@@ -288,14 +337,16 @@ export function loadPatternRules(db: D1Database): Promise<RedirectRule[]> {
 /** Create or update (by id, or by source when importing). Returns the saved rule. */
 export async function saveRule(db: D1Database, input: RedirectInput & { id?: string }): Promise<RedirectRule> {
 	await ensureTable(db);
-	const rule = validate(input);
-	const now = new Date().toISOString();
+	const isRegex = input.isRegex === true;
+	const trimmed = (input.source ?? "").trim();
 	const existing = input.id
-		? await db.prepare(`SELECT id FROM ${TABLE} WHERE id = ?`).bind(input.id).first<{ id: string }>()
+		? await db.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE id = ?`).bind(input.id).first<{ id: string; source: string; is_regex: number }>()
 		: await db
-				.prepare(`SELECT id FROM ${TABLE} WHERE source = ? AND is_regex = ?`)
-				.bind(rule.source, rule.isRegex ? 1 : 0)
-				.first<{ id: string }>();
+				.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE source = ? AND is_regex = ?`)
+				.bind(isRegex ? trimmed : normalizePath(trimmed), isRegex ? 1 : 0)
+				.first<{ id: string; source: string; is_regex: number }>();
+	const rule = validate(input, { unchangedPattern: isRegex && existing?.is_regex === 1 && existing.source === trimmed });
+	const now = new Date().toISOString();
 	const id = existing?.id ?? input.id ?? crypto.randomUUID();
 	if (existing) {
 		await db
