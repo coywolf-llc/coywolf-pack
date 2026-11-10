@@ -492,6 +492,27 @@ const uploadKey = (uid: string) => `videos:upload:${uid}`;
 
 const rateLimited = () => new PluginRouteError("RATE_LIMITED", "Too many requests. Try again in a minute.", 429);
 
+/** EmDash's Admin role. */
+const ADMIN_ROLE = 50;
+/**
+ * Admins see a video's MP4 download URL; Contributors, Authors and Editors (who can use the Videos page through
+ * media:upload or media:edit_any) don't: it's a direct, shareable link to the file, also for videos that are on
+ * no published page yet. A route without a user is an API token, which needs the admin scope.
+ */
+export const seesDownloadUrls = (ctx: { user?: { role?: number } | null }) => !ctx.user || (ctx.user.role ?? 0) >= ADMIN_ROLE;
+/** A video's details without its MP4 download URL (status and progress stay, so the page still shows them). */
+export function withoutDownloadUrl<T extends { downloadUrl?: string } | null>(meta: T): T {
+	if (!meta || meta.downloadUrl === undefined) return meta;
+	const { downloadUrl: _hidden, ...rest } = meta;
+	return rest as T;
+}
+/**
+ * Uploads a user below Admin may start per UTC day: Stream bills by stored minutes, so the routes Contributors
+ * can reach shouldn't be able to fill the account. Admins aren't limited.
+ */
+export const NON_ADMIN_UPLOADS_PER_DAY = 10;
+const uploadsKey = (userId: string) => `state:videos:uploadsBy:${userId}`;
+
 /** Videos embedded in published entries: the only ones public routes answer for (drafts stay private). */
 let publishedMemo: { items: EmbedEntry[]; uids: Set<string> } | null = null;
 async function publishedUids(ctx: Ctx): Promise<Set<string>> {
@@ -665,6 +686,7 @@ export function videosModule(options: VideosOptions) {
 				} catch {
 					download = null;
 				}
+				if (!seesDownloadUrls(ctx)) return { meta: withoutDownloadUrl(meta), download: download && { status: download.status, percent: download.percent } };
 				return { meta, download };
 			},
 		})),
@@ -716,6 +738,7 @@ export function videosModule(options: VideosOptions) {
 				// Only the pages that show this video (its name, description, poster or download changed), not every page.
 				afterResponse(clearVideoPages(ctx, input.uid));
 				ctx.log.info("Video updated", { uid: input.uid });
+				if (!seesDownloadUrls(ctx)) return { meta: withoutDownloadUrl(meta), download: download && { status: download.status } };
 				return { meta, download };
 			},
 		}),
@@ -746,6 +769,14 @@ export function videosModule(options: VideosOptions) {
 				// Stream turns any file it's given into a "video" (a still image becomes a one-frame clip).
 				if (input.type !== undefined && !input.type.startsWith("video/")) throw new PluginRouteError("BAD_REQUEST", "Choose a video file (MP4, MOV, WebM…), not an image or other file.", 400);
 				const api = await requireClient(ctx);
+				// Below Admin: a daily number of uploads (counted once Stream has accepted one).
+				const limited = ctx.user && (ctx.user.role ?? 0) < ADMIN_ROLE ? ctx.user.id : null;
+				const day = new Date().toISOString().slice(0, 10);
+				const started = limited ? await ctx.kv.get<{ day: string; count: number }>(uploadsKey(limited)) : null;
+				const startedToday = started?.day === day ? started.count : 0;
+				if (limited && startedToday >= NON_ADMIN_UPLOADS_PER_DAY) {
+					throw new PluginRouteError("RATE_LIMITED", `You can start ${NON_ADMIN_UPLOADS_PER_DAY} video uploads a day. Ask an admin to upload more.`, 429);
+				}
 				await invalidateLibrary(ctx);
 				// The upload dialog starts with the default tags (Settings → Uploads).
 				const tags = parseTags(input.tags ?? (await ctx.settings.get<string>(SETTINGS.defaultTags)) ?? "").join(", ");
@@ -753,6 +784,7 @@ export function videosModule(options: VideosOptions) {
 				const r = await stream(() => api.tusUpload({ length: size, maxDurationSeconds: maxDuration, name }));
 				if (!r.uid) throw new PluginRouteError("INTERNAL_ERROR", "Cloudflare Stream didn't return an id for the upload.", 502);
 				const uid = r.uid;
+				if (limited) await ctx.kv.set(uploadsKey(limited), { day, count: startedToday + 1 });
 				// tus uploads carry only the name; tags go on the waiting video record.
 				if (tags) await api.update(uid, { meta }).catch((error: unknown) => ctx.log.warn("Videos: could not tag the upload", { uid, error: String(error) }));
 				await ctx.kv.set(uploadKey(uid), { url: r.uploadURL, size, createdAt: Date.now() } satisfies PendingUpload);
@@ -1060,6 +1092,9 @@ export function videosModule(options: VideosOptions) {
 			handler: async (ctx) => {
 				await requireFeature(ctx, F.captions);
 				const { uid, lang } = parseInput(z.object({ uid: uidSchema, lang: langSchema }), ctx.input);
+				// Like videos/embed, play and like: only videos embedded in published content. A transcript of a video
+				// that's only in drafts stays private, even to someone who has its id.
+				if (!(await publishedUids(ctx)).has(uid)) throw PluginRouteError.notFound("No such caption track.");
 				const doc = await captionStore(ctx).get(`${uid}:${lang}`);
 				if (!doc) throw PluginRouteError.notFound("No such caption track.");
 				return { vtt: doc.vtt };

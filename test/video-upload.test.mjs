@@ -108,3 +108,45 @@ test("a piece Stream refuses is reported, not counted", async () => {
 	assert.ok(kv.has(`videos:upload:${UID}`));
 	invalidateFeatures();
 });
+
+// ── Below Admin: a daily number of uploads, no MP4 download URLs ──
+
+test("users below Admin can start 10 uploads a day; Admins and API tokens aren't limited", async () => {
+	const { NON_ADMIN_UPLOADS_PER_DAY } = await import("../src/videos/module.ts");
+	invalidateFeatures();
+	const kv = new Map();
+	const stream = async (url, init) => {
+		if (String(url).includes("/stream?direct_user=true")) return new Response(null, { status: 201, headers: { Location: TUS_URL, "stream-media-id": UID } });
+		return Response.json({ success: true, result: {} }); // tagging the waiting video
+	};
+	const upload = (user) => {
+		const c = ctx({ input: { name: "Clip", size: 1000, type: "video/mp4" }, kv });
+		c.settings.get = async (key) => (key === "features" ? { videos: true } : key === "videosAccountId" ? "0123456789abcdef0123456789abcdef" : key === "videosApiToken" ? "t" : null);
+		return routes["videos/upload"].handler({ ...c, user });
+	};
+	const contributor = { id: "u1", role: 20 };
+	await withFetch(stream, async () => {
+		for (let i = 0; i < NON_ADMIN_UPLOADS_PER_DAY; i++) assert.equal((await upload(contributor)).uid, UID);
+		await assert.rejects(upload(contributor), (error) => error.status === 429 && /10 video uploads a day/.test(error.message));
+		assert.equal((await upload({ id: "u2", role: 40 })).uid, UID, "each user has their own count");
+		assert.equal((await upload({ id: "admin", role: 50 })).uid, UID);
+		assert.equal((await upload(undefined)).uid, UID, "an API token (admin scope)");
+	});
+	assert.equal(kv.get("state:videos:uploadsBy:u1").count, NON_ADMIN_UPLOADS_PER_DAY);
+	assert.equal(kv.has("state:videos:uploadsBy:admin"), false);
+	invalidateFeatures();
+});
+
+test("MP4 download URLs are for Admins only; the download's status still shows", async () => {
+	const { seesDownloadUrls, withoutDownloadUrl } = await import("../src/videos/module.ts");
+	assert.equal(seesDownloadUrls({ user: { role: 50 } }), true);
+	assert.equal(seesDownloadUrls({}), true, "an API token");
+	for (const role of [20, 30, 40]) assert.equal(seesDownloadUrls({ user: { role } }), false, String(role));
+	assert.deepEqual(withoutDownloadUrl({ name: "A", downloadUrl: "https://x/v.mp4", downloadStatus: "ready" }), { name: "A", downloadStatus: "ready" });
+	assert.equal(withoutDownloadUrl(null), null);
+	const src = (await import("node:fs")).readFileSync(new URL("../src/videos/module.ts", import.meta.url), "utf8");
+	for (const route of ["videos/detail", "videos/update"]) {
+		const body = src.slice(src.indexOf(`"${route}":`), src.indexOf("\n\t\t}),", src.indexOf(`"${route}":`)));
+		assert.match(body, /seesDownloadUrls\(ctx\)/, route);
+	}
+});

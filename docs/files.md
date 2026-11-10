@@ -31,7 +31,7 @@ The Coywolf Files plugin for WordPress, on EmDash. Add a **File download** block
 
 The browser sends the file to the site in 6 MiB parts (`files/upload-part`), and the Worker uploads each to R2's multipart upload. Since EmDash 1.3.1, admin pages send `Content-Security-Policy: connect-src 'self'`, which blocks the browser from talking to R2 directly; the bucket needs no CORS policy. Each part must be exactly its expected size and belongs to the upload `files/upload-start` recorded, so a request can't write anywhere else. With 10,000 parts at most, a file can be up to just under 60 GB; the **largest upload** setting goes up to 50 GB.
 
-Only administrators (`plugins:manage`) can upload, and uploads above the **largest upload** setting (default 5 GB, at most 50 GB) are refused. R2 storage and operations are billed to your Cloudflare account.
+Only administrators (`plugins:manage`) can upload, and uploads above the **largest upload** setting (default 5 GB, at most 50 GB) are refused. The upload steps (`files/upload-start`, `-part`, `-complete`, `-abort`) clear no cached pages and record no settings change: a file is on no page until an entry uses it (the block's file picker lists only finished uploads). Before 0.35.19 each part cleared every cached page. R2 storage and operations are billed to your Cloudflare account.
 
 Files are stored as `files/<id>/<name>` with their metadata in plugin storage. Files moved from Coywolf Files for WordPress keep their 20-character WordPress id and object key (see [Migrating from WordPress](wordpress-import.md)). The pack calls only `<account>.r2.cloudflarestorage.com`.
 
