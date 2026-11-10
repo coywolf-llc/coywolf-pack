@@ -295,6 +295,8 @@ const READ_ONLY_ROUTES = [
 	"ai/media",
 	"ai/test",
 	"backups/download-link",
+	"cloudflare/fix",
+	"cloudflare/token/save",
 	"codeBlocks/preview",
 	"files/options",
 	"images/check",

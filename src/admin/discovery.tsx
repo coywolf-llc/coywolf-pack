@@ -13,6 +13,7 @@ import { FEATURES_CHANGED, PartSwitch, useParts } from "./feature-switches.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { useSaveResult } from "./toast.js";
+import { type SecurityTxtSettings, buildSecurityTxt, securityTxtProblems } from "../discovery/security-txt.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/discovery";
 
@@ -22,13 +23,15 @@ interface Settings {
 	news: { collections: string[]; publicationName: string; language: string };
 	feed: { collections: string[]; items: number; termFeeds: boolean };
 	llms: { summary: string; intro: string; collections: string[]; maxEntries: number; markdown: boolean; license: string };
+	securityTxt: SecurityTxtSettings;
 }
 
 interface Status {
-	features: { news: boolean; llms: boolean; feed: boolean };
+	features: { news: boolean; llms: boolean; feed: boolean; securityTxt: boolean };
 	settings: Settings;
 	collections: { slug: string; label: string; hidden: boolean; hasSeo: boolean }[];
-	urls: { news: string; llms: string; feed: string };
+	origin: string;
+	urls: { news: string; llms: string; feed: string; securityTxt: string };
 	cache: { llms: { count: number; builtAt: string } | null; news: { count: number; builtAt: string } | null };
 }
 
@@ -423,6 +426,16 @@ export function DiscoveryPage() {
 					/>
 				</Section>
 
+				<Section
+					title="security.txt"
+					part="discovery.securityTxt"
+					parts={parts}
+					description="A security.txt file (RFC 9116) at /.well-known/security.txt that tells security researchers how to report a problem. Its expiry date is set about a year ahead every day, so it never goes stale. The contact becomes public."
+				>
+					<ExternalLink href={status.urls.securityTxt} />
+					<SecurityTxtFields value={draft.securityTxt} origin={status.origin} onChange={(patch) => set("securityTxt", patch)} />
+				</Section>
+
 			</form>
 
 			<SaveBar
@@ -437,14 +450,60 @@ export function DiscoveryPage() {
 	);
 }
 
+/** security.txt's fields, with what's wrong and a preview of the file (built as the site builds it). */
+function SecurityTxtFields(props: { value: SecurityTxtSettings; origin: string; onChange: (patch: Partial<SecurityTxtSettings>) => void }) {
+	const { value } = props;
+	const problems = securityTxtProblems(value);
+	const preview = buildSecurityTxt(value, props.origin);
+	const url = (key: "policy" | "encryption" | "acknowledgments" | "hiring", label: string, description: string) => (
+		<Input
+			label={label}
+			description={description}
+			placeholder="https://"
+			value={value[key]}
+			onChange={(e: React.ChangeEvent<HTMLInputElement>) => props.onChange({ [key]: e.target.value })}
+		/>
+	);
+	return (
+		<>
+			<InputArea
+				label="Contacts"
+				description="One per line, most preferred first: an email address (security@example.com), an https:// page or form, or a tel: number. At least one is required for the file to be served."
+				rows={3}
+				value={value.contacts.join("\n")}
+				onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => props.onChange({ contacts: e.target.value.split("\n").slice(0, 10) })}
+			/>
+			<div className="grid gap-4 sm:grid-cols-2">
+				{url("policy", "Policy (optional)", "Your vulnerability disclosure policy: what's in scope, how you respond.")}
+				<Input
+					label="Preferred languages"
+					description="Language codes for reports, such as en or en, fr."
+					value={value.languages}
+					onChange={(e: React.ChangeEvent<HTMLInputElement>) => props.onChange({ languages: e.target.value })}
+				/>
+				{url("encryption", "Encryption key (optional)", "A link to your OpenPGP key, for encrypted reports.")}
+				{url("acknowledgments", "Acknowledgments (optional)", "A page thanking researchers who reported problems.")}
+				{url("hiring", "Security jobs (optional)", "A page with your security job openings.")}
+			</div>
+			{problems.length > 0 && <Banner variant="error" description={problems.join(" ")} />}
+			<details className="rounded-md border border-kumo-line text-sm" open={Boolean(preview)}>
+				<summary className="cursor-pointer px-3 py-2 font-medium" style={{ display: "list-item" }}>
+					Preview
+				</summary>
+				<pre className="overflow-x-auto border-t border-kumo-line px-3 py-3 text-xs">{preview ?? "Add a contact: without one there's no file (the address answers 404)."}</pre>
+			</details>
+		</>
+	);
+}
+
 function Header() {
 	return (
 		<PageHeader
 			title="Discovery"
 			description={
 				<>
-				Help search engines, feed readers and AI agents find your content: Cloudflare's Crawler Hints, a Google News sitemap, an RSS feed, and llms.txt with Markdown
-				versions of your entries.
+				Help search engines, feed readers, AI agents and security researchers find what they need: Cloudflare's Crawler Hints, a Google News sitemap, an RSS
+				feed, llms.txt with Markdown versions of your entries, and security.txt.
 				</>
 			}
 		/>

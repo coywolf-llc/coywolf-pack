@@ -16,8 +16,10 @@ EmDash on Cloudflare builds every page in a Worker, and a Worker that hasn't run
 | **Redirects** | Answered by middleware from rules cached per isolate, before EmDash renders anything, then kept in the edge cache (tagged `coywolf-redirects`) until a redirect edit clears them. |
 | **Fewer D1 round trips** | Pages that aren't cached yet cost the pack about one D1 round trip: settings come with the feature switches' query (cached per isolate for five minutes), an entry's pack data is one query, and the pack's own reads of a moment go to D1 as one batch. See [Database reads](internals.md). |
 | **No client JavaScript where it isn't needed** | Code highlighting, tables of contents, breadcrumbs, reviews and schema are rendered on the server. |
+| **The next page** | Optional [Speculation Rules](#speculation-rules): browsers fetch a page from the edge cache as soon as a visitor is about to open it, so it appears almost at once. Cloudflare's Speed Brain can't do this for pages a Worker serves. |
+| **Campaign and social links** | Optional: links with `utm_…`, `fbclid`, `gclid` and similar parameters served from the cached page instead of being built for each one, with a two-line change to the site's `src/worker.ts` ([Tracking parameters](cloudflare-checkup.md#tracking-parameters)). |
 
-See [Page cache](#page-cache) for setup.
+See [Page cache](#page-cache) for setup. The [Cloudflare Checkup](cloudflare-checkup.md) page checks the zone settings that affect speed (Speed Brain, Early Hints, HTTP/3, Rocket Loader).
 
 ## Page cache
 
@@ -128,6 +130,34 @@ It needs a read-only, account-owned API token (Cloudflare dashboard → Manage A
 - Account → Account Analytics → Read (D1 and Workers usage)
 - Workers → Metadata Read-Only, for All Workers (finds the site's Worker and database, and reads Workers Logs for the warming estimate; on a personal token: Account → Workers Scripts → Read and Account → Workers Observability → Edit)
 - Account → Account Settings → Read (the plan, from the account's entitlements)
-- Optional: Zone → Zone → Read, for all zones or the site's zone, so the Discovery page can show whether [Crawler Hints](discovery.md#crawler-hints) is on
+- Optional: Zone → Zone → Read, for all zones or the site's zone, so the Discovery page can show whether [Crawler Hints](discovery.md#crawler-hints) is on; with Zone Settings → Read, DNS → Read and Bot Management → Read in the same policy, the [Cloudflare Checkup](cloudflare-checkup.md#tokens) page reads the zone's settings
 
 Set it as the `USAGE_API_TOKEN` Worker secret (one token works for every site in the account), or save it as **Cloudflare usage** on the plugin's Settings page. The account comes from `CF_ACCOUNT_ID`, the Clean Image URLs account ID, or the token itself when it's limited to one account. A part the token can't read is left out with a note naming the permission; the rest still shows.
+
+## Speculation Rules
+
+Off until you turn on **Speculation Rules** (on the **Features** page, or with the switch on its card on the Performance page). Then every public page carries one `<script type="speculationrules">` in its head, so browsers that support it (Chrome, Edge and other Chromium browsers; others ignore it) fetch a same-site page as soon as a visitor is about to open it, and the page appears almost at once. Prefetched pages come from the edge cache like any visit, which pairs well with cache warming.
+
+Cloudflare's own version, Speed Brain, "will not prefetch on routes that run Workers" ([Cloudflare's docs](https://developers.cloudflare.com/speed/optimization/content/speed-brain/)), which is every page of an EmDash site on Workers: the [Cloudflare Checkup](cloudflare-checkup.md) page shows whether it's on, and can turn it off.
+
+| Feature switch | Default | What it does |
+| --- | --- | --- |
+| `speculation` | off | The speculation rules script on every public page (EmDash's `page:fragments` hook) |
+
+Settings, on the Performance page's **Speculation Rules** card (one setting, `speculationRules`, read with the feature switches, so pages cost no query of their own):
+
+- **Prefetch a page**: when a visitor hovers over a link (`moderate`, the default), presses it (`conservative`), or soon after a link is seen (`eager`, the most requests).
+- **Prerender a page**: off (the default), on press or on hover. Prefetching downloads the page only; prerendering also builds it in the background, scripts included, so it shows instantly but uses more data and runs the page's scripts before the visitor arrives. Fathom's script (`cdn.usefathom.com/script.js`) checks `document.prerendering` and counts the view only once a prerendered page is shown (checked November 2026); check any other analytics or scripts on your pages before turning prerendering on. Links with the `no-prerender` class are prefetched but never prerendered.
+- **Never fetch these paths ahead**: one URL path per line, such as `/visit/*` for affiliate links (`*` matches anything). Only plain path characters and `*`: a pattern the browser couldn't read would make it ignore the whole rule set.
+
+Always left out:
+
+- EmDash's admin, API and previews (`/_emdash/*`) and Astro's assets (`/_astro/*`);
+- any URL with a query string (search results, previews, filters, tracking links);
+- links to files: `.pdf`, `.zip`, images, feeds, `.txt`, `.md` and similar;
+- File Downloads' links (`/download/*`, or its URL base) while that module is on;
+- links with `rel="nofollow"` or `rel="sponsored"`, links with a `download` attribute, and anything with the `no-prefetch` class (on the link or around it).
+
+Saving the settings, or turning the switch on or off, clears the cached pages (each one carries the rules), so new visits get the new rules. A prefetch of a page that isn't cached yet costs a Worker request like any visit.
+
+**Removing a theme's own rules.** Seven of the eight Coywolf sites carry a hand-copied rule set in `src/layouts/Base.astro` (the `<script is:inline type="speculationrules">…</script>` element just before `<slot name="head" />`). When the switch is on, delete that element and deploy, or pages carry two rule sets (browsers would act on both). Two of them used other settings than the pack's defaults: coywolf.com prerenders on hover (`prerender`, `moderate`) and leaves out `/download/*` and `/theme/*`; glossary.io prefetches on hover and leaves out `/api/*`. To keep that, set **Prerender a page** to **On hover**, or add the paths under **Never fetch these paths ahead**.

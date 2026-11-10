@@ -212,7 +212,7 @@ function fakeCtx({ features = { discovery: true }, settings: initial = {}, kv: i
 const pack = discoveryPack({});
 
 test("IndexNow and Bing submission are gone: no switch, routes, key file or hosts; Crawler Hints reads Cloudflare's API", () => {
-	assert.deepEqual(pack.features.map((f) => f.id), ["discovery", "discovery.newsSitemap", "discovery.feed", "discovery.llms"]);
+	assert.deepEqual(pack.features.map((f) => f.id), ["discovery", "discovery.newsSitemap", "discovery.feed", "discovery.llms", "discovery.securityTxt"]);
 	assert.deepEqual(pack.allowedHosts, ["api.cloudflare.com"]);
 	for (const name of ["discovery/public/key", "discovery/regenerate-key", "discovery/submit", "discovery/bing-key", "discovery/bing-check"]) assert.equal(pack.routes[name], undefined, name);
 	assert.equal(pack.tasks.length, 0);
@@ -220,7 +220,7 @@ test("IndexNow and Bing submission are gone: no switch, routes, key file or host
 	assert.equal(SECRET_SETTINGS.discoveryBingApiKey, undefined);
 	assert.equal(GUIDES.bing, undefined);
 	assert.match(GUIDES["crawler-hints-token"].steps.join(" "), /Zone → Zone → Read/);
-	assert.deepEqual(discoveryMiddleware.map((m) => m.feature), ["discovery.newsSitemap", "discovery.feed", "discovery.llms"]);
+	assert.deepEqual(discoveryMiddleware.map((m) => m.feature), ["discovery.newsSitemap", "discovery.feed", "discovery.llms", "discovery.securityTxt"]);
 	// A GET: it changes nothing, so it clears no cache (only POSTs to pack routes do).
 	assert.equal(pack.routes["discovery/crawler-hints"].methods, undefined);
 	assert.equal(pack.routes["discovery/crawler-hints"].permission, "plugins:manage");
@@ -356,7 +356,7 @@ test("the old daily task runs the cleanup when it fires, whatever the switches s
 	for (let i = 0; i < 50 && !opened.kvMap.get("state:discovery:indexnowRetired"); i++) await new Promise((r) => setTimeout(r, 2));
 	assert.equal(opened.settingsMap.has("discoveryBingApiKey"), false);
 	assert.equal(opened.kvMap.has("state:discovery:url:posts:1"), false);
-	assert.deepEqual(Object.keys(status).sort(), ["cache", "collections", "features", "settings", "urls"]);
+	assert.deepEqual(Object.keys(status).sort(), ["cache", "collections", "features", "origin", "settings", "urls"]);
 	assert.equal(status.settings.indexnow, undefined, "the old settings part is dropped");
-	assert.deepEqual(status.features, { news: false, llms: false, feed: false });
+	assert.deepEqual(status.features, { news: false, llms: false, feed: false, securityTxt: false });
 });

@@ -5,6 +5,7 @@
  */
 import { aiPack } from "./ai/pack.js";
 import { backupsDownloadMiddleware, backupsPack } from "./backups/pack.js";
+import { cloudflarePack } from "./cloudflare/pack.js";
 import { codeBlocksPack } from "./codeBlocks/pack.js";
 import { customBlocksPack } from "./customBlocks/pack.js";
 import type { PackMiddleware, PackModule } from "./core/module.js";
@@ -21,6 +22,7 @@ import { schemaPack } from "./schema/pack.js";
 import { searchLiveMiddleware, searchPack, searchRateLimitMiddleware } from "./search/pack.js";
 import { robotsMiddleware, robotsPack } from "./robots/pack.js";
 import { reviewsPack } from "./reviews/pack.js";
+import { speculationPack } from "./speculation/pack.js";
 import type { CoywolfOptions } from "./options.js";
 import { videosCaptionsMiddleware, videosPack, videosSitemapMiddleware } from "./videos/pack.js";
 import { updatesPack } from "./updates/pack.js";
@@ -51,6 +53,8 @@ export const MODULES: Factory[] = [
 	(o) => (o.customBlocks === false || o.contentBlocks === false ? null : customBlocksPack()),
 	(o) => (o.images === false ? null : imagesPack(o.images ?? {})),
 	(o) => (o.pageCache === false ? null : pageCachePack(o.pageCache ?? {})),
+	(o) => (o.speculation === false ? null : speculationPack()),
+	(o) => (o.cloudflare === false ? null : cloudflarePack()),
 ];
 
 export const MIDDLEWARE: PackMiddleware[] = [pageCacheMiddleware, strayRobotsMiddleware, imagesMiddleware, backupsDownloadMiddleware, redirectsMiddleware, robotsMiddleware, filesMiddleware, searchLiveMiddleware, searchRateLimitMiddleware, ...discoveryMiddleware, videosSitemapMiddleware, videosCaptionsMiddleware];
