@@ -230,6 +230,15 @@ test("a page whose render saw a failed read isn't cached, decided after its body
 	assert.equal(out.status, 200);
 });
 
+test("a page going to the edge cache loses this render's Server-Timing; one kept out of it keeps it", async () => {
+	const timed = () => html("<p>hi</p>", { headers: { "content-type": "text/html", "server-timing": 'cw;dur=12', "x-keep": "1" } });
+	const cached = await settlePage(astroCache(), timed(), { failed: () => false });
+	assert.equal(cached.headers.get("server-timing"), null);
+	assert.equal(cached.headers.get("x-keep"), "1");
+	const failed = await settlePage(astroCache(), timed(), { failed: () => true });
+	assert.equal(failed.headers.get("server-timing"), "cw;dur=12", "not cached, so the visitor's own timings stay");
+});
+
 test("a failed read wins over a stopgap; the cache warmer is told to come back", async () => {
 	const visitor = astroCache();
 	await settlePage(visitor, html(), { failed: () => true, stopgap: () => true });

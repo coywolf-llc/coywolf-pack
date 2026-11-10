@@ -565,7 +565,7 @@ test("Stream webhook: clears only the pages that show the video (no full purge),
 		globalThis.fetch = realFetch;
 	}
 	assert.equal(docs.get(UID)?.duration, 12, "the video's details were refreshed");
-	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/news/a"], tags: ["home"] }], "only the page that shows it, and the home page by its entry's tag, in one call");
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/news/a"], tags: ["home", "coywolf:video-sitemap"] }], "only the page that shows it, the home page by its entry's tag, and the video sitemap, in one call");
 });
 
 // ── Off the request path: crops and posters (src/images/pack.ts, src/videos/poster.ts) ──

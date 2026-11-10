@@ -492,6 +492,50 @@ test("middleware: the title index is immutable for its version, short-lived for 
 	assert.equal((await handle(`${serve.INDEX_ENDPOINT}?v=${version}&locale=en`, { "If-None-Match": etag })).status, 304);
 });
 
+test("middleware with Workers Cache: successful answers go to the edge cache, tagged; errors and 429s never do", async () => {
+	engine.invalidateSearchMeta();
+	invalidateFeatures();
+	serve.resetLiveMemory();
+	const d1 = fixture();
+	const edge = fakeEdgeCache();
+	globalThis.caches = { default: edge };
+	globalThis.__testEnv = { DB: d1 };
+	configureSearchRateLimit({ requestsPerMinute: 1 });
+	const handle = (path) => {
+		const sets = [];
+		const ctx = { ...request(path, { "cf-connecting-ip": "198.51.100.77" }), cache: { enabled: true, set: (o) => sets.push(o) } };
+		return serve.searchLiveMiddleware.handle(ctx, globalThis.__testEnv, () => {}).then((response) => ({ response, sets }));
+	};
+	const { response, sets } = await handle(`${serve.LIVE_ENDPOINT}?q=Wol&limit=5`);
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get("Server-Timing"), null, "no render timings stored at the edge");
+	assert.equal(response.headers.get("X-Coywolf-Cache"), null);
+	const last = sets.at(-1);
+	assert.equal(last.maxAge, serve.LIVE_EDGE_TTL);
+	assert.equal(last.swr, 0);
+	assert.equal(last.tags[0], serve.SEARCH_TAG);
+	assert.ok(last.tags.length > 1, "and the searchable collections, which EmDash clears on publish");
+	assert.equal(edge.store.size, 0, "the Cache API layer is skipped: the edge cache is the copy");
+	// Over the limit: a 429, kept out of the edge cache (only the handler's own set(false)).
+	const limited = await handle(`${serve.LIVE_ENDPOINT}?q=elk`);
+	assert.equal(limited.response.status, 429);
+	assert.deepEqual(limited.sets, [false]);
+	configureSearchRateLimit({});
+	const bad = await handle(`${serve.LIVE_ENDPOINT}?q=%20`);
+	assert.equal(bad.response.status, 400);
+	assert.deepEqual(bad.sets, [false]);
+	const warm = await handle(`${serve.LIVE_ENDPOINT}?warm=1`);
+	assert.equal(warm.response.status, 204);
+	assert.deepEqual(warm.sets, [false]);
+	// The title index: a day for the current version, five minutes for an old page's.
+	const version = await serve.searchVersion();
+	const index = await handle(`${serve.INDEX_ENDPOINT}?v=${version}`);
+	assert.equal(index.sets.at(-1).maxAge, 86_400);
+	assert.equal(index.response.headers.get("Server-Timing"), null);
+	const stale = await handle(`${serve.INDEX_ENDPOINT}?v=old`);
+	assert.equal(stale.sets.at(-1).maxAge, 300);
+});
+
 test("publishing changes the version pages and cache keys use", async () => {
 	invalidateFeatures();
 	globalThis.__testEnv = { DB: fixture() };

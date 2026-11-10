@@ -338,6 +338,10 @@ export async function settlePage(cache: RouteCache | undefined, response: Respon
 			headers.set(checks.markHeader, "1");
 		} else cache.set({ maxAge: Math.min(maxAge, STOPGAP_LIFETIME.maxAge), swr: STOPGAP_LIFETIME.swr });
 	}
+	// A page going to the edge cache doesn't keep this render's Server-Timing: every later visitor would get it
+	// (a cold start's timings, served for days). Only what's set by the time the pack's middleware returns; EmDash's
+	// own middleware runs outside the pack's and adds its timings after (see docs/performance.md).
+	if (cache.options?.maxAge !== undefined) headers.delete("Server-Timing");
 	return new Response(body, { status: response.status, statusText: response.statusText, headers });
 }
 

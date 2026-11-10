@@ -20,6 +20,8 @@ import type { MiddlewareHandler } from "astro";
 import { PLUGIN_ID } from "../core/features.js";
 import { noteReadFailure, routeFailed } from "../core/read-failures.js";
 import type { PackMiddleware } from "../core/module.js";
+import { keepAtEdge } from "../pageCache/lib.js";
+import { LLMS_EDGE_MAX_AGE, LLMS_TAG, MARKDOWN_EDGE_MAX_AGE, MARKDOWN_TAG, NEWS_EDGE_MAX_AGE, NEWS_TAG } from "./build.js";
 import { FEED_EDGE_MAX_AGE, parseFeedPath } from "./feed.js";
 import { pagePathFromMarkdownPath } from "./markdown.js";
 import { MemoryCache } from "./memory-cache.js";
@@ -64,6 +66,14 @@ async function callRoute<T>(context: Context, route: string, query: Record<strin
 
 const isRead = (context: Context) => context.request.method === "GET" || context.request.method === "HEAD";
 
+/**
+ * With Astro route caching (Workers Cache) on, answers go to the edge cache, so only misses are kept in
+ * memory: a copy from memory could put the version from before a publish back at the edge right after
+ * EmDash cleared it. Without it, everything is kept for a minute (the only cache there is).
+ */
+const edgeCaching = (context: Context) => Boolean((context as unknown as { cache?: { enabled?: boolean } }).cache?.enabled);
+const memoryKeep = (context: Context): "all" | "misses" => (edgeCaching(context) ? "misses" : "all");
+
 function respond(context: Context, body: string, headers: Record<string, string>): Response {
 	return new Response(context.request.method === "HEAD" ? null : body, { status: 200, headers });
 }
@@ -75,10 +85,14 @@ const NEWS_PATHS = new Set(["/news-sitemap.xml", "/coywolf-news-sitemap.xml"]);
 export const newsSitemapMiddleware: PackMiddleware = {
 	module: "discovery",
 	feature: FEATURE.news,
+	// Kept at the edge for five minutes, tagged with its collections (EmDash clears them on publish) and NEWS_TAG
+	// (cleared when a rebuild changes it).
+	ownsCache: true,
 	handle: async (context) => {
 		if (!isRead(context) || !NEWS_PATHS.has(context.url.pathname)) return undefined;
-		const result = await callRoute<{ body: string }>(context, "discovery/public/news");
+		const result = await callRoute<{ body: string; tags?: string[] }>(context, "discovery/public/news", {}, memoryKeep(context));
 		if (!result?.body) return undefined;
+		keepAtEdge(context, NEWS_EDGE_MAX_AGE, result.tags ?? [NEWS_TAG]);
 		return respond(context, result.body, {
 			"Content-Type": "application/xml; charset=utf-8",
 			"Cache-Control": "public, max-age=300",
@@ -127,18 +141,23 @@ interface MarkdownDoc {
 	body: string;
 	tokens: number;
 	markdownUrl: string;
+	tags?: string[];
 }
 
 export const llmsMiddleware: PackMiddleware = {
 	module: "discovery",
 	feature: FEATURE.llms,
+	// llms.txt is kept at the edge for an hour and a Markdown version for a day, tagged with their collections
+	// (and a Markdown version with its entry), which EmDash clears when content changes.
+	ownsCache: true,
 	handle: async (context) => {
 		if (!isRead(context)) return undefined;
 		const { pathname } = context.url;
 
 		if (pathname === "/llms.txt") {
-			const result = await callRoute<{ body: string }>(context, "discovery/public/llms");
+			const result = await callRoute<{ body: string; tags?: string[] }>(context, "discovery/public/llms", {}, memoryKeep(context));
 			if (!result?.body) return undefined;
+			keepAtEdge(context, LLMS_EDGE_MAX_AGE, result.tags ?? [LLMS_TAG]);
 			return respond(context, result.body, {
 				"Content-Type": "text/plain; charset=utf-8",
 				"Cache-Control": "public, max-age=3600",
@@ -148,8 +167,9 @@ export const llmsMiddleware: PackMiddleware = {
 
 		const pagePath = pagePathFromMarkdownPath(pathname);
 		if (pagePath) {
-			const doc = await callRoute<MarkdownDoc>(context, "discovery/public/markdown", { path: pagePath });
+			const doc = await callRoute<MarkdownDoc>(context, "discovery/public/markdown", { path: pagePath }, memoryKeep(context));
 			if (!doc?.body) return undefined;
+			keepAtEdge(context, MARKDOWN_EDGE_MAX_AGE, doc.tags ?? [MARKDOWN_TAG]);
 			return respond(context, doc.body, {
 				"Content-Type": "text/markdown; charset=utf-8",
 				"Cache-Control": "public, max-age=3600",

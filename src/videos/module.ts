@@ -30,6 +30,7 @@ import {
 	sha256Hex,
 	MAX_CAPTION_BYTES,
 	MAX_WEBHOOK_PAGES,
+	VIDEO_SITEMAP_TAG,
 	utf8Bytes,
 	verifyWebhookSignature,
 	videoPagesScope,
@@ -260,8 +261,9 @@ async function clearVideoPages(ctx: Ctx, uid: string): Promise<void> {
 				max: MAX_WEBHOOK_PAGES,
 			});
 		}
-		const scope: PurgeScope =
-			pages.pathPrefixes.length && pages.tags.length ? { pathPrefixes: pages.pathPrefixes, tags: pages.tags } : pages.tags.length ? { tags: pages.tags } : { pathPrefixes: pages.pathPrefixes };
+		// The video sitemap lists the video too: its edge copy goes in the same purge call.
+		const tags = [...pages.tags, VIDEO_SITEMAP_TAG];
+		const scope: PurgeScope = pages.pathPrefixes.length ? { pathPrefixes: pages.pathPrefixes, tags } : { tags };
 		if (await withDeadline(purgePageCache(scope), DEADLINES.purgeMs, "clearing the pages that show a video")) {
 			ctx.log.info("Videos: cleared the pages that show the video", { uid, pages: pages.pathPrefixes.length, homePage: pages.tags.length > 0 });
 		}
@@ -373,10 +375,17 @@ async function videoContributions(ctx: Ctx, page: PageMetadataEvent["page"], emb
 // ── Sitemap ──────────────────────────────────────────────────────
 
 const SITEMAP_TTL = 10 * 60_000;
+/** Most collection tags on the video sitemap's edge copy. */
+const MAX_SITEMAP_COLLECTION_TAGS = 50;
 
-async function sitemapXml(ctx: Ctx, origin: string): Promise<string> {
-	const cached = await ctx.kv.get<{ xml: string; at: number }>(SITEMAP_KEY);
-	if (cached && Date.now() - cached.at < SITEMAP_TTL) return cached.xml;
+/**
+ * The video sitemap and its edge cache tags: VIDEO_SITEMAP_TAG (cleared with
+ * the pages of a video that changes, see clearVideoPages) and the collections
+ * of the entries it lists (EmDash clears those when their content changes).
+ */
+async function sitemapXml(ctx: Ctx, origin: string): Promise<{ xml: string; tags: string[] }> {
+	const cached = await ctx.kv.get<{ xml: string; at: number; tags?: string[] }>(SITEMAP_KEY);
+	if (cached && Date.now() - cached.at < SITEMAP_TTL) return { xml: cached.xml, tags: cached.tags ?? [VIDEO_SITEMAP_TAG] };
 	const features = await ctxFeatures(ctx);
 	const entries = (await allEmbeds(ctx)).filter((e) => e.status === "published" && e.url);
 	const uids = [...new Set(entries.flatMap((e) => e.uids))];
@@ -404,8 +413,9 @@ async function sitemapXml(ctx: Ctx, origin: string): Promise<string> {
 			}),
 		}));
 	const xml = buildVideoSitemap(out.map((e) => ({ ...e, videos: e.videos.map((v) => ({ ...v, description: v.description.replace(/<[^>]*>/g, "") })) })));
-	await ctx.kv.set(SITEMAP_KEY, { xml, at: Date.now() });
-	return xml;
+	const tags = [VIDEO_SITEMAP_TAG, ...[...new Set(entries.map((e) => e.collection))].slice(0, MAX_SITEMAP_COLLECTION_TAGS)];
+	await ctx.kv.set(SITEMAP_KEY, { xml, at: Date.now(), tags });
+	return { xml, tags };
 }
 
 // ── Plays and likes ──────────────────────────────────────────────
@@ -1022,7 +1032,7 @@ export function videosModule(options: VideosOptions) {
 			request: { body: "json", maxBytes: 1024 },
 			handler: async (ctx) => {
 				await requireFeature(ctx, F.sitemap);
-				return { xml: await sitemapXml(ctx, ctx.site.url || new URL(ctx.request.url).origin) };
+				return sitemapXml(ctx, ctx.site.url || new URL(ctx.request.url).origin);
 			},
 		}),
 

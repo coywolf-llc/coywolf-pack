@@ -24,11 +24,12 @@ Results come from `GET /_emdash/api/plugins/coywolf-pack/search/live?q=…` (opt
 
 **Speed and caching.** With the pack middleware installed (`coywolfPack()` in `src/middleware.ts`), the middleware answers both URLs itself, before EmDash's plugin routing:
 
-- Every answer is stored in Cloudflare's cache (the Cache API, per location; live answers for 5 minutes, title indexes for a day) and in a small per-isolate memory cache. The key is the query (trimmed, spaces collapsed, lower-cased), `limit`, `collections`, `locale` and the **search content version**. Browsers keep live answers for 60 seconds, and the title index for a year when the page's version matches (its URL changes with every version), 5 minutes otherwise.
+- With Astro route caching on (Workers Cache in front of the Worker), every successful answer is kept in the edge cache, so repeats don't run the Worker at all: live answers for 5 minutes, the title index for a day when the URL names the current content version (5 minutes for an old page's version). Each is tagged `coywolf-search` and with every searchable collection's slug, which EmDash clears whenever content in that collection changes, so a publish shows up in search at once. Bad input (400), the rate limit's 429, the warm-up's 204 and failures are never kept. Answers sent to the edge carry no `Server-Timing` or `X-Coywolf-Cache` (the edge would hand one render's timings to every later visitor).
+- Without route caching, every answer is stored in Cloudflare's cache (the Cache API, per location; live answers for 5 minutes, title indexes for a day) and in a small per-isolate memory cache instead. The key is the query (trimmed, spaces collapsed, lower-cased), `limit`, `collections`, `locale` and the **search content version**. With route caching those two layers are skipped: an isolate that hasn't read a new content version yet would put its old answer back at the edge right after EmDash cleared it. Browsers keep live answers for 60 seconds, and the title index for a year when the page's version matches (its URL changes with every version), 5 minutes otherwise.
 - The content version changes whenever published content does (publish, unpublish, update, delete, restore), and when search settings change on the **Search** admin page. New keys miss, so visitors never see results from before an edit; old copies just expire. Other Worker isolates pick up a new version within five minutes (it's read with the feature switches).
 - Cache hits skip the database and the rate limit. Misses count against **Search rate limit** when it's on.
 - A miss reads the database in a few batched round trips: search settings (cached per isolate for a minute), then title and full-text matches for every collection at once, then excerpts and URL terms at once. The any-word fallback adds one more. That's 2–3 D1 round trips (about 7 statements) where it was 25–31 queries.
-- Responses carry `Server-Timing` (`cw-search` says `hit-memory`, `hit-edge`, `miss` or `warm`; `cw-d1` counts statements and round trips) and `X-Coywolf-Cache: HIT` or `MISS`.
+- Without route caching, responses carry `Server-Timing` (`cw-search` says `hit-memory`, `hit-edge`, `miss` or `warm`; `cw-d1` counts statements and round trips) and `X-Coywolf-Cache: HIT` or `MISS`. With it, check `cf-cache-status` instead (`HIT` once the edge has the answer).
 
 Without the middleware, the plugin routes run the same batched search, without the Cache API layer.
 
@@ -43,9 +44,9 @@ coywolfPlugin({ search: { live: { limit: 8, minChars: 2, debounce: 120, enterOpe
 To measure on a live site:
 
 ```sh
-# A miss, then a hit (same query, any case or spacing).
-curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf%20$RANDOM" | grep -iE "server-timing|x-coywolf-cache|cache-control"
-curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf" | grep -iE "server-timing|x-coywolf-cache"
+# A miss, then a hit (same URL: the edge cache keys on the exact query string).
+curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf%20$RANDOM" | grep -iE "cf-cache-status|cache-control"
+curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf" | grep -iE "cf-cache-status"
 # The title index and the warm-up.
 curl -s --compressed -o /dev/null -w "%{size_download} bytes, %{time_total}s\n" "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/index?v=x"
 curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?warm=1" | grep -i server-timing
