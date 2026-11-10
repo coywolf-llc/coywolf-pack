@@ -11,7 +11,8 @@ import { absoluteUrl, entryUrl } from "../core/content-url.js";
 import { ctxFeatures, invalidateFeatures, isOn, requireCachedFeature, requireFeature, cachedCtxFeatures } from "../core/features.js";
 import { DEADLINES, withDeadline } from "../core/single-flight.js";
 import { type PurgeScope, purgePageCache } from "../pageCache/lib.js";
-import { afterResponse, parseInput } from "../shared.js";
+import { DEFAULT_RATE_LIMITER, addressKey, bindingAllows, rateLimitBinding } from "../core/rate-limit.js";
+import { afterResponse, parseInput, workerEnv } from "../shared.js";
 import { ENGAGEMENT_HEADER, ENGAGEMENT_LIMITS, EngagementLimiter, LIKES_BY_PREFIX, hasEngagementHeader, likeAction, likesByKey, staleLikesByKey } from "./engagement.js";
 import {
 	type SitemapEntry,
@@ -74,6 +75,11 @@ import { readOnlyRoute } from "../core/routes.js";
 export interface VideosOptions {
 	/** Longest upload Stream should accept, in seconds (reserves quota while uploading). Default 3600. */
 	maxUploadDurationSeconds?: number;
+	/**
+	 * Workers Rate Limiting binding (wrangler "ratelimits") that also limits plays and likes per visitor across isolates.
+	 * Default COYWOLF_RATE_LIMITER, used when the site has a binding by that name (see docs/performance.md).
+	 */
+	rateLimiter?: string;
 }
 
 export const F = {
@@ -453,7 +459,17 @@ async function visitorHash(ctx: Ctx & { requestMeta: { ip: string | null } }): P
 	const ip = ctx.requestMeta.ip?.trim();
 	if (!ip) return null;
 	const { day, salt } = await dailySalt(ctx);
-	return { hash: await sha256Hex(`${ip}|${salt}`), day };
+	// An IPv6 visitor by its /64 (addressKey): one connection gets a whole /64, so full addresses made one visitor any number of them.
+	return { hash: await sha256Hex(`${addressKey(ip)}|${salt}`), day };
+}
+
+/**
+ * Plays and likes per visitor across isolates: the site's Workers Rate Limiting binding (`rateLimiter`, default
+ * COYWOLF_RATE_LIMITER), on top of the per-isolate limits. True without a binding.
+ */
+async function bindingLets(name: string, key: string): Promise<boolean> {
+	const env: Record<string, unknown> = await workerEnv().catch(() => ({}));
+	return bindingAllows(rateLimitBinding(env, name), key);
 }
 
 const limiter = new EngagementLimiter();
@@ -512,6 +528,7 @@ const updateInput = z.object({
 
 export function videosModule(options: VideosOptions) {
 	const maxDuration = Math.min(21_600, Math.max(60, options.maxUploadDurationSeconds ?? 3600));
+	const rateLimiter = options.rateLimiter ?? DEFAULT_RATE_LIMITER;
 
 	const routes = {
 		// ── Admin ───────────────────────────────────────────────
@@ -1065,7 +1082,7 @@ export function videosModule(options: VideosOptions) {
 				// No address: plays aren't counted (they'd all be one visitor, see visitorHash).
 				if (!visitor) return { plays: ((await statsStore(ctx).get(uid)) ?? { plays: 0 }).plays, counted: false };
 				const { hash } = visitor;
-				if (!limiter.play(hash)) throw rateLimited();
+				if (!limiter.play(hash) || !(await bindingLets(rateLimiter, `play:${hash}`))) throw rateLimited();
 				if (seenRecently(`${uid}:${hash}`)) return { plays: ((await statsStore(ctx).get(uid)) ?? { plays: 0 }).plays, counted: false };
 				const counts = await bump(ctx, uid, "plays", 1);
 				return { plays: counts.plays, counted: true };
@@ -1089,7 +1106,7 @@ export function videosModule(options: VideosOptions) {
 				// is stored and the button shows the count without the visitor's like.
 				if (!visitor) return current(false);
 				const { hash, day } = visitor;
-				if (!limiter.like(hash)) throw rateLimited();
+				if (!limiter.like(hash) || !(await bindingLets(rateLimiter, `like:${hash}`))) throw rateLimited();
 				const id = await sha256Hex(`${uid}|${hash}`);
 				const likes = (ctx.storage as Record<string, import("emdash").StorageCollection<{ uid: string; day: string }>>)[COLLECTIONS.likes];
 				const action = likeAction(liked, await likes.exists(id));

@@ -7,7 +7,7 @@ EmDash has full-text search built in: SQLite FTS5 with BM25 ranking, English ste
 - **Search settings** (`search.settings`): a **Search** admin page to choose which collections are searchable, set field weights, pick the tokenizer (English stemming, exact words, or trigram substrings), and rebuild indexes with a progress readout and per-collection entry counts. It calls EmDash's own search API, so it needs EmDash's `search:manage` permission (admins). Fields are made searchable in each collection's schema.
 - **Live results** (`search.live`, on by default with Search): matching entries in a dropdown as visitors type into the site's search box, like the Coywolf Search WordPress plugin. See [Live results](#live-results).
 - **Search box** (`search.box`): a `SearchBox` component with as-you-type suggestions while **Live results** is on (titles first, then full text, with excerpts), arrow keys, Enter and Escape, a clear button, content-type labels, highlighted matches, screen-reader announcements, and a fade that respects reduced motion. When nothing matches every word, it shows results for any of the words, ranked by how many they contain. Without JavaScript it's a plain search form that submits to your search page.
-- **Search rate limit** (`search.rateLimit`): limits each visitor to 120 searches a minute (configurable) on EmDash's public search and suggestion endpoints and the pack's search and live results routes, answering `429` with `Retry-After`. Visitors are keyed by a salted hash of their IP address, never the address itself.
+- **Search rate limit** (`search.rateLimit`): limits each visitor to 120 searches a minute (configurable) on EmDash's public search and suggestion endpoints and the pack's search and live results routes, answering `429` with `Retry-After`. Visitors are keyed by a salted hash of their IP address (an IPv6 address by its /64, since one connection gets a whole /64), never the address itself.
 
 ## Live results
 
@@ -95,19 +95,18 @@ Fallback results aren't paginated (the best 50 are ranked together).
 
 ## Rate limit setup
 
-The limit is enforced by a [Workers Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) binding when you add one. Its limit and period (10 or 60 seconds) come from `wrangler.jsonc`:
+The limit is enforced by a [Workers Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) binding named `COYWOLF_RATE_LIMITER` when the site has one; the same binding limits video plays and likes (see [Rate limiting](performance.md#rate-limiting)). Its limit and period (10 or 60 seconds) come from `wrangler.jsonc`:
 
 ```jsonc
+// wrangler.jsonc (coywolf.com)
 "ratelimits": [
-  { "name": "SEARCH_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }
+  { "name": "COYWOLF_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }
 ]
 ```
 
-```js
-coywolfPlugin({ search: { rateLimiter: "SEARCH_RATE_LIMITER" } });
-```
-
-- `rateLimiter`: the binding's name. Counting happens at Cloudflare (per location), so it holds across Worker isolates. Blocked requests get `Retry-After: 60`.
+- Counting happens at Cloudflare (per location), so it holds across Worker isolates. Blocked requests get `Retry-After: 60`. Search's keys are its own (`search:<hash>`), so plays and likes don't use up a visitor's searches.
+- `namespace_id` must be unique in the Cloudflare account: give each site its own number, or sites in one account share their counters.
+- `rateLimiter`: a binding with another name (`coywolfPlugin({ search: { rateLimiter: "SEARCH_RATE_LIMITER" } })`), for sites that added one before 0.35.19.
 - Without a binding, each Worker isolate counts on its own (`requestsPerMinute`, default 120; `0` turns it off). That's best effort: it stops one client hammering one isolate, but it isn't a hard limit.
 - Optional Worker secret `SEARCH_RATE_LIMIT_SALT` for the IP hash (recommended; a fixed built-in salt is used otherwise, so keys agree across isolates).
 - Requires the pack middleware (`coywolfPack()` in `src/middleware.ts`). The admin endpoints (enable, rebuild, stats) aren't limited.

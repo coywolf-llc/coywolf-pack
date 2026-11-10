@@ -82,6 +82,25 @@ Every one of them also carries the settings generation's tag (see **After Coywol
 
 Crawlers ask for `/robots.txt` constantly, and each answer used to run the Worker. It's now kept in the edge cache for a day, whether the pack's Robots.txt Rules or EmDash's own file serves it (tag `coywolf-robots`; the pack clears its cache after its admin saves and settings changes, so edits show at once). A `robots.txt` asked for below the root (`/news/robots.txt`, which crawlers try) gets a small plain-text 404, also cached for a day, instead of a rendered 404 page. The live search client (`/_emdash/api/plugins/coywolf-pack/search/live-client?v=<hash>`) is kept at the edge for a year when the URL names the current version (5 minutes otherwise); live results and the title index are kept for minutes to a day (see the table above).
 
+### Rate limiting
+
+Search (when **Search rate limit** is on), video plays and video likes count each visitor's requests. Without help they count per Worker isolate, and Workers spread one visitor's requests over many short-lived isolates, so a client that's spread out is barely limited. Add a [Workers Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) binding named `COYWOLF_RATE_LIMITER` and the pack uses it for all three, with no other setup: Cloudflare counts across isolates in each location. For coywolf.com:
+
+```jsonc
+// wrangler.jsonc
+"ratelimits": [
+  // Coywolf Pack: search, video plays and likes, per visitor (IPv6 by /64). namespace_id is unique per account: one per site.
+  { "name": "COYWOLF_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }
+]
+```
+
+- Each limit has keys of its own (`search:…`, `play:…`, `like:…`, from a salted hash of the address, never the address), each counted at the binding's limit (120 a minute here).
+- Visitors are keyed by IP address; an IPv6 address by its /64, since one connection gets a whole /64 (2^64 addresses to rotate through).
+- Search: the binding replaces the per-isolate counter (`requestsPerMinute`), which stays as the fallback without a binding or if the binding errors. Plays and likes keep their stricter per-isolate limits (10 and 20 a minute) and the daily cap on new likes, and the binding adds the limit across isolates.
+- A binding with another name: `coywolfPlugin({ search: { rateLimiter: "NAME" }, videos: { rateLimiter: "NAME" } })`.
+- Without a binding nothing changes: each isolate counts on its own, best effort.
+- Requests answered from the edge cache (repeat searches) never reach the Worker, so they aren't counted; only misses are.
+
 ### Cloudflare usage
 
 The Performance page's **Cloudflare usage** card, and a **Cloudflare usage** dashboard widget, show what the site and its account use on Cloudflare, read from Cloudflare's analytics and kept for an hour (**Refresh** reads again):
