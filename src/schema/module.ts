@@ -1157,6 +1157,36 @@ export function schemaModule(options: SchemaOptions) {
 			},
 		})),
 
+		/**
+		 * One entry's override, for the entry editor's Schema panel: its types (and the collection's,
+		 * which apply when it has none), its main subject's name, and its custom markup's types.
+		 */
+		"schema/entry": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await requireFeature(ctx, MAIN);
+				const { collection, entryId } = parseInput(z.object({ collection: z.string().min(1).max(100), entryId: z.string().min(1).max(100) }), ctx.input);
+				const [override, config, features] = await Promise.all([
+					entries(ctx).get(`${collection}:${entryId}`) as Promise<EntryOverride | null>,
+					loadConfig(ctx, options.database),
+					ctxFeatures(ctx),
+				]);
+				const labels = Object.fromEntries([...PAGE_TYPES, ...ARTICLE_TYPES]);
+				const bylineId = mainSubjectByline(override?.mainSubject);
+				const byline = bylineId && ctx.bylines ? await ctx.bylines.get(bylineId).catch(() => null) : null;
+				return {
+					override: override ?? null,
+					collectionTypes: config.types[collection] ?? {},
+					labels,
+					mainSubject: override?.mainSubject === "publisher" ? "The site publisher" : bylineId ? (byline?.displayName ?? "A byline") : null,
+					customTypes: override?.custom ? markupTypes(override.custom.markup) : [],
+					features: { graph: isOn(features, SCHEMA_FEATURES.graph), custom: isOn(features, SCHEMA_FEATURES.custom) },
+				};
+			},
+		})),
+
 		/** Recent entries of a collection, for picking one to override or preview. */
 		"schema/entries/find": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
@@ -1424,6 +1454,23 @@ export function schemaModule(options: SchemaOptions) {
 	};
 
 	return { routes };
+}
+
+/** The @types in custom markup (a node, an array, or { "@graph": [...] }), for a summary; empty when it doesn't parse. */
+export function markupTypes(markup: string): string[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(markup);
+	} catch {
+		return [];
+	}
+	const graph = parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray((parsed as { "@graph"?: unknown })["@graph"]) ? (parsed as { "@graph": unknown[] })["@graph"] : parsed;
+	const nodes = Array.isArray(graph) ? graph : [graph];
+	const types = nodes.flatMap((node) => {
+		const type = node && typeof node === "object" ? (node as { "@type"?: unknown })["@type"] : undefined;
+		return (Array.isArray(type) ? type : [type]).filter((t): t is string => typeof t === "string");
+	});
+	return [...new Set(types)].slice(0, 10);
 }
 
 /** The hook EmDash calls for each rendered page. */

@@ -9,6 +9,7 @@ An inventory of every link in your content, ported from Coywolf SEO's Link Manag
 - **Bulk actions**: **Replace** a URL across every entry that uses it (link text and other formatting are kept), **Unlink** (the text stays; linked images and buttons lose their link; embeds are left alone), **Ignore** a URL or domain, and **Recheck**. Ignore rules can also be domains, exact URLs, wildcards (`https://coywolf.com/visit/*`) or regular expressions. Ignored links aren't checked or counted.
 - **Export CSV**: every link matching the current filters (all pages), with its status, HTTP code, final URL, the entries that use it, and their anchor text. Filter by **Broken** first for a list to hand to whoever fixes links. Cells that look like spreadsheet formulas are prefixed with an apostrophe.
 - **Dashboard widget** with the number of broken links.
+- **In the entry editor and content lists** (EmDash 1.4+, admins only, while Link Manager is on): a saved entry's sidebar has a **Link status** section with its links, worst first, each with its status and HTTP code, and a link to Link Manager. Content lists get a **Links** column: "2 broken", "1 blocked", or "5 OK" per entry. The column reads a whole page of entries in one request (one D1 read per 90 entries, over the references' `entryKey` index), not one per row. Both only read; the inventory is updated when entries are saved.
 
 Feature switches: **Link Manager** (`links`) and **Scheduled link checking** (`links.check`), both off by default.
 

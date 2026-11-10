@@ -221,6 +221,28 @@ export function aiRoutes(options: AiOptions) {
 			},
 		})),
 
+		/** One entry's analysis, for the entry editor's AI suggestions panel. */
+		"ai/entry": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (raw) => {
+				const ctx = asCtx(raw);
+				await requireFeature(ctx, "ai");
+				const { collection, id } = parseInput(entryRef, (raw as { input: unknown }).input);
+				const [record, features, collections] = await Promise.all([
+					col<EntryRecord>(ctx, "aiEntries").get(entryKey(collection, id)),
+					ctxFeatures(ctx),
+					readSettings(ctx, options).then((s) => targetCollections(ctx, s)).catch(() => null),
+				]);
+				return {
+					record: record ?? null,
+					covered: !collections || collections.includes(collection),
+					features: { entities: isOn(features, "ai.entities"), descriptions: isOn(features, "ai.descriptions") },
+				};
+			},
+		})),
+
 		"ai/entry/reanalyze": definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],

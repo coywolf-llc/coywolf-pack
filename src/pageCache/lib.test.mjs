@@ -292,6 +292,7 @@ const { readOnlyRoute, isReadOnlyRoute, readOnlyRouteNames } = await import("../
 /** Every route declared read-only where it's defined (`"name": readOnlyRoute(definePluginRoute({`). Adding one is a deliberate change: list it here. */
 const READ_ONLY_ROUTES = [
 	"ai/entries",
+	"ai/entry",
 	"ai/media",
 	"ai/test",
 	"backups/cloudflare/apply",
@@ -302,10 +303,13 @@ const READ_ONLY_ROUTES = [
 	"files/options",
 	"images/check",
 	"images/setup/plan",
+	"links/entries/status",
+	"links/entry",
 	"links/list",
 	"redirects/test",
 	"schema/entries/bylines",
 	"schema/entries/find",
+	"schema/entry",
 	"schema/media",
 	"schema/preview",
 	"videos/captions/list",

@@ -945,6 +945,39 @@ test("plugin pages render inside the admin's <Toasty> and RouterProvider, bare (
 	assert.match(functionSource(admin, "PluginPage"), /if \(PluginComponent\) return \/\* @__PURE__ \*\/ jsx\(PluginComponent, \{\}\)/);
 });
 
+test("entry editor panels and content-list columns: read from the plugin's admin module, picked by a synchronous collections predicate re-run when manifest.plugins changes, and the manifest is in the router context's queryClient (src/admin/extensions.ts)", async () => {
+	// The admin registry imports each plugin's admin entry as a namespace, so named exports reach pluginAdmins.
+	const registry = [...emdashDist.values()].find((src) => src.includes("function generateAdminRegistryModule("));
+	assert.ok(registry, "no generateAdminRegistryModule");
+	assert.match(functionSource(registry, "generateAdminRegistryModule"), /import \* as \$\{varName\} from "\$\{descriptor\.adminEntry\}";/);
+	// Panels: pluginAdmins[id].contentEditorPanels, predicate called with the collection, disabled plugins skipped, role checked.
+	const panels = functionSource(admin, "resolveContentEditorPanels");
+	assert.match(panels, /pluginAdmins\[pluginId\]\?\.contentEditorPanels/);
+	assert.match(admin, /function appliesToCollection\$1\(pluginId, panel, collection\) \{[\s\S]{0,300}?return panel\.collections\(collection\);/);
+	assert.match(panels, /candidate\.minRole !== void 0 && userRole < candidate\.minRole/);
+	assert.match(admin, /resolveContentEditorPanels\(pluginAdmins, collection, currentUser\?\.role \?\? 0, manifest\?\.plugins\) : \[\], \[[\s\S]{0,120}?manifest\?\.plugins,/);
+	assert.match(admin, /jsx\(Panel, \{\s*collection,\s*entry: item,\s*locale:/);
+	// Columns: the same, keyed on pluginStates = manifest.plugins; cells get the page's visibleItems.
+	const columns = functionSource(admin, "resolveContentListColumns");
+	assert.match(columns, /pluginAdmins\[pluginId\]\?\.contentListColumns/);
+	assert.match(admin, /function appliesToCollection\(pluginId, column, collection\) \{[\s\S]{0,300}?return column\.collections\(collection\);/);
+	assert.match(admin, /resolveContentListColumns\(pluginAdmins, collection, userRole, pluginStates\), \[[\s\S]{0,80}?pluginStates,/);
+	assert.match(admin, /pluginStates: manifest\.plugins,/);
+	assert.match(admin, /jsx\(Cell, \{\s*collection,\s*item,\s*locale: item\.locale,\s*visibleItems\s*\}\)/);
+	// The router's context carries the React Query client that holds ["manifest"].
+	assert.match(functionSource(admin, "createAdminRouter"), /context: \{ queryClient \}/);
+	assert.match(admin, /queryKey: \["manifest"\]/);
+	// The manifest's plugin entry lists the admin pages EmDash got from plugin.admin.pages (the pack's live getter).
+	const runtime = [...emdashDist.values()].find((src) => src.includes("_buildManifest()"));
+	assert.match(runtime, /enabled,\s*adminMode,\s*adminPages: plugin\.admin\?\.pages \?\? \[\]/);
+	// And the predicate the pack hands EmDash reads it from there.
+	const { packPageOn } = await import("../src/admin/extensions.ts");
+	const queryClient = { getQueryData: (key) => (key[0] === "manifest" ? { plugins: { "coywolf-pack": { enabled: true, adminPages: [{ path: "/links" }] } } } : undefined) };
+	const router = { navigate() {}, history: { block: () => () => {} }, options: { basepath: "/_emdash/admin", context: { queryClient } } };
+	assert.equal(packPageOn("/links", { __TSR_ROUTER__: router }), true);
+	assert.equal(packPageOn("/schema", { __TSR_ROUTER__: router }), false);
+});
+
 test("EmDash runs plugin:install, then plugin:activate, once for a config plugin with no _plugin_state row (the 0.36.0 defaults: src/core/features.ts recordDefaults)", () => {
 	const runtime = [...emdashDist.values()].find((src) => src.includes("installUnrecordedConfigPlugins(configPlugins"));
 	assert.ok(runtime, `EmDash ${emdashVersion} no longer installs unrecorded config plugins at boot`);

@@ -39,8 +39,9 @@ export interface AdminRouter {
 		/** True from blockerFn blocks the navigation. Returns the unblock function. */
 		block(blocker: { blockerFn: (args: BlockerArgs) => boolean | Promise<boolean>; enableBeforeUnload?: boolean | (() => boolean) }): () => void;
 	};
-	navigate(options: { to: string }): unknown;
-	options?: { basepath?: string };
+	navigate(options: { to: string; search?: Record<string, string> }): unknown;
+	/** `context.queryClient`: the admin's React Query client (createAdminRouter puts it there); src/admin/extensions.ts reads the manifest from it. */
+	options?: { basepath?: string; context?: { queryClient?: { getQueryData(key: readonly unknown[]): unknown } } };
 }
 
 /** The admin's router, or null when it isn't there (outside the admin, or an admin that no longer uses TanStack Router). */
@@ -65,12 +66,16 @@ export function packPagePath(page: string): string {
 
 /**
  * Go to an admin path inside the app (no reload) when the router is there;
- * otherwise load it. Blockers (unsaved changes) still apply.
+ * otherwise load it. Blockers (unsaved changes) still apply. A query string
+ * in `to` ("/plugins/coywolf-pack/schema?entry=posts:1") goes to the router
+ * as its search params (TanStack's `to` is a path only).
  */
 export function goTo(to: string, scope?: { __TSR_ROUTER__?: unknown; location?: { assign(url: string): void } }): void {
 	const router = adminRouter(scope);
 	if (router) {
-		void router.navigate({ to });
+		const at = to.indexOf("?");
+		if (at === -1) void router.navigate({ to });
+		else void router.navigate({ to: to.slice(0, at), search: Object.fromEntries(new URLSearchParams(to.slice(at + 1))) });
 		return;
 	}
 	(scope?.location ?? globalThis.location)?.assign(adminHref(to));

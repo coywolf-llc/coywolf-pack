@@ -29,6 +29,10 @@ import {
 	linkCollections,
 	putMany,
 	queryIn,
+	refsForEntries,
+	refsWhere,
+	summarizeEntryLinks,
+	entryKey,
 	reapplyIgnores,
 	refs,
 	removeEntry,
@@ -454,6 +458,60 @@ export function linksModule() {
 					siteUrlKnown: Boolean(ctx.site?.url),
 					ignores: await getIgnores(ctx),
 				};
+			},
+		})),
+
+		/** One entry's links with their status, worst first, for the entry editor's Links panel. */
+		"links/entry": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await guard(ctx);
+				const { collection, entryId } = parseInput(z.object({ collection: z.string().min(1).max(100), entryId: z.string().min(1).max(200) }), ctx.input);
+				const rows = await refsWhere(ctx, "entryKey", entryKey(collection, entryId));
+				const found = await getMany(urls(ctx), [...new Set(rows.map((r) => r.data.urlId))]);
+				const items = rows
+					.map(({ data }) => ({ ref: data, url: found.get(data.urlId) }))
+					.filter((item): item is { ref: RefRow; url: UrlRow } => Boolean(item.url))
+					.sort((a, b) => a.url.rank - b.url.rank || a.url.url.localeCompare(b.url.url))
+					.slice(0, 100)
+					.map(({ ref, url }) => ({
+						url: url.url,
+						status: url.status,
+						code: url.code,
+						note: url.note,
+						finalUrl: url.finalUrl,
+						internal: url.internal,
+						ignored: url.ignored,
+						checkedAt: url.checkedAt,
+						anchors: ref.anchors.slice(0, 3),
+					}));
+				const features = await ctxFeatures(ctx);
+				return {
+					items,
+					total: rows.length,
+					summary: summarizeEntryLinks(rows.map((r) => r.data), found).get(entryKey(collection, entryId)) ?? null,
+					checking: features["links.check"] ?? false,
+				};
+			},
+		})),
+
+		/**
+		 * Link problems of the entries on one page of the content list (its Links column): one request
+		 * per page, one D1 read per 90 entries (refsForEntries) plus their URLs' rows.
+		 */
+		"links/entries/status": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await guard(ctx);
+				const { collection, ids } = parseInput(z.object({ collection: z.string().min(1).max(100), ids: z.array(z.string().min(1).max(200)).max(200) }), ctx.input);
+				const rows = await refsForEntries(ctx, ids.map((id) => entryKey(collection, id)));
+				const found = await getMany(urls(ctx), [...new Set(rows.map((r) => r.urlId))]);
+				const byKey = summarizeEntryLinks(rows, found);
+				return { entries: Object.fromEntries(ids.map((id) => [id, byKey.get(entryKey(collection, id)) ?? null])) };
 			},
 		})),
 
