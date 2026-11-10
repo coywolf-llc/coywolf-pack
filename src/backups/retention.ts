@@ -53,9 +53,12 @@ export interface LockRule {
 	condition: { type: "Age"; maxAgeSeconds: number } | DateCondition | { type: "Indefinite" };
 }
 
+/** Mirror counts kept beside locked manifests (store.ts MIRRORS_PREFIX): aged out with the backups, never locked. */
+const SIDECAR_PREFIX = "mirrors/";
+
 /** The pack's lifecycle rules for `days` of retention. */
 export function retentionRules(days: number): LifecycleRule[] {
-	return RETENTION_PREFIXES.map((prefix) => ({
+	return [...RETENTION_PREFIXES, SIDECAR_PREFIX].map((prefix) => ({
 		id: lifecycleId(prefix),
 		enabled: true,
 		conditions: { prefix },
@@ -77,7 +80,10 @@ export function mergeRules<T extends { id: string }>(existing: T[], ours: T[]): 
 /** Whether a rule's prefix covers keys under `prefix` ("" covers the whole bucket). */
 const covers = (rulePrefix: string | undefined, prefix: string) => prefix.startsWith(rulePrefix ?? "");
 
-/** Days after which an enabled lifecycle rule deletes keys under `prefix` (the soonest of the rules that do), or null. */
+/**
+ * Days after which an enabled lifecycle rule deletes keys under `prefix` (the soonest of the rules that do),
+ * or null. A rule that deletes on a fixed date isn't counted: it doesn't keep the retention days (see dateDeletes).
+ */
 function deleteDays(rules: LifecycleRule[], prefix: string): number | null {
 	let soonest: number | null = null;
 	for (const rule of rules) {
@@ -111,6 +117,8 @@ export interface RetentionStatus {
 	mirrorLocked: boolean;
 	/** Any lock (the pack's or not) on database backups: a manifest can be written once only. */
 	d1Locked: boolean;
+	/** A rule that deletes backups on a fixed date: whatever the retention days, they go then. */
+	dateDeletes: boolean;
 	/** Other lock rules on the bucket. */
 	otherLocks: number;
 }
@@ -136,16 +144,29 @@ export function retentionStatus(lifecycle: LifecycleRule[], locks: LockRule[], r
 		lockDays,
 		mirrorLocked: locks.some((rule) => !isOurs(rule.id) && rule.enabled && MIRROR_PREFIXES.some((prefix) => covers(rule.prefix, prefix))),
 		d1Locked: locks.some((rule) => rule.enabled && covers(rule.prefix, "d1/")),
+		dateDeletes: lifecycle.some(
+			(rule) => rule.enabled && rule.deleteObjectsTransition?.condition?.type === "Date" && RETENTION_PREFIXES.some((prefix) => covers(rule.conditions?.prefix, prefix)),
+		),
 		otherLocks: locks.filter((rule) => !isOurs(rule.id)).length,
 	};
 }
 
 /**
- * Whether the pack's daily pruning is redundant: a lifecycle rule deletes
- * every prefix that ages out, at the retention days or sooner.
+ * Whether the pack's daily pruning is redundant: a lifecycle rule deletes every prefix that ages out at
+ * exactly the retention days. Any other rule doesn't count: one that deletes later leaves pruning to the
+ * pack, and one that deletes sooner than the setting (Keep backups for raised after the rule was set) is a
+ * mismatch the Backups page warns about (Cloudflare deletes them anyway; pruning again changes nothing).
  */
-export function pruningRedundant(status: Pick<RetentionStatus, "coveredDays"> | null | undefined, retentionDays: number): boolean {
-	return status?.coveredDays != null && status.coveredDays <= retentionDays;
+export function pruningRedundant(status: Pick<RetentionStatus, "byPrefix"> | null | undefined, retentionDays: number): boolean {
+	return Boolean(status) && RETENTION_PREFIXES.every((prefix) => status?.byPrefix[prefix] === retentionDays);
+}
+
+/** The rule deletes backups sooner than Keep backups for: some are lost before the setting says. */
+export function deletesSooner(status: Pick<RetentionStatus, "byPrefix"> | null | undefined, retentionDays: number): boolean {
+	return Boolean(status) && RETENTION_PREFIXES.some((prefix) => {
+		const days = status?.byPrefix[prefix];
+		return days != null && days < retentionDays;
+	});
 }
 
 // ── Cloudflare API ───────────────────────────────────────────────
@@ -179,7 +200,13 @@ export async function putLocks(access: RetentionAccess, rules: LockRule[]): Prom
 	await cloudflareApi(`${bucketPath(access)}/lock`, call(access, "R2 bucket lock rules", { method: "PUT", body: { rules } }));
 }
 
-/** Whether `key` is in the named bucket, by Cloudflare's object listing (the Worker's binding wrote it: same bucket). */
+/**
+ * Whether `key` is in the named bucket, by Cloudflare's documented R2 "List Objects" REST endpoint
+ * (GET /accounts/{account_id}/r2/buckets/{bucket_name}/objects with `prefix` and `per_page`; the
+ * Cloudflare API reference, R2 → Buckets → Objects → List, and Cloudflare's OpenAPI schema). The
+ * Worker's binding wrote the key a moment ago, so finding it means it's the same bucket. Fails safe:
+ * an error, another shape, or no match counts as "not this bucket", and the caller refuses to go on.
+ */
 export async function bucketHasKey(access: RetentionAccess, key: string): Promise<boolean> {
 	const { result } = await cloudflareApi<Array<{ key?: string }> | null>(
 		`${bucketPath(access)}/objects?prefix=${encodeURIComponent(key)}&per_page=1`,
@@ -190,3 +217,9 @@ export async function bucketHasKey(access: RetentionAccess, key: string): Promis
 
 /** The probe the bucket check writes through the binding (outside every prefix a rule covers). */
 export const PROBE_PREFIX = "coywolf-pack/bucket-check/";
+/**
+ * Written through the binding when the bucket check passes: which bucket the rule was checked on. The
+ * daily task reads it through the binding, so a BACKUPS binding pointed at another bucket since (no
+ * marker there) makes the site prune again, without a token.
+ */
+export const BUCKET_MARKER = "coywolf-pack/retention-bucket.json";

@@ -13,6 +13,7 @@ import { ConfirmDialog } from "./confirm-dialog.js";
 import { CredentialGuide } from "./guides.js";
 import { DocsLink } from "./page.js";
 import { SecretField, SettingsSection } from "./settings-ui.js";
+import { AGING_PREFIXES, backupsStoppedWarning, days, lifecycleSummary } from "./backups-retention-core.js";
 import { useToast } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/backups";
@@ -30,6 +31,7 @@ export interface RetentionStatus {
 	lockDays: number | null;
 	mirrorLocked: boolean;
 	d1Locked: boolean;
+	dateDeletes?: boolean;
 	otherLocks: number;
 }
 
@@ -50,31 +52,11 @@ interface RetentionInfo {
 	envAccountId: boolean;
 	retentionDays: number;
 	state: RetentionState | null;
+	/** When the newest backup was made (ISO), or null. */
+	newestBackup?: string | null;
 }
 
-const days = (n: number) => `${n} ${n === 1 ? "day" : "days"}`;
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
-
-/** One line for what the rule does now, for the badge and the summary. */
-export function lifecycleSummary(state: RetentionState | null, retentionDays: number): { badge: string; variant: "primary" | "secondary" | "outline"; text: string } {
-	if (!state) return { badge: "Not checked", variant: "outline", text: "Select Check to see what the backup bucket does with old backups." };
-	const { status } = state;
-	if (status.lifecycle === "on" && state.retentionDays === retentionDays) {
-		return { badge: "On", variant: "primary", text: `Cloudflare deletes backups ${days(retentionDays)} after they're made. The site doesn't delete them itself.` };
-	}
-	if (status.lifecycle === "different" || (status.lifecycle === "on" && state.retentionDays !== retentionDays)) {
-		const found = [...new Set(Object.values(status.byPrefix).filter((v): v is number => v !== null))];
-		return {
-			badge: "Different",
-			variant: "secondary",
-			text: `The bucket's rule deletes backups after ${found.map(days).join(" or ")}, but Keep backups for says ${days(retentionDays)}. Update the rule to match.`,
-		};
-	}
-	if (status.lifecycle === "partial") {
-		return { badge: "Partly", variant: "secondary", text: "A lifecycle rule covers only some of the backup folders. Set the rule to cover all of them." };
-	}
-	return { badge: "Off", variant: "outline", text: `No lifecycle rule yet: the site deletes backups older than ${days(retentionDays)} once a day.` };
-}
 
 export function RetentionCard(props: { retentionDays: number; onChanged?: () => void }) {
 	const toast = useToast();
@@ -137,9 +119,10 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 	const state = info.state;
 	const status = state?.status;
 	const summary = lifecycleSummary(state, props.retentionDays);
-	const inSync = status?.lifecycle === "on" && state?.retentionDays === props.retentionDays;
+	const inSync = Boolean(status && AGING_PREFIXES.every((p) => status.byPrefix[p] === props.retentionDays));
 	const lockInSync = (status?.lockDays ?? null) === (lock ? props.retentionDays : null);
 	const showForm = open || !state;
+	const stoppedWarning = backupsStoppedWarning(info.newestBackup, props.retentionDays, Boolean(state && AGING_PREFIXES.every((p) => state.status.byPrefix[p] != null)));
 	const hasToken = Boolean(draft.token.trim() || info.tokenSaved || info.envToken);
 	const ready = Boolean((draft.accountId.trim() || info.envAccountId) && (draft.bucket.trim() || info.bucket) && hasToken);
 	const busy = pending !== undefined;
@@ -194,6 +177,14 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 					description="Another rule covers media/current/ or uploads/current/ (or the whole bucket), so Cloudflare deletes the backup copies of files that are still in use. Remove or narrow that rule in the Cloudflare dashboard (R2 → the bucket → Settings → Object lifecycle rules)."
 				/>
 			)}
+			{status?.dateDeletes && (
+				<Banner
+					variant="alert"
+					title="A lifecycle rule deletes backups on a fixed date"
+					description="Another rule on this bucket deletes database backups or copies of replaced files on a set date, whatever Keep backups for says. Check it in the Cloudflare dashboard (R2 → the bucket → Settings → Object lifecycle rules)."
+				/>
+			)}
+			{stoppedWarning && <Banner variant="error" role="alert" title="Backups may have stopped" description={stoppedWarning} />}
 			{status?.mirrorLocked && (
 				<Banner
 					variant="alert"
@@ -268,6 +259,12 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 
 			{error && <Banner variant="error" role="alert" description={error} />}
 
+			<p className="text-sm text-kumo-subtle">
+				Cloudflare deletes backups by age, whether or not new ones are being made: if backups stop working, after{" "}
+				{days(props.retentionDays)} none is left (the site's own pruning skips a day when the backup fails; the rule doesn't). The
+				dashboard widget warns when backups stop, and so does this card once the newest is older than half the retention days. A
+				longer Keep backups for gives you more time to notice. The lock doesn't help with this: it ends at the same age.
+			</p>
 			<div className="flex flex-wrap gap-2">
 				<Button type="button" variant="secondary" icon={<MagnifyingGlass />} disabled={busy || !ready} onClick={() => void run("check", { saveToken: draft.saveToken })}>
 					{pending === "check" ? "Checking…" : "Check"}

@@ -20,6 +20,7 @@ import {
 	undoRewind,
 } from "./restore.js";
 import {
+	BUCKET_MARKER,
 	PROBE_PREFIX,
 	type RetentionAccess,
 	type RetentionStatus,
@@ -34,7 +35,7 @@ import {
 	retentionRules,
 	retentionStatus,
 } from "./retention.js";
-import { FILE, type Manifest, STAMP, listBackups, makeStamp, mirrorBucket, mirrorMedia, pruneBackups, writeDumpStream, writeManifest } from "./store.js";
+import { FILE, type Manifest, STAMP, listBackups, makeStamp, mirrorBucket, mirrorMedia, newestStamp, pruneBackups, stampToDate, writeDumpStream, writeManifest, writeMirrorCounts } from "./store.js";
 import { readOnlyRoute } from "../core/routes.js";
 
 export interface BackupsOptions {
@@ -145,10 +146,12 @@ export function backupsModule(options: BackupsOptions) {
 	}
 
 	/**
-	 * `writeOnce`: the backup bucket has a lock on d1/, which refuses to overwrite a manifest, so it's
-	 * written once, after the mirrors (their counts in it), instead of first and again after each mirror.
+	 * The database is saved first, with its manifest, so a media problem (or a run cut off in the middle
+	 * of the mirrors) can't cost the dump: it's listed and restorable at once. The mirror counts are added
+	 * by rewriting the manifest, except when d1/ is locked (`locked`: R2 refuses to overwrite a locked
+	 * object), when they go to mirrors/<stamp>.json instead (outside every locked prefix).
 	 */
-	async function runBackup(source: "admin" | "scheduled", writeOnce = false) {
+	async function runBackup(source: "admin" | "scheduled", locked = false) {
 		const { db, media, backups, uploads, restore } = await bindings();
 		const stamp = makeStamp();
 		const timeTravelBookmark = restore ? await currentBookmark(restore).catch(() => undefined) : undefined;
@@ -157,23 +160,26 @@ export function backupsModule(options: BackupsOptions) {
 		const counts = { tables: 0, rows: 0 };
 		const written = await writeDumpStream(backups, stamp, file, dumpLines(db, counts));
 		const extra: Partial<Manifest> = { database: name, source, timeTravelBookmark, tables: counts.tables, rows: counts.rows };
-		// Save the database first so a media problem can't cost the dump (unless the manifest can be written only once).
-		let result = writeOnce ? ({ ...extra } as Manifest) : await writeManifest(backups, stamp, file, written, extra);
+		const manifest = await writeManifest(backups, stamp, file, written, extra);
+		let result: Manifest = manifest;
+		const record = async (next: Manifest) => (locked ? next : writeManifest(backups, stamp, file, written, next));
 		try {
-			const mediaResult = await mirrorMedia(media, backups, stamp);
-			result = writeOnce ? { ...result, media: mediaResult } : await writeManifest(backups, stamp, file, written, { ...extra, media: mediaResult });
+			result = await record({ ...result, media: await mirrorMedia(media, backups, stamp) });
 		} catch (error) {
 			console.error("coywolf backups: media mirror failed; the database backup was saved", error);
 		}
 		if (uploads) {
 			try {
-				const uploadsResult = await mirrorBucket(uploads, backups, stamp, "uploads");
-				result = writeOnce ? { ...result, uploads: uploadsResult } : await writeManifest(backups, stamp, file, written, { ...result, uploads: uploadsResult });
+				result = await record({ ...result, uploads: await mirrorBucket(uploads, backups, stamp, "uploads") });
 			} catch (error) {
 				console.error("coywolf backups: form uploads mirror failed; the database backup was saved", error);
 			}
 		}
-		if (writeOnce) result = await writeManifest(backups, stamp, file, written, result);
+		if (locked && (result.media || result.uploads)) {
+			await writeMirrorCounts(backups, stamp, { media: result.media, uploads: result.uploads }).catch((error: unknown) =>
+				console.error("coywolf backups: couldn't record the mirror counts; the backup was saved", error),
+			);
+		}
 		return result;
 	}
 
@@ -226,6 +232,20 @@ export function backupsModule(options: BackupsOptions) {
 		} finally {
 			await backups.delete(key).catch(() => undefined);
 		}
+		// Which bucket was checked, readable through the binding alone (bucketMatches).
+		await backups.put(BUCKET_MARKER, JSON.stringify({ bucket: access.bucket, at: new Date().toISOString() }), { httpMetadata: { contentType: "application/json" } });
+	}
+
+	/** Whether the BACKUPS binding still writes to the bucket the rule was checked on (the marker verifyBucket left there). */
+	async function bucketMatches(bucket: string): Promise<boolean> {
+		try {
+			const { backups } = await bindings();
+			const object = await backups.get(BUCKET_MARKER);
+			const marker = object ? ((await object.json()) as { bucket?: unknown }) : null;
+			return marker?.bucket === bucket;
+		} catch {
+			return false;
+		}
 	}
 
 	async function readRetentionState(ctx: { kv: PluginContext["kv"] }): Promise<RetentionState | null> {
@@ -253,14 +273,16 @@ export function backupsModule(options: BackupsOptions) {
 	}
 
 	/**
-	 * Whether today's pruning can be skipped: the bucket's lifecycle rule deletes every prefix that ages
-	 * out, at the retention days or sooner, as last seen within RETENTION_TRUST_MS. The rules are read
-	 * again once a day when a token is available (saved or a Worker secret); without one, a look from the
-	 * Backups page counts for a week, then the pack prunes again (redundant, never harmful).
+	 * Whether pruning can be skipped: the bucket's lifecycle rule deletes every prefix that ages out at
+	 * exactly the retention days (pruningRedundant), as last seen within RETENTION_TRUST_MS, on the bucket
+	 * the BACKUPS binding still writes to (its marker). With `recheck`, rules older than a day are read
+	 * again first when a token is available (saved or a Worker secret); without one, a look from the
+	 * Backups page counts for a week, then the pack prunes again (it deletes the same backups the rule
+	 * would, so nothing is lost either way).
 	 */
-	async function pruningSkippable(ctx: PluginContext, retentionDays: number): Promise<{ skip: boolean; state: RetentionState | null }> {
+	async function pruningSkippable(ctx: PluginContext, retentionDays: number, recheck = true): Promise<{ skip: boolean; state: RetentionState | null }> {
 		let state = await readRetentionState(ctx);
-		if (state && Date.now() - Date.parse(state.checkedAt) > RETENTION_RECHECK_MS) {
+		if (recheck && state && Date.now() - Date.parse(state.checkedAt) > RETENTION_RECHECK_MS) {
 			const access = await retentionAccess(ctx).catch(() => null);
 			if (access) {
 				state = await inspectRetention(ctx, access, retentionDays).catch((error: unknown) => {
@@ -270,7 +292,56 @@ export function backupsModule(options: BackupsOptions) {
 			}
 		}
 		const fresh = Boolean(state && Date.now() - Date.parse(state.checkedAt) <= RETENTION_TRUST_MS);
-		return { skip: fresh && pruningRedundant(state?.status, retentionDays), state };
+		const skip = fresh && pruningRedundant(state?.status, retentionDays) && (await bucketMatches(state?.bucket ?? ""));
+		return { skip, state };
+	}
+
+	/**
+	 * The lifecycle rule deletes by age whether or not new backups are being made: after `retentionDays`
+	 * of failed backups none is left. Warn in the log once the newest is older than half that.
+	 */
+	async function warnIfBackupsStopped(ctx: PluginContext, retentionDays: number) {
+		const { backups } = await bindings();
+		const newest = await newestStamp(backups).catch(() => null);
+		const ageDays = newest ? (Date.now() - stampToDate(newest).getTime()) / DAY_MS : Number.POSITIVE_INFINITY;
+		if (ageDays > retentionDays / 2) {
+			ctx.log.warn("Backups: the newest backup is older than half the retention days, and the bucket's lifecycle rule keeps deleting old ones", {
+				newest,
+				retentionDays,
+			});
+		}
+	}
+
+	/**
+	 * After Keep backups for changes: set the pack's rule (and its lock) to the new days when the site has
+	 * a token (saved or a Worker secret), so Cloudflare doesn't keep deleting at the old days. Returns a
+	 * warning when it couldn't, or null.
+	 */
+	async function followRetention(ctx: PluginContext, retentionDays: number): Promise<string | null> {
+		const state = await readRetentionState(ctx);
+		if (!state?.status.ours || pruningRedundant(state.status, retentionDays)) return null;
+		const stale = `The backup bucket's lifecycle rule still deletes backups after ${Math.min(...Object.values(state.status.byPrefix).filter((d): d is number => d !== null))} days. Update it under Retention on Cloudflare, or backups are deleted before Keep backups for says.`;
+		const access = await retentionAccess(ctx).catch(() => null);
+		if (!access) return stale;
+		try {
+			await applyRules(ctx, access, retentionDays, state.status.lockDays != null);
+			return null;
+		} catch (error) {
+			ctx.log.warn("Backups: couldn't update the lifecycle rule to the new retention days", { error: String(error).slice(0, 300) });
+			return stale;
+		}
+	}
+
+	/** Set the pack's lifecycle rule to `retentionDays` (keeping the bucket's other rules), and its lock with `lock`. */
+	async function applyRules(ctx: PluginContext, access: RetentionAccess, retentionDays: number, lock: boolean): Promise<RetentionState> {
+		await verifyBucket(access);
+		const [lifecycle, locks] = await Promise.all([getLifecycle(access), getLocks(access)]);
+		await putLifecycle(access, mergeRules(lifecycle, retentionRules(retentionDays)));
+		const hadLock = locks.some((rule) => rule.id.startsWith("coywolf-pack-backups-"));
+		if (lock || hadLock) await putLocks(access, mergeRules(locks, lock ? lockRules(retentionDays) : []));
+		const state = await inspectRetention(ctx, access, retentionDays);
+		ctx.log.info("Backups: retention set on the backup bucket", { bucket: access.bucket, days: retentionDays, lock });
+		return state;
 	}
 
 	async function daily(ctx: PluginContext) {
@@ -281,7 +352,10 @@ export function backupsModule(options: BackupsOptions) {
 			ctx.log.info("Scheduled backup complete", { stamp: manifest.stamp, bytes: manifest.bytes });
 		}
 		// The backup bucket's lifecycle rule deletes old backups itself: pruning here would only repeat it.
-		if (retention.skip) return;
+		if (retention.skip) {
+			await warnIfBackupsStopped(ctx, s.retentionDays);
+			return;
+		}
 		const { backups } = await bindings();
 		const pruned = await pruneBackups(backups, s.retentionDays);
 		if (pruned) ctx.log.info("Pruned old backups", { pruned });
@@ -309,7 +383,9 @@ export function backupsModule(options: BackupsOptions) {
 				await ctx.settings.set("backupsStaleAfterHours", input.staleAfterHours);
 				await ensureBackupsTask(ctx);
 				ctx.log.info("Backup settings saved", input);
-				return settings(ctx);
+				// The pack's lifecycle rule follows Keep backups for (or the page says it couldn't).
+				const retentionWarning = await followRetention(ctx, input.retentionDays);
+				return { ...(await settings(ctx)), ...(retentionWarning ? { retentionWarning } : {}) };
 			},
 		}),
 
@@ -319,11 +395,12 @@ export function backupsModule(options: BackupsOptions) {
 			request: { body: "none" },
 			handler: async (ctx) => {
 				await ensureBackupsTask(ctx);
-				const state = await readRetentionState(ctx);
-				const manifest = await runBackup("admin", state?.status.d1Locked === true);
-				ctx.log.info("Backup complete", { stamp: manifest.stamp, bytes: manifest.bytes });
 				const { retentionDays } = await settings(ctx);
-				if (!pruningRedundant(state?.status, retentionDays)) {
+				// The same rule as the daily task (trust window, bucket marker), without reading Cloudflare's API here.
+				const retention = await pruningSkippable(ctx, retentionDays, false);
+				const manifest = await runBackup("admin", retention.state?.status.d1Locked === true);
+				ctx.log.info("Backup complete", { stamp: manifest.stamp, bytes: manifest.bytes });
+				if (!retention.skip) {
 					const { backups } = await bindings();
 					await pruneBackups(backups, retentionDays);
 				}
@@ -416,6 +493,10 @@ export function backupsModule(options: BackupsOptions) {
 					envAccountId: Boolean(options.restore?.accountId || secret(env, "CF_ACCOUNT_ID") || secret(env, "CLOUDFLARE_ACCOUNT_ID")),
 					retentionDays,
 					state: await readRetentionState(ctx),
+					newestBackup: await bindings()
+						.then(({ backups }) => newestStamp(backups))
+						.then((stamp) => (stamp ? stampToDate(stamp).toISOString() : null))
+						.catch(() => null),
 				};
 			},
 		},
@@ -459,14 +540,8 @@ export function backupsModule(options: BackupsOptions) {
 				const access = await retentionAccess(ctx, input);
 				const { retentionDays } = await settings(ctx);
 				try {
-					await verifyBucket(access);
-					const [lifecycle, locks] = await Promise.all([getLifecycle(access), getLocks(access)]);
-					await putLifecycle(access, mergeRules(lifecycle, retentionRules(retentionDays)));
-					const hadLock = locks.some((rule) => rule.id.startsWith("coywolf-pack-backups-"));
-					if (input.lock || hadLock) await putLocks(access, mergeRules(locks, input.lock ? lockRules(retentionDays) : []));
+					const state = await applyRules(ctx, access, retentionDays, input.lock);
 					await rememberAccess(ctx, input, access);
-					const state = await inspectRetention(ctx, access, retentionDays);
-					ctx.log.info("Backups: retention set on the backup bucket", { bucket: access.bucket, days: retentionDays, lock: input.lock });
 					return state;
 				} catch (error) {
 					return cloudflareError(error);
@@ -484,6 +559,7 @@ export function backupsModule(options: BackupsOptions) {
 				const access = await retentionAccess(ctx, input);
 				const { retentionDays } = await settings(ctx);
 				try {
+					await verifyBucket(access);
 					const [lifecycle, locks] = await Promise.all([getLifecycle(access), getLocks(access)]);
 					await putLifecycle(access, mergeRules(lifecycle, []));
 					if (locks.some((rule) => rule.id.startsWith("coywolf-pack-backups-"))) await putLocks(access, mergeRules(locks, []));
