@@ -219,8 +219,9 @@ export async function auditStep(ctx: PluginContext, ops: Ops, options: StepOptio
 			let generated = new Set<string>();
 			if (options.socialImages && items.length) {
 				ops.spend(1);
-				const docs = await getManyBatched(ctx.storage[SOCIAL_IMAGES] as StorageCollection<unknown>, items.map((i) => `${schema.slug}:${i.id}`)).catch(() => new Map());
-				generated = new Set(docs.keys());
+				const docs = await getManyBatched(ctx.storage[SOCIAL_IMAGES] as StorageCollection<{ key?: string | null }>, items.map((i) => `${schema.slug}:${i.id}`)).catch(() => new Map<string, { key?: string | null }>());
+				// Only an image that's been made counts (a queued or failed one isn't on the page yet).
+				generated = new Set([...docs].filter(([, doc]) => Boolean(doc?.key)).map(([id]) => id));
 			}
 			const shape = shapeOf(schema);
 			const chunk: Chunk = {

@@ -3,7 +3,7 @@
  * token), the template with a live preview, the collections, generating
  * images for existing entries, and the latest images.
  */
-import { Badge, Banner, Button, Checkbox, Input, Select } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Input, InputArea, Select } from "@cloudflare/kumo";
 import { ArrowClockwise, ImageSquare, Play, Stop } from "@phosphor-icons/react";
 import * as React from "react";
 
@@ -39,7 +39,7 @@ interface Doc {
 
 interface Status {
 	schemaOn: boolean;
-	settings: { template: Template; collections: string[]; accountId: string };
+	settings: { template: Template; collections: string[]; accountId: string; defaultImages: string[] };
 	renderer: { kind: "binding" | "api" } | { kind: "none"; reason: string };
 	tokenSaved: boolean;
 	counts: Record<Doc["status"], number>;
@@ -53,10 +53,13 @@ interface Draft {
 	template: Template;
 	collections: string[];
 	accountId: string;
+	/** One URL or path per line. */
+	defaultImages: string;
 	token: string;
 }
 
 const HEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+const lines = (text: string) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
 const ADMIN = "/_emdash/admin";
 
@@ -128,7 +131,7 @@ export function SocialImagesPage() {
 		try {
 			const next = await post<Status>("status", {}, "Couldn't load Social Images");
 			setStatus(next);
-			const d: Draft = { template: next.settings.template, collections: next.settings.collections, accountId: next.settings.accountId, token: "" };
+			const d: Draft = { template: next.settings.template, collections: next.settings.collections, accountId: next.settings.accountId, defaultImages: next.settings.defaultImages.join("\n"), token: "" };
 			setDraft((current) => (current && saved && isDirty(current, saved) ? current : d));
 			setSaved(d);
 			return next;
@@ -147,7 +150,7 @@ export function SocialImagesPage() {
 		setSaving(true);
 		result.clear();
 		try {
-			await post("settings/save", { template: draft.template, collections: draft.collections, accountId: draft.accountId, ...(draft.token ? { token: draft.token } : {}) }, "Couldn't save");
+			await post("settings/save", { template: draft.template, collections: draft.collections, accountId: draft.accountId, defaultImages: lines(draft.defaultImages), ...(draft.token ? { token: draft.token } : {}) }, "Couldn't save");
 			const d = { ...draft, token: "" };
 			setDraft(d);
 			setSaved(d);
@@ -164,7 +167,7 @@ export function SocialImagesPage() {
 		if (!draft) return;
 		setSaving(true);
 		try {
-			await post("settings/save", { template: saved?.template ?? draft.template, collections: saved?.collections ?? draft.collections, accountId: saved?.accountId ?? draft.accountId, clearToken: true });
+			await post("settings/save", { template: saved?.template ?? draft.template, collections: saved?.collections ?? draft.collections, accountId: saved?.accountId ?? draft.accountId, defaultImages: lines(saved?.defaultImages ?? draft.defaultImages), clearToken: true });
 			toast.success("Token removed");
 			void load();
 		} catch (cause) {
@@ -329,8 +332,12 @@ export function SocialImagesPage() {
 										{ value: "center", label: "Title centered, accent bar on top" },
 									]}
 								/>
-								<Checkbox label="Show the logo" checked={draft.template.showLogo} onCheckedChange={(on: boolean) => setTemplate({ showLogo: on })} />
-								<Checkbox label="Show the site's name" checked={draft.template.showSiteName} onCheckedChange={(on: boolean) => setTemplate({ showSiteName: on })} />
+								<div>
+									<Checkbox label="Show the logo" checked={draft.template.showLogo} onCheckedChange={(on: boolean) => setTemplate({ showLogo: on })} />
+								</div>
+								<div>
+									<Checkbox label="Show the site's name" checked={draft.template.showSiteName} onCheckedChange={(on: boolean) => setTemplate({ showSiteName: on })} />
+								</div>
 								<Button type="button" variant="ghost" size="sm" onClick={() => setTemplate(status.defaults)}>
 									Reset to the default colors
 								</Button>
@@ -345,7 +352,7 @@ export function SocialImagesPage() {
 						{test?.error && <Banner variant="error" role="alert" title="The test image couldn't be made" description={test.error} />}
 					</SettingsSection>
 
-					<SettingsSection id="cw-social-collections" title="Collections" description="None checked makes images for every collection with public pages.">
+					<SettingsSection id="cw-social-collections" title="Which entries" description="None checked makes images for every collection with public pages.">
 						<div className="flex flex-wrap gap-x-6 gap-y-2">
 							{status.collections.map((c) => (
 								<Checkbox
@@ -356,6 +363,14 @@ export function SocialImagesPage() {
 								/>
 							))}
 						</div>
+						<InputArea
+							label="Theme default images (optional)"
+							description="If your theme gives every page the same share image when an entry has none, enter its URL or path (one per line, like /images/share.png). Pages with it get their generated image instead. Entries with an SEO image or an image field always keep theirs."
+							rows={2}
+							placeholder="/theme/images/share.png"
+							value={draft.defaultImages}
+							onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setDraft({ ...draft, defaultImages: e.target.value })}
+						/>
 					</SettingsSection>
 				</form>
 			)}

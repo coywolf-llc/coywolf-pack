@@ -18,11 +18,11 @@ import { siteName as readSiteName } from "../core/site.js";
 import { withDeadline } from "../core/single-flight.js";
 import { IMAGES_SETTINGS } from "../images/settings.js";
 import { secret, workerEnv } from "../shared.js";
-import { type SocialImageDoc, docId, socialImages } from "./store.js";
+import { SOCIAL_SETTINGS_KEY, type SocialImageDoc, docId, parseDefaultImages, socialImages } from "./store.js";
 import { HEIGHT, type TemplateSettings, WIDTH, imageHash, imageKey, normalizeTemplate, socialImageHtml } from "./template.js";
 
 export const TOKEN_SETTING = "socialImagesApiToken";
-export const SETTINGS_KEY = "socialImagesSettings";
+export const SETTINGS_KEY = SOCIAL_SETTINGS_KEY;
 /** Longest a screenshot may take (Browser Run's own page timeout is 15 s below this). */
 export const RENDER_MS = 30_000;
 /** Largest PNG kept (a 1200×630 card is 50–300 KB). */
@@ -36,6 +36,11 @@ export interface SocialSettings {
 	collections: string[];
 	/** Cloudflare account ID for the REST API (not needed with a BROWSER binding). */
 	accountId: string;
+	/**
+	 * The theme's site-wide share images (URLs or paths): a page whose image (or SEO image) is one of these
+	 * counts as having none, so its generated image is used (src/social/store.ts isThemeDefault).
+	 */
+	defaultImages: string[];
 }
 
 export function normalizeSocialSettings(raw: unknown): SocialSettings {
@@ -44,6 +49,7 @@ export function normalizeSocialSettings(raw: unknown): SocialSettings {
 		template: normalizeTemplate(r.template),
 		collections: Array.isArray(r.collections) ? r.collections.filter((c): c is string => typeof c === "string" && /^[a-z][a-z0-9_]*$/.test(c)).slice(0, 100) : [],
 		accountId: typeof r.accountId === "string" && /^[0-9a-f]{32}$/i.test(r.accountId.trim()) ? r.accountId.trim().toLowerCase() : "",
+		defaultImages: parseDefaultImages(r.defaultImages),
 	};
 }
 
@@ -185,23 +191,31 @@ export async function siteLogo(bucket: R2Bucket | undefined, origin: string): Pr
 	}
 }
 
+/** RenderError's status when Browser Run isn't set up (no binding, token or account): the batch stops, nothing is counted against the entry. */
+export const NOT_SET_UP = -1;
+
 export interface RenderContext {
-	renderer: Exclude<Renderer, { kind: "none" }>;
+	/** How Browser Run is reached, looked up on the first render that needs it (an unchanged image needs none). Throws RenderError(NOT_SET_UP). */
+	renderer: () => Promise<Exclude<Renderer, { kind: "none" }>>;
 	bucket: R2Bucket;
 	siteName: string;
 	logo: { src: string | null; key: string | null };
 	template: TemplateSettings;
 }
 
-/** What every render in a batch shares: the renderer, the bucket, the site's name and logo, the template. */
+/** What every render in a batch shares: the renderer (looked up when first needed), the bucket, the site's name and logo, the template. */
 export async function renderContext(ctx: PluginContext, settings: SocialSettings, bucketName = "MEDIA"): Promise<RenderContext | { reason: string }> {
 	const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
-	const r = await renderer(ctx, settings, env);
-	if (r.kind === "none") return { reason: r.reason };
 	const bucket = env[bucketName] as R2Bucket | undefined;
 	if (!bucket?.put) return { reason: `The media bucket isn't bound as ${bucketName}.` };
 	const origin = ctx.site?.url ?? "";
-	return { renderer: r, bucket, siteName: (await readSiteName(ctx).catch(() => "")) || ctx.site?.name || "", logo: await siteLogo(bucket, origin), template: settings.template };
+	let found: Promise<Renderer> | null = null;
+	const get = async () => {
+		const r = await (found ??= renderer(ctx, settings, env));
+		if (r.kind === "none") throw new RenderError(r.reason, NOT_SET_UP);
+		return r;
+	};
+	return { renderer: get, bucket, siteName: (await readSiteName(ctx).catch(() => "")) || ctx.site?.name || "", logo: await siteLogo(bucket, origin), template: settings.template };
 }
 
 /**
@@ -221,7 +235,7 @@ export async function renderEntry(ctx: PluginContext, rc: RenderContext, entry: 
 	}
 	const base: SocialImageDoc = existing ?? { collection: entry.collection, id: entry.id, title: entry.title, key: null, hash: null, status: "pending", note: null, attempts: 0, updatedAt: now, renderedAt: null };
 	try {
-		const png = await screenshot(rc.renderer, socialImageHtml({ title: entry.title, siteName: rc.siteName, logo: rc.logo.src, settings: rc.template }));
+		const png = await screenshot(await rc.renderer(), socialImageHtml({ title: entry.title, siteName: rc.siteName, logo: rc.logo.src, settings: rc.template }));
 		const key = imageKey(entry.collection, entry.id, hash);
 		await rc.bucket.put(key, png, { httpMetadata: { contentType: "image/png", cacheControl: "public, max-age=31536000, immutable" } });
 		const replaced = existing?.key && existing.key !== key ? existing.key : (existing?.previousKey ?? null);
@@ -234,8 +248,9 @@ export async function renderEntry(ctx: PluginContext, rc: RenderContext, entry: 
 	} catch (error) {
 		const status = error instanceof RenderError ? error.status : 0;
 		const attempts = base.attempts + 1;
-		// A rate limit isn't the entry's fault: it stays pending without counting an attempt.
-		const doc: SocialImageDoc = { ...base, title: entry.title, status: status === 429 ? "pending" : attempts >= 3 ? "failed" : "pending", note: (error instanceof Error ? error.message : String(error)).slice(0, 300), attempts: status === 429 ? base.attempts : attempts, updatedAt: now };
+		// A rate limit, or Browser Run not set up, isn't the entry's fault: it stays pending without counting an attempt.
+		const notCounted = status === 429 || status === NOT_SET_UP;
+		const doc: SocialImageDoc = { ...base, title: entry.title, status: notCounted ? "pending" : attempts >= 3 ? "failed" : "pending", note: (error instanceof Error ? error.message : String(error)).slice(0, 300), attempts: notCounted ? base.attempts : attempts, updatedAt: now };
 		await store.put(id, doc);
 		throw error;
 	}

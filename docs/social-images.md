@@ -56,8 +56,14 @@ The title is set in the system font stack (Browser Run's Chromium), 44–84 px d
 - Each entry's record is one plugin storage document (`socialImages`, id `<collection>:<entry id>`), read with the page's other pack reads (one D1 round trip).
 - Backups include the images (the media bucket) and the records (D1).
 
+## Themes that pass a default image
+
+Many themes give every page a share image: the entry's own when it has one, else a site-wide default, passed to `EmDashHead` as the page's `image` (and sometimes as `seo.ogImage`). Social Images decides by the entry, not the page: an entry with no SEO image and no image field gets its generated image in place of whatever `image` the theme passes. An SEO image the page passes wins, unless it's one of the **Theme default images** in Social Images' settings (URLs or paths, compared by path, so `/theme/images/share.png` matches `https://example.com/theme/images/share.png?v=2`). Saving those settings clears the page cache, as other pack settings saves do.
+
+If the theme prints its own `og:image:width`, `og:image:height` or `og:image:alt` for its default image, print them only when the page has an image of its own; otherwise pages carry both sets (the generated image's come first, inside `EmDashHead`).
+
 ## Notes
 
-- The generated image is used only when the page has no image of its own (`page.image` or the SEO image). It replaces the site's default OG image for those pages.
+- The SEO panel's image always wins (unless it's a theme default, above). A theme's site-wide default image is replaced on entries without an image of their own.
 - The tags include the image's size, type and alt (the entry's title), with or without Schema & Social's Open Graph extras; `twitter:card` becomes `summary_large_image`. With the Schema.org graph on, the image is the page's primary image there too.
 - Images aren't removed when an entry is unpublished or deleted; they're small, and backups keep them consistent.

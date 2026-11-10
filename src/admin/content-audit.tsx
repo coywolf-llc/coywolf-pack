@@ -136,23 +136,25 @@ function SettingsDialog(props: { open: boolean; status: Status | undefined; onCl
 							<legend className="text-sm font-medium">Collections</legend>
 							<p className="text-xs text-kumo-subtle">None checked audits every collection with public pages.</p>
 							{collections.map((c) => (
-								<Checkbox
-									key={c.slug}
-									label={c.label}
-									checked={draft.collections.includes(c.slug)}
-									onCheckedChange={(on: boolean) => setDraft({ ...draft, collections: on ? [...draft.collections, c.slug] : draft.collections.filter((x) => x !== c.slug) })}
-								/>
+								<div key={c.slug}>
+									<Checkbox
+										label={c.label}
+										checked={draft.collections.includes(c.slug)}
+										onCheckedChange={(on: boolean) => setDraft({ ...draft, collections: on ? [...draft.collections, c.slug] : draft.collections.filter((x) => x !== c.slug) })}
+									/>
+								</div>
 							))}
 						</fieldset>
 						<fieldset className="space-y-2">
 							<legend className="text-sm font-medium">Checks</legend>
 							{checks.map((c) => (
-								<Checkbox
-									key={c.id}
-									label={c.label}
-									checked={!draft.off.includes(c.id)}
-									onCheckedChange={(on: boolean) => setDraft({ ...draft, off: on ? draft.off.filter((x) => x !== c.id) : [...draft.off, c.id] })}
-								/>
+								<div key={c.id}>
+									<Checkbox
+										label={c.label}
+										checked={!draft.off.includes(c.id)}
+										onCheckedChange={(on: boolean) => setDraft({ ...draft, off: on ? draft.off.filter((x) => x !== c.id) : [...draft.off, c.id] })}
+									/>
+								</div>
 							))}
 						</fieldset>
 						<div className="grid gap-3 sm:grid-cols-2">

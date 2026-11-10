@@ -36,7 +36,7 @@ import { noteReadFailure, readFailures } from "../core/read-failures.js";
 import { requestMemo, requestStore } from "../core/request-memo.js";
 import { parseInput, workerEnv } from "../shared.js";
 import { type MediaRow, cleanDefaultOgImage, mediaHostImageInfo, ogImageTags, ownImageOnMediaHost, packOwnsOgImage } from "./og-image.js";
-import { generatedImage } from "../social/store.js";
+import { generatedImage, isThemeDefault, themeDefaultImages } from "../social/store.js";
 import { ARTICLE_TYPES, ORGANIZATION_PROPERTIES, ORGANIZATION_TYPES, PAGE_TYPES, PERSON_PROPERTIES, PROPERTY_INPUTS } from "./catalog.js";
 import {
 	type BylineFacts,
@@ -692,9 +692,14 @@ export async function schemaContributions(
 	const ogOn = isOn(on, SCHEMA_FEATURES.openGraph);
 	const cleanImages = isOn(on, "images");
 	const [config, site] = await Promise.all([loadConfig(ctx, options.database), siteFacts(ctx, page), cleanImages ? refreshMediaHost() : undefined]);
-	// Social Images: an entry without an image of its own gets its generated one (when it's been made) as og:image.
+	// Social Images: an entry without an image of its own (no SEO image or image field: Social Images checked when it made
+	// the image) gets its generated one as og:image. It replaces page.image, which themes often set to a site-wide default;
+	// an entry whose image field the theme passes has none (src/social/store.ts generatedImage). An SEO image wins, unless
+	// it's one of the theme's defaults (Social Images → Theme default images; read with the switches, no query of its own).
+	const socialOn = isOn(on, "socialImages") && Boolean(page.content);
+	const themeDefaults = socialOn && page.seo?.ogImage ? await themeDefaultImages(options.database) : [];
 	const generatedRead =
-		isOn(on, "socialImages") && page.content && !(page.seo?.ogImage || page.image)
+		socialOn && page.content && (!page.seo?.ogImage || isThemeDefault(page.seo.ogImage, themeDefaults))
 			? generatedImage(ctx, page.content, site.origin, options.database).catch(() => null)
 			: Promise.resolve(null);
 	const imageRead =

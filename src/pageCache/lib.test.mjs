@@ -321,7 +321,6 @@ const READ_ONLY_ROUTES = [
 	"social/preview",
 	"social/regenerate",
 	"social/render",
-	"social/settings/save",
 	"social/status",
 	"social/test",
 	"videos/captions/list",

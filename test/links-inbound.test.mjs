@@ -64,14 +64,17 @@ function d1(db) {
 function database() {
 	const db = new DatabaseSync(":memory:");
 	db.exec(`
-		CREATE TABLE _emdash_collections (slug TEXT, label TEXT, label_singular TEXT, url_pattern TEXT, title_field TEXT, routable INTEGER NOT NULL DEFAULT 1);
+		CREATE TABLE _emdash_collections (id TEXT, slug TEXT, label TEXT, label_singular TEXT, url_pattern TEXT, title_field TEXT, routable INTEGER NOT NULL DEFAULT 1);
+		CREATE TABLE _emdash_fields (collection_id TEXT, slug TEXT);
 		CREATE TABLE _emdash_seo (collection TEXT, content_id TEXT, seo_no_index INTEGER NOT NULL DEFAULT 0);
 		CREATE TABLE ec_posts (id TEXT, slug TEXT, status TEXT, locale TEXT, published_at TEXT, updated_at TEXT, deleted_at TEXT, translation_group TEXT, title TEXT);
 		CREATE TABLE ec_widgets (id TEXT, slug TEXT, status TEXT, locale TEXT, published_at TEXT, updated_at TEXT, deleted_at TEXT, translation_group TEXT, title TEXT);
 		CREATE TABLE content_taxonomies (collection TEXT, entry_id TEXT, taxonomy_id TEXT);
 		CREATE TABLE _plugin_storage (plugin_id TEXT NOT NULL, collection TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (plugin_id, collection, id));
 	`);
-	db.prepare("INSERT INTO _emdash_collections VALUES ('posts', 'Posts', 'Post', '/{slug}/', 'title', 1), ('widgets', 'Widgets', 'Widget', NULL, 'title', 0)").run();
+	// No title field set on posts (EmDash then uses its `title` field).
+	db.prepare("INSERT INTO _emdash_collections VALUES ('c1', 'posts', 'Posts', 'Post', '/{slug}/', NULL, 1), ('c2', 'widgets', 'Widgets', 'Widget', NULL, 'title', 0)").run();
+	db.prepare("INSERT INTO _emdash_fields VALUES ('c1', 'title'), ('c1', 'body'), ('c2', 'title')").run();
 	const post = db.prepare("INSERT INTO ec_posts VALUES (?, ?, ?, 'en', '2026-01-01', '2026-02-01', ?, ?, ?)");
 	post.run("p1", "one", "published", null, "g1", "Post one");
 	post.run("p2", "two", "published", null, "g2", "Post two");

@@ -6,7 +6,7 @@
  * page:metadata hook. See docs/social-images.md.
  */
 import type { CollectionSchemaInfo, PluginContext } from "emdash";
-import { definePluginRoute } from "emdash";
+import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
 import { CLOUDFLARE_API_HOST } from "../core/cloudflare-api.js";
@@ -17,8 +17,8 @@ import { readOnlyRoute } from "../core/routes.js";
 import { purgePageCache } from "../pageCache/lib.js";
 import { siteName } from "../core/site.js";
 import { afterResponse, parseInput, workerEnv } from "../shared.js";
-import { type RenderContext, RenderError, SETTINGS_KEY, TOKEN_SETTING, normalizeSocialSettings, readSocialSettings, renderContext, renderEntry, renderer, screenshot, siteLogo } from "./render.js";
-import { SOCIAL_STORAGE, type SocialImageDoc, counts, docId, markPending, socialImages, socialImageUrl } from "./store.js";
+import { NOT_SET_UP, type RenderContext, RenderError, SETTINGS_KEY, TOKEN_SETTING, normalizeSocialSettings, readSocialSettings, renderContext, renderEntry, renderer, screenshot, siteLogo } from "./render.js";
+import { SOCIAL_STORAGE, type SocialImageDoc, counts, docId, markPending, parseDefaultImages, socialImages, socialImageUrl } from "./store.js";
 import { TEMPLATE_DEFAULTS, socialImageHtml } from "./template.js";
 
 export const SOCIAL_FEATURE = "socialImages";
@@ -106,7 +106,7 @@ export async function renderPending(ctx: PluginContext, options: { limit: number
 			if (after.key !== before) changed.push({ collection: doc.collection, id: doc.id, slug: item.slug });
 		} catch (error) {
 			out.failed++;
-			if (error instanceof RenderError && error.status === 429) {
+			if (error instanceof RenderError && (error.status === 429 || error.status === NOT_SET_UP)) {
 				out.stopped = error.message;
 				break;
 			}
@@ -199,11 +199,13 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 
 	/** Queue the entry and start its render after the response (the hourly job retries what doesn't finish). */
 	const onPublished = async (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => {
-		const content = event.content as { id?: string; status?: string };
+		const content = event.content as { id?: string; status?: string; slug?: string | null; data?: Record<string, unknown> };
 		if (!content?.id || (content.status && content.status !== "published")) return;
 		const settings = await readSocialSettings(ctx);
 		if (!wanted(settings.collections, event.collection)) return;
-		await markPending(ctx, event.collection, content.id);
+		// The title as saved, for the page's list until the image is made (the render reads the entry again).
+		const title = [content.data?.title, content.data?.name, content.slug].find((v) => nonEmpty(v)) as string | undefined;
+		await markPending(ctx, event.collection, content.id, title?.trim().slice(0, 200) ?? "");
 		afterResponse(renderPending(ctx, { limit: 1, deadline: Date.now() + 25_000, bucket }).catch((error: unknown) => ctx.log.warn("social images: render after publish failed; the hourly job retries", { error: String(error) })));
 	};
 
@@ -255,33 +257,37 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 			}),
 		),
 
-		// The routes below change only Social Images' own settings, records and stored images: read-only for the page cache
+		// A normal save (not read-only): the theme default images change which og:image pages get, so the page cache
+		// is cleared and every isolate reads the settings again, as with any pack settings save.
+		"social/settings/save": definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await requireFeature(ctx, SOCIAL_FEATURE);
+				const input = parseInput(
+					z.object({
+						template: templateInput,
+						collections: z.array(z.string().regex(/^[a-z][a-z0-9_]*$/)).max(100),
+						accountId: z.string().trim().regex(/^([0-9a-fA-F]{32})?$/, "The account ID is 32 letters and numbers (Cloudflare dashboard → the account's home → Account ID)."),
+						defaultImages: z.array(z.string().trim().max(500)).max(10).optional(),
+						token: z.string().trim().max(500).optional(),
+						clearToken: z.boolean().optional(),
+					}),
+					ctx.input,
+				);
+				const bad = (input.defaultImages ?? []).filter((v) => v && !parseDefaultImages([v]).length);
+				if (bad.length) throw PluginRouteError.badRequest(`Use a full https URL or a path starting with /: ${bad.slice(0, 3).join(", ")}`);
+				const settings = normalizeSocialSettings(input);
+				await ctx.settings.set(SETTINGS_KEY, settings);
+				if (input.clearToken) await ctx.settings.delete(TOKEN_SETTING);
+				else if (input.token) await ctx.settings.set(TOKEN_SETTING, input.token);
+				return { settings, tokenSaved: input.clearToken ? false : Boolean(input.token) || Boolean(await ctx.settings.get<string>(TOKEN_SETTING).catch(() => null)) };
+			},
+		}),
+
+		// The routes below change only Social Images' own records and stored images: read-only for the page cache
 		// (an entry's page is purged when its image changes, in renderPending).
-		"social/settings/save": readOnlyRoute(
-			definePluginRoute({
-				permission: "plugins:manage",
-				methods: ["POST"],
-				request: { body: "json" },
-				handler: async (ctx) => {
-					await requireFeature(ctx, SOCIAL_FEATURE);
-					const input = parseInput(
-						z.object({
-							template: templateInput,
-							collections: z.array(z.string().regex(/^[a-z][a-z0-9_]*$/)).max(100),
-							accountId: z.string().trim().regex(/^([0-9a-fA-F]{32})?$/, "The account ID is 32 letters and numbers (Cloudflare dashboard → the account's home → Account ID)."),
-							token: z.string().trim().max(500).optional(),
-							clearToken: z.boolean().optional(),
-						}),
-						ctx.input,
-					);
-					const settings = normalizeSocialSettings(input);
-					await ctx.settings.set(SETTINGS_KEY, settings);
-					if (input.clearToken) await ctx.settings.delete(TOKEN_SETTING);
-					else if (input.token) await ctx.settings.set(TOKEN_SETTING, input.token);
-					return { settings, tokenSaved: input.clearToken ? false : Boolean(input.token) || Boolean(await ctx.settings.get<string>(TOKEN_SETTING).catch(() => null)) };
-				},
-			}),
-		),
 
 		/** Render the sample title once and return it (not stored): checks the token and shows the real result. */
 		"social/test": readOnlyRoute(
@@ -295,7 +301,7 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 					const rc: RenderContext | { reason: string } = await renderContext(ctx, settings, bucket);
 					if ("reason" in rc) return { ok: false, error: rc.reason };
 					try {
-						const png = await screenshot(rc.renderer, socialImageHtml({ title: SAMPLE_TITLE, siteName: rc.siteName, logo: rc.logo.src, settings: rc.template }));
+						const png = await screenshot(await rc.renderer(), socialImageHtml({ title: SAMPLE_TITLE, siteName: rc.siteName, logo: rc.logo.src, settings: rc.template }));
 						let binary = "";
 						for (let i = 0; i < png.length; i += 0x8000) binary += String.fromCharCode(...png.subarray(i, i + 0x8000));
 						return { ok: true, image: `data:image/png;base64,${btoa(binary)}`, bytes: png.byteLength };

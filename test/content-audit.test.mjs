@@ -206,7 +206,8 @@ test("generated social images count, and broken internal links come from Link Ma
 	resetSchema();
 	const entries = many(3, () => ({ data: { title: "x", body: [text("p", words(400))] } }));
 	const ctx = fakeCtx(entries);
-	await ctx.storage.socialImages.put("posts:e1", { key: "coywolf-og/posts/e1-abc.png" });
+	await ctx.storage.socialImages.put("posts:e1", { key: "coywolf-og/posts/e1-abc.png", status: "ready" });
+	await ctx.storage.socialImages.put("posts:e0", { key: null, status: "pending" }); // Queued, not made yet: still missing.
 	await ctx.storage.links_urls.put("u1", { url: "/gone/", internal: true, status: "broken", ignored: false });
 	await ctx.storage.links_refs.put("posts/e2|u1", { urlId: "u1", entryKey: "posts/e2" });
 	await run.startRun(ctx, "admin");

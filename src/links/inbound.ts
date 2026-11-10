@@ -52,19 +52,33 @@ export interface PageCollection extends CollectionInfo {
 	routable: boolean;
 }
 
-/** Collections that have public pages (routable), from EmDash's collections table. */
+interface CollectionRow {
+	slug: string;
+	label: string;
+	label_singular: string | null;
+	url_pattern: string | null;
+	title_field: string | null;
+	routable: number | null;
+}
+
+/** Collections' `title` and `name` fields, for those without a title field set (EmDash then shows `title`, else `name`). */
+export const titleFieldsSql = `SELECT c.slug AS collection, f.slug AS field FROM _emdash_fields AS f INNER JOIN _emdash_collections AS c ON c.id = f.collection_id WHERE f.slug IN ('title', 'name')`;
+
+/** Collections that have public pages (routable), from EmDash's collections table, with the field their titles are in. One batch. */
 export async function pageCollections(db: D1Database): Promise<PageCollection[]> {
-	const { results } = await db.prepare("SELECT slug, label, label_singular, url_pattern, title_field, routable FROM _emdash_collections ORDER BY slug").all<{
-		slug: string;
-		label: string;
-		label_singular: string | null;
-		url_pattern: string | null;
-		title_field: string | null;
-		routable: number | null;
-	}>();
-	return (results ?? [])
+	const [collections, fields] = (await db.batch([db.prepare("SELECT slug, label, label_singular, url_pattern, title_field, routable FROM _emdash_collections ORDER BY slug"), db.prepare(titleFieldsSql)])) as unknown as [
+		{ results?: CollectionRow[] },
+		{ results?: Array<{ collection: string; field: string }> },
+	];
+	const named = new Map<string, Set<string>>();
+	for (const f of fields.results ?? []) named.set(f.collection, (named.get(f.collection) ?? new Set()).add(f.field));
+	return (collections.results ?? [])
 		.filter((r) => COLLECTION_SLUG.test(r.slug) && r.routable !== 0)
-		.map((r) => ({ slug: r.slug, label: r.label, labelSingular: r.label_singular, urlPattern: r.url_pattern, titleField: r.title_field, routable: true }));
+		.map((r) => {
+			const has = named.get(r.slug);
+			const titleField = r.title_field ?? (has?.has("title") ? "title" : has?.has("name") ? "name" : null);
+			return { slug: r.slug, label: r.label, labelSingular: r.label_singular, urlPattern: r.url_pattern, titleField, routable: true };
+		});
 }
 
 interface EntryRow {

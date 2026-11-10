@@ -93,7 +93,7 @@ function fakeCtx(entries = [], extra = {}) {
 	};
 }
 
-const rc = (bucket, quickAction) => ({ renderer: { kind: "binding", browser: { quickAction } }, bucket, siteName: "Example", logo: { src: null, key: null }, template: template.TEMPLATE_DEFAULTS });
+const rc = (bucket, quickAction) => ({ renderer: async () => ({ kind: "binding", browser: { quickAction } }), bucket, siteName: "Example", logo: { src: null, key: null }, template: template.TEMPLATE_DEFAULTS });
 
 test("render: stored in the media bucket once per title and template; the image before last is deleted", async () => {
 	const ctx = fakeCtx();
@@ -130,6 +130,10 @@ test("render failures: a rate limit keeps it pending without counting; three fai
 	let doc = await ctx.storage.socialImages.get("posts:e1");
 	assert.equal(doc.status, "pending");
 	assert.equal(doc.attempts, 0);
+	// Browser Run not set up: looked up only when a render is needed, and not counted against the entry either.
+	const unset = { ...rc(bucket, async () => png()), renderer: async () => Promise.reject(new render.RenderError("Add a token", render.NOT_SET_UP)) };
+	await assert.rejects(render.renderEntry(ctx, unset, { collection: "posts", id: "e1", title: "T" }), /Add a token/);
+	assert.equal((await ctx.storage.socialImages.get("posts:e1")).attempts, 0);
 	const broken = rc(bucket, async () => new Response("<html>", { headers: { "content-type": "image/png" } }));
 	for (let i = 0; i < 3; i++) await assert.rejects(render.renderEntry(ctx, broken, { collection: "posts", id: "e1", title: "T" }), /didn't return a PNG/);
 	doc = await ctx.storage.socialImages.get("posts:e1");
@@ -234,9 +238,24 @@ test("og:image: the generated image for an entry without its own, with its size,
 	assert.equal(prop("og:image:alt"), "My Post");
 	assert.equal(out.find((c) => c.name === "twitter:card")?.content, "summary_large_image");
 
-	// The entry's own image wins; no doc, nothing generated.
-	const own = await schemaContributions(ctx, page({ image: "https://example.com/cover.jpg" }), {});
-	assert.notEqual(own.find((c) => c.property === "og:image")?.content, prop("og:image"));
+	// A theme's site-wide default (page.image) is replaced: the entry has no image of its own, or it wouldn't have one made.
+	const themed = await schemaContributions(ctx, page({ image: "https://example.com/theme/default-share.png" }), {});
+	assert.equal(themed.find((c) => c.property === "og:image")?.content, prop("og:image"));
+	// The SEO image always wins; an entry that got an image of its own since ("skipped") keeps it; no record, nothing.
+	const seo = await schemaContributions(ctx, page({ seo: { ogImage: "https://example.com/seo.jpg", robots: null } }), {});
+	assert.notEqual(seo.find((c) => c.property === "og:image")?.content, prop("og:image"));
+	const skipped = schemaCtx({ "posts:e1": { collection: "posts", id: "e1", title: "My Post", key: "coywolf-og/posts/e1-abc.png", status: "skipped" } });
+	assert.equal((await schemaContributions(skipped, page(), {})).find((c) => c.name === "twitter:card"), undefined);
 	const none = await schemaContributions(schemaCtx({}), page({ content: { collection: "posts", id: "e9", slug: "x" } }), {});
 	assert.equal(none.find((c) => c.name === "twitter:card"), undefined);
+});
+
+test("theme default images: http(s) URLs or paths, compared by path, so a theme's share image counts as none", async () => {
+	const { parseDefaultImages, isThemeDefault } = await import("../src/social/store.ts");
+	assert.deepEqual(parseDefaultImages(["/theme/images/share.png", "https://cdn.example/x.png", "javascript:alert(1)", "//evil.test/x.png", "/theme/images/share.png", 42]), ["/theme/images/share.png", "https://cdn.example/x.png"]);
+	const defaults = parseDefaultImages(["/theme/images/share.png"]);
+	assert.equal(isThemeDefault("https://example.com/theme/images/share.png?v=2", defaults), true);
+	assert.equal(isThemeDefault("https://example.com/theme/images/other.png", defaults), false);
+	assert.equal(isThemeDefault(null, defaults), false);
+	assert.equal(render.normalizeSocialSettings({ defaultImages: ["/a.png", "bad"] }).defaultImages.join(), "/a.png");
 });
