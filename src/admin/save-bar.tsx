@@ -21,7 +21,7 @@ import * as React from "react";
 
 import { SAVE_BAR_CSS } from "./admin-css.js";
 import { ConfirmDialog } from "./confirm-dialog.js";
-import { adminRouter, guardNavigation } from "./router.js";
+import { adminRouter, guardNavigation, leaveQuestions } from "./router.js";
 
 export { isDirty } from "./dirty.js";
 
@@ -48,24 +48,12 @@ export function useUnsavedChanges(dirty: boolean, onSave: () => void, canSave = 
 		if (!dirty) return;
 		const router = adminRouter();
 		if (!router) return;
-		let open: ((leave: boolean) => void) | null = null;
-		const release = guardNavigation(
-			router,
-			() =>
-				new Promise<boolean>((resolve) => {
-					const answer = (leave: boolean) => {
-						open = null;
-						setAsking(null);
-						resolve(leave);
-					};
-					open = answer;
-					setAsking({ answer });
-				}),
-		);
+		const questions = leaveQuestions((answer) => setAsking(answer ? { answer } : null));
+		const release = guardNavigation(router, () => questions.ask());
 		return () => {
 			release();
 			// Saved or discarded while the dialog was open: nothing would be lost now.
-			(open as ((leave: boolean) => void) | null)?.(true);
+			questions.settle(true);
 		};
 	}, [dirty]);
 

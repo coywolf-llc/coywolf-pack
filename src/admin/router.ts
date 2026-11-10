@@ -108,6 +108,40 @@ export function guardNavigation(router: AdminRouter, ask: (next: HistoryLocation
 	});
 }
 
+/**
+ * The "Leave without saving?" question for one page: `ask()` shows it (through
+ * `show(answer)`) and resolves true to leave. One question at a time: a
+ * navigation that comes while one is open (a second Back, say) answers the open
+ * one with Stay first, so no navigation is left waiting and the page and the
+ * address can't disagree. `settle(leave)` answers the open one, if any (the page
+ * stopped being dirty while it was open). `show(null)` hides it.
+ */
+export function leaveQuestions(show: (answer: ((leave: boolean) => void) | null) => void) {
+	let open: ((leave: boolean) => void) | null = null;
+	return {
+		ask(): Promise<boolean> {
+			open?.(false);
+			return new Promise<boolean>((resolve) => {
+				const answer = (leave: boolean) => {
+					if (open !== answer) return;
+					open = null;
+					show(null);
+					resolve(leave);
+				};
+				open = answer;
+				show(answer);
+			});
+		},
+		settle(leave: boolean) {
+			open?.(leave);
+		},
+		/** True while a question is waiting for its answer. */
+		get pending() {
+			return open !== null;
+		},
+	};
+}
+
 /** The navigation a "Leave" answer applies to. */
 let leaving: string | null = null;
 const targetKey = (location: HistoryLocationLike) => location.href ?? `${location.pathname}${location.search ?? ""}${location.hash ?? ""}`;

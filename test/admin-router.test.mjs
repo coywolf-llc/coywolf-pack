@@ -8,7 +8,7 @@ import { test } from "node:test";
 
 import "./ts-resolve.mjs";
 
-const { adminRouter, adminHref, goTo, guardNavigation, isPlainClick, packPagePath } = await import("../src/admin/router.ts");
+const { adminRouter, adminHref, goTo, guardNavigation, isPlainClick, leaveQuestions, packPagePath } = await import("../src/admin/router.ts");
 
 function fakeRouter(basepath = "/_emdash/admin") {
 	const blockers = [];
@@ -28,6 +28,9 @@ function fakeRouter(basepath = "/_emdash/admin") {
 		},
 		navigate(options) {
 			navigated.push(options.to);
+		},
+		get pathname() {
+			return location.pathname;
 		},
 		/** A navigation to `pathname` (PUSH unless said otherwise): true when it went ahead. */
 		async go(pathname, action = "PUSH", search = "") {
@@ -112,4 +115,64 @@ test("in-admin links: paths, plain clicks, and going there through the router or
 	const loads = [];
 	goTo("/redirects", { location: { assign: (url) => loads.push(url) } });
 	assert.deepEqual(loads, ["/_emdash/admin/redirects"]);
+});
+
+// SaveBar's dialog (useUnsavedChanges) answers through leaveQuestions: `shown` stands in for its React state.
+function dialog() {
+	let shown = null;
+	const questions = leaveQuestions((answer) => (shown = answer));
+	return {
+		questions,
+		answer: (leave) => shown?.(leave),
+		get open() {
+			return shown !== null;
+		},
+		get current() {
+			return shown;
+		},
+	};
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("the dialog: Stay keeps the page, Leave goes; it closes either way", async () => {
+	const router = fakeRouter();
+	const d = dialog();
+	guardNavigation(router, () => d.questions.ask());
+	const stay = router.go("/_emdash/admin/plugins/coywolf-pack/features");
+	await settle();
+	assert.equal(d.open, true);
+	d.answer(false);
+	assert.equal(await stay, false);
+	assert.equal(d.open, false);
+	const leave = router.go("/_emdash/admin/plugins/coywolf-pack/features");
+	await settle();
+	d.answer(true);
+	assert.equal(await leave, true);
+	assert.equal(router.pathname, "/_emdash/admin/plugins/coywolf-pack/features");
+});
+
+test("a second navigation while the dialog is open (Back twice) settles the first as Stay: nothing is left waiting, the page stays", async () => {
+	const router = fakeRouter();
+	const d = dialog();
+	guardNavigation(router, () => d.questions.ask());
+	const first = router.go("/_emdash/admin/content/posts", "BACK");
+	await settle();
+	const firstAnswer = d.current;
+	const second = router.go("/_emdash/admin", "BACK");
+	await settle();
+	assert.equal(await first, false, "the first navigation is settled as Stay, not orphaned");
+	assert.equal(d.questions.pending, true, "one question open: the second's");
+	firstAnswer(true);
+	assert.equal(d.questions.pending, true, "the first dialog's late answer doesn't answer the second");
+	d.answer(false);
+	assert.equal(await second, false);
+	assert.equal(d.questions.pending, false);
+	assert.equal(router.pathname, "/_emdash/admin/plugins/coywolf-pack/schema", "the page and the address still agree");
+	// Saved or discarded while the dialog is open: the navigation goes ahead.
+	const third = router.go("/_emdash/admin/settings");
+	await settle();
+	d.questions.settle(true);
+	assert.equal(await third, true);
+	assert.equal(d.open, false);
 });
