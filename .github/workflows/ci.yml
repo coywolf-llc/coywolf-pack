@@ -1,0 +1,109 @@
+# Type check and tests on every pull request and every push to main, against the EmDash
+# version the sites run and the latest EmDash release, each with the Kumo version that
+# EmDash's admin pins. Releases are made only from a green main (docs/releasing.md);
+# publish.yml runs the same checks again on the tag.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Weekly, so a new EmDash release is tested before the sites take it, even without a push.
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A pull request's runs replace each other; every push to main gets its own group (by commit), so a quick
+  # second merge can't cancel the first merge's pending run.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: EmDash ${{ matrix.emdash }}, Kumo ${{ matrix.kumo }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only valid combinations run: a site's Kumo is the one its EmDash's admin pins (the pack's admin
+        # pages share it), so a row whose Kumo isn't that pin is skipped. 2.15.0 is the pin of EmDash's next
+        # release; until it's out, the "latest, 2.15.0" row is skipped and "latest, 2.6.0" runs.
+        include:
+          # The 8 sites (update this when they move to a new EmDash).
+          - emdash: "1.4.0"
+            kumo: "2.6.0"
+          - emdash: latest
+            kumo: "2.6.0"
+          - emdash: latest
+            kumo: "2.15.0"
+    env:
+      # The Kumo versions of the "latest" rows only (not the sites row's): a latest release is skipped only when
+      # another latest row tests its pin, so the newest EmDash can never be skipped untested.
+      LATEST_KUMO_ROWS: "2.6.0 2.15.0"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      # Fails when package-lock.json doesn't match package.json.
+      - run: npm ci
+
+      - name: The lockfile's Kumo is the one its EmDash's admin pins
+        run: |
+          node -e '
+            const v = (name) => require(`./node_modules/${name}/package.json`);
+            const pin = v("@emdash-cms/admin").dependencies["@cloudflare/kumo"];
+            const kumo = v("@cloudflare/kumo").version;
+            console.log(`Lockfile: EmDash ${v("emdash").version}, Kumo ${kumo} (the admin pins ${pin})`);
+            if (kumo !== pin) {
+              console.log(`::error::package.json installs @cloudflare/kumo ${kumo}, but the admin of EmDash ${v("emdash").version} pins ${pin}. Set the devDependency to ${pin}.`);
+              process.exit(1);
+            }'
+
+      - name: Install EmDash ${{ matrix.emdash }} and Kumo ${{ matrix.kumo }}
+        id: versions
+        env:
+          EMDASH: ${{ matrix.emdash }}
+          KUMO: ${{ matrix.kumo }}
+        run: |
+          set -euo pipefail
+          field() { node -e 'let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => console.log(JSON.parse(s)[process.argv[1]] ?? ""))' "$1"; }
+          installed() { node -p "require('./node_modules/$1/package.json').version"; }
+          version="$(npm view "emdash@$EMDASH" version)"
+          admin="$(npm view "emdash@$version" dependencies --json | field @emdash-cms/admin)"
+          pin="$(npm view "@emdash-cms/admin@$admin" dependencies --json | field @cloudflare/kumo)"
+          echo "EmDash $EMDASH is $version; its admin ($admin) pins Kumo $pin."
+          if [ "$pin" != "$KUMO" ]; then
+            if [ "$EMDASH" != latest ]; then
+              echo "::error::Not a valid row: EmDash $version pins Kumo $pin, not $KUMO. Fix the matrix in .github/workflows/ci.yml."
+              exit 1
+            fi
+            if [[ " $LATEST_KUMO_ROWS " == *" $pin "* ]]; then
+              echo "::notice::Skipped: EmDash $version pins Kumo $pin, not $KUMO. The latest, Kumo $pin row tests it."
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::EmDash $version pins Kumo $pin, which no row of the matrix tests: add a "latest" row for it to .github/workflows/ci.yml (matrix and LATEST_KUMO_ROWS)."
+            exit 1
+          fi
+          if [ "$(installed emdash)" != "$version" ] || [ "$(installed @cloudflare/kumo)" != "$KUMO" ]; then
+            # --no-save: package.json and package-lock.json stay as committed (checked below).
+            npm install --no-save --no-audit --no-fund "emdash@$version" "@cloudflare/kumo@$KUMO"
+          fi
+          git diff --exit-code -- package.json package-lock.json
+          echo "Testing EmDash $(installed emdash) (admin $(installed @emdash-cms/admin)) with Kumo $(installed @cloudflare/kumo)."
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - if: steps.versions.outputs.run == 'true'
+        run: npx tsc --noEmit
+
+      - if: steps.versions.outputs.run == 'true'
+        run: npm test

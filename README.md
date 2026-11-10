@@ -42,7 +42,7 @@ Coywolf Pack is a native (trusted) EmDash plugin: you add it to your site's code
 
 ### What you need
 
-- An EmDash site (1.2 or later) on Cloudflare Workers, using EmDash's Cloudflare adapter with a D1 database bound as `DB` and an R2 media bucket bound as `MEDIA`. That's the setup EmDash's own Cloudflare starter creates.
+- An EmDash site (1.4 or later) on Cloudflare Workers, using EmDash's Cloudflare adapter with a D1 database bound as `DB` and an R2 media bucket bound as `MEDIA`. That's the setup EmDash's own Cloudflare starter creates.
 - The site's code in a folder (or Git repository) you can edit and deploy, with Node.js and Wrangler.
 
 ### 1. Install the package
