@@ -243,3 +243,64 @@ test("a refused redirect save or settings save isn't parsed (EmDash checks permi
 	await settled();
 	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }], "going live still clears every page");
 });
+
+// ── "Not found" pages (Performance → Keep "not found" pages for 5 minutes) ──
+
+const { keepNotFound, watchInvalidation, purgeScope, NOT_FOUND_TAG, NOT_FOUND_MAX_AGE } = await import("../src/pageCache/lib.ts");
+
+test("keepNotFound: five minutes for a 404 on a cacheable route, replacing EmDash's and the site's set(false); never private, cookies or EmDash's URLs", () => {
+	const site = cacheable();
+	site.set(false); // EmDash and the sites turn caching off for 404s.
+	assert.equal(keepNotFound(site, new Response("gone", { status: 404 }), "/nope/"), true);
+	assert.equal(site.options.maxAge, NOT_FOUND_MAX_AGE);
+	assert.equal(site.options.swr, 0);
+	assert.deepEqual(site.tags, [NOT_FOUND_TAG]);
+	for (const [response, path] of [
+		[new Response("x", { status: 404, headers: { "Cache-Control": "private, no-store" } }), "/a/"],
+		[new Response("x", { status: 404, headers: { "Set-Cookie": "a=1" } }), "/a/"],
+		[new Response("{}", { status: 404 }), "/_emdash/api/content/posts/x"],
+		[new Response("ok", { status: 200 }), "/a/"],
+		[new Response("gone", { status: 410 }), "/a/"],
+	]) {
+		const cache = cacheable();
+		cache.set(false);
+		assert.equal(keepNotFound(cache, response, path), false, `${response.status} ${path}`);
+		assert.equal(cache.options.maxAge, undefined);
+	}
+	assert.equal(purgeScope("/_emdash/api/plugins/coywolf-pack/cache/not-found/save"), null, "turning it on or off clears nothing");
+});
+
+test("with the option on, a content change's purge clears cached 404s in the same call", async () => {
+	const calls = [];
+	const cache = { invalidate: async (o) => calls.push(o) };
+	watchInvalidation(cache, [NOT_FOUND_TAG]);
+	await cache.invalidate({ tags: ["posts", "01ABC"] });
+	assert.deepEqual(calls, [{ tags: ["posts", "01ABC", NOT_FOUND_TAG] }]);
+	const plain = { invalidate: async (o) => calls.push(o) };
+	watchInvalidation(plain);
+	await plain.invalidate({ tags: ["posts"] });
+	assert.deepEqual(calls.at(-1), { tags: ["posts"] }, "option off: EmDash's call unchanged");
+});
+
+test("end to end: a 404 is kept for minutes only with the option on and a healthy render", async () => {
+	const notFound = (cache) => async () => {
+		cache.set(false); // the site's middleware
+		return new Response("<html>Not found</html>", { status: 404, headers: { "content-type": "text/html" } });
+	};
+	const db = d1();
+	freshIsolate(db);
+	const off = cacheable();
+	await (await coywolfPack({}, [])(context("/missing/", off), notFound(off))).text();
+	assert.equal(off.options.maxAge, undefined, "off by default: 404s stay out of the edge cache");
+	db.sqlite.prepare("INSERT INTO options (name, value) VALUES (?, ?)").run("plugin:coywolf-pack:settings:pageCacheNotFound", "true");
+	freshIsolate(db);
+	const on = cacheable();
+	await (await coywolfPack({}, [])(context("/missing/", on), notFound(on))).text();
+	assert.equal(on.options.maxAge, NOT_FOUND_MAX_AGE);
+	assert.ok(on.tags.includes(NOT_FOUND_TAG) && on.tags.some((t) => t.startsWith("coywolf-gen-")));
+	// A route the site didn't make cacheable is left alone.
+	const plain = new AstroCache({});
+	await (await coywolfPack({}, [])(context("/other/", plain), notFound(plain))).text();
+	assert.equal(plain.options.maxAge, undefined);
+	await settled();
+});

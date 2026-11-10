@@ -80,6 +80,27 @@ export type PurgeScope = { purgeEverything: true } | { pathPrefixes: string[] } 
 export const REDIRECTS_TAG = "coywolf-redirects";
 /** robots.txt in the edge cache (cleared with everything else after the pack's admin saves and settings changes). */
 export const ROBOTS_TAG = "coywolf-robots";
+/** "Not found" pages in the edge cache (the Performance page's 404 option); cleared with every content change EmDash clears. */
+export const NOT_FOUND_TAG = "coywolf-404";
+/** How long the edge keeps a "not found" page, when that's on: a page published at that address shows up within this. */
+export const NOT_FOUND_MAX_AGE = 300;
+
+/**
+ * Keep a "not found" page in the edge cache for NOT_FOUND_MAX_AGE (the
+ * Performance page's option): every probe and dead link otherwise renders the
+ * site's 404 page (EmDash and the sites turn caching off for 404s). Only for
+ * a GET on a route the site made cacheable, outside EmDash's own URLs, and
+ * never for a response marked private or no-store or setting a cookie.
+ * Replaces whatever the request had (EmDash's set(false), the page lifetime),
+ * no stale serving. True when it was kept.
+ */
+export function keepNotFound(cache: RouteCache | undefined, response: Response, pathname: string): boolean {
+	if (!cache?.enabled || response.status !== 404 || pathname.startsWith("/_emdash/")) return false;
+	if (/\b(private|no-store)\b/i.test(response.headers.get("Cache-Control") ?? "") || response.headers.has("Set-Cookie")) return false;
+	cache.set(false);
+	cache.set({ maxAge: NOT_FOUND_MAX_AGE, swr: 0, tags: [NOT_FOUND_TAG] });
+	return true;
+}
 
 interface EdgeRouteCache {
 	enabled?: boolean;
@@ -117,7 +138,7 @@ export function keepOffEdge(context: unknown): void {
 export function purgeScope(pathname: string): PurgeScope | null {
 	const route = pathname.slice(PACK_API.length);
 	if (/^redirects\/(?!(list|test|removed)$)|^backups\/(rewind|undo)$/.test(route)) return { tags: [REDIRECTS_TAG] };
-	if (/^(redirects|backups|links|updates)\//.test(route) || /^cache\/(media|warm|purge)(\/|$)/.test(route)) return null;
+	if (/^(redirects|backups|links|updates)\//.test(route) || /^cache\/(media|warm|purge|not-found)(\/|$)/.test(route)) return null;
 	// Stored image sizes: new uploads and crops are picked up after a short stopgap lifetime; a backfill run clears the cache itself once when it is done.
 	if (/^images\/variants\/(settings|run|bulk|estimate)$/.test(route)) return null;
 	// (Un)subscribing the Stream webhook changes no page (its secret is on no page). The videos admin reads
@@ -352,11 +373,16 @@ export async function settlePage(cache: RouteCache | undefined, response: Respon
  * cache.invalidate. Astro gives the middleware and the route the same cache
  * object. Returns a function telling whether it was called (and succeeded).
  */
-export function watchInvalidation(cache: { invalidate?: (...args: unknown[]) => Promise<unknown> } | undefined): () => boolean {
+export function watchInvalidation(cache: { invalidate?: (...args: unknown[]) => Promise<unknown> } | undefined, extraTags: string[] = []): () => boolean {
 	let invalidated = false;
 	const original = cache?.invalidate;
 	if (!cache || typeof original !== "function") return () => false;
 	cache.invalidate = async (...args: unknown[]) => {
+		// Tags of the pack's own that every content change clears too (cached "not found" pages: a new entry may now be at that
+		// address), in the same purge call as EmDash's, so they cost no purge of their own.
+		const [input, ...rest] = args;
+		const tags = (input as { tags?: unknown } | null)?.tags;
+		if (extraTags.length && Array.isArray(tags) && tags.length) args = [{ ...(input as object), tags: [...new Set([...tags, ...extraTags])] }, ...rest];
 		const result = await original.apply(cache, args);
 		invalidated = true;
 		return result;
