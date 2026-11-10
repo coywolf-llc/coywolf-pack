@@ -19,7 +19,7 @@
 import type { MiddlewareHandler } from "astro";
 
 import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOption, siteFeatures, siteOption, siteSetting, isOn } from "./core/features.js";
-import { claimSettle, currentGenerationTag, mergeScopes, recordSettingsChange } from "./core/generation.js";
+import { SETTLE_RETRY_MS, claimSettle, currentGenerationTag, mergeScopes, recordSettingsChange, settleLater } from "./core/generation.js";
 import { invalidateRobotsCache } from "./robots/middleware.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
 import { DEADLINES } from "./core/single-flight.js";
@@ -28,7 +28,7 @@ import type { PackMiddleware } from "./core/module.js";
 import { MIDDLEWARE } from "./modules.js";
 import { ALWAYS, LIFETIME_DEFAULTS, LIFETIME_SETTINGS } from "./pageCache/pack.js";
 import { ROBOTS_EDGE_MAX_AGE } from "./robots/pack.js";
-import { type PurgeScope, ROBOTS_TAG, applyPageLifetime, keepAtEdge, isRedirectSave, purgePageCache, purgeScope, purgesAfter, redirectPagesScope, settlePage, tagGeneration, watchInvalidation } from "./pageCache/lib.js";
+import { type PurgeScope, ROBOTS_TAG, applyPageLifetime, keepAtEdge, isRedirectSave, purgeOutcome, purgeScope, purgesAfter, redirectPagesScope, settlePage, tagGeneration, watchInvalidation } from "./pageCache/lib.js";
 import { STOPGAP_HEADER, WARMER_AGENT, WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, scheduleRewarm, startWarm, warmMayHaveWork, warmStep } from "./pageCache/warm.js";
 import { prefetchRedirects } from "./redirects/middleware.js";
 import { notePackMiddleware } from "./search/live-serve.js";
@@ -119,10 +119,18 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		// whatever this response leaves in the edge cache, so a settings save can clear just those.
 		const generation = currentGenerationTag();
 		const db = env[options.database ?? "DB"] as D1Database | undefined;
-		/** Clear cached pages, then (for a full purge, when warming is on) start warming them again. */
-		const purge = (scope: PurgeScope) =>
-			purgePageCache(scope).then(async (purged) => {
-				if (purged && "purgeEverything" in scope && db && (await siteSetting<boolean>(WARM_SETTING, options.database))) await startWarming(db, "settings");
+		/**
+		 * Clear cached pages, then (for a full purge, when warming is on) start warming them again. A purge
+		 * that's refused (the account's purge rate limit) or fails is kept for the settling purge (settleLater),
+		 * or, when it was the settling purge, tried again a minute later.
+		 */
+		const purge = (scope: PurgeScope, settling = false) =>
+			purgeOutcome(scope).then(async (outcome) => {
+				if (outcome === "refused") {
+					if (db) await settleLater(db, scope, Date.now(), settling ? SETTLE_RETRY_MS : undefined);
+					return;
+				}
+				if (outcome === "purged" && "purgeEverything" in scope && db && (await siteSetting<boolean>(WARM_SETTING, options.database))) await startWarming(db, "settings");
 			});
 		// Page cache: a successful pack admin write (settings, redirects, imports…) can change any page.
 		if (purgesAfter(context.request.method, context.url.pathname)) {
@@ -214,7 +222,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		if (db) {
 			waitUntil(
 				claimSettle(db)
-					.then((scope) => (scope ? purge(scope) : undefined))
+					.then((scope) => (scope ? purge(scope, true) : undefined))
 					.catch((error) => console.error("coywolf-pack: settling purge failed", error)),
 			);
 		}

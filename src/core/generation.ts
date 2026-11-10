@@ -58,7 +58,17 @@ export interface GenerationRow {
 	 * one of them, so a save that clears everything settles by their tags.
 	 */
 	recent?: Array<{ id: string; at: number }>;
+	/** The settling purge is due then (ms) instead of STALE_WINDOW_MS after `at`: a settling purge that was refused, tried again. */
+	settleAfter?: number;
+	/** How many times a refused settling purge has been tried again (given up after MAX_SETTLE_RETRIES). */
+	settleRetries?: number;
 }
+
+/** Refused settling purges are tried again this many times, a minute apart, then given up on (logged). */
+export const MAX_SETTLE_RETRIES = 10;
+
+/** How long a refused settling purge waits before it's tried again (the purge API allows 5 a minute per account). */
+export const SETTLE_RETRY_MS = 60_000;
 
 export function parseGeneration(raw: string | null | undefined): GenerationRow | null {
 	if (!raw) return null;
@@ -148,7 +158,44 @@ export async function recordSettingsChange(db: D1Database, settle: PurgeScope | 
 
 /** True when the last read generation has a settling purge whose time has come. */
 export function settleDue(row: GenerationRow | null, now = Date.now()): row is GenerationRow & { settle: PurgeScope } {
-	return Boolean(row?.settle && now - row.at > STALE_WINDOW_MS);
+	if (!row?.settle) return false;
+	return typeof row.settleAfter === "number" ? now > row.settleAfter : now - row.at > STALE_WINDOW_MS;
+}
+
+/**
+ * A purge that was refused or failed (the purge API's rate limit is 5 a
+ * minute for the whole account, shared with EmDash's content purges): add its
+ * scope to the pending settling purge, so it's done then. Needed because a
+ * full save settles by generation tags only, which can't reach pages cached
+ * before the save under older generations: if the save's first, full purge
+ * was refused, the settling purge must clear everything instead.
+ * `retryAfterMs`: for a settling purge that was itself refused (it's no longer
+ * pending once claimed), when to try again. A compare-and-set on the row, so a
+ * save made meanwhile in another isolate isn't lost (tried a few times).
+ */
+export async function settleLater(db: D1Database, scope: PurgeScope, now = Date.now(), retryAfterMs?: number): Promise<void> {
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const raw = (await db.prepare("SELECT value FROM options WHERE name = ?").bind(GENERATION_OPTION).first<{ value: string }>())?.value ?? null;
+		const row = parseGeneration(raw);
+		if (!raw || !row) return; // No save recorded (or unreadable): nothing to attach it to.
+		const next: GenerationRow = { ...row, settle: mergeScopes(row.settle, scope) ?? scope };
+		if (retryAfterMs !== undefined) {
+			const retries = (row.settleRetries ?? 0) + 1;
+			if (retries > MAX_SETTLE_RETRIES && !row.settle) {
+				console.error(`coywolf-pack: settling purge refused ${MAX_SETTLE_RETRIES} times; giving up (Performance → Clear pages and images clears everything)`, scope);
+				return;
+			}
+			next.settleRetries = retries;
+			next.settleAfter = Math.min(next.settleAfter ?? Number.POSITIVE_INFINITY, now + retryAfterMs);
+		}
+		const value = JSON.stringify(next);
+		const result = await db.prepare("UPDATE options SET value = ? WHERE name = ? AND value = ?").bind(value, GENERATION_OPTION, raw).run();
+		if ((result.meta?.changes ?? 0) > 0) {
+			rememberSiteOption(GENERATION_OPTION, value);
+			return;
+		}
+	}
+	console.error("coywolf-pack: could not keep a refused purge for later (the settings row kept changing)");
 }
 
 /**
@@ -161,7 +208,8 @@ export async function claimSettle(db: D1Database, now = Date.now()): Promise<Pur
 	const raw = siteOption(GENERATION_OPTION);
 	const row = parseGeneration(raw);
 	if (!raw || !settleDue(row, now)) return null;
-	const { settle, ...rest } = row;
+	const { settle, settleAfter: _retry, ...rest } = row;
+	// settleRetries stays (counting the retries of this settle); a new save starts a new row without it.
 	const next = JSON.stringify(rest);
 	// Only one isolate claims it, and a newer save (another row) isn't touched.
 	rememberSiteOption(GENERATION_OPTION, next);

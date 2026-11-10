@@ -13,7 +13,7 @@ registerHooks({
 	resolve(specifier, context, next) {
 		if (specifier === "cloudflare:workers") {
 			return {
-				url: `data:text/javascript,export const env = new Proxy({}, { get: (_, k) => globalThis.__testEnv?.[k] }); export const waitUntil = (p) => { globalThis.__waitUntil?.push(p); }; export const cache = { purge: async (o) => { globalThis.__purges.push(o); return { success: true }; } };`,
+				url: `data:text/javascript,export const env = new Proxy({}, { get: (_, k) => globalThis.__testEnv?.[k] }); export const waitUntil = (p) => { globalThis.__waitUntil?.push(p); }; export const cache = { get purge() { return globalThis.__noCache ? undefined : async (o) => { globalThis.__purges.push(o); return { success: globalThis.__purgeOk !== false }; }; } };`,
 				shortCircuit: true,
 			};
 		}
@@ -242,4 +242,57 @@ test("a refused redirect save or settings save isn't parsed (EmDash checks permi
 	});
 	await settled();
 	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }], "going live still clears every page");
+});
+
+// ── Refused purges (the account's purge rate limit) ──
+
+test("a full save whose first purge is refused settles by clearing everything, not just generation tags", async () => {
+	const db = d1();
+	freshIsolate(db);
+	globalThis.__purgeOk = false;
+	try {
+		await coywolfPack({}, [])(context("/_emdash/api/plugins/coywolf-pack/schema/site/save", undefined, "POST"), async () => Response.json({ ok: true }));
+		await settled();
+	} finally {
+		globalThis.__purgeOk = true;
+	}
+	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }], "tried once");
+	assert.deepEqual(row(db).settle, { purgeEverything: true }, "pages cached under older generations would otherwise stay for days");
+});
+
+test("a refused settling purge is tried again a minute later, a limited number of times; without Workers Cache nothing is kept", async () => {
+	const { SETTLE_RETRY_MS, MAX_SETTLE_RETRIES, settleLater, settleDue } = generation;
+	const db = d1();
+	freshIsolate(db);
+	await recordSettingsChange(db, { tags: ["coywolf-redirects"] }, Date.now(), { byGeneration: true });
+	await features.siteFeatures();
+	const due = Date.now() + TTL + 20_000;
+	const scope = await claimSettle(db, due);
+	assert.deepEqual(scope, { tags: ["coywolf-redirects"] });
+	assert.equal(row(db).settle, undefined, "claimed");
+	await settleLater(db, scope, due, SETTLE_RETRY_MS);
+	const retry = row(db);
+	assert.deepEqual(retry.settle, scope);
+	assert.equal(retry.settleAfter, due + SETTLE_RETRY_MS);
+	assert.equal(settleDue(retry, due + 1000), false, "not before the retry time");
+	assert.equal(settleDue(retry, due + SETTLE_RETRY_MS + 1), true);
+	// Given up after MAX_SETTLE_RETRIES.
+	for (let i = 1; i <= MAX_SETTLE_RETRIES + 2; i++) {
+		const current = row(db);
+		const { settle: _claimed, ...rest } = current;
+		db.sqlite.prepare("UPDATE options SET value = ? WHERE name = ?").run(JSON.stringify(rest), features.GENERATION_OPTION);
+		await settleLater(db, scope, due, SETTLE_RETRY_MS);
+	}
+	assert.equal(row(db).settle, undefined, "no endless retries");
+	// No Workers Cache: a full save's purge can't happen, and nothing is kept for later.
+	const other = d1();
+	freshIsolate(other);
+	globalThis.__noCache = true;
+	try {
+		await coywolfPack({}, [])(context("/_emdash/api/plugins/coywolf-pack/schema/site/save", undefined, "POST"), async () => Response.json({ ok: true }));
+		await settled();
+	} finally {
+		globalThis.__noCache = false;
+	}
+	assert.ok(row(other).settle && "tags" in row(other).settle, "the generation settle as usual, not escalated");
 });

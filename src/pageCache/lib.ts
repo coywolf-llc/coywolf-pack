@@ -173,26 +173,38 @@ export function disposeRpcResult(result: unknown): void {
 
 /** Purge cached pages (all of them unless a scope says otherwise). False when there's no Workers Cache or the purge was refused. */
 export async function purgePageCache(scope: PurgeScope = { purgeEverything: true }): Promise<boolean> {
+	return (await purgeOutcome(scope)) === "purged";
+}
+
+/**
+ * Purge, telling a refused or failed purge (worth trying again later) from a
+ * site without Workers Cache (nothing to purge, ever): "unavailable" outside
+ * Workers or without the cache.
+ */
+export async function purgeOutcome(scope: PurgeScope = { purgeEverything: true }): Promise<"purged" | "refused" | "unavailable"> {
+	let workers: { cache?: { purge(options: PurgeScope): Promise<{ success?: boolean; errors?: Array<{ message: string }> } | undefined> } };
 	try {
-		const workers = (await import("cloudflare:workers")) as unknown as {
-			cache?: { purge(options: PurgeScope): Promise<{ success?: boolean; errors?: Array<{ message: string }> } | undefined> };
-		};
-		if (!workers.cache?.purge) return false;
+		workers = (await import("cloudflare:workers")) as unknown as typeof workers;
+	} catch {
+		return "unavailable"; // Not on Workers.
+	}
+	if (!workers.cache?.purge) return "unavailable";
+	try {
 		const result = await workers.cache.purge(scope);
 		try {
 			// The purge API rate-limits (Free-tier limits for Workers Cache) and says so in the result.
 			if (result && result.success === false) {
 				console.error("coywolf-pack: page cache purge refused", result.errors);
-				return false;
+				return "refused";
 			}
-			return true;
+			return "purged";
 		} finally {
 			// The result is an RPC result: dispose of it, or the runtime warns that it wasn't.
 			disposeRpcResult(result);
 		}
 	} catch (error) {
 		console.error("coywolf-pack: page cache purge failed", error);
-		return false;
+		return "refused";
 	}
 }
 
