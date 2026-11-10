@@ -45,7 +45,7 @@ The card reads the account's `rumWebVitalsEventsAdaptiveGroups` dataset with the
 
 **Web Analytics beacon** adds a small script at the end of every public page (through EmDash's page fragments, so the layout needs `<EmDashBodyEnd>`). Once the page is parsed, it adds Cloudflare's beacon as a module script, `https://static.cloudflareinsights.com/beacon.min.js?token=<token>` (the form Cloudflare documents for tag managers), unless the page already has one. So a theme that loads the beacon itself, or Cloudflare's automatic setup, never makes a page report twice. It never blocks rendering. Saving the token clears the page cache, so cached pages get the beacon at once.
 
-Why the pack adds it: Cloudflare's automatic setup injects the beacon "as the HTML response passes through Cloudflare's edge" for proxied sites, but Cloudflare doesn't document whether that covers responses a Worker makes, and reports from Workers sites disagree (some see it injected on Workers custom domains, others never do). None of the eight sites had the beacon on November 9, 2026. The pack's beacon works either way.
+Why the pack adds it: Cloudflare's automatic setup injects the beacon "as the HTML response passes through Cloudflare's edge" for proxied sites, but Cloudflare doesn't document whether that covers responses a Worker makes, and reports from Workers sites disagree (some see it injected on Workers custom domains, others never do). Neither coywolf.com nor recollect.fyi had the beacon in its HTML on November 10, 2026. The pack's beacon works either way.
 
 The token is the 32-character `token` in Cloudflare's snippet (`data-cf-beacon='{"token": "…"}'`), found under **Web Analytics → the site → Manage site**. It's public (every page carries it), so it's a plain setting.
 
