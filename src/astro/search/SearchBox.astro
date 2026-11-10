@@ -58,4 +58,4 @@ const { database, ...props } = Astro.props;
 const features = await siteFeatures(database);
 ---
 
-{isOn(features, "search.box") && <SearchBoxForm {...props} live={isOn(features, "search.live")} />}
+{isOn(features, "search.box") && <SearchBoxForm {...props} live={isOn(features, "search.live")} seen={isOn(features, "search.live") && isOn(features, "insights.search")} />}

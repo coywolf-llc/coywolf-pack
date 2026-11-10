@@ -13,12 +13,12 @@
  * (from the live row) and after every save or publish. Rules are made with a
  * "Slug change:" note; only those are ever edited or deleted.
  */
-import type { PluginContext } from "emdash";
+import type { PluginContext, RedirectAccessWithWrite } from "emdash";
 
 import { COLLECTION_SLUG, entryUrl, hostDefaultLocale, readCollections } from "../core/content-url.js";
 import { REDIRECTS_TAG, purgePageCache } from "../pageCache/lib.js";
 import { workerEnv } from "../shared.js";
-import { invalidateRedirectCache } from "./middleware.js";
+import { noteRedirectsChanged } from "./middleware.js";
 import { type EntrySnapshot, snapshotFromContent, snapshotFromRow } from "./removed-core.js";
 import { deleteRule, ensureTable, normalizePath, saveRule } from "./rules.js";
 import { type PlanRule, SLUG_NOTE_PREFIX, planSlugChange } from "./slug-core.js";
@@ -33,7 +33,7 @@ interface KnownUrl {
 	at: string;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: plugin storage collections are untyped here.
+// any: plugin storage collections are untyped here.
 const urls = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[STORE] as {
 	get(id: string): Promise<KnownUrl | null>;
 	put(id: string, data: KnownUrl): Promise<void>;
@@ -49,6 +49,78 @@ const live = (entry: EntrySnapshot) => entry.status === "published" && Boolean(e
 const handled = async (entry: EntrySnapshot) => !entry.locale || entry.locale === (await hostDefaultLocale());
 /** How long beforeSave may spend recording a URL: EmDash fails the save if a beforeSave hook times out (5 s). */
 const BEFORE_SAVE_BUDGET_MS = 1500;
+
+/** The group EmDash files its own slug-change redirects under (RedirectRepository.createAutoRedirect). */
+export const EMDASH_AUTO_GROUP = "Auto: slug change";
+/**
+ * Pages of EmDash's auto rows read per change (100 a page, narrowed by the new slug): every page until
+ * the last, up to this many (20,000 rows), which only a site with a runaway number of matching rows
+ * reaches; the log then says so and the rest are left.
+ */
+export const AUTO_PAGES = 200;
+
+/** The part of EmDash's redirects API (ctx.redirects, capability redirects:write) the slug changes use. */
+export type AutoRedirectsApi = Pick<RedirectAccessWithWrite, "list" | "get" | "delete">;
+
+const trimSlash = (path: string) => path.replace(/\/+$/, "");
+
+/**
+ * Delete the redirect EmDash made for the same change (its "Auto: slug change" rows),
+ * through EmDash's redirects API, so EmDash's write lock, its loop cache and the
+ * redirects it publishes to its middleware all see the delete.
+ * EmDash builds them from the collection's URL pattern: without one it writes
+ * /<collection>/<slug> paths that don't exist, and for a nested page it writes a
+ * top-level /<old> that can hijack a real page there. Its middleware runs before
+ * the pack's, so its rule would also answer first (without the trailing slash).
+ * Only auto rows from the old URL (or URLs whose rules were just pointed at the new one,
+ * since EmDash collapses its chains the same way) whose destination ends in the new
+ * slug; EmDash's own table and API keep working for everything else.
+ * Matching (as the SQL delete before 0.36.0 did): the source, trailing slashes removed, is one
+ * of those paths exactly; the destination, trailing slashes removed, ends in "/<new slug>"
+ * (ignoring ASCII case). A row changed since it was listed is left alone (its revision no
+ * longer matches). Returns how many rows were deleted; 0 without the API.
+ */
+export async function dropEmDashAuto(
+	ctx: { redirects?: Partial<AutoRedirectsApi>; log?: { warn(message: string, data?: unknown): void } },
+	collection: string,
+	from: string,
+	newSlug: string | null,
+	earlier: string[] = [],
+	maxPages = AUTO_PAGES,
+): Promise<number> {
+	const api = ctx.redirects;
+	if (typeof api?.list !== "function" || typeof api.get !== "function" || typeof api.delete !== "function") return 0;
+	const oldSlug = normalizePath(from).split("/").pop();
+	if (!oldSlug || !newSlug) return 0;
+	const slugs = [oldSlug, ...earlier.map((path) => normalizePath(path).split("/").pop() ?? "")].filter(Boolean);
+	const sources = new Set([normalizePath(from), ...earlier.map(normalizePath), ...slugs.flatMap((slug) => [`/${collection}/${slug}`, `/${slug}`])]);
+	const ending = `/${newSlug}`.toLowerCase();
+	const matches = (row: { source: string; destination: string; auto: boolean; groupName: string | null }) =>
+		row.auto && row.groupName === EMDASH_AUTO_GROUP && sources.has(trimSlash(row.source)) && trimSlash(row.destination).toLowerCase().endsWith(ending);
+	let removed = 0;
+	let cursor: string | undefined;
+	for (let page = 0; ; page++) {
+		if (page >= maxPages) {
+			ctx.log?.warn("Slug change: stopped looking through EmDash's slug-change redirects after the page limit; the rest are left", { pages: maxPages, newSlug, removed });
+			break;
+		}
+		// `search` (source or destination containing the new slug) keeps the pages short.
+		const result = await api.list({ auto: true, group: EMDASH_AUTO_GROUP, search: newSlug, limit: 100, ...(cursor ? { cursor } : {}) });
+		for (const row of result.items) {
+			if (!matches(row)) continue;
+			const current = await api.get(row.id);
+			if (!current || !matches(current.redirect)) continue;
+			try {
+				if (await api.delete(row.id, { _rev: current._rev })) removed++;
+			} catch {
+				// Changed or deleted since it was read: leave it.
+			}
+		}
+		if (!result.hasMore || !result.cursor) break;
+		cursor = result.cursor;
+	}
+	return removed;
+}
 
 export function slugChangesModule(options: { database?: string }) {
 	async function db(): Promise<D1Database | undefined> {
@@ -94,38 +166,13 @@ export function slugChangesModule(options: { database?: string }) {
 		}
 		// EmDash collapses its own chains too, so its rows from those earlier URLs now point at the new one.
 		const retargetedSources = rules.filter((r) => plan.retargetIds.includes(r.id)).map((r) => r.source);
-		const replaced = await dropEmDashAuto(d1, collection, from, entry.slug, retargetedSources);
-		invalidateRedirectCache();
+		const replaced = await dropEmDashAuto(ctx, collection, from, entry.slug, retargetedSources).catch((error: unknown) => {
+			ctx.log.warn("Slug change: could not remove EmDash's own redirect for the same change", { from, error: String(error) });
+			return 0;
+		});
+		await noteRedirectsChanged(d1);
 		await purgePageCache({ tags: [REDIRECTS_TAG] });
 		ctx.log.info("Slug change redirect", { collection, from, to, deleted: plan.deleteIds.length, retargeted: plan.retargetIds.length, emdashAutoRemoved: replaced });
-	}
-
-	/**
-	 * Delete the redirect EmDash made for the same change (its "Auto: slug change" rows).
-	 * EmDash builds them from the collection's URL pattern: without one it writes
-	 * /<collection>/<slug> paths that don't exist, and for a nested page it writes a
-	 * top-level /<old> that can hijack a real page there. Its middleware runs before
-	 * the pack's, so its rule would also answer first (without the trailing slash).
-	 * Only auto rows from the old URL (or URLs whose rules were just pointed at the new one,
-	 * since EmDash collapses its chains the same way) whose destination ends in the new
-	 * slug; EmDash's own table and API keep working for everything else.
-	 */
-	async function dropEmDashAuto(d1: D1Database, collection: string, from: string, newSlug: string | null, earlier: string[] = []): Promise<number> {
-		const oldSlug = normalizePath(from).split("/").pop();
-		if (!oldSlug || !newSlug) return 0;
-		try {
-			const slugs = [oldSlug, ...earlier.map((path) => normalizePath(path).split("/").pop() ?? "")].filter(Boolean);
-			const sources = [...new Set([normalizePath(from), ...earlier.map(normalizePath), ...slugs.flatMap((slug) => [`/${collection}/${slug}`, `/${slug}`])])];
-			const result = await d1
-				.prepare(
-					`DELETE FROM _emdash_redirects WHERE auto = 1 AND group_name = 'Auto: slug change' AND rtrim(source, '/') IN (${sources.map(() => "?").join(", ")}) AND rtrim(destination, '/') LIKE ?`,
-				)
-				.bind(...sources, `%/${newSlug}`)
-				.run();
-			return result.meta.changes ?? 0;
-		} catch {
-			return 0; // EmDash's table changed shape: leave it.
-		}
 	}
 
 	/**
@@ -141,7 +188,7 @@ export function slugChangesModule(options: { database?: string }) {
 			.all<{ id: string }>();
 		if (!results.length) return;
 		for (const row of results) await deleteRule(d1, row.id);
-		invalidateRedirectCache();
+		await noteRedirectsChanged(d1);
 		await purgePageCache({ tags: [REDIRECTS_TAG] });
 		ctx.log.info("Slug change redirect removed: the URL is live again", { url, rules: results.length });
 	}

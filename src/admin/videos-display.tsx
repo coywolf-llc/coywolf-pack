@@ -103,7 +103,7 @@ export function DisplaySettings(props: {
 				<SettingsSection
 					id="videos-engagement"
 					title="Views & likes"
-					description="What shows beneath each video. Each Coywolf Video block can override these (Show or Hide); blocks left on Site default follow them. Views and likes also need Plays and likes turned on under Plugins → Coywolf Pack."
+					description="What shows beneath each video. Each Coywolf Video block can override these (Show or Hide); blocks left on Site default follow them. Views and likes also need the Plays and likes part turned on."
 				>
 					<div className="grid gap-2">
 						{check("showPlays", "Show the number of views")}

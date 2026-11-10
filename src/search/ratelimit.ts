@@ -1,18 +1,23 @@
 /**
  * Rate limiting for search (feature "search.rateLimit"), served through the
  * pack middleware. Each client is keyed by a salted SHA-256 of its IP address
- * (Cloudflare's CF-Connecting-IP, which visitors can't spoof), never the
- * address itself. With a Workers Rate Limiting binding (option
- * `rateLimiter`), Cloudflare counts across isolates; without one, a
+ * (Cloudflare's CF-Connecting-IP, which visitors can't spoof; an IPv6 address
+ * by its /64, see addressKey), never the address itself. With a Workers Rate
+ * Limiting binding (COYWOLF_RATE_LIMITER, or the one named by the
+ * `rateLimiter` option), Cloudflare counts across isolates; without one, a
  * per-isolate in-memory counter does, best effort.
  */
 import type { PackMiddleware } from "../core/module.js";
-import { MemoryWindowCounter, type RateLimitBinding, isLimitedPath, limitClient } from "./ratelimit-core.js";
+import { DEFAULT_RATE_LIMITER, addressKey, rateLimitBinding } from "../core/rate-limit.js";
+import { MemoryWindowCounter, isLimitedPath, limitClient } from "./ratelimit-core.js";
 
 export interface SearchRateLimitOptions {
 	/** Requests per minute per visitor for the in-memory fallback. Default 120; 0 turns the fallback off. With a binding, the binding's own limit applies. */
 	requestsPerMinute?: number;
-	/** Name of a Workers Rate Limiting binding (wrangler "ratelimits"). Default none (per-isolate memory only). */
+	/**
+	 * Name of a Workers Rate Limiting binding (wrangler "ratelimits"). Default COYWOLF_RATE_LIMITER, used when the site has
+	 * a binding by that name; without one, per-isolate memory only.
+	 */
 	rateLimiter?: string;
 }
 
@@ -58,14 +63,33 @@ function tooMany(retryAfter: number): Response {
 
 /** The 429 response when this client is over the limit, else undefined. */
 export async function rateLimitResponse(context: Parameters<PackMiddleware["handle"]>[0], env: Record<string, unknown>): Promise<Response | undefined> {
-	const binding = config.rateLimiter ? (env[config.rateLimiter] as RateLimitBinding | undefined) : undefined;
+	const binding = rateLimitBinding(env, config.rateLimiter ?? DEFAULT_RATE_LIMITER);
 	const limit = config.requestsPerMinute ?? DEFAULT_RPM;
 	if (!binding && limit <= 0) return undefined;
 	const ip = clientIp(context.request, () => context.clientAddress);
 	if (!ip) return undefined;
 	const secret = env[SALT_SECRET];
-	const client = await hashClient(ip, typeof secret === "string" && secret ? secret : DEFAULT_SALT);
-	const result = await limitClient(client, { limit, now: Date.now(), memory, binding });
+	const client = await hashClient(addressKey(ip), typeof secret === "string" && secret ? secret : DEFAULT_SALT);
+	// "search:": the binding may count video plays and likes too, each with keys of its own.
+	const result = await limitClient(`search:${client}`, { limit, now: Date.now(), memory, binding });
+	return result.allowed ? undefined : tooMany(result.retryAfter);
+}
+
+/** search/seen (Search insights' settled searches): its own fallback limit and counter, keys "seen:<client>". */
+const SEEN_RPM = 30;
+const seenMemory = new MemoryWindowCounter();
+
+/**
+ * The 429 for search/seen, whatever the search.rateLimit switch says: it's a public write, so it's always
+ * limited, through the same binding when the site has one (keys of its own) and per isolate otherwise.
+ */
+export async function seenRateLimitResponse(context: Parameters<PackMiddleware["handle"]>[0], env: Record<string, unknown>): Promise<Response | undefined> {
+	const binding = rateLimitBinding(env, config.rateLimiter ?? DEFAULT_RATE_LIMITER);
+	const ip = clientIp(context.request, () => context.clientAddress);
+	if (!ip) return undefined;
+	const secret = env[SALT_SECRET];
+	const client = await hashClient(addressKey(ip), typeof secret === "string" && secret ? secret : DEFAULT_SALT);
+	const result = await limitClient(`seen:${client}`, { limit: SEEN_RPM, now: Date.now(), memory: seenMemory, binding });
 	return result.allowed ? undefined : tooMany(result.retryAfter);
 }
 

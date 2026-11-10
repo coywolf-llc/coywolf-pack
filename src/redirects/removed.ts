@@ -14,7 +14,7 @@ import { COLLECTION_SLUG, entryUrl, readCollections } from "../core/content-url.
 import { requireFeature } from "../core/features.js";
 import { REDIRECTS_TAG, purgePageCache } from "../pageCache/lib.js";
 import { parseInput, workerEnv } from "../shared.js";
-import { invalidateRedirectCache } from "./middleware.js";
+import { noteRedirectsChanged } from "./middleware.js";
 import {
 	type AppliedRule,
 	type EntrySnapshot,
@@ -41,7 +41,7 @@ interface Options {
 	database?: string;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: plugin storage collections are untyped here.
+// any: plugin storage collections are untyped here.
 const store = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[STORE] as {
 	get(id: string): Promise<PendingDecision | null>;
 	put(id: string, data: PendingDecision): Promise<void>;
@@ -49,7 +49,7 @@ const store = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[STORE
 	query(o: { orderBy?: Record<string, "asc" | "desc">; limit?: number }): Promise<{ items: Array<{ id: string; data: PendingDecision }> }>;
 };
 
-// biome-ignore lint/suspicious/noExplicitAny: plugin storage collections are untyped here.
+// any: plugin storage collections are untyped here.
 const applied = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[APPLIED] as {
 	get(id: string): Promise<AppliedRule | null>;
 	put(id: string, data: AppliedRule): Promise<void>;
@@ -128,7 +128,7 @@ export function removedModule(options: Options) {
 		if (!shouldDropApplied(done, rule, currentUrl, reason)) return;
 		await applied(ctx).delete(id);
 		await deleteRule(d1, done.ruleId);
-		invalidateRedirectCache();
+		await noteRedirectsChanged(d1);
 		await purgePageCache({ tags: [REDIRECTS_TAG] });
 		ctx.log.info("Removed content rule undone", { url: done.url, reason });
 	}
@@ -271,7 +271,7 @@ export function removedModule(options: Options) {
 						if (error instanceof RedirectValidationError) throw PluginRouteError.badRequest(error.message);
 						throw error;
 					}
-					invalidateRedirectCache();
+					await noteRedirectsChanged(d1);
 					await applied(ctx).put(pending.id, {
 						id: pending.id,
 						collection: pending.collection,

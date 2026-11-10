@@ -7,9 +7,10 @@
  */
 import { Badge, Banner, Button, Dialog, Input, InputArea, Select, Switch } from "@cloudflare/kumo";
 import { PencilSimple, Plus, Trash } from "@phosphor-icons/react";
-import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
+import { apiPost, errorText } from "./api.js";
 import {
 	type CustomMarkup,
 	type LintWarning,
@@ -26,16 +27,7 @@ import { MARKUP_TEMPLATES, templateText } from "../schema/custom-templates.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/schema";
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
+const post = apiPost(API);
 
 /** What the Schema page's config says about custom markup. */
 export interface CustomSite {
@@ -88,6 +80,7 @@ export function MarkupEditor(props: {
 	pageUrl: string;
 	contributionId: string;
 }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const { value, onChange } = props;
 	const [template, setTemplate] = React.useState("Service");
 	const check = useMarkupCheck(value, props.site, props.graphOn, props.pageUrl);
@@ -98,13 +91,14 @@ export function MarkupEditor(props: {
 		return output ? `<script type="application/ld+json">\n${scriptJson(output.contribution.graph, "\t")}\n</script>` : null;
 	}, [check, props.graphOn, props.site, props.pageUrl, props.contributionId, value.mainEntity]);
 
-	const insert = () => {
-		if (value.markup.trim() && !window.confirm("Replace the markup with the template?")) return;
+	const insert = async () => {
+		if (value.markup.trim() && !(await confirm({ title: "Replace the markup with the template?", description: "What's in the editor now is replaced.", confirmLabel: "Replace" }))) return;
 		onChange({ ...value, markup: templateText(template) });
 	};
 
 	return (
 		<div className="space-y-4">
+			{confirmDialog}
 			<div className="flex flex-col gap-2 sm:flex-row sm:items-end">
 				<div className="sm:w-64">
 					<Select
@@ -266,13 +260,14 @@ function RuleDialog(props: {
 }
 
 export function CustomTab(props: { site: CustomSite; graphOn: boolean; customOn: boolean; onSaved: (rules: PathRule[]) => void }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const [editing, setEditing] = React.useState<Draft | null>(null);
 	const [notice, setNotice] = React.useState<string>();
 	const [error, setError] = React.useState<string>();
 	const rules = props.site.rules;
 
 	const remove = async (rule: PathRule) => {
-		if (!window.confirm(`Remove the custom markup "${rule.label}"?`)) return;
+		if (!(await confirm({ title: `Remove the custom markup “${rule.label}”?`, description: "Its pages stop getting this markup.", confirmLabel: "Remove" }))) return;
 		setError(undefined);
 		try {
 			const result = await post<{ rules: PathRule[] }>("custom/delete", { id: rule.id });
@@ -285,6 +280,7 @@ export function CustomTab(props: { site: CustomSite; graphOn: boolean; customOn:
 
 	return (
 		<section className="space-y-4 rounded-lg border border-kumo-line p-4">
+			{confirmDialog}
 			<div>
 				<h2 className="text-base font-semibold">Custom markup</h2>
 				<p className="mt-1 text-sm text-kumo-subtle">
@@ -293,7 +289,7 @@ export function CustomTab(props: { site: CustomSite; graphOn: boolean; customOn:
 				</p>
 			</div>
 			{!props.customOn && (
-				<Banner variant="default" role="status" description="Turn on Custom markup (above, or on the Coywolf Pack page) to save markup and add it to pages." />
+				<Banner variant="default" role="status" description="Turn on Custom markup (above, or on the Features page) to save markup and add it to pages." />
 			)}
 			<div className="flex justify-end">
 				<Button variant="primary" icon={<Plus aria-hidden="true" />} disabled={!props.customOn} onClick={() => setEditing({ ...EMPTY_RULE })}>

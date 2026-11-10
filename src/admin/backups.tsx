@@ -1,9 +1,9 @@
 /**
- * Backups admin page and dashboard widget. Layout and components follow the
+ * Backups admin page (the dashboard widget is in backups-widget.tsx). Layout and components follow the
  * EmDash admin's own list pages (Redirects, Bylines): Kumo controls, a bordered
  * row list, and confirmation dialogs.
  */
-import { Badge, Banner, Button, Dialog, DropdownMenu, Input, Loader, Switch } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Dialog, DropdownMenu, Input, Switch } from "@cloudflare/kumo";
 import {
 	ArrowCounterClockwise,
 	ClockCounterClockwise,
@@ -13,40 +13,19 @@ import {
 	ImagesSquare,
 	Plus,
 } from "@phosphor-icons/react";
-import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
+import { DocsLink, Loading, PageHeader } from "./page.js";
+import { type Backup, type ListResponse, type UndoPoint, ago, isStale, sourceLabel, useBackups } from "./backups-widget.js";
+import { RetentionCard } from "./backups-retention.js";
 import { SaveBar } from "./save-bar.js";
 import { SettingsSection } from "./settings-ui.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/backups";
 
-interface Backup {
-	stamp: string;
-	createdAt: string;
-	file: string;
-	bytes: number;
-	source?: string;
-	tables?: number;
-	rows?: number;
-	media?: { copied: number; preserved: number; total: number; pending?: number };
-	uploads?: { copied: number; preserved: number; total: number; pending?: number };
-}
-
-interface UndoPoint {
-	bookmark: string;
-	rewoundAt: string;
-	rewoundTo: string;
-}
-
-interface ListResponse {
-	items: Backup[];
-	scheduled: boolean;
-	retentionDays: number;
-	staleAfterHours: number;
-	restore: { enabled: true } | { enabled: false; reason: string };
-	undo: UndoPoint | null;
-}
+const post = apiPost(API);
 
 interface NewDatabaseResult {
 	databaseId: string;
@@ -56,7 +35,6 @@ interface NewDatabaseResult {
 	mismatches: Record<string, [number, number | null]>;
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
 const formatDate = (iso: string) => dateFormat.format(new Date(iso));
 
@@ -64,49 +42,6 @@ function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
 	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function ago(iso: string): string {
-	const hours = (Date.now() - new Date(iso).getTime()) / 3_600_000;
-	if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} min ago`;
-	if (hours < 48) return `${Math.round(hours)} h ago`;
-	return `${Math.round(hours / 24)} days ago`;
-}
-
-function sourceLabel(source?: string): string {
-	if (source === "admin") return "Manual";
-	if (source === "scheduled") return "Scheduled";
-	return "Nightly job";
-}
-
-async function post<T>(path: string, body?: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
-
-function useBackups() {
-	const [data, setData] = React.useState<ListResponse>();
-	const [error, setError] = React.useState<string>();
-	const load = React.useCallback(async () => {
-		setError(undefined);
-		try {
-			setData(await parseApiResponse<ListResponse>(await apiFetch(`${API}/list`), "Could not load backups"));
-		} catch (cause) {
-			setError(errorText(cause, "Could not load backups"));
-		}
-	}, []);
-	React.useEffect(() => {
-		void load();
-	}, [load]);
-	return { data, error, load };
-}
-
-function isStale(data: ListResponse): boolean {
-	const latest = data.items[0];
-	return !latest || (Date.now() - new Date(latest.createdAt).getTime()) / 3_600_000 > data.staleAfterHours;
 }
 
 /**
@@ -190,7 +125,7 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 	const [draft, setDraft] = React.useState(initial);
 	React.useEffect(() => setDraft(initial()), [initial]);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<{ error: boolean; text: string }>();
+	const result = useSaveResult();
 	const dirty =
 		draft.scheduled !== props.data.scheduled ||
 		draft.retentionDays !== String(props.data.retentionDays) ||
@@ -198,17 +133,19 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 
 	const save = async () => {
 		setPending(true);
-		setStatus(undefined);
+		result.clear();
 		try {
-			await post("settings/save", {
+			const saved = await post<{ retentionWarning?: string }>("settings/save", {
 				scheduled: draft.scheduled,
 				retentionDays: Number(draft.retentionDays),
 				staleAfterHours: Number(draft.staleAfterHours),
 			});
 			await props.onSaved();
-			setStatus({ error: false, text: "Backup settings saved." });
+			// The lifecycle rule couldn't follow the new retention days (no token, or Cloudflare refused).
+			if (saved.retentionWarning) result.failed(saved.retentionWarning, "Saved, but the lifecycle rule wasn't updated");
+			else result.saved("Backup settings saved");
 		} catch (cause) {
-			setStatus({ error: true, text: errorText(cause, "Could not save the backup settings") });
+			result.failed(errorText(cause, "Could not save the backup settings"));
 		} finally {
 			setPending(false);
 		}
@@ -240,7 +177,7 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 							min={1}
 							max={365}
 							label="Keep backups for (days)"
-							description="Older database backups and replaced media and upload copies are deleted daily. The mirrors themselves are kept."
+							description="Older database backups and replaced media and upload copies are deleted daily (by Cloudflare instead, with Retention on Cloudflare below). The mirrors themselves are kept."
 							value={draft.retentionDays}
 							onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft((d) => ({ ...d, retentionDays: e.target.value }))}
 						/>
@@ -255,11 +192,10 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 						/>
 					</div>
 					<div aria-live="polite">
-						{status && (status.error ? <Banner variant="error" role="alert" description={status.text} /> : <p className="text-sm text-kumo-subtle">{status.text}</p>)}
 					</div>
 				</SettingsSection>
 			</form>
-			<SaveBar form="cw-backups-settings-form" dirty={dirty} saving={pending} onDiscard={() => setDraft(initial())} />
+			<SaveBar error={result.error} form="cw-backups-settings-form" dirty={dirty} saving={pending} onDiscard={() => setDraft(initial())} />
 		</>
 	);
 }
@@ -366,21 +302,23 @@ export function BackupsPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Backups</h1>
-					<div className="flex shrink-0 justify-end gap-2">
+			<PageHeader
+				title="Backups"
+				actions={
+					<>
 						<Button variant="primary" icon={<Plus />} onClick={() => void runBackup()} disabled={running}>
 							{running ? "Backing up…" : "Back up now"}
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Each backup is a full copy of the database (content, users, settings, menus, redirects) plus a mirror of the
 						media library and of private form uploads{data ? `, kept for ${data.retentionDays} days` : ""}. Theme code lives in your Git repository. Download
 						any backup to keep your own copy: it's a standard SQL file that restores into any D1 database.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			{notice && (
 				<Banner
@@ -422,13 +360,19 @@ export function BackupsPage() {
 				/>
 			)}
 			{data && !data.restore.enabled && (
-				<Banner variant="default" title="Restore isn't set up yet." description={`${data.restore.reason} See docs/backups.md in the Coywolf Pack repository.`} />
+				<Banner
+					variant="default"
+					title="Restore isn't set up yet."
+					description={
+						<>
+							{data.restore.reason} See <DocsLink doc="backups">the Backups docs</DocsLink>.
+						</>
+					}
+				/>
 			)}
 
 			{!data && !error ? (
-				<div className="py-12 text-center text-kumo-subtle">
-					<Loader />
-				</div>
+				<Loading className="py-12 text-center text-kumo-subtle" />
 			) : data && data.items.length === 0 ? (
 				<div className="py-10 text-center text-kumo-subtle">
 					<Database size={40} className="mx-auto mb-3 opacity-30" aria-hidden="true" />
@@ -475,7 +419,7 @@ export function BackupsPage() {
 									<DropdownMenu.Content className="p-1">
 										<DropdownMenu.Item
 											className="py-1 data-highlighted:bg-kumo-fill"
-											icon={<DownloadSimple className="me-1.5 size-3.5" aria-hidden="true" />}
+											icon={DownloadSimple}
 											onClick={() =>
 												void download(backup).catch((cause) =>
 													setNotice({ variant: "error", title: "Download failed", description: errorText(cause, "") }),
@@ -488,7 +432,7 @@ export function BackupsPage() {
 										<DropdownMenu.Item
 											className="py-1 data-highlighted:bg-kumo-fill"
 											disabled={!restoreEnabled}
-											icon={<ClockCounterClockwise className="me-1.5 size-3.5" aria-hidden="true" />}
+											icon={ClockCounterClockwise}
 											onClick={() => {
 												setActionError(undefined);
 												setAction({ kind: "rewind", backup });
@@ -499,7 +443,7 @@ export function BackupsPage() {
 										<DropdownMenu.Item
 											className="py-1 data-highlighted:bg-kumo-fill"
 											disabled={!restoreEnabled}
-											icon={<Database className="me-1.5 size-3.5" aria-hidden="true" />}
+											icon={Database}
 											onClick={() => {
 												setActionError(undefined);
 												setAction({ kind: "restore-new", backup });
@@ -530,6 +474,7 @@ export function BackupsPage() {
 			)}
 
 			{data && <ScheduleSettings data={data} onSaved={load} />}
+			{data && <RetentionCard retentionDays={data.retentionDays} />}
 
 			<TypedConfirmDialog
 				open={action?.kind === "rewind"}
@@ -594,20 +539,3 @@ export function BackupsPage() {
 		</div>
 	);
 }
-
-export function BackupStatusWidget() {
-	const { data, error } = useBackups();
-	if (error) return <p className="text-sm text-kumo-danger">{error}</p>;
-	if (!data) return <Loader />;
-	const latest = data.items[0];
-	if (!latest) return <p className="text-sm text-kumo-danger">No backups yet.</p>;
-	return (
-		<div className="space-y-1 text-sm">
-			<p className={isStale(data) ? "font-medium text-kumo-danger" : "font-medium"}>Last backup {ago(latest.createdAt)}</p>
-			<p className="text-kumo-subtle">
-				{sourceLabel(latest.source)} · {data.items.length} kept
-			</p>
-		</div>
-	);
-}
-

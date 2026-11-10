@@ -171,6 +171,34 @@ test("breadcrumb trails", () => {
 	assert.equal(humanize("caf%C3%A9"), "Café");
 });
 
+test("captured trails belong to their request: an edit-mode render can't hand its draft title to a public render of the same URL", async () => {
+	const { AsyncLocalStorage } = await import("node:async_hooks");
+	const als = new AsyncLocalStorage();
+	const key = Symbol.for("emdash:request-context");
+	const before = globalThis[key];
+	globalThis[key] = als;
+	try {
+		let release;
+		const gate = new Promise((r) => (release = r));
+		// The public render captures, then (while its body is still rendering) an editor's render of the same URL captures its draft.
+		const publicRender = als.run({}, async () => {
+			capturePage({ url: "https://ex.com/same/", pageTitle: "Published title" });
+			await gate;
+			return capturedPage("/same/")?.title;
+		});
+		const editorRender = als.run({}, async () => {
+			capturePage({ url: "https://ex.com/same/", pageTitle: "Draft title" });
+			return capturedPage("/same/")?.title;
+		});
+		assert.equal(await editorRender, "Draft title");
+		release();
+		assert.equal(await publicRender, "Published title", "the public page keeps its own title");
+		assert.equal(await als.run({}, async () => capturedPage("/same/")), null, "another request sees nothing captured");
+	} finally {
+		globalThis[key] = before;
+	}
+});
+
 test("captured theme trails are keyed by URL path and query", () => {
 	capturePage({ url: "https://ex.com/fr/guide/?v=2", breadcrumbs: [{ name: "Accueil", url: "/fr/" }], pageTitle: "Guide" });
 	assert.equal(capturedPage("/fr/guide?v=2")?.title, "Guide");

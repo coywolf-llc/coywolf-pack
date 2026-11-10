@@ -6,31 +6,26 @@
  */
 import type { PageMetadataContribution } from "emdash";
 
-import { FORMATS, cdnOriginalUrl, cleanImagePath, imageCdn, mediaFile, mimeForExt, parseCdnUrl, parseImagePath } from "../images/lib.js";
-import { type ImageInfo, absolute } from "./graph.js";
+import { cdnOriginalUrl, cleanImagePath, imageCdn, mediaFile, mimeForExt, parseCdnUrl } from "../images/lib.js";
+import type { ImageInfo } from "./graph.js";
 
 export const OG_WIDTH = 1200;
 export const OG_HEIGHT = 630;
 
 /**
- * The site's default OG image as a clean 1200x630 URL. On the media host,
+ * The site's default OG image as a clean 1200x630 URL on the media host,
  * /s/1200x630/<file> (the host serves the original format to crawlers that
- * don't ask for WebP or AVIF, so the type is the original's). Otherwise the
- * Worker route, where PNG stays PNG and anything else becomes JPEG. Null when
- * it isn't a (raster) media-library image.
+ * don't ask for WebP or AVIF, so the type is the original's). The image can
+ * come as EmDash's /_emdash/api/media/file/<file> or, with EmDash's
+ * publicUrl, as <publicUrl>/<file>. Null without a media host or when it
+ * isn't a (raster) media-library image: EmDash's own og:image stays then.
  */
-export function cleanDefaultOgImage(defaultOg: ImageInfo | null | undefined, origin: string): ImageInfo | null {
-	if (!defaultOg) return null;
+export function cleanDefaultOgImage(defaultOg: ImageInfo | null | undefined, _origin: string): ImageInfo | null {
+	if (!defaultOg || !imageCdn()) return null;
 	const file = mediaFile(defaultOg.url);
 	if (!file || file.ext === "svg") return null;
-	if (imageCdn()) {
-		const url = cleanImagePath(defaultOg.url, { width: OG_WIDTH, height: OG_HEIGHT });
-		return url ? { url, width: OG_WIDTH, height: OG_HEIGHT, alt: defaultOg.alt, mimeType: mimeForExt(file.ext) } : null;
-	}
-	const format = file.ext === "png" ? "png" : "jpg";
-	const path = cleanImagePath(defaultOg.url, { width: OG_WIDTH, height: OG_HEIGHT, format });
-	if (!path) return null;
-	return { url: absolute(path, origin) ?? path, width: OG_WIDTH, height: OG_HEIGHT, alt: defaultOg.alt, mimeType: FORMATS[format] };
+	const url = cleanImagePath(defaultOg.url, { width: OG_WIDTH, height: OG_HEIGHT });
+	return url ? { url, width: OG_WIDTH, height: OG_HEIGHT, alt: defaultOg.alt, mimeType: mimeForExt(file.ext) } : null;
 }
 
 /** The page's own image (a media-library file) as its original on the media host; null without a host or for anything else. */
@@ -65,18 +60,13 @@ export function mediaHostImageInfo(url: string, row: MediaRow): ImageInfo | null
 
 /**
  * Whether the pack outputs og:image/twitter:image itself (so they win over
- * EmDash's, first contribution wins): for media-host URLs, and for the
- * default image at its Worker-route clean URL. EmDash's own tags stay for
- * everything else, so there's never a second og:image.
+ * EmDash's, first contribution wins): for media-host URLs. EmDash's own tags
+ * stay for everything else, so there's never a second og:image. (The other
+ * arguments are kept for callers; the default image's Worker-route URL, which
+ * the pack also owned, is gone with that route.)
  */
-export function packOwnsOgImage(url: string, origin: string, hasOwnImage: boolean): boolean {
-	if (parseCdnUrl(url)) return true;
-	if (hasOwnImage) return false;
-	try {
-		return parseImagePath(new URL(url, origin || "https://site.invalid").pathname) !== null;
-	} catch {
-		return false;
-	}
+export function packOwnsOgImage(url: string, _origin: string, _hasOwnImage: boolean): boolean {
+	return parseCdnUrl(url) !== null;
 }
 
 /** og:image (when the pack owns it), its size, type and alt, and twitter:image(:alt). */

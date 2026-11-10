@@ -5,13 +5,17 @@
  * EmDash's permission checks apply. The pack route only reads the current
  * configuration, which EmDash has no endpoint for.
  */
-import { Badge, Banner, Button, Input, Loader, Meter, Select, Switch } from "@cloudflare/kumo";
+import { Banner, Button, Input, Meter, Select, Switch } from "@cloudflare/kumo";
 import { ArrowsClockwise, MagnifyingGlass } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
+import { errorText, postJson } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useToast } from "./toast.js";
 
 const PACK_API = "/_emdash/api/plugins/coywolf-pack/search";
 const SEARCH_API = "/_emdash/api/search";
@@ -61,15 +65,8 @@ function draftDirty(c: CollectionConfig, d: Draft | undefined): boolean {
 	return d.tokenize !== c.tokenize || searchableFields(c).some((f) => parsed[f.slug] !== (c.weights[f.slug] ?? 1));
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
 async function post<T>(path: string, body: unknown, fallback: string): Promise<T> {
-	const response = await apiFetch(`${SEARCH_API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	const result = await parseApiResponse<T>(response, fallback);
+	const result = await postJson<T>(`${SEARCH_API}/${path}`, body, { fallback });
 	// Cached live results and title indexes were built with the old settings: start fresh (best effort).
 	await apiFetch(`${PACK_API}/touch`, { method: "POST" }).catch(() => undefined);
 	return result;
@@ -176,6 +173,7 @@ function CollectionCard(props: {
 }
 
 export function SearchPage() {
+	const [confirm, confirmDialog] = useConfirm();
 	const [collections, setCollections] = React.useState<CollectionConfig[]>();
 	const [stats, setStats] = React.useState<Stats>({});
 	const [error, setError] = React.useState<string>();
@@ -211,6 +209,8 @@ export function SearchPage() {
 
 	const busy = progress !== null;
 
+	const toast = useToast();
+
 	/** Run one or more index jobs with a progress readout, then refresh. */
 	async function run(jobs: Array<{ label: string; fn: () => Promise<unknown> }>, done: string) {
 		setError(undefined);
@@ -222,9 +222,12 @@ export function SearchPage() {
 				setStatus(`${job.label} (${i + 1} of ${jobs.length})…`);
 				await job.fn();
 			}
-			setStatus(done);
+			setStatus("");
+			toast.success(done);
 		} catch (cause) {
-			setError(errorText(cause, "The search index couldn't be updated"));
+			const message = errorText(cause, "The search index couldn't be updated");
+			setError(message);
+			toast.error("The search index couldn't be updated", message);
 			setStatus("");
 		} finally {
 			setProgress(null);
@@ -257,10 +260,11 @@ export function SearchPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Search</h1>
-					<div className="flex shrink-0 justify-end gap-2">
+			{confirmDialog}
+			<PageHeader
+				title="Search"
+				actions={
+					<>
 						<Button
 							variant="secondary"
 							icon={<ArrowsClockwise />}
@@ -277,14 +281,16 @@ export function SearchPage() {
 						>
 							Rebuild all
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						EmDash's full-text search: choose which collections are searchable, how much each field counts, and how words
 						are matched. Changing weights or the tokenizer rebuilds that collection's index. Fields are made searchable in
 						each collection's schema.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="search" />
 
@@ -301,9 +307,7 @@ export function SearchPage() {
 			{error && <Banner variant="error" role="alert" title="Something went wrong" description={error} />}
 
 			{!collections && !error ? (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			) : collections && collections.length === 0 ? (
 				<div className="py-10 text-center text-kumo-subtle">
 					<MagnifyingGlass size={40} className="mx-auto mb-3 opacity-30" aria-hidden="true" />
@@ -319,7 +323,7 @@ export function SearchPage() {
 						indexed={stats[c.slug]?.indexed}
 						busy={busy}
 						onEnable={async (on) => {
-							if (!on && !window.confirm(`Turn off search for ${c.label}? Its search index is deleted; your settings are kept.`)) return;
+							if (!on && !(await confirm({ title: `Turn off search for ${c.label}?`, description: "Its search index is deleted; your settings are kept.", confirmLabel: "Turn off" }))) return;
 							await run(
 								[
 									{

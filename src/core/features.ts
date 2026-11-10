@@ -38,6 +38,23 @@ export function featureCatalog(): FeatureDef[] {
 const parentOf = (id: string) => (id.includes(".") ? id.slice(0, id.indexOf(".")) : null);
 
 /**
+ * A key in the stored switches that isn't a feature: true once the site's
+ * switches account for the defaults that changed in 0.36.0 (Redirect
+ * Manager, Slug changes and Backups start off on new sites; see
+ * recordDefaults). Until it's there, a feature with a `legacyDefault` takes
+ * that instead of its `default`, so an existing site keeps what it had,
+ * whatever reads the switches first, and a read that fails (resolved from
+ * nothing) doesn't turn them off either.
+ */
+export const DEFAULTS_RECORDED = "_defaults036";
+
+/** A feature's default for this stored map: its pre-0.36.0 default until the map records the change. */
+function defaultOf(def: FeatureDef, stored: FeatureMap | null | undefined): boolean {
+	if (stored?.[DEFAULTS_RECORDED] !== true && def.legacyDefault !== undefined) return def.legacyDefault;
+	return def.default ?? false;
+}
+
+/**
  * The stored choice of a feature's legacy ids (FeatureDef.replaces): the
  * first one present in the map wins. A legacy sub-feature ("a.b") counted
  * only while its parent was on, so its parent's state (stored, else the
@@ -49,7 +66,8 @@ export function legacyChoice(stored: FeatureMap | null | undefined, def: Feature
 		if (typeof stored[legacy] !== "boolean") continue;
 		const parent = parentOf(legacy);
 		// A parent that's no longer in the catalog (and wasn't stored) doesn't hold the choice back.
-		const parentOn = !parent || (stored[parent] ?? (catalog.has(parent) ? (catalog.get(parent)?.default ?? false) : true));
+		const known = parent ? catalog.get(parent) : undefined;
+		const parentOn = !parent || (stored[parent] ?? (known ? defaultOf(known, stored) : !catalog.has(parent)));
 		return stored[legacy] && parentOn;
 	}
 	return undefined;
@@ -57,12 +75,13 @@ export function legacyChoice(stored: FeatureMap | null | undefined, def: Feature
 
 /**
  * Stored choices over catalog defaults. A feature with no stored choice
- * takes its legacy ids' choice (FeatureDef.replaces), then its default. A
+ * takes its legacy ids' choice (FeatureDef.replaces), then its default
+ * (`legacyDefault` until the map records the 0.36.0 defaults). A
  * sub-feature ("a.b") is on only when its parent ("a") is on too.
  */
 export function resolveFeatures(stored: FeatureMap | null | undefined): FeatureMap {
 	const out: FeatureMap = {};
-	for (const def of catalog.values()) out[def.id] = stored?.[def.id] ?? legacyChoice(stored, def) ?? def.default ?? false;
+	for (const def of catalog.values()) out[def.id] = stored?.[def.id] ?? legacyChoice(stored, def) ?? defaultOf(def, stored);
 	for (const id of Object.keys(out)) {
 		const parent = parentOf(id);
 		if (parent && parent in out && !out[parent]) out[id] = false;
@@ -90,6 +109,122 @@ export async function ctxFeatures(ctx: SettingsCtx): Promise<FeatureMap> {
 		throw error;
 	}
 	return remember(resolveFeatures(stored));
+}
+
+/**
+ * The stored switches with the 0.36.0 defaults recorded (DEFAULTS_RECORDED
+ * set). For an `existing` site, every feature with a legacyDefault that has
+ * no stored or legacy choice gets its legacyDefault stored, so it stays as it
+ * was; a new site takes the new defaults. A map that already records them
+ * comes back as it is.
+ */
+export function withRecordedDefaults(stored: FeatureMap | null | undefined, existing: boolean): FeatureMap {
+	if (stored?.[DEFAULTS_RECORDED] === true) return stored;
+	const next: FeatureMap = { ...(stored ?? {}) };
+	if (existing) {
+		for (const def of catalog.values()) {
+			if (def.legacyDefault === undefined || typeof next[def.id] === "boolean" || legacyChoice(next, def) !== undefined) continue;
+			next[def.id] = def.legacyDefault;
+		}
+	}
+	next[DEFAULTS_RECORDED] = true;
+	return next;
+}
+
+interface DefaultsCtx {
+	settings: {
+		getVersioned<T>(key: string): Promise<{ value: T; revision: string } | null>;
+		compareAndSet(key: string, expectedRevision: string | null, value: unknown): Promise<{ applied: boolean }>;
+	};
+	kv: {
+		list(prefix?: string): Promise<Array<{ key: string }>>;
+		get<T>(key: string): Promise<T | null>;
+		set(key: string, value: unknown): Promise<void>;
+		delete(key: string): Promise<boolean>;
+	};
+	storage?: Record<string, { count(): Promise<number> } | undefined>;
+}
+
+/**
+ * Left by plugin:install until the defaults are recorded, so a fresh install
+ * whose recording failed there is still recorded as one later (a KV row, and
+ * a flag in this isolate for when that write failed too).
+ */
+export const FRESH_INSTALL_KEY = "state:freshInstall";
+let freshInstall = false;
+
+/**
+ * KV rows the pack writes by itself on any site, whether or not anyone has
+ * used a feature: they don't make a site "existing". The fresh-install flag;
+ * the deployed version the page cache middleware records on the first request
+ * (src/pageCache/lib.ts VERSION_OPTION) and its warming progress
+ * (src/pageCache/warm.ts WARM_STATE_OPTION); Discovery's IndexNow clean-up
+ * marker (src/discovery/module.ts RETIRED_MARKER, set in plugin:activate; remove it here in 0.38.0,
+ * with retireIndexNow).
+ */
+export const HOUSEKEEPING_KEYS: ReadonlySet<string> = new Set([FRESH_INSTALL_KEY, "pageCache:version", "pageCache:warmState", "state:discovery:indexnowRetired"]);
+
+/**
+ * Anything the pack has stored on this site: a plugin setting or KV row
+ * (EmDash's options table, where the switches, the settings generation and
+ * every module's settings live) other than its housekeeping rows, or a
+ * document in one of its storage collections. A read that fails counts as yes.
+ */
+async function hasPackState(ctx: DefaultsCtx): Promise<boolean> {
+	try {
+		if ((await ctx.kv.list()).some((row) => !HOUSEKEEPING_KEYS.has(row.key))) return true;
+		for (const collection of Object.values(ctx.storage ?? {})) if (collection && (await collection.count()) > 0) return true;
+		return false;
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * One time per site: record the 0.36.0 defaults in the stored switches
+ * (withRecordedDefaults), so an existing site keeps Redirect Manager, Slug
+ * changes and Backups as they were while new sites start with them off.
+ *
+ * A site counts as new only after a fresh install (`fresh`: plugin:install,
+ * which EmDash runs once, when it first records the plugin on a site; or the
+ * flag it leaves, FRESH_INSTALL_KEY, when recording failed there) and while
+ * the pack has nothing stored there but its housekeeping rows. Every other
+ * call (plugin:activate, the Features page, a save of the switches) and any
+ * doubt (stored switches, any pack setting or data, a read that fails) count
+ * as an existing site. Writes only if the switches didn't change meanwhile
+ * (compare-and-set); a save of the switches records them itself. Returns
+ * true when the map records them now.
+ */
+export async function recordDefaults(ctx: DefaultsCtx, options: { fresh?: boolean } = {}): Promise<boolean> {
+	if (options.fresh) {
+		freshInstall = true;
+		// Before anything that can fail: a later call retries as a fresh install.
+		await ctx.kv.set(FRESH_INSTALL_KEY, true).catch(() => undefined);
+	}
+	const current = await ctx.settings.getVersioned<FeatureMap>(FEATURES_SETTING);
+	const stored = current?.value ?? null;
+	if (stored?.[DEFAULTS_RECORDED] === true) {
+		await forgetFreshInstall(ctx);
+		return true;
+	}
+	const fresh = options.fresh || freshInstall || (await ctx.kv.get<boolean>(FRESH_INSTALL_KEY).catch(() => null)) === true;
+	const existing = !fresh || stored !== null || (await hasPackState(ctx));
+	const { applied } = await ctx.settings.compareAndSet(FEATURES_SETTING, current?.revision ?? null, withRecordedDefaults(stored, existing));
+	if (applied) {
+		invalidateFeatures();
+		await forgetFreshInstall(ctx);
+	}
+	return applied;
+}
+
+async function forgetFreshInstall(ctx: DefaultsCtx): Promise<void> {
+	freshInstall = false;
+	await ctx.kv.delete(FRESH_INSTALL_KEY).catch(() => undefined);
+}
+
+/** Tests: forget this isolate's fresh-install flag. */
+export function resetFreshInstallForTests(): void {
+	freshInstall = false;
 }
 
 /** The switches most recently read in this isolate (null before the first read). */
@@ -127,7 +262,7 @@ export async function cachedCtxFeatures(ctx: SettingsCtx): Promise<FeatureMap> {
 export async function requireCachedFeature(ctx: SettingsCtx, id: string): Promise<void> {
 	if (!isOn(await cachedCtxFeatures(ctx), id)) {
 		const { PluginRouteError } = await import("emdash");
-		throw PluginRouteError.notFound("This feature is turned off (Plugins → Coywolf Pack).");
+		throw PluginRouteError.notFound("This feature is turned off (Coywolf Pack → Features).");
 	}
 }
 
@@ -405,6 +540,6 @@ export async function siteFeatureOn(id: string, database?: string): Promise<bool
 export async function requireFeature(ctx: SettingsCtx, id: string): Promise<void> {
 	if (!isOn(await ctxFeatures(ctx), id)) {
 		const { PluginRouteError } = await import("emdash");
-		throw PluginRouteError.notFound("This feature is turned off (Plugins → Coywolf Pack).");
+		throw PluginRouteError.notFound("This feature is turned off (Coywolf Pack → Features).");
 	}
 }

@@ -3,15 +3,20 @@
  * The label, copy button and line numbers are turned on or off on the
  * Features page; the preview shows them as they're currently set.
  */
-import { Banner, Button, Loader, Select } from "@cloudflare/kumo";
+import { Banner, Button, Select } from "@cloudflare/kumo";
 import { FloppyDisk } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack";
+
+const post = apiPost(API);
 
 interface ThemeOption {
 	id: string;
@@ -21,18 +26,6 @@ interface ThemeOption {
 
 type Switches = Record<string, boolean>;
 
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
-async function post<T>(path: string, body: unknown, fallback: string): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, fallback);
-}
-
 export function CodeBlocksPage() {
 	const [themes, setThemes] = React.useState<ThemeOption[] | null>(null);
 	const [saved, setSaved] = React.useState<{ theme: string; switches: Switches } | null>(null);
@@ -40,7 +33,7 @@ export function CodeBlocksPage() {
 	const [switches, setSwitches] = React.useState<Switches>({});
 	const [preview, setPreview] = React.useState<{ css: string; html: string } | null>(null);
 	const [error, setError] = React.useState<string | null>(null);
-	const [status, setStatus] = React.useState("");
+	const result = useSaveResult();
 	const [saving, setSaving] = React.useState(false);
 
 	React.useEffect(() => {
@@ -99,14 +92,13 @@ export function CodeBlocksPage() {
 		if (!saved) return;
 		setSaving(true);
 		setError(null);
-		setStatus("Saving…");
+		result.clear();
 		try {
 			if (theme !== saved.theme) await post("codeBlocks/save", { theme }, "Couldn't save the theme");
 			setSaved({ theme, switches });
-			setStatus("Saved. The site picks up changes within a minute.");
+			result.saved("Settings saved", "The site picks up changes within a minute.");
 		} catch (cause) {
-			setStatus("");
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setSaving(false);
 		}
@@ -117,33 +109,29 @@ export function CodeBlocksPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Code Blocks</h1>
-					<div className="flex shrink-0 justify-end">
+			<PageHeader
+				title="Code Blocks"
+				actions={
+					<>
 						<Button variant="primary" icon={<FloppyDisk />} disabled={!dirty || saving} onClick={() => void save()}>
 							Save
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Syntax highlighting for code blocks on the site, done on the server, so visitors download no highlighting
 						script. Only the chosen theme's styles are sent, and only on pages with code.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="codeBlocks" />
 
 			{error && <Banner variant="error" role="alert" description={error} />}
-			<p className="sr-only" role="status" aria-live="polite">
-				{status}
-			</p>
-			{status && !saving && <p className="text-sm text-kumo-subtle">{status}</p>}
 
 			{!themes && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{themes && (
@@ -182,14 +170,12 @@ export function CodeBlocksPage() {
 						)}
 						{preview ? (
 							// The markup comes from this plugin's own renderer (escaped text and hljs spans only).
-							<div inert className="text-left">
+							<div inert className="text-start">
 								<style>{preview.css}</style>
 								<div dangerouslySetInnerHTML={{ __html: preview.html }} />
 							</div>
 						) : (
-							<div className="flex justify-center py-12">
-								<Loader />
-							</div>
+							<Loading />
 						)}
 						<p className="mt-2 text-xs text-kumo-subtle">
 							"Light/dark by system" themes follow your computer's appearance setting, as they will for visitors.
@@ -198,7 +184,7 @@ export function CodeBlocksPage() {
 				</div>
 			)}
 
-			<SaveBar dirty={dirty} saving={saving} onSave={() => void save()} onDiscard={() => saved && setTheme(saved.theme)} />
+			<SaveBar error={result.error} dirty={dirty} saving={saving} onSave={() => void save()} onDiscard={() => saved && setTheme(saved.theme)} />
 		</div>
 	);
 }

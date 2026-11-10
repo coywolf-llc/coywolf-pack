@@ -4,6 +4,7 @@
  * the page title for the last crumb and humanized path segments for the
  * ancestors.
  */
+import { requestStore } from "../core/request-memo.js";
 
 export interface Crumb {
 	name: string;
@@ -83,8 +84,13 @@ export function cssString(value: string): string {
 // breadcrumbs and title here so a Breadcrumbs block in the body can use the
 // theme's trail without the theme wiring anything. This relies on the theme
 // rendering <EmDashHead page={page}> with an accurate `url`; without it the
-// block derives the trail from the URL path. Keyed by the page URL (path plus
-// query, so locales and variants don't mix); short-lived.
+// block derives the trail from the URL path. Kept per request (EmDash's
+// request context, src/core/request-memo.ts): an isolate renders many pages
+// at once, and keyed only by URL, an editor's edit-mode render of a page
+// (its draft title) could land in a public render of the same URL that was
+// on its way to the edge cache. Within the request it's keyed by the page URL
+// (path plus query, so locales and variants don't mix). Outside a request
+// (tests, scripts) a short-lived map shared by the isolate stands in.
 
 interface Captured {
 	items?: Crumb[];
@@ -94,7 +100,21 @@ interface Captured {
 
 const CAPTURE_TTL_MS = 60_000;
 const CAPTURE_MAX = 200;
+/** Outside a request only. */
 const captured = new Map<string, Captured>();
+const perRequest = new WeakMap<object, Map<string, Captured>>();
+
+/** This request's captures (the isolate-wide map outside a request). */
+function captures(create: boolean): Map<string, Captured> | undefined {
+	const request = requestStore();
+	if (!request) return captured;
+	let map = perRequest.get(request);
+	if (!map && create) {
+		map = new Map();
+		perRequest.set(request, map);
+	}
+	return map;
+}
 
 /** Cache key for a page URL: normalized path plus query string, ignoring origin and fragment. */
 export function captureKey(url: string): string {
@@ -110,14 +130,15 @@ export function capturePage(page: { path?: string; url?: string; locale?: string
 	const source = page.url ?? page.path;
 	if (!source) return;
 	const key = captureKey(source);
-	captured.delete(key);
-	captured.set(key, { items: page.breadcrumbs, title: page.pageTitle ?? page.title ?? null, at: Date.now() });
-	while (captured.size > CAPTURE_MAX) captured.delete(captured.keys().next().value as string);
+	const map = captures(true) as Map<string, Captured>;
+	map.delete(key);
+	map.set(key, { items: page.breadcrumbs, title: page.pageTitle ?? page.title ?? null, at: Date.now() });
+	while (map.size > CAPTURE_MAX) map.delete(map.keys().next().value as string);
 }
 
-/** The trail captured for this request URL, if EmDashHead published one in the last minute. */
+/** The trail captured for this request URL, if EmDashHead published one in this request (in the last minute). */
 export function capturedPage(url: string): Omit<Captured, "at"> | null {
-	const entry = captured.get(captureKey(url));
+	const entry = captures(false)?.get(captureKey(url));
 	if (!entry || Date.now() - entry.at > CAPTURE_TTL_MS) return null;
 	return entry;
 }

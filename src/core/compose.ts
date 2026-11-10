@@ -3,10 +3,11 @@
  */
 import type { PluginContext } from "emdash";
 
-import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn } from "./features.js";
+import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn, recordDefaults } from "./features.js";
 import type { PackModule, TaskDef } from "./module.js";
 import { noteReadFailure } from "./read-failures.js";
 import { requestStore } from "./request-memo.js";
+import { withOutcome } from "./task-health.js";
 import { afterResponse } from "../shared.js";
 
 /**
@@ -100,7 +101,7 @@ function hookFeature(module: PackModule, hook: string): string {
 	return module.hookFeature?.[hook as keyof typeof module.hookFeature] ?? mainFeature(module);
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: events differ per hook.
+// any: events differ per hook.
 type Handler = (event: any, ctx: PluginContext) => Promise<unknown>;
 
 export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] }) {
@@ -110,7 +111,7 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 	const hooks: Record<string, Handler | { handler: Handler; timeout?: number; priority?: number }> = {};
 
 	for (const name of names) {
-		if (name === "cron" || name === "plugin:activate") continue; // Composed below.
+		if (name === "cron" || name === "plugin:activate" || name === "plugin:install") continue; // Composed below.
 		const participants = modules.filter((m) => m.hooks?.[name as keyof NonNullable<PackModule["hooks"]>]);
 		if (BACKGROUND.has(name)) {
 			// Priority 0 (EmDash's default is 100, lower runs first): the pipeline runs plugins' handlers one
@@ -187,6 +188,22 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 	// EmDash 1.2.0 runs install → activate once at boot for a config plugin with no _plugin_state row, and a
 	// hook that fails (its 5-second default timeout included) disables the plugin until an admin re-enables
 	// it. Scheduling a dozen tasks is a dozen D1 writes: give it room.
+	//
+	// plugin:install runs only then, on a site that has never had the pack (or lost EmDash's record of it):
+	// a site with nothing of the pack's stored yet takes the 0.36.0 defaults (Redirect Manager, Slug changes
+	// and Backups off); anything else is recorded as an existing site (src/core/features.ts recordDefaults).
+	hooks["plugin:install"] = {
+		timeout: ACTIVATE_TIMEOUT_MS,
+		// Never throws, like plugin:activate. Unrecorded, the switches keep the pre-0.36.0 defaults (on).
+		handler: async (_event, ctx) => {
+			try {
+				await recordDefaults(ctx, { fresh: true });
+			} catch (error) {
+				ctx.log.error("plugin:install: recording the feature defaults failed; they're recorded when the Features page opens", { error: String(error) });
+			}
+		},
+	};
+
 	hooks["plugin:activate"] = {
 		timeout: ACTIVATE_TIMEOUT_MS,
 		// Never throws: EmDash leaves a plugin whose activation fails turned off, and a brief D1 error here
@@ -194,9 +211,15 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 		// Features page loads (features/list), and module steps run again on the next activation.
 		handler: async (event, ctx) => {
 			try {
-				await ensureTasks(ctx, tasks);
+				await ensureTasks(ctx, tasks, await ctxFeatures(ctx).catch(() => null));
 			} catch (error) {
 				ctx.log.error("plugin:activate: scheduling tasks failed; they're scheduled again when the Features page opens", { error: String(error) });
+			}
+			try {
+				// After plugin:install on a new site this finds the defaults recorded; on an existing one it records them.
+				await recordDefaults(ctx);
+			} catch (error) {
+				ctx.log.error("plugin:activate: recording the feature defaults failed; they're recorded when the Features page opens", { error: String(error) });
 			}
 			for (const module of modules) {
 				try {
@@ -219,8 +242,13 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 				return;
 			}
 			const features: FeatureMap = await ctxFeatures(ctx);
-			if (task.feature && !isOn(features, task.feature)) return;
-			await task.handler(ctx);
+			if (task.feature && !isOn(features, task.feature)) {
+				// Off: a task that runs only while on stops firing until the switch is turned on again (features/save schedules it).
+				if (task.onlyWhileOn) await ctx.cron?.cancel(task.name).catch(() => undefined);
+				return;
+			}
+			if (task.recordOutcome) await withOutcome(ctx.kv, task.name, () => task.handler(ctx));
+			else await task.handler(ctx);
 		},
 	};
 
@@ -229,20 +257,31 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 
 /**
  * Config-registered native plugins don't get plugin:activate at boot, so
- * routes call this too. schedule() is an upsert.
+ * routes call this too. schedule() is an upsert. A task marked `onlyWhileOn`
+ * is scheduled only while its feature is on and cancelled while it's off,
+ * when `features` is known (unknown: scheduled, and its handler stays gated).
  */
 export async function ensureTasks(
-	ctx: { cron?: { schedule(name: string, opts: { schedule: string }): Promise<void> }; log?: { error(msg: string, data?: unknown): void } },
+	ctx: {
+		cron?: { schedule(name: string, opts: { schedule: string }): Promise<void>; cancel?(name: string): Promise<void> };
+		log?: { error(msg: string, data?: unknown): void };
+	},
 	tasks: TaskDef[],
-) {
-	// One bad task must not break the routes that call this (e.g. the Features page).
+	features?: FeatureMap | null,
+): Promise<Array<{ task: string; scheduling: boolean; error: string }>> {
+	// One bad task must not break the routes that call this (e.g. the Features page): failures are logged and returned.
+	const failures: Array<{ task: string; scheduling: boolean; error: string }> = [];
 	for (const task of tasks) {
+		const cancel = Boolean(task.onlyWhileOn && features && task.feature && !isOn(features, task.feature));
 		try {
-			await ctx.cron?.schedule(task.name, { schedule: task.schedule });
+			if (cancel) await ctx.cron?.cancel?.(task.name);
+			else await ctx.cron?.schedule(task.name, { schedule: task.schedule });
 		} catch (error) {
-			ctx.log?.error(`coywolf-pack: could not schedule task ${task.name}`, { error: String(error) });
+			ctx.log?.error(`coywolf-pack: could not ${cancel ? "cancel" : "schedule"} task ${task.name}`, { error: String(error) });
+			failures.push({ task: task.name, scheduling: !cancel, error: error instanceof Error ? error.message : String(error) });
 		}
 	}
+	return failures;
 }
 
 /** EmDash's task-name rule (emdash/src/plugins/cron.ts validateTaskName). */

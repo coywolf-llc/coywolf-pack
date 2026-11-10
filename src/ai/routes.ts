@@ -61,7 +61,7 @@ const listInput = z.object({ cursor: z.string().max(2000).optional(), filter: z.
 async function featureForBulk(ctx: PluginContext, kind: BulkState["kind"]) {
 	const features = await ctxFeatures(ctx);
 	const on = kind === "media" ? isOn(features, "ai.imageText") : isOn(features, "ai.entities") || isOn(features, "ai.descriptions");
-	if (!on) throw PluginRouteError.notFound("Turn on the matching AI feature first (Plugins → Coywolf Pack).");
+	if (!on) throw PluginRouteError.notFound("Turn on the matching AI feature first (Coywolf Pack → Features, or the AI Enrichment page).");
 }
 
 export function aiRoutes(options: AiOptions) {
@@ -218,6 +218,28 @@ export function aiRoutes(options: AiOptions) {
 				const where: Record<string, string> | undefined = filter === "suggested" ? { descriptionStatus: "suggested" } : filter === "error" ? { status: "error" } : undefined;
 				const page = await col<EntryRecord>(ctx, "aiEntries").query({ where, orderBy: { updated: "desc" }, limit: 50, cursor });
 				return { items: page.items.map((i) => i.data), cursor: page.cursor, hasMore: page.hasMore };
+			},
+		})),
+
+		/** One entry's analysis, for the entry editor's AI suggestions panel. */
+		"ai/entry": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (raw) => {
+				const ctx = asCtx(raw);
+				await requireFeature(ctx, "ai");
+				const { collection, id } = parseInput(entryRef, (raw as { input: unknown }).input);
+				const [record, features, collections] = await Promise.all([
+					col<EntryRecord>(ctx, "aiEntries").get(entryKey(collection, id)),
+					ctxFeatures(ctx),
+					readSettings(ctx, options).then((s) => targetCollections(ctx, s)).catch(() => null),
+				]);
+				return {
+					record: record ?? null,
+					covered: !collections || collections.includes(collection),
+					features: { entities: isOn(features, "ai.entities"), descriptions: isOn(features, "ai.descriptions") },
+				};
 			},
 		})),
 

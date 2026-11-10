@@ -10,8 +10,10 @@ import { z } from "zod";
 import { absoluteUrl, entryUrl } from "../core/content-url.js";
 import { ctxFeatures, invalidateFeatures, isOn, requireCachedFeature, requireFeature, cachedCtxFeatures } from "../core/features.js";
 import { DEADLINES, withDeadline } from "../core/single-flight.js";
-import { type PurgeScope, purgePageCache } from "../pageCache/lib.js";
-import { afterResponse, parseInput } from "../shared.js";
+import { settleLater } from "../core/generation.js";
+import { type PurgeScope, purgeOutcome } from "../pageCache/lib.js";
+import { DEFAULT_RATE_LIMITER, addressKey, bindingAllows, rateLimitBinding } from "../core/rate-limit.js";
+import { afterResponse, parseInput, workerEnv } from "../shared.js";
 import { ENGAGEMENT_HEADER, ENGAGEMENT_LIMITS, EngagementLimiter, LIKES_BY_PREFIX, hasEngagementHeader, likeAction, likesByKey, staleLikesByKey } from "./engagement.js";
 import {
 	type SitemapEntry,
@@ -30,6 +32,7 @@ import {
 	sha256Hex,
 	MAX_CAPTION_BYTES,
 	MAX_WEBHOOK_PAGES,
+	VIDEO_SITEMAP_TAG,
 	utf8Bytes,
 	verifyWebhookSignature,
 	videoPagesScope,
@@ -73,6 +76,11 @@ import { readOnlyRoute } from "../core/routes.js";
 export interface VideosOptions {
 	/** Longest upload Stream should accept, in seconds (reserves quota while uploading). Default 3600. */
 	maxUploadDurationSeconds?: number;
+	/**
+	 * Workers Rate Limiting binding (wrangler "ratelimits") that also limits plays and likes per visitor across isolates.
+	 * Default COYWOLF_RATE_LIMITER, used when the site has a binding by that name (see docs/performance.md).
+	 */
+	rateLimiter?: string;
 }
 
 export const F = {
@@ -241,29 +249,60 @@ async function unindexEntry(ctx: Ctx, collection: string, id: string): Promise<v
 }
 
 /**
- * After a Stream webhook call: clear the cached pages that embed the video
- * (videoPagesScope: by path, the home page by its entry's tag, at most
- * MAX_WEBHOOK_PAGES paths), within DEADLINES.purgeMs. Never fails the webhook.
+ * After a Stream webhook call, or an admin change to videos (details,
+ * deletion, captions): clear the cached pages that embed them, in one purge
+ * call (videoPagesScope: by path, the home page by its entry's tag, at most
+ * MAX_WEBHOOK_PAGES paths per video), with the video sitemap, within
+ * DEADLINES.purgeMs. Never fails the caller. These aren't settings saves
+ * (src/pageCache/lib.ts NO_SETTINGS_CHANGE): the videos' details are read from
+ * D1 on every render, so one purge is enough. Archives and other list pages
+ * don't show a video's player or schema, so they aren't cleared.
+ *
+ * `overCap`: a video on more pages than that. The webhook ("skip") clears the
+ * newest and leaves the rest to their normal lifetime: Stream calls it several
+ * times while a video processes, and clearing every page each time was the
+ * November 9 incident. An admin's change ("everything") clears every page
+ * instead, once.
  */
-async function clearVideoPages(ctx: Ctx, uid: string): Promise<void> {
+export async function clearVideoPages(ctx: Ctx, uids: string | string[], overCap: "skip" | "everything" = "everything"): Promise<void> {
+	const list = Array.isArray(uids) ? uids : [uids];
 	try {
-		const pages = videoPagesScope(await allEmbeds(ctx), uid);
-		if (!pages) return;
-		if (pages.skipped) {
+		const entries = await allEmbeds(ctx);
+		const paths = new Set<string>();
+		const tags = new Set<string>();
+		let found = false;
+		let skipped = 0;
+		for (const uid of list) {
+			const pages = videoPagesScope(entries, uid);
+			if (!pages) continue;
+			found = true;
+			for (const path of pages.pathPrefixes) paths.add(path);
+			for (const tag of pages.tags) tags.add(tag);
+			skipped += pages.skipped;
+		}
+		if (!found) return;
+		tags.add(VIDEO_SITEMAP_TAG); // The video sitemap lists the videos too: its edge copy goes in the same call.
+		let scope: PurgeScope = paths.size ? { pathPrefixes: [...paths], tags: [...tags] } : { tags: [...tags] };
+		// Cloudflare takes 100 tags and paths per purge.
+		if ((skipped && overCap === "everything") || paths.size + tags.size > 100) scope = { purgeEverything: true };
+		else if (skipped) {
 			ctx.log.warn("Videos: the video is on more pages than one webhook call clears; the newest were cleared, the rest refresh at their normal lifetime", {
-				uid,
-				cleared: pages.pathPrefixes.length,
-				skipped: pages.skipped,
+				uids: list,
+				cleared: paths.size,
+				skipped,
 				max: MAX_WEBHOOK_PAGES,
 			});
 		}
-		const scope: PurgeScope =
-			pages.pathPrefixes.length && pages.tags.length ? { pathPrefixes: pages.pathPrefixes, tags: pages.tags } : pages.tags.length ? { tags: pages.tags } : { pathPrefixes: pages.pathPrefixes };
-		if (await withDeadline(purgePageCache(scope), DEADLINES.purgeMs, "clearing the pages that show a video")) {
-			ctx.log.info("Videos: cleared the pages that show the video", { uid, pages: pages.pathPrefixes.length, homePage: pages.tags.length > 0 });
+		const outcome = await withDeadline(purgeOutcome(scope), DEADLINES.purgeMs, "clearing the pages that show a video").catch(() => "refused" as const);
+		if (outcome === "purged") ctx.log.info("Videos: cleared the pages that show the video", { uids: list, pages: "purgeEverything" in scope ? "all" : paths.size });
+		else if (outcome === "refused") {
+			// The account's purge rate limit (or a timeout): kept for the settling purge, as the middleware does with its own.
+			const db = (await workerEnv().catch(() => ({}) as Record<string, unknown>)).DB as D1Database | undefined;
+			if (db) await settleLater(db, scope);
+			ctx.log.warn("Videos: clearing the pages that show the video was refused; it's kept for the settling purge", { uids: list });
 		}
 	} catch (error) {
-		ctx.log.warn("Videos: couldn't clear the pages that show the video", { uid, error: String(error) });
+		ctx.log.warn("Videos: couldn't clear the pages that show the video", { uids: list, error: String(error) });
 	}
 }
 
@@ -370,10 +409,17 @@ async function videoContributions(ctx: Ctx, page: PageMetadataEvent["page"], emb
 // ── Sitemap ──────────────────────────────────────────────────────
 
 const SITEMAP_TTL = 10 * 60_000;
+/** Most collection tags on the video sitemap's edge copy. */
+const MAX_SITEMAP_COLLECTION_TAGS = 50;
 
-async function sitemapXml(ctx: Ctx, origin: string): Promise<string> {
-	const cached = await ctx.kv.get<{ xml: string; at: number }>(SITEMAP_KEY);
-	if (cached && Date.now() - cached.at < SITEMAP_TTL) return cached.xml;
+/**
+ * The video sitemap and its edge cache tags: VIDEO_SITEMAP_TAG (cleared with
+ * the pages of a video that changes, see clearVideoPages) and the collections
+ * of the entries it lists (EmDash clears those when their content changes).
+ */
+async function sitemapXml(ctx: Ctx, origin: string): Promise<{ xml: string; tags: string[] }> {
+	const cached = await ctx.kv.get<{ xml: string; at: number; tags?: string[] }>(SITEMAP_KEY);
+	if (cached && Date.now() - cached.at < SITEMAP_TTL) return { xml: cached.xml, tags: cached.tags ?? [VIDEO_SITEMAP_TAG] };
 	const features = await ctxFeatures(ctx);
 	const entries = (await allEmbeds(ctx)).filter((e) => e.status === "published" && e.url);
 	const uids = [...new Set(entries.flatMap((e) => e.uids))];
@@ -401,8 +447,9 @@ async function sitemapXml(ctx: Ctx, origin: string): Promise<string> {
 			}),
 		}));
 	const xml = buildVideoSitemap(out.map((e) => ({ ...e, videos: e.videos.map((v) => ({ ...v, description: v.description.replace(/<[^>]*>/g, "") })) })));
-	await ctx.kv.set(SITEMAP_KEY, { xml, at: Date.now() });
-	return xml;
+	const tags = [VIDEO_SITEMAP_TAG, ...[...new Set(entries.map((e) => e.collection))].slice(0, MAX_SITEMAP_COLLECTION_TAGS)];
+	await ctx.kv.set(SITEMAP_KEY, { xml, at: Date.now(), tags });
+	return { xml, tags };
 }
 
 // ── Plays and likes ──────────────────────────────────────────────
@@ -440,7 +487,17 @@ async function visitorHash(ctx: Ctx & { requestMeta: { ip: string | null } }): P
 	const ip = ctx.requestMeta.ip?.trim();
 	if (!ip) return null;
 	const { day, salt } = await dailySalt(ctx);
-	return { hash: await sha256Hex(`${ip}|${salt}`), day };
+	// An IPv6 visitor by its /64 (addressKey): one connection gets a whole /64, so full addresses made one visitor any number of them.
+	return { hash: await sha256Hex(`${addressKey(ip)}|${salt}`), day };
+}
+
+/**
+ * Plays and likes per visitor across isolates: the site's Workers Rate Limiting binding (`rateLimiter`, default
+ * COYWOLF_RATE_LIMITER), on top of the per-isolate limits. True without a binding.
+ */
+async function bindingLets(name: string, key: string): Promise<boolean> {
+	const env: Record<string, unknown> = await workerEnv().catch(() => ({}));
+	return bindingAllows(rateLimitBinding(env, name), key);
 }
 
 const limiter = new EngagementLimiter();
@@ -462,6 +519,51 @@ interface PendingUpload {
 const uploadKey = (uid: string) => `videos:upload:${uid}`;
 
 const rateLimited = () => new PluginRouteError("RATE_LIMITED", "Too many requests. Try again in a minute.", 429);
+
+/** EmDash's Admin role. */
+const ADMIN_ROLE = 50;
+/**
+ * Admins see a video's MP4 download URL; Contributors, Authors and Editors (who can use the Videos page through
+ * media:upload or media:edit_any) don't: it's a direct, shareable link to the file, also for videos that are on
+ * no published page yet. A route without a user is an API token, which needs the admin scope.
+ */
+export const seesDownloadUrls = (ctx: { user?: { role?: number } | null }) => !ctx.user || (ctx.user.role ?? 0) >= ADMIN_ROLE;
+/** A video's details without its MP4 download URL (status and progress stay, so the page still shows them). */
+export function withoutDownloadUrl<T extends { downloadUrl?: string } | null>(meta: T): T {
+	if (!meta || meta.downloadUrl === undefined) return meta;
+	const { downloadUrl: _hidden, ...rest } = meta;
+	return rest as T;
+}
+/**
+ * Uploads a user below Admin may start per UTC day: Stream bills by stored minutes, so the routes Contributors
+ * can reach shouldn't be able to fill the account. Admins aren't limited.
+ */
+export const NON_ADMIN_UPLOADS_PER_DAY = 10;
+const uploadsKey = (userId: string) => `state:videos:uploadsBy:${userId}`;
+type UploadCount = { day: string; count: number };
+
+/**
+ * Take one of today's uploads for a user below Admin: a compare-and-set on
+ * plugin KV, so two uploads started at once can't both take the last one.
+ * False when none are left (or the count kept changing: refused, to be safe).
+ */
+async function takeUpload(ctx: Ctx, userId: string, day: string): Promise<boolean> {
+	// Enough tries for every upload a user could start at once to get its turn.
+	for (let attempt = 0; attempt < NON_ADMIN_UPLOADS_PER_DAY + 10; attempt++) {
+		const current = await ctx.kv.getVersioned<UploadCount>(uploadsKey(userId));
+		const count = current?.value?.day === day ? current.value.count : 0;
+		if (count >= NON_ADMIN_UPLOADS_PER_DAY) return false;
+		if ((await ctx.kv.compareAndSet(uploadsKey(userId), current?.revision ?? null, { day, count: count + 1 } satisfies UploadCount)).applied) return true;
+	}
+	return false;
+}
+
+/** Give a taken upload back when Stream refused to start it (best effort). */
+async function giveBackUpload(ctx: Ctx, userId: string, day: string): Promise<void> {
+	const current = await ctx.kv.getVersioned<UploadCount>(uploadsKey(userId)).catch(() => null);
+	if (current?.value?.day !== day || current.value.count <= 0) return;
+	await ctx.kv.compareAndSet(uploadsKey(userId), current.revision, { day, count: current.value.count - 1 } satisfies UploadCount).catch(() => undefined);
+}
 
 /** Videos embedded in published entries: the only ones public routes answer for (drafts stay private). */
 let publishedMemo: { items: EmbedEntry[]; uids: Set<string> } | null = null;
@@ -499,11 +601,13 @@ const updateInput = z.object({
 
 export function videosModule(options: VideosOptions) {
 	const maxDuration = Math.min(21_600, Math.max(60, options.maxUploadDurationSeconds ?? 3600));
+	const rateLimiter = options.rateLimiter ?? DEFAULT_RATE_LIMITER;
 
 	const routes = {
 		// ── Admin ───────────────────────────────────────────────
 
-		"videos/status": {
+		// A read (the Videos page asks for it with any method): it clears nothing and records no settings change.
+		"videos/status": readOnlyRoute({
 			permission: "media:upload" as const,
 			handler: async (ctx: Ctx) => {
 				await requireFeature(ctx, F.main);
@@ -516,7 +620,7 @@ export function videosModule(options: VideosOptions) {
 					sitemapUrl: ctx.url("/coywolf-video-sitemap.xml"),
 				};
 			},
-		},
+		}),
 
 		/** The Videos page's Settings tab (the token is reported as set or not, never returned). */
 		"videos/settings": {
@@ -634,6 +738,7 @@ export function videosModule(options: VideosOptions) {
 				} catch {
 					download = null;
 				}
+				if (!seesDownloadUrls(ctx)) return { meta: withoutDownloadUrl(meta), download: download && { status: download.status, percent: download.percent } };
 				return { meta, download };
 			},
 		})),
@@ -682,7 +787,10 @@ export function videosModule(options: VideosOptions) {
 				const meta = await stream(() => refreshVideo(ctx, input.uid, api));
 				await invalidateLibrary(ctx);
 				await invalidateSitemap(ctx);
+				// Only the pages that show this video (its name, description, poster or download changed), not every page.
+				afterResponse(clearVideoPages(ctx, input.uid));
 				ctx.log.info("Video updated", { uid: input.uid });
+				if (!seesDownloadUrls(ctx)) return { meta: withoutDownloadUrl(meta), download: download && { status: download.status } };
 				return { meta, download };
 			},
 		}),
@@ -713,12 +821,25 @@ export function videosModule(options: VideosOptions) {
 				// Stream turns any file it's given into a "video" (a still image becomes a one-frame clip).
 				if (input.type !== undefined && !input.type.startsWith("video/")) throw new PluginRouteError("BAD_REQUEST", "Choose a video file (MP4, MOV, WebM…), not an image or other file.", 400);
 				const api = await requireClient(ctx);
+				// Below Admin: a daily number of uploads (counted once Stream has accepted one).
+				const limited = ctx.user && (ctx.user.role ?? 0) < ADMIN_ROLE ? ctx.user.id : null;
+				const day = new Date().toISOString().slice(0, 10);
+				if (limited && !(await takeUpload(ctx, limited, day))) {
+					throw new PluginRouteError("RATE_LIMITED", `You can start ${NON_ADMIN_UPLOADS_PER_DAY} video uploads a day. Ask an admin to upload more.`, 429);
+				}
 				await invalidateLibrary(ctx);
 				// The upload dialog starts with the default tags (Settings → Uploads).
 				const tags = parseTags(input.tags ?? (await ctx.settings.get<string>(SETTINGS.defaultTags)) ?? "").join(", ");
 				const meta: Record<string, string> = tags ? { name, tags } : { name };
-				const r = await stream(() => api.tusUpload({ length: size, maxDurationSeconds: maxDuration, name }));
-				if (!r.uid) throw new PluginRouteError("INTERNAL_ERROR", "Cloudflare Stream didn't return an id for the upload.", 502);
+				let r: Awaited<ReturnType<typeof api.tusUpload>>;
+				try {
+					r = await stream(() => api.tusUpload({ length: size, maxDurationSeconds: maxDuration, name }));
+					if (!r.uid) throw new PluginRouteError("INTERNAL_ERROR", "Cloudflare Stream didn't return an id for the upload.", 502);
+				} catch (error) {
+					// Not started: it doesn't count against the day's uploads.
+					if (limited) await giveBackUpload(ctx, limited, day);
+					throw error;
+				}
 				const uid = r.uid;
 				// tus uploads carry only the name; tags go on the waiting video record.
 				if (tags) await api.update(uid, { meta }).catch((error: unknown) => ctx.log.warn("Videos: could not tag the upload", { uid, error: String(error) }));
@@ -785,6 +906,8 @@ export function videosModule(options: VideosOptions) {
 					}
 				});
 				await removeLocal(ctx, uid);
+				// Pages that still embed it (deleted anyway) lose its schema and player details.
+				if (used.length) afterResponse(clearVideoPages(ctx, uid));
 				ctx.log.info("Video deleted", { uid, usedIn: used.length });
 				return { deleted: true, usedIn: used.length };
 			},
@@ -882,6 +1005,8 @@ export function videosModule(options: VideosOptions) {
 				const api = await requireClient(ctx);
 				await stream(() => api.uploadCaption(uid, lang, vtt));
 				await stream(() => refreshCaptions(ctx, uid, api));
+				// The video's schema lists its captions and transcript: clear the pages that show it.
+				afterResponse(clearVideoPages(ctx, uid));
 				return { captions: await stream(() => api.listCaptions(uid)) };
 			},
 		}),
@@ -910,6 +1035,7 @@ export function videosModule(options: VideosOptions) {
 				const api = await requireClient(ctx);
 				await stream(() => api.deleteCaption(uid, lang));
 				await stream(() => refreshCaptions(ctx, uid, api));
+				afterResponse(clearVideoPages(ctx, uid));
 				return { captions: await stream(() => api.listCaptions(uid)) };
 			},
 		}),
@@ -923,6 +1049,7 @@ export function videosModule(options: VideosOptions) {
 				await requireFeature(ctx, F.captions);
 				const { uid } = parseInput(z.object({ uid: uidSchema }), ctx.input);
 				const meta = await stream(() => refreshCaptions(ctx, uid));
+				afterResponse(clearVideoPages(ctx, uid));
 				return { meta };
 			},
 		}),
@@ -1010,7 +1137,7 @@ export function videosModule(options: VideosOptions) {
 			request: { body: "json", maxBytes: 1024 },
 			handler: async (ctx) => {
 				await requireFeature(ctx, F.sitemap);
-				return { xml: await sitemapXml(ctx, ctx.site.url || new URL(ctx.request.url).origin) };
+				return sitemapXml(ctx, ctx.site.url || new URL(ctx.request.url).origin);
 			},
 		}),
 
@@ -1021,6 +1148,9 @@ export function videosModule(options: VideosOptions) {
 			handler: async (ctx) => {
 				await requireFeature(ctx, F.captions);
 				const { uid, lang } = parseInput(z.object({ uid: uidSchema, lang: langSchema }), ctx.input);
+				// Like videos/embed, play and like: only videos embedded in published content. A transcript of a video
+				// that's only in drafts stays private, even to someone who has its id.
+				if (!(await publishedUids(ctx)).has(uid)) throw PluginRouteError.notFound("No such caption track.");
 				const doc = await captionStore(ctx).get(`${uid}:${lang}`);
 				if (!doc) throw PluginRouteError.notFound("No such caption track.");
 				return { vtt: doc.vtt };
@@ -1043,7 +1173,7 @@ export function videosModule(options: VideosOptions) {
 				// No address: plays aren't counted (they'd all be one visitor, see visitorHash).
 				if (!visitor) return { plays: ((await statsStore(ctx).get(uid)) ?? { plays: 0 }).plays, counted: false };
 				const { hash } = visitor;
-				if (!limiter.play(hash)) throw rateLimited();
+				if (!limiter.play(hash) || !(await bindingLets(rateLimiter, `play:${hash}`))) throw rateLimited();
 				if (seenRecently(`${uid}:${hash}`)) return { plays: ((await statsStore(ctx).get(uid)) ?? { plays: 0 }).plays, counted: false };
 				const counts = await bump(ctx, uid, "plays", 1);
 				return { plays: counts.plays, counted: true };
@@ -1067,7 +1197,7 @@ export function videosModule(options: VideosOptions) {
 				// is stored and the button shows the count without the visitor's like.
 				if (!visitor) return current(false);
 				const { hash, day } = visitor;
-				if (!limiter.like(hash)) throw rateLimited();
+				if (!limiter.like(hash) || !(await bindingLets(rateLimiter, `like:${hash}`))) throw rateLimited();
 				const id = await sha256Hex(`${uid}|${hash}`);
 				const likes = (ctx.storage as Record<string, import("emdash").StorageCollection<{ uid: string; day: string }>>)[COLLECTIONS.likes];
 				const action = likeAction(liked, await likes.exists(id));
@@ -1115,7 +1245,7 @@ export function videosModule(options: VideosOptions) {
 						if (meta?.downloadStatus === "inprogress") await refreshDownload(ctx, uid);
 						// Only the pages that show this video: the webhook isn't an admin save (no full purge,
 						// no settings generation, no re-warm; see src/pageCache/lib.ts purgesAfter).
-						afterResponse(clearVideoPages(ctx, uid));
+						afterResponse(clearVideoPages(ctx, uid, "skip"));
 					} catch (error) {
 						ctx.log.warn("Videos: webhook refresh failed", { uid, error: String(error) });
 					}
@@ -1163,13 +1293,19 @@ export function videosModule(options: VideosOptions) {
 				const pending = await metaStore(ctx).query({ where: { captionsPending: true }, limit: 10 });
 				const api = await client(ctx);
 				if (!api) return;
+				const changed: string[] = [];
 				for (const item of pending.items) {
 					try {
-						await refreshCaptions(ctx, item.id, api);
+						const before = JSON.stringify(item.data.captions ?? []);
+						const meta = await refreshCaptions(ctx, item.id, api);
+						// Generated captions arrived (or changed): the pages that show the video list them in their schema.
+						if (meta && JSON.stringify(meta.captions ?? []) !== before) changed.push(item.id);
 					} catch (error) {
 						ctx.log.warn("Videos: caption refresh failed", { uid: item.id, error: String(error) });
 					}
 				}
+				// One purge for every video whose captions arrived (the purge API allows 5 a minute for the account).
+				if (changed.length) await clearVideoPages(ctx, changed, "skip");
 			},
 		},
 		{

@@ -7,6 +7,7 @@ import { type CollectionSchemaInfo, type PluginContentItem, type PluginContext, 
 
 import { absoluteUrl, matchEntryPath } from "../core/content-url.js";
 import { DEADLINES, type SharedSlot, sharedRead, sharedSlot } from "../core/single-flight.js";
+import { purgePageCache } from "../pageCache/lib.js";
 
 import { buildLlmsTxt, type LlmsSection } from "./llms.js";
 import { estimateTokens, frontmatter, markdownUrl, portableTextToMarkdown } from "./markdown.js";
@@ -21,10 +22,21 @@ export const NEWS_TTL_MS = 5 * 60_000;
 /** llms.txt is invalidated on content changes; this is only a safety net. */
 export const LLMS_TTL_MS = 24 * 60 * 60_000;
 
+/** Edge cache tags of llms.txt, the news sitemap and the Markdown versions (each also carries its collections' tags). */
+export const LLMS_TAG = "coywolf:llms";
+export const NEWS_TAG = "coywolf:news";
+export const MARKDOWN_TAG = "coywolf:markdown";
+/** How long the edge keeps them: llms.txt an hour, the news sitemap five minutes (its 48-hour window moves), a Markdown version a day. */
+export const LLMS_EDGE_MAX_AGE = 3600;
+export const NEWS_EDGE_MAX_AGE = 300;
+export const MARKDOWN_EDGE_MAX_AGE = 86_400;
+
 export interface CachedDocument {
 	body: string;
 	count: number;
 	builtAt: string;
+	/** The collections it lists (their slugs are its edge cache tags). Missing on copies built before 0.35.19. */
+	collections?: string[];
 }
 
 const str = (value: unknown) => (typeof value === "string" ? value : "");
@@ -76,7 +88,8 @@ export async function buildLlms(ctx: PluginContext, settings: DiscoverySettings)
 	const max = settings.llms.maxEntries;
 	const sections: LlmsSection[] = [];
 	let remaining = max;
-	for (const collection of await pickCollections(ctx, settings.llms.collections)) {
+	const picked = await pickCollections(ctx, settings.llms.collections);
+	for (const collection of picked) {
 		if (remaining <= 0) break;
 		const entries: LlmsSection["entries"] = [];
 		for await (const batch of published(ctx, collection.slug, remaining)) {
@@ -101,7 +114,7 @@ export async function buildLlms(ctx: PluginContext, settings: DiscoverySettings)
 		sections,
 		maxEntries: max,
 	});
-	return { body, count: sections.reduce((n, s) => n + s.entries.length, 0), builtAt: new Date().toISOString() };
+	return { body, count: sections.reduce((n, s) => n + s.entries.length, 0), builtAt: new Date().toISOString(), collections: picked.map((c) => c.slug) };
 }
 
 // ── News sitemap ─────────────────────────────────────────────────
@@ -127,7 +140,7 @@ export async function buildNews(ctx: PluginContext, settings: DiscoverySettings,
 		name: settings.news.publicationName || (await siteName(ctx)) || new URL(ctx.site.url).host,
 		language: settings.news.language || ctx.site.locale,
 	});
-	return { body, count: selectedArticles.length, builtAt: new Date(now).toISOString() };
+	return { body, count: selectedArticles.length, builtAt: new Date(now).toISOString(), collections: collections.map((c) => c.slug) };
 }
 
 // ── Caching (stale-while-revalidate) ─────────────────────────────
@@ -139,15 +152,18 @@ export async function buildNews(ctx: PluginContext, settings: DiscoverySettings,
 
 export type DocKind = "llms" | "news";
 const DOC_KEY: Record<DocKind, string> = { llms: LLMS_CACHE, news: NEWS_CACHE };
+export const DOC_TAG: Record<DocKind, string> = { llms: LLMS_TAG, news: NEWS_TAG };
 const DOC_TTL: Record<DocKind, number> = { llms: LLMS_TTL_MS, news: NEWS_TTL_MS };
 /** Wait this long after a change for more changes before rebuilding. */
 const REBUILD_DEBOUNCE_MS = 5000;
 
-async function buildDoc(ctx: PluginContext, kind: DocKind): Promise<CachedDocument> {
+/** Build a document and store it. `changed`: a stored copy existed and this one differs (its edge copy is out of date). */
+async function buildDoc(ctx: PluginContext, kind: DocKind): Promise<{ doc: CachedDocument; changed: boolean }> {
 	const settings = await loadSettings(ctx);
 	const doc = kind === "llms" ? await buildLlms(ctx, settings) : await buildNews(ctx, settings);
+	const previous = await ctx.kv.get<CachedDocument>(DOC_KEY[kind]).catch(() => null);
 	await ctx.kv.set(DOC_KEY[kind], doc);
-	return doc;
+	return { doc, changed: Boolean(previous?.body && previous.body !== doc.body) };
 }
 
 const pendingRebuild = new Set<DocKind>();
@@ -165,7 +181,14 @@ const REBUILD_STALE_MS = 30_000;
  */
 const coldBuilds = new Map<DocKind, SharedSlot<CachedDocument>>();
 
-/** Rebuild these documents in the background, after the response (debounced). */
+/**
+ * Rebuild these documents in the background, after the response (debounced).
+ * The edge copies of the ones that changed go too, in one purge call for the
+ * whole batch (purges share the account's rate limit: 5 a minute for every
+ * site): EmDash clears the collection tags when content changes, but this
+ * rebuild runs seconds later, so a request in between may have put the
+ * previous copy back at the edge.
+ */
 export function scheduleRebuild(ctx: PluginContext, kinds: DocKind[], delayMs = REBUILD_DEBOUNCE_MS): void {
 	for (const kind of kinds) pendingRebuild.add(kind);
 	if ((rebuildDueAt && Date.now() < rebuildDueAt + REBUILD_STALE_MS) || !pendingRebuild.size) return;
@@ -176,13 +199,15 @@ export function scheduleRebuild(ctx: PluginContext, kinds: DocKind[], delayMs = 
 		const kinds = [...pendingRebuild];
 		pendingRebuild.clear();
 		if (rebuildDueAt === due) rebuildDueAt = 0;
+		const changed: string[] = [];
 		for (const kind of kinds) {
 			try {
-				await buildDoc(ctx, kind);
+				if ((await buildDoc(ctx, kind)).changed) changed.push(DOC_TAG[kind]);
 			} catch (error) {
 				ctx.log.error(`Discovery: rebuilding ${kind} failed`, { error: String(error) });
 			}
 		}
+		if (changed.length) await purgePageCache({ tags: changed });
 	});
 }
 
@@ -198,12 +223,15 @@ export async function readDoc(ctx: PluginContext, kind: DocKind): Promise<Cached
 		slot = sharedSlot<CachedDocument>();
 		coldBuilds.set(kind, slot);
 	}
-	return sharedRead(slot, () => buildDoc(ctx, kind), { waitMs: DEADLINES.coldBuildWaitMs, anchor: (promise) => after(async () => void (await promise)), label: `building ${kind}` });
+	return sharedRead(slot, () => buildDoc(ctx, kind).then((built) => built.doc), { waitMs: DEADLINES.coldBuildWaitMs, anchor: (promise) => after(async () => void (await promise)), label: `building ${kind}` });
 }
 
-/** Rebuild now (admin "Rebuild now"). */
+/**
+ * Rebuild now (admin "Rebuild now"). No purge of its own: the route is a pack admin save, so the
+ * middleware clears every cached page after it answers.
+ */
 export async function rebuildNow(ctx: PluginContext, kind: DocKind): Promise<CachedDocument> {
-	return buildDoc(ctx, kind);
+	return (await buildDoc(ctx, kind)).doc;
 }
 
 // ── Per-entry Markdown ───────────────────────────────────────────
@@ -213,6 +241,8 @@ export interface MarkdownDocument {
 	tokens: number;
 	pageUrl: string;
 	markdownUrl: string;
+	/** Edge cache tags: MARKDOWN_TAG, the collection and the entry id (EmDash clears those when the entry changes). */
+	tags: string[];
 }
 
 /**
@@ -261,5 +291,5 @@ export async function buildMarkdown(ctx: PluginContext, settings: DiscoverySetti
 		sources: [resolved.url],
 		license: settings.llms.license || undefined,
 	})}\n${body}\n`;
-	return { body: markdown, tokens: estimateTokens(markdown), pageUrl: resolved.url, markdownUrl: markdownUrl(resolved.url) };
+	return { body: markdown, tokens: estimateTokens(markdown), pageUrl: resolved.url, markdownUrl: markdownUrl(resolved.url), tags: [MARKDOWN_TAG, resolved.collection.slug, resolved.id] };
 }

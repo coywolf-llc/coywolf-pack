@@ -107,3 +107,19 @@ jobs:
 
       - if: steps.versions.outputs.run == 'true'
         run: npm test
+
+  # The one check main's branch rule requires. Its name stays the same when the matrix rows above
+  # change, so the rule never waits for a check that no longer exists.
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every matrix row passed
+        env:
+          RESULT: ${{ needs.test.result }}
+        run: |
+          echo "Matrix result: $RESULT"
+          [ "$RESULT" = success ]

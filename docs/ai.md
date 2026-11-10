@@ -9,7 +9,9 @@ Ported from Coywolf SEO's AI features, with the same prompts and validation:
 - **Meta descriptions** (`ai.descriptions`). Writes a description (under 155 characters, no clickbait) for published entries in SEO-enabled collections that don't have one. By default they're suggestions you edit and apply on the AI page; or have empty descriptions filled automatically. Either way it writes only EmDash's SEO panel field and never replaces a description someone wrote unless you choose **Replace**.
 - **Image text** (`ai.imageText`). Writes alt text (and, if you turn it on, captions) for images on upload and in bulk, with accessibility-first prompts. Alt text and captions people wrote are kept unless you turn on overwrite. EmDash media has no title or description fields, so titles are shown on the AI page for reference only.
 
-All four are off by default, under the **AI Enrichment** switch on the Coywolf Pack page.
+All four are off by default, under the **AI Enrichment** switch on the **Features** page (**Coywolf Pack → Features** in the sidebar).
+
+**In the entry editor.** While AI Enrichment is on, a saved entry's sidebar has an **AI suggestions** section (EmDash 1.4+, admins only): the suggested meta description with **Copy** and **Dismiss**, the entities found (main subjects highlighted), and **Analyze again**, which queues the entry. It doesn't write the description itself: paste it into the SEO section, or apply it on the AI page, so it can't clash with the editor's own save. It says so when the entry's collection isn't one AI Enrichment analyzes.
 
 ## How it runs
 

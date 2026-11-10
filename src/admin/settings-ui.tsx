@@ -78,8 +78,6 @@ export function SetupCard(props: { title: string; description: React.ReactNode; 
 	);
 }
 
-export const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
 /** Parse a number input, keeping `fallback` for anything that isn't a whole number. */
 export const wholeNumber = (value: string, fallback: number) => {
 	const n = Number.parseInt(value, 10);

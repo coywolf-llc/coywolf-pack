@@ -4,7 +4,8 @@ import { test } from "node:test";
 
 const { extractLinks, extractEntryLinks, transformLinks, transformEntry, isInternal, resolveHref, isTrackable } = await import("../src/links/pt.ts");
 const { classify, isBotWall, nextCheckAt, normalizeIgnore, ruleMatches, isIgnored, isPublicTarget, IgnoreRuleError } = await import("../src/links/classify.ts");
-const { checkUrl, BudgetExhausted } = await import("../src/links/check.ts");
+const { checkUrl, checkerUserAgent, BudgetExhausted } = await import("../src/links/check.ts");
+const { VERSION } = await import("../src/version.ts");
 const store = await import("../src/links/store.ts");
 const { isAllowedTarget } = await import("../src/links/pt.ts");
 
@@ -320,6 +321,41 @@ test("checker: HEAD ok, redirect chain recorded, GET fallback, budget", async ()
 
 	s = stub({ "HEAD https://a.test/x": { status: 405 } });
 	await assert.rejects(checkUrl(new URL("https://a.test/x"), { left: 1 }, { fetcher: s.fetcher }), BudgetExhausted);
+});
+
+test("checker: an honest user agent naming the pack, its version and the site, and no browser-only headers", async () => {
+	assert.equal(
+		checkerUserAgent("1.2.3", "https://coywolf.com/some/path"),
+		"Mozilla/5.0 (compatible; CoywolfPack-LinkChecker/1.2.3; +https://github.com/coywolf-llc/coywolf-pack/blob/main/docs/links.md#how-links-are-checked) checking links on https://coywolf.com",
+	);
+	assert.doesNotMatch(checkerUserAgent("1.2.3", undefined), /checking links on/, "no site URL: no site named");
+	assert.doesNotMatch(checkerUserAgent("1.2.3", "not a url"), /checking links on/);
+	const seen = [];
+	const fetcher = async (_url, init) => {
+		seen.push(init.headers);
+		return new Response(null, { status: 200 });
+	};
+	await checkUrl(new URL("https://a.test/"), { left: 10 }, { fetcher, siteUrl: "https://coywolf.com/" });
+	assert.equal(seen[0]["User-Agent"], checkerUserAgent(VERSION, "https://coywolf.com/"));
+	assert.doesNotMatch(seen[0]["User-Agent"], /Chrome|Safari/);
+	assert.ok(!Object.keys(seen[0]).some((h) => /^sec-/i.test(h)), "no Sec-Fetch-* or client hints");
+	// The site's override wins (and can't add header lines).
+	await checkUrl(new URL("https://a.test/"), { left: 10 }, { fetcher, siteUrl: "https://coywolf.com/", userAgent: "MyChecker/1\r\nX-Evil: 1" });
+	assert.equal(seen[1]["User-Agent"], "MyChecker/1 X-Evil: 1");
+});
+
+test("checker: 403, 429 and challenge pages are Blocked, not Broken; a 404 after a refused HEAD is still Broken", async () => {
+	let s = stub({ "https://a.test/": { status: 403 } });
+	assert.equal((await checkUrl(new URL("https://a.test/"), { left: 10 }, { fetcher: s.fetcher })).status, "blocked");
+	assert.deepEqual(s.calls, ["HEAD https://a.test/", "GET https://a.test/"], "a refused HEAD is confirmed with GET");
+	s = stub({ "https://a.test/": { status: 429 } });
+	assert.equal((await checkUrl(new URL("https://a.test/"), { left: 10 }, { fetcher: s.fetcher })).status, "blocked");
+	s = stub({ "https://a.test/": { status: 503, headers: { "cf-mitigated": "challenge" } } });
+	const challenge = await checkUrl(new URL("https://a.test/"), { left: 10 }, { fetcher: s.fetcher });
+	assert.equal(challenge.status, "blocked");
+	assert.match(challenge.note, /can't be verified from a server/);
+	s = stub({ "HEAD https://a.test/gone": { status: 403 }, "GET https://a.test/gone": { status: 404 } });
+	assert.equal((await checkUrl(new URL("https://a.test/gone"), { left: 10 }, { fetcher: s.fetcher })).status, "broken");
 });
 
 // ── Unlink shapes, targets, guards ───────────────────────────────

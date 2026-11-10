@@ -1,6 +1,6 @@
 /**
  * Discovery module: routes and hooks for the news sitemap, the RSS feed,
- * llms.txt and per-entry Markdown, and the Crawler Hints card (Cloudflare's
+ * llms.txt and per-entry Markdown, security.txt, and the Crawler Hints card (Cloudflare's
  * own IndexNow integration, read from the site's zone). Site URLs are
  * answered by the middleware in ./middleware.ts, which calls the public
  * routes here.
@@ -12,13 +12,14 @@ import { siteName } from "../core/site.js";
 import { cachedCtxFeatures, ctxFeatures, invalidateFeatures, isOn, readSiteSetting, registerSiteSetting, requireFeature } from "../core/features.js";
 import type { TaskDef } from "../core/module.js";
 import { afterResponse, parseInput, workerEnv } from "../shared.js";
-import { LLMS_CACHE, NEWS_CACHE, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
+import { LLMS_CACHE, LLMS_TAG, NEWS_CACHE, NEWS_TAG, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
 import { type CrawlerHintsZone, crawlerHintsDashboardUrl, readCrawlerHints } from "./crawler-hints.js";
 import { buildFeed } from "./feed-build.js";
 import { FEED_PATH, FEED_TAG } from "./feed.js";
 import { purgePageCache } from "../pageCache/lib.js";
 import { readCloudflareToken } from "../pageCache/usage.js";
 import { markdownUrl } from "./markdown.js";
+import { SECURITY_TXT_PATH, SECURITY_TXT_TAG, securityTxtProblems } from "./security-txt.js";
 import { RETIRED_SETTINGS, SETTINGS_KEY, type DiscoverySettings, loadSettings, selected, settingsSchema } from "./settings.js";
 import { siteOrigin } from "./urls.js";
 
@@ -27,6 +28,7 @@ export const FEATURE = {
 	news: "discovery.newsSitemap",
 	llms: "discovery.llms",
 	feed: "discovery.feed",
+	securityTxt: "discovery.securityTxt",
 } as const;
 
 export interface DiscoveryOptions {
@@ -35,6 +37,12 @@ export interface DiscoveryOptions {
 }
 
 // ── Retired: IndexNow and Bing submission (removed in 0.35.18) ──
+//
+// REMOVE IN 0.38.0: everything in this section (retireIndexNow, the RETIRED_* constants), the
+// retiredTasks entry and the two calls below (plugin:activate, discovery/status), RETIRED_SETTINGS in
+// settings.ts, and the marker in HOUSEKEEPING_KEYS (src/core/features.ts). By then every site has run a
+// release that cleans up (0.35.18 to 0.37.x). test/indexnow-removal.test.mjs fails once package.json
+// reaches 0.38.0 while any of it is still here. See docs/discovery.md.
 
 /**
  * The daily task that sent Bing's queue. Its cron row stays scheduled on sites that ran 0.35.17, so it's
@@ -207,7 +215,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 			public: true,
 			handler: async (ctx: PluginContext) => {
 				await requireFeature(ctx, FEATURE.news);
-				return { body: (await readDoc(ctx, "news")).body };
+				const doc = await readDoc(ctx, "news");
+				return { body: doc.body, tags: [NEWS_TAG, ...(doc.collections ?? [])] };
 			},
 		},
 		"discovery/public/feed": {
@@ -224,7 +233,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 			public: true,
 			handler: async (ctx: PluginContext) => {
 				await requireFeature(ctx, FEATURE.llms);
-				return { body: (await readDoc(ctx, "llms")).body };
+				const doc = await readDoc(ctx, "llms");
+				return { body: doc.body, tags: [LLMS_TAG, ...(doc.collections ?? [])] };
 			},
 		},
 		"discovery/public/markdown": {
@@ -256,13 +266,15 @@ export function discoveryModule(options: DiscoveryOptions) {
 					return d ? { count: d.count, builtAt: d.builtAt } : null;
 				};
 				return {
-					features: { news: isOn(features, FEATURE.news), llms: isOn(features, FEATURE.llms), feed: isOn(features, FEATURE.feed) },
+					features: { news: isOn(features, FEATURE.news), llms: isOn(features, FEATURE.llms), feed: isOn(features, FEATURE.feed), securityTxt: isOn(features, FEATURE.securityTxt) },
 					settings,
 					collections,
+					origin,
 					urls: {
 						news: `${origin}/news-sitemap.xml`,
 						llms: `${origin}/llms.txt`,
 						feed: `${origin}${FEED_PATH}`,
+						securityTxt: `${origin}${SECURITY_TXT_PATH}`,
 					},
 					cache: { llms: await doc(LLMS_CACHE), news: await doc(NEWS_CACHE) },
 				};
@@ -288,6 +300,10 @@ export function discoveryModule(options: DiscoveryOptions) {
 			request: { body: "json" },
 			handler: async (ctx) => {
 				const settings = parseInput(settingsSchema, ctx.input);
+				// One contact per line in the admin: blank lines and spaces aren't kept.
+				settings.securityTxt.contacts = settings.securityTxt.contacts.map((c) => c.trim()).filter(Boolean);
+				const problems = securityTxtProblems(settings.securityTxt);
+				if (problems.length) throw PluginRouteError.badRequest(`security.txt: ${problems.join(" ")}`);
 				await ctx.settings.set(SETTINGS_KEY, settings);
 				settingsMemo = null;
 				// Read with the feature switches: drop that cache too.
@@ -296,8 +312,8 @@ export function discoveryModule(options: DiscoveryOptions) {
 				const features = await ctxFeatures(ctx);
 				const kinds: DocKind[] = [...(isOn(features, FEATURE.llms) ? (["llms"] as const) : []), ...(isOn(features, FEATURE.news) ? (["news"] as const) : [])];
 				if (kinds.length) scheduleRebuild(ctx, kinds, 0);
-				// Feeds in the edge cache were built with the old settings.
-				await purgePageCache({ tags: [FEED_TAG] }).catch((error: unknown) => ctx.log.warn("Discovery: clearing cached feeds failed", { error: String(error) }));
+				// Feeds and security.txt in the edge cache were built with the old settings.
+				await purgePageCache({ tags: [FEED_TAG, SECURITY_TXT_TAG] }).catch((error: unknown) => ctx.log.warn("Discovery: clearing cached feeds failed", { error: String(error) }));
 				return { settings };
 			},
 		}),
@@ -317,7 +333,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 		}),
 	};
 
-	/** IndexNow and Bing submission's daily task, from 0.35.17: cleans up and cancels itself when it next fires. */
+	/** IndexNow and Bing submission's daily task, from 0.35.17: cleans up and cancels itself when it next fires. Remove in 0.38.0 (see above). */
 	const retiredTasks: Record<string, (ctx: PluginContext) => Promise<void>> = {
 		[RETIRED_BING_TASK]: async (ctx) => {
 			await retireIndexNow(ctx);

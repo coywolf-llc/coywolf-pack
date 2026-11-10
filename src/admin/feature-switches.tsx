@@ -9,6 +9,9 @@ import { Banner, Switch } from "@cloudflare/kumo";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { FeaturesLink } from "./page.js";
+import { errorText } from "./api.js";
+
 const API = "/_emdash/api/plugins/coywolf-pack/features";
 
 export interface Part {
@@ -25,8 +28,6 @@ interface ModuleState {
 
 /** Sent after a part is switched, so the page can refresh what depends on it. */
 export const FEATURES_CHANGED = "coywolf-pack:features-changed";
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 
 /** The module's main switch and its parts, with a toggle that saves at once. */
 export function useParts(moduleId: string) {
@@ -105,7 +106,15 @@ export function PartSwitches(props: { module: string }) {
 					Turn parts on or off
 				</h2>
 				<p className="mt-1 text-sm text-kumo-subtle">
-					{main.enabled ? "Changes apply right away. The same switches are on the Features page." : `${main.label} is off: turn it on under Plugins → Coywolf Pack → Features first.`}
+					{main.enabled ? (
+						<>
+							Changes apply right away. The same switches are on <FeaturesLink />.
+						</>
+					) : (
+						<>
+							{main.label} is off: turn it on on <FeaturesLink /> first.
+						</>
+					)}
 				</p>
 			</div>
 			<ul className="divide-y divide-kumo-line">

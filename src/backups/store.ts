@@ -192,6 +192,11 @@ export async function writeDumpStream(
 }
 
 /** Write (or rewrite) a backup's manifest for a dump already stored. */
+/**
+ * Write (or rewrite) a backup's manifest. With a bucket lock on d1/ a manifest can be written once only
+ * (R2 refuses to overwrite a locked object), so the backup then records the mirror counts in
+ * mirrors/<stamp>.json instead of rewriting it (see writeMirrorCounts).
+ */
 export async function writeManifest(
 	bucket: R2Bucket,
 	stamp: string,
@@ -206,6 +211,31 @@ export async function writeManifest(
 	return manifest;
 }
 
+
+/**
+ * Mirror counts of a backup whose manifest can't be rewritten (d1/ is locked): kept outside every
+ * locked prefix, at mirrors/<stamp>.json, and merged into the listing. Pruned with the backup.
+ */
+export const MIRRORS_PREFIX = "mirrors/";
+
+export async function writeMirrorCounts(bucket: R2Bucket, stamp: string, counts: Pick<Manifest, "media" | "uploads">): Promise<void> {
+	await bucket.put(`${MIRRORS_PREFIX}${stamp}.json`, JSON.stringify(counts), { httpMetadata: { contentType: "application/json" } });
+}
+
+/** The newest backup's stamp (from the d1/ folder names: one list call), or null when there's none. */
+export async function newestStamp(bucket: R2Bucket): Promise<string | null> {
+	let newest: string | null = null;
+	let cursor: string | undefined;
+	do {
+		const page = await bucket.list({ prefix: "d1/", delimiter: "/", cursor });
+		for (const prefix of page.delimitedPrefixes) {
+			const stamp = prefix.slice(3, -1);
+			if (STAMP.test(stamp) && (!newest || stamp > newest)) newest = stamp;
+		}
+		cursor = page.truncated ? page.cursor : undefined;
+	} while (cursor);
+	return newest;
+}
 
 /** Every backup with a manifest, newest first. */
 export async function listBackups(bucket: R2Bucket): Promise<BackupEntry[]> {
@@ -232,7 +262,26 @@ export async function listBackups(bucket: R2Bucket): Promise<BackupEntry[]> {
 			}
 		}),
 	);
-	return entries.filter((e): e is BackupEntry => e !== null).sort((a, b) => b.stamp.localeCompare(a.stamp));
+	const listed = entries.filter((e): e is BackupEntry => e !== null);
+	// Mirror counts kept beside a locked manifest (one list call; a read only for the backups that have one).
+	const sidecars = new Set<string>();
+	let mirrorCursor: string | undefined;
+	do {
+		const page = await bucket.list({ prefix: MIRRORS_PREFIX, cursor: mirrorCursor });
+		for (const object of page.objects) sidecars.add(object.key.slice(MIRRORS_PREFIX.length).replace(/\.json$/, ""));
+		mirrorCursor = page.truncated ? page.cursor : undefined;
+	} while (mirrorCursor);
+	await Promise.all(
+		listed
+			.filter((entry) => !entry.media && sidecars.has(entry.stamp))
+			.map(async (entry) => {
+				const object = await bucket.get(`${MIRRORS_PREFIX}${entry.stamp}.json`);
+				const counts = object ? ((await object.json().catch(() => null)) as Pick<Manifest, "media" | "uploads"> | null) : null;
+				if (counts?.media) entry.media = counts.media;
+				if (counts?.uploads) entry.uploads = counts.uploads;
+			}),
+	);
+	return listed.sort((a, b) => b.stamp.localeCompare(a.stamp));
 }
 
 /**
@@ -379,10 +428,16 @@ export async function restoreMissingMedia(
 	return { restored, checked, pending };
 }
 
-/** Delete database backups and replaced media and upload copies older than `days`. Returns the number of stamps pruned. */
+/**
+ * Delete database backups and replaced media and upload copies older than `days`. Returns the number of
+ * stamps pruned. A folder R2 refuses to delete (a bucket lock that keeps it longer than `days`) is left
+ * for a later run, and the rest are still pruned. Not needed once the backup bucket has a lifecycle rule
+ * doing the same (see retention.ts): the daily task then skips it.
+ */
 export async function pruneBackups(bucket: R2Bucket, days: number): Promise<number> {
 	const cutoff = makeStamp(new Date(Date.now() - days * 86_400_000));
 	let pruned = 0;
+	let refused = 0;
 	for (const prefix of ["d1/", "media/changed/", "uploads/changed/"]) {
 		let cursor: string | undefined;
 		do {
@@ -390,12 +445,34 @@ export async function pruneBackups(bucket: R2Bucket, days: number): Promise<numb
 			for (const dir of page.delimitedPrefixes) {
 				const stamp = dir.slice(prefix.length, -1);
 				if (!STAMP.test(stamp) || stamp >= cutoff) continue;
-				await deletePrefix(bucket, dir);
-				if (prefix === "d1/") pruned++;
+				try {
+					await deletePrefix(bucket, dir);
+					if (prefix === "d1/") pruned++;
+				} catch (error) {
+					refused++;
+					if (refused === 1) console.warn(`coywolf backups: couldn't delete ${dir} (a bucket lock may still keep it); trying again tomorrow`, error);
+				}
 			}
 			cursor = page.truncated ? page.cursor : undefined;
 		} while (cursor);
 	}
+	// Mirror counts kept beside locked manifests go with their backup, never before it (a lock can keep the backup longer).
+	const kept = new Set<string>();
+	let cursor: string | undefined;
+	do {
+		const page = await bucket.list({ prefix: "d1/", delimiter: "/", cursor });
+		for (const dir of page.delimitedPrefixes) kept.add(dir.slice(3, -1));
+		cursor = page.truncated ? page.cursor : undefined;
+	} while (cursor);
+	do {
+		const page = await bucket.list({ prefix: MIRRORS_PREFIX, cursor });
+		const old = page.objects.map((o) => o.key).filter((key) => {
+			const stamp = key.slice(MIRRORS_PREFIX.length).replace(/\.json$/, "");
+			return STAMP.test(stamp) && stamp < cutoff && !kept.has(stamp);
+		});
+		if (old.length) await bucket.delete(old).catch(() => undefined);
+		cursor = page.truncated ? page.cursor : undefined;
+	} while (cursor);
 	return pruned;
 }
 

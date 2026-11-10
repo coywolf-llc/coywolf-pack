@@ -96,10 +96,10 @@ function decodeAttr(value: string): string {
 
 /** A link or image URL that's safe to print: http(s), mailto, tel, or relative. Null otherwise. */
 export function safeUrl(value: string): string | null {
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: browsers ignore these inside a scheme.
+	// Control characters in the pattern: browsers ignore these inside a scheme.
 	const url = decodeAttr(value).replace(/[\u0000- \u007f]+/g, (m, i: number) => (i === 0 ? "" : m)).trim();
 	if (!url || url.length > 2000) return null;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: see above.
+	// Control characters in the pattern: see above.
 	const scheme = url.replace(/[\u0000- \u007f]/g, "").match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
 	if (scheme && !["http", "https", "mailto", "tel"].includes(scheme)) return null;
 	return url;
@@ -120,7 +120,14 @@ function markdownLite(escaped: string): string {
 		.replace(/\*\*(?=\S)([^*\n]{1,1000}?)\*\*/g, "<strong>$1</strong>");
 }
 
-const TAG = /<!--[\s\S]*?(?:-->|$)|<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s+[^\s"'>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g;
+/**
+ * One tag (or comment). Attribute names can't contain `<`, so a tag that never
+ * closes stops being a candidate at the next `<`: with `<` allowed, every
+ * unclosed `<a b c …` was scanned to the end of the field again from each
+ * `<`, a quadratic case (80,000 characters took 4 seconds; fields take up to
+ * 500,000). Quoted values may still contain `<`.
+ */
+const TAG = /<!--[\s\S]*?(?:-->|$)|<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g;
 const ATTR = /([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
 
 const STYLE_PROPS = new Set(["color", "background-color", "font-size", "font-weight", "font-style", "font-variant", "text-decoration", "text-transform", "text-align", "letter-spacing", "white-space"]);
@@ -194,7 +201,7 @@ export function renderRich(input: unknown, opts: RichOptions = {}): string {
 	const source = input
 		.slice(0, 500_000)
 		.replace(/\r\n?/g, "\n")
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: strip control characters (keep tab and newline).
+		// Control characters in the pattern: strip control characters (keep tab and newline).
 		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
 	const inline = Boolean(opts.inline);
 	let out = "";
@@ -298,13 +305,41 @@ export function renderRich(input: unknown, opts: RichOptions = {}): string {
 	return out.trim();
 }
 
+/**
+ * `<script>` and `<style>` elements removed, body and all, in one pass. A lazy
+ * `<script[\s\S]*?</script>` regex rescans to the end from every opening tag
+ * that has no closing one (quadratic); this looks for a tag's closing tag at
+ * most once after it's known to have none.
+ */
+function dropScriptsAndStyles(input: string): string {
+	const open = /<(script|style)\b/gi;
+	const unclosed = new Set<string>();
+	let out = "";
+	let last = 0;
+	for (let m = open.exec(input); m; m = open.exec(input)) {
+		const tag = (m[1] as string).toLowerCase();
+		if (unclosed.has(tag)) continue;
+		const close = new RegExp(`<\\/${tag}\\s*>`, "gi");
+		close.lastIndex = open.lastIndex;
+		const end = close.exec(input);
+		if (!end) {
+			unclosed.add(tag);
+			continue;
+		}
+		out += input.slice(last, m.index);
+		last = end.index + end[0].length;
+		open.lastIndex = last;
+	}
+	return out + input.slice(last);
+}
+
 /** Plain text of a field (for labels, schema and checks): tags dropped, entities decoded, whitespace collapsed. */
 export function plainText(input: unknown): string {
 	if (typeof input !== "string") return "";
 	return decodeAttr(
-		input
-			.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, "")
-			.replace(/<[^>]*>/g, " ")
+		// A tag ends at the next `>` or `<` (an unclosed `<` stays text): linear, however many `<` there are.
+		dropScriptsAndStyles(input)
+			.replace(/<[^<>]*>/g, " ")
 			.replace(/\[([^\]\n]+)\]\([^()\s]+\)/g, "$1")
 			.replace(/\*\*([^*\n]+)\*\*/g, "$1"),
 	)

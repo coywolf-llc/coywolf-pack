@@ -10,15 +10,17 @@ import { SLUG_CHANGES_FEATURE, slugChangesModule } from "./slug-changes.js";
 const FEATURES = [
 	{
 		id: "redirects",
-		label: "Redirects",
+		label: "Redirect Manager",
 		description: "External and file-path redirects, regular expressions, hit counts, and import.",
-		default: true,
+		// On by default before 0.36.0: sites set up earlier keep it on (recordDefaults in src/core/features.ts).
+		default: false,
+		legacyDefault: true,
 	},
 	{
 		id: TRASH_PROMPT_FEATURE,
 		label: "Removed content",
 		description:
-			"When a published entry is trashed or unpublished, ask what its old URL should do: redirect it or return 410 Gone. Undecided URLs stay listed on the Redirects page.",
+			"When a published entry is trashed or unpublished, ask what its old URL should do: redirect it or return 410 Gone. Undecided URLs stay listed on the Redirect Manager page.",
 		default: false,
 	},
 	{
@@ -26,12 +28,13 @@ const FEATURES = [
 		label: "Slug changes",
 		description:
 			"When a published entry's URL changes (a new slug, category or parent page), add a 301 from the old URL to the new one. EmDash's own slug-change redirect uses the collection's URL pattern, which can't express category or parent paths.",
-		default: true,
+		default: false,
+		legacyDefault: true,
 	},
 ];
 registerFeatures(FEATURES);
 
-// biome-ignore lint/suspicious/noExplicitAny: hook events differ per hook.
+// any: hook events differ per hook.
 type Hook = (event: any, ctx: PluginContext) => Promise<unknown>;
 
 /**
@@ -68,16 +71,17 @@ export function redirectsPack(options: RedirectsOptions): PackModule {
 	const slugs = slugChangesModule(options);
 	return {
 		id: "redirects",
-		label: "Redirects",
+		label: "Redirect Manager",
 		features: FEATURES,
 		routes: { ...redirectsModule(options).routes, ...removed.routes },
-		adminPages: [{ path: "/redirects", label: "Redirects", icon: "arrow-bend-up-right" }],
+		adminPages: [{ path: "/redirects", label: "Redirect Manager", icon: "arrow-bend-up-right" }],
 		hooks: mergeHooks([
 			{ feature: TRASH_PROMPT_FEATURE, hooks: removed.hooks },
 			{ feature: SLUG_CHANGES_FEATURE, hooks: slugs.hooks },
 		]),
 		storage: { ...removed.storage, ...slugs.storage },
-		capabilities: ["content:read"],
+		// redirects:write: Slug changes delete EmDash's own redirect for the same change (ctx.redirects).
+		capabilities: ["content:read", "redirects:write"],
 	};
 }
 

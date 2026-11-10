@@ -6,6 +6,7 @@ import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
 import { ctxFeatures, requireFeature } from "../core/features.js";
+import { configuredSiteOrigin } from "../core/site.js";
 import { parseInput, workerEnv } from "../shared.js";
 import { BudgetExhausted, type Budget, checkUrl } from "./check.js";
 import { type IgnoreRule, IgnoreRuleError, type LinkStatus, nextCheckAt, normalizeIgnore } from "./classify.js";
@@ -29,6 +30,10 @@ import {
 	linkCollections,
 	putMany,
 	queryIn,
+	refsForEntries,
+	refsWhere,
+	summarizeEntryLinks,
+	entryKey,
 	reapplyIgnores,
 	refs,
 	removeEntry,
@@ -38,7 +43,7 @@ import {
 } from "./store.js";
 
 /** No build-time options yet; settings live on the Link Manager page. */
-// biome-ignore lint/complexity/noBannedTypes: reserved for future options.
+// An empty type: reserved for future options.
 export type LinksOptions = {};
 
 export const LINKS_SCAN_TASK = "links-scan";
@@ -169,6 +174,8 @@ export async function runChecks(ctx: PluginContext, options: { ids?: string[]; b
 	})();
 	const fetcher = (url: string, init: RequestInit) =>
 		self && siteHost && new URL(url).host === siteHost ? self.fetch(url, init) : fetch(url, init);
+	// The site the checker names in its user agent: the configured production address, never a staging or request origin.
+	const checkerSite = await configuredSiteOrigin(await workerEnv().catch(() => ({}))).catch(() => null);
 
 	let candidates: Array<{ id: string; data: UrlRow }>;
 	if (options.ids) {
@@ -210,7 +217,7 @@ export async function runChecks(ctx: PluginContext, options: { ids?: string[]; b
 				continue;
 			}
 			try {
-				const outcome = await checkUrl(new URL(data.resolved), budget, { userAgent, fetcher });
+				const outcome = await checkUrl(new URL(data.resolved), budget, { userAgent, siteUrl: checkerSite, fetcher });
 				await urls(ctx).put(id, {
 					...data,
 					status: outcome.status,
@@ -388,9 +395,9 @@ async function list(ctx: PluginContext, input: z.infer<typeof listInput>) {
 	const sort = input.sort ?? "status";
 	const orderBy: Record<string, "asc" | "desc"> = sort === "url" ? { url: "asc" } : sort === "checked" ? { checkedAt: "desc" } : { rank: "asc" };
 
-	// biome-ignore lint/suspicious/noExplicitAny: WhereClause is EmDash's.
+	// any: WhereClause is EmDash's.
 	const page = await urls(ctx).query({ where: where as any, orderBy, limit: PAGE_SIZE, cursor: input.cursor ?? undefined });
-	// biome-ignore lint/suspicious/noExplicitAny: WhereClause is EmDash's.
+	// any: WhereClause is EmDash's.
 	const total = await urls(ctx).count(where as any);
 	const usage = await queryIn(
 		refs(ctx),
@@ -454,6 +461,60 @@ export function linksModule() {
 					siteUrlKnown: Boolean(ctx.site?.url),
 					ignores: await getIgnores(ctx),
 				};
+			},
+		})),
+
+		/** One entry's links with their status, worst first, for the entry editor's Links panel. */
+		"links/entry": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await guard(ctx);
+				const { collection, entryId } = parseInput(z.object({ collection: z.string().min(1).max(100), entryId: z.string().min(1).max(200) }), ctx.input);
+				const rows = await refsWhere(ctx, "entryKey", entryKey(collection, entryId));
+				const found = await getMany(urls(ctx), [...new Set(rows.map((r) => r.data.urlId))]);
+				const items = rows
+					.map(({ data }) => ({ ref: data, url: found.get(data.urlId) }))
+					.filter((item): item is { ref: RefRow; url: UrlRow } => Boolean(item.url))
+					.sort((a, b) => a.url.rank - b.url.rank || a.url.url.localeCompare(b.url.url))
+					.slice(0, 100)
+					.map(({ ref, url }) => ({
+						url: url.url,
+						status: url.status,
+						code: url.code,
+						note: url.note,
+						finalUrl: url.finalUrl,
+						internal: url.internal,
+						ignored: url.ignored,
+						checkedAt: url.checkedAt,
+						anchors: ref.anchors.slice(0, 3),
+					}));
+				const features = await ctxFeatures(ctx);
+				return {
+					items,
+					total: rows.length,
+					summary: summarizeEntryLinks(rows.map((r) => r.data), found).get(entryKey(collection, entryId)) ?? null,
+					checking: features["links.check"] ?? false,
+				};
+			},
+		})),
+
+		/**
+		 * Link problems of the entries on one page of the content list (its Links column): one request
+		 * per page, one D1 read per 90 entries (refsForEntries) plus their URLs' rows.
+		 */
+		"links/entries/status": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await guard(ctx);
+				const { collection, ids } = parseInput(z.object({ collection: z.string().min(1).max(100), ids: z.array(z.string().min(1).max(200)).max(200) }), ctx.input);
+				const rows = await refsForEntries(ctx, ids.map((id) => entryKey(collection, id)));
+				const found = await getMany(urls(ctx), [...new Set(rows.map((r) => r.urlId))]);
+				const byKey = summarizeEntryLinks(rows, found);
+				return { entries: Object.fromEntries(ids.map((id) => [id, byKey.get(entryKey(collection, id)) ?? null])) };
 			},
 		})),
 

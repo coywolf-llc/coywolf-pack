@@ -38,16 +38,28 @@ export interface CoywolfOptions {
 	reviews?: ReviewsOptions | false;
 	/** Custom Blocks: Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks (no options yet). `false` leaves the module out. */
 	customBlocks?: Record<string, never> | false;
-	/** Clean image URLs (/media/<id>-<w>x<h>.<format>): media bucket and Images binding names. */
+	/** Clean Image URLs on the media host: its fallback address (`cdn`; EmDash's r2({ publicUrl }) wins), the media bucket and Images binding names, crops. */
 	images?: import("./images/pack.js").ImagesOptions | false;
-	/** Page cache upkeep for Cloudflare Workers Cache (no options yet). `false` leaves the module out. */
-	pageCache?: Record<string, never> | false;
+	/** Page cache upkeep for Cloudflare Workers Cache (see docs/performance.md). `false` leaves the module out. */
+	pageCache?: import("./pageCache/pack.js").PageCacheOptions | false;
+	/** Speculation Rules: prefetch (and optionally prerender) the next page (settings on the Performance page; no options here). `false` leaves the module out. */
+	speculation?: Record<string, never> | false;
+	/** Cloudflare Checkup: the zone settings that matter, with one-click fixes (no options here). `false` leaves the module out. */
+	cloudflare?: Record<string, never> | false;
+	/** Insights reports (edge errors, Core Web Vitals, Fathom, Search Console, search insights). `false` leaves the module out. */
+	insights?: import("./insights/pack.js").InsightsOptions | false;
 	/** The daily check for a newer Coywolf Pack on npm (off until turned on on the Features page). `false` leaves the module out. */
 	updates?: Record<string, never> | false;
 	/** @deprecated Until 0.12.0 the Custom Blocks module was called Content Blocks; `contentBlocks: false` still leaves it out. */
 	contentBlocks?: Record<string, never> | false;
 	/** WordPress import tools (no options yet). `false` leaves the module out. */
 	wpImport?: Record<string, never> | false;
+	/** Content Audit (no options; settings are on its page). `false` leaves the module out. */
+	audit?: Record<string, never> | false;
+	/** Alerts & Digest (no options; settings are on its page). `false` leaves the module out. */
+	alerts?: Record<string, never> | false;
+	/** Social Images: the media bucket's binding (default "MEDIA"). `false` leaves the module out. */
+	socialImages?: import("./social/pack.js").SocialImagesOptions | false;
 	/**
 	 * Entry URL patterns for collections the theme routes differently from
 	 * EmDash's url_pattern, e.g. `{ posts: "/{term:category|uncategorized}/{slug}/" }`

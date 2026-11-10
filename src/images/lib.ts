@@ -1,22 +1,37 @@
 /**
- * Clean image URLs: resized copies of media-library images at
- *
- *   /media/<file id>-<width>x<height>.<format>     (cropped to fill)
- *   /media/<file id>-<width>w.<format>              (width only, keeps the ratio)
- *
- * instead of Astro's /_image?href=…&w=…&h=… endpoint. Pure helpers (no
- * imports) so tests can load them; the middleware is in pack.ts.
- *
- * With a media host configured (`images: { cdn: "https://media.example.com" }`:
- * an R2 custom domain on the media bucket, with Cloudflare Image
- * Transformations and the zone's /s/ rewrite rules), URLs point there instead
- * and never touch the Worker:
+ * Clean image URLs on the media host: resized copies of media-library images at
  *
  *   https://media.example.com/<file>              the original file
  *   https://media.example.com/s/<w>x<h>/<file>    cropped to fill
  *   https://media.example.com/s/<w>/<file>        width only, keeps the ratio
  *
- * The media host picks WebP or AVIF for browsers that accept them.
+ * instead of Astro's /_image?href=…&w=…&h=… endpoint. Pure helpers (no
+ * imports) so tests can load them; the middleware is in pack.ts.
+ *
+ * The media host is an R2 custom domain on the media bucket, with Cloudflare
+ * Image Transformations and the zone's /s/ rewrite rules. Where it comes from:
+ *
+ *  - EmDash's own setting: `storage: r2({ binding, publicUrl })` in
+ *    astro.config.mjs, when publicUrl is a plain https origin (not r2.dev).
+ *    EmDash's own components (Image, Gallery, site-settings logo and
+ *    favicon…) print media there too, so it's one setting for both.
+ *  - The host saved on the Clean Image URLs page, else the pack's
+ *    `images: { cdn }` option (the pack's own host).
+ *
+ * When only one is set, that's the host. When both are and they differ, the
+ * pack's own host wins (it's the one known to have the /s/ rules), and the
+ * Clean Image URLs page says so: publicUrl takes over once it's the same
+ * host, or once the pack's own is removed (after Check passes on it).
+ *
+ * Media URLs are recognized in each form EmDash and the pack print them:
+ * /_emdash/api/media/file/<file> (EmDash without publicUrl), <publicUrl>/<file>
+ * (EmDash with it, even when publicUrl isn't a plain origin), and <media host>/<file>.
+ *
+ * Earlier releases gave a site without a media host resized copies from the
+ * Worker at /media/<file id>-<w>x<h>.<format>. That route duplicated
+ * EmDash's own /_image endpoint and no site used it, so it's gone: without a
+ * media host cleanImagePath() returns null (themes use their usual image
+ * code), and old /media/ addresses only redirect (301) to the media host.
  */
 
 export const IMAGE_PATH = "/media/";
@@ -29,18 +44,6 @@ export const IMAGE_PATH = "/media/";
 const MEDIA_FILE = /^(?:https?:\/\/[^/]+)?\/_emdash\/api\/media\/file\/([A-Za-z0-9_.-]+)\.([a-z0-9]{2,5})(?:[?#].*)?$/i;
 const CLEAN = /^\/media\/([A-Za-z0-9_.-]+)-(?:(\d{1,4})x(\d{1,4})|(\d{1,4})w)\.(webp|avif|jpe?g|png)$/i;
 export const MAX_DIMENSION = 2560;
-/**
- * Worker-route sizes are multiples of this many pixels, so anyone requesting
- * /media/ URLs can't make the Worker run (and bill) a new transform for every
- * pixel. 10 keeps the sizes themes ask for (50, 100, 400, 640, 800, 1200x630)
- * exact; anything else rounds up.
- */
-export const SIZE_STEP = 10;
-
-/** Round a size up to the Worker route's grid (at most MAX_DIMENSION). */
-export function snapDimension(n: number): number {
-	return Math.min(MAX_DIMENSION, Math.ceil(n / SIZE_STEP) * SIZE_STEP);
-}
 export const FORMATS: Record<string, string> = { webp: "image/webp", avif: "image/avif", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png" };
 
 /** MIME types of original files by extension (for og:image:type on media-host URLs). */
@@ -68,9 +71,15 @@ export function normalizeMediaHost(input: string | null | undefined): string | n
 	return m ? `https://${m[1].toLowerCase()}` : null;
 }
 
-/** The media host set in astro.config.mjs (`images.cdn`), and the one saved on the Clean Image URLs page (wins when set). */
+/**
+ * The media host set in astro.config.mjs (`images.cdn`), the one saved on the
+ * Clean Image URLs page, and EmDash's storage publicUrl (as a plain origin,
+ * and as written, for recognizing EmDash's media URLs).
+ */
 let optionBase: string | null = null;
 let savedBase: string | null = null;
+let storageBase: string | null = null;
+let storagePrefix: string | null = null;
 
 /** Set (or clear) the media host from the plugin option. Anything but an https origin is ignored. */
 export function setImageCdn(url: string | null | undefined): void {
@@ -82,9 +91,31 @@ export function setSavedImageCdn(url: string | null | undefined): void {
 	savedBase = normalizeMediaHost(url);
 }
 
-/** The media host in use (https origin, no trailing slash), or null for the Worker's /media/ route. */
+/**
+ * Set (or clear) EmDash's storage publicUrl (`r2({ publicUrl })`). As a plain
+ * https origin it's the media host, ahead of the saved host and the option.
+ * With a path (or on http) it isn't usable for /s/ resizing, but media URLs
+ * under it are still recognized as media-library files.
+ */
+export function setStoragePublicUrl(url: string | null | undefined): void {
+	const raw = String(url ?? "").trim().replace(/\/+$/, "");
+	storagePrefix = /^https?:\/\/[^/?#\s]+(?:\/[^?#\s]*)?$/i.test(raw) ? raw : null;
+	const host = normalizeMediaHost(raw);
+	// An r2.dev address isn't in a zone, so it can't have Image Transformations or the /s/ rules: never the media host.
+	storageBase = host && !/\.r2\.dev$/i.test(host) ? host : null;
+}
+
+/** The media host in use (https origin, no trailing slash), or null when there's none. */
 export function imageCdn(): string | null {
-	return savedBase ?? optionBase;
+	const packHost = savedBase ?? optionBase;
+	// A publicUrl that isn't the pack's own working host doesn't take over unannounced: it may lack the /s/ rules.
+	if (storageBase && packHost && storageBase !== packHost) return packHost;
+	return storageBase ?? packHost;
+}
+
+/** Every base under which a media-library file can appear as <base>/<file>, the host in use first. */
+function mediaBases(): string[] {
+	return [...new Set([imageCdn(), storagePrefix, savedBase, optionBase].filter((b): b is string => Boolean(b)))];
 }
 
 /**
@@ -111,9 +142,23 @@ export function withMediaPreconnect(response: Response, host: string | null = im
 	}
 }
 
-/** Where the media host comes from: the admin setting, the plugin option, or nowhere. */
-export function imageCdnSource(): { host: string | null; option: string | null; saved: string | null } {
-	return { host: imageCdn(), option: optionBase, saved: savedBase };
+/**
+ * Where the media host comes from: EmDash's publicUrl (`storage`, as a plain
+ * origin; `storageUrl` as written), the admin setting, the plugin option, or nowhere.
+ */
+export function imageCdnSource(): {
+	host: string | null;
+	option: string | null;
+	saved: string | null;
+	storage: string | null;
+	storageUrl: string | null;
+	from: "storage" | "saved" | "option" | null;
+	/** EmDash's publicUrl is a usable host but not the one in use (the pack's own differs). */
+	conflict: boolean;
+} {
+	const host = imageCdn();
+	const from = host && host === storageBase ? "storage" : savedBase ? "saved" : optionBase ? "option" : null;
+	return { host, option: optionBase, saved: savedBase, storage: storageBase, storageUrl: storagePrefix, from, conflict: Boolean(storageBase && host && storageBase !== host) };
 }
 
 export interface ImageRequest {
@@ -123,10 +168,26 @@ export interface ImageRequest {
 	format: string;
 }
 
-/** The file id and extension of a media-library URL, or null for anything else. */
+/** A media-library file's bucket key as stored by EmDash (<id>.<ext>). */
+const KEY = /^([A-Za-z0-9_.-]+)\.([a-z0-9]{2,5})$/i;
+
+/**
+ * The file id and extension of a media-library URL, or null for anything
+ * else: EmDash's /_emdash/api/media/file/<file> (relative or absolute), or the
+ * original file under EmDash's publicUrl or a media host (<base>/<file>, the
+ * form EmDash prints with publicUrl set). Resized and stored sizes on the
+ * media host (/s/…, /v1/…) aren't files: see parseCdnUrl.
+ */
 export function mediaFile(src: string | null | undefined): { id: string; ext: string } | null {
-	const m = MEDIA_FILE.exec(String(src ?? "").trim());
-	return m ? { id: m[1], ext: m[2].toLowerCase() } : null;
+	const value = String(src ?? "").trim();
+	const m = MEDIA_FILE.exec(value);
+	if (m) return { id: m[1], ext: m[2].toLowerCase() };
+	for (const base of mediaBases()) {
+		if (!value.startsWith(`${base}/`)) continue;
+		const key = KEY.exec(value.slice(base.length + 1).split(/[?#]/)[0] ?? "");
+		if (key) return { id: key[1], ext: key[2].toLowerCase() };
+	}
+	return null;
 }
 
 /** The original file on the media host, or null when there's no host or `src` isn't a media-library file. */
@@ -141,45 +202,24 @@ export function cdnOriginalUrl(src: string | null | undefined): string | null {
 }
 
 /**
- * Build a clean URL; null when `src` isn't a media-library file or the size is
- * out of range. On the media host when one is set (format chosen by the host),
- * otherwise the Worker's /media/ route.
+ * Build a clean URL on the media host; null when there's no media host, `src`
+ * isn't a media-library file, or the size is out of range. The host picks the
+ * format (`format` is ignored: it only applied to the Worker route, which is gone).
  */
 export function cleanImagePath(src: string | null | undefined, options: { width: number; height?: number; format?: string }): string | null {
+	const cdn = imageCdn();
+	if (!cdn) return null;
 	const file = mediaFile(src);
 	if (!file) return null;
 	const width = Math.round(options.width);
 	const height = options.height === undefined ? undefined : Math.round(options.height);
 	if (!(width >= 1 && width <= MAX_DIMENSION) || (height !== undefined && !(height >= 1 && height <= MAX_DIMENSION))) return null;
-	const cdn = imageCdn();
-	if (cdn) {
-		// Cloudflare's resizer reads JPEG, PNG, GIF, WebP, SVG and HEIC, not AVIF (it answers 415).
-		if (!CDN_RESIZABLE.has(file.ext)) return null;
-		return `${cdn}/s/${height === undefined ? width : `${width}x${height}`}/${file.id}.${file.ext}`;
-	}
-	const format = (options.format ?? "webp").toLowerCase();
-	if (!FORMATS[format]) return null;
-	return imagePath({ id: file.id, width: snapDimension(width), height: height === undefined ? undefined : snapDimension(height), format });
+	// Cloudflare's resizer reads JPEG, PNG, GIF, WebP, SVG and HEIC, not AVIF (it answers 415).
+	if (!CDN_RESIZABLE.has(file.ext)) return null;
+	return `${cdn}/s/${height === undefined ? width : `${width}x${height}`}/${file.id}.${file.ext}`;
 }
 
-/** The Worker-route path of a request, as given (no snapping). */
-function imagePath(request: ImageRequest): string {
-	return `${IMAGE_PATH}${request.id}-${request.height === undefined ? `${request.width}w` : `${request.width}x${request.height}`}.${request.format}`;
-}
-
-/**
- * The on-grid path for a Worker-route request whose size is off the grid
- * (see SIZE_STEP), or null when it's already on it. The middleware answers
- * off-grid requests with a redirect there instead of resizing.
- */
-export function snappedImagePath(request: ImageRequest): string | null {
-	const width = snapDimension(request.width);
-	const height = request.height === undefined ? undefined : snapDimension(request.height);
-	if (width === request.width && height === request.height) return null;
-	return imagePath({ ...request, width, height });
-}
-
-/** Parse a clean URL path; null when it isn't one (or the size is out of range). */
+/** Parse an old Worker-route path (/media/<id>-<w>x<h>.<format>, from earlier releases); null when it isn't one (or the size is out of range). */
 export function parseImagePath(pathname: string): ImageRequest | null {
 	const m = CLEAN.exec(pathname);
 	if (!m) return null;
@@ -190,13 +230,18 @@ export function parseImagePath(pathname: string): ImageRequest | null {
 }
 
 /**
- * Parse a media-host URL (absolute, on the configured host): the file and the
- * requested size (none for the original). Null for anything else.
+ * Parse a media-host URL (absolute, on the media host in use): the file and
+ * the requested size (none for the original). The original under another
+ * known base (EmDash's publicUrl, a saved or configured host that isn't the
+ * one in use) counts too. Null for anything else.
  */
 export function parseCdnUrl(url: string | null | undefined): { id: string; ext: string; width?: number; height?: number } | null {
 	const cdn = imageCdn();
 	const value = String(url ?? "");
-	if (!cdn || !value.startsWith(`${cdn}/`)) return null;
+	if (!cdn || !value.startsWith(`${cdn}/`)) {
+		const file = cdn ? mediaFile(value) : null;
+		return file && !MEDIA_FILE.test(value.trim()) ? { id: file.id, ext: file.ext, width: undefined, height: undefined } : null;
+	}
 	const path = value.slice(cdn.length).split(/[?#]/)[0];
 	const m = /^\/(?:s\/(\d{1,4})(?:x(\d{1,4}))?\/)?([A-Za-z0-9_.-]+)\.([a-z0-9]{2,5})$/i.exec(path);
 	if (!m) return null;
@@ -205,9 +250,6 @@ export function parseCdnUrl(url: string | null | undefined): { id: string; ext: 
 	if ((width !== undefined && !(width >= 1 && width <= MAX_DIMENSION)) || (height !== undefined && !(height >= 1 && height <= MAX_DIMENSION))) return null;
 	return { id: m[3], ext: m[4].toLowerCase(), width, height };
 }
-
-/** A media-library file's bucket key as stored by EmDash (<id>.<ext>). */
-const KEY = /^[A-Za-z0-9_.-]+\.[a-z0-9]{2,5}$/i;
 
 /**
  * Where an old Worker-route URL (/media/<id>-<w>x<h>.<format>) lives on the

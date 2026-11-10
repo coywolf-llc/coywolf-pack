@@ -1,4 +1,4 @@
-# Robots.txt Rules
+# Robots.txt
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
@@ -46,7 +46,7 @@ Extra lines that would block search engines or the whole site are flagged on the
 
 Rules saved before 0.7.0 keep working unchanged: the stored config is read with defaults for the new fields, and “keep the rules for all crawlers” is turned on only when that changes no verdict.
 
-Feature switches: **Robots.txt Rules** (`robots`) and **Weekly crawler list from Cloudflare Radar** (`robots.radarSync`). Both default to off.
+Feature switches: **Robots.txt** (`robots`) and **Weekly crawler list from Cloudflare Radar** (`robots.radarSync`). Both default to off.
 
 ## Setup
 

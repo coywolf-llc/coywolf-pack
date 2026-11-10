@@ -10,7 +10,7 @@
  * plugin blocks) is skipped rather than guessed at.
  */
 
-// biome-ignore lint/suspicious/noExplicitAny: Portable Text is untyped JSON.
+// any: Portable Text is untyped JSON.
 type Node = Record<string, any>;
 
 export interface MarkdownOptions {

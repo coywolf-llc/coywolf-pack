@@ -39,13 +39,13 @@ export const SECRET_SETTINGS = {
 		type: "secret",
 		label: "File Downloads — R2 secret access key",
 		description:
-			"For large uploads. To get one: (1) Cloudflare dashboard → R2 → Manage API tokens → Create Account API token; (2) choose Object Read & Write on the bucket bound as MEDIA; (3) create it and copy the Secret Access Key (shown once); (4) paste it here and save. The account ID, access key ID and bucket name go on the Files page → Settings, which has the full step-by-step guide.",
+			"For large uploads. To get one: (1) Cloudflare dashboard → R2 → Manage API tokens → Create Account API token; (2) choose Object Read & Write on the bucket bound as MEDIA; (3) create it and copy the Secret Access Key (shown once); (4) paste it here and save. The account ID, access key ID and bucket name go on the File Downloads page → Settings, which has the full step-by-step guide.",
 	},
 	videosApiToken: {
 		type: "secret",
 		label: "Videos — Cloudflare Stream API token",
 		description:
-			"To get one: (1) Cloudflare dashboard → My Profile → API Tokens → Create Token → Create Custom Token; (2) add the permission Account → Stream → Edit and include your account; (3) create it and copy the token (shown once); (4) paste it here and save. Or set the CF_STREAM_TOKEN Worker secret. The account ID and the full step-by-step guide are on the Videos page → Settings.",
+			"To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Stream → Edit; (3) create it and copy the token (shown once); (4) paste it here and save. Or set the CF_STREAM_TOKEN Worker secret. The account ID and the full step-by-step guide are on the Videos page → Settings.",
 	},
 	videosWebhookSecret: {
 		type: "secret",
@@ -54,21 +54,51 @@ export const SECRET_SETTINGS = {
 	},
 	imagesApiToken: {
 		type: "secret",
-		label: "Clean image URLs — Cloudflare API token",
+		label: "Clean Image URLs — Cloudflare API token",
 		description:
-			"Optional. Only for Set up media host on the Clean Image URLs page, which does the Cloudflare setup for you. To get one: (1) Cloudflare dashboard → My Profile → API Tokens → Create Token → Create Custom Token; (2) add the permissions Zone → Zone → Read, Zone → Zone Settings → Edit, Zone → Transform Rules → Edit, Zone → DNS → Edit, Account → Workers R2 Storage → Edit and Account → Account Rulesets → Read; (3) include your account and the site's zone; (4) create it, copy the token (shown once), paste it here and save. Or set the IMAGES_API_TOKEN Worker secret.",
+			"Optional. Only for Set up media host on the Clean Image URLs page, which does the Cloudflare setup for you. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Specified Domains → the site's domain, add Zone → Read, Zone Settings → Edit, Transform Rules → Edit and DNS → Edit; (3) in a policy scoped to Entire Account, add Workers R2 Storage → Edit and Account Rulesets → Read; (4) create it, copy the token (shown once), paste it here and save. The Clean Image URLs page has a pre-filled form. Or set the IMAGES_API_TOKEN Worker secret.",
 	},
 	usageApiToken: {
 		type: "secret",
 		label: "Cloudflare usage — read-only API token",
 		description:
-			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) add the permissions Account → Account Analytics → Read, Workers → Metadata Read-Only (All Workers; finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account → Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account). With Zone → Zone → Read added too (all zones, or this site's), the Discovery page shows whether Cloudflare's Crawler Hints is on.",
+			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Account Analytics → Read, Workers → Metadata Read-Only (finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. The Performance page has a pre-filled form. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account). With Zone → Read added too, in a policy scoped to All Domains or this site's domain, the Discovery page shows whether Cloudflare's Crawler Hints is on; with Zone Settings → Read, Bot Management → Read and DNS → Read as well, the Cloudflare Checkup page reads the zone's settings.",
+	},
+	cloudflareSetupToken: {
+		type: "secret",
+		label: "Cloudflare Checkup — setup token",
+		description:
+			"Optional. Only for the one-click fixes on the Cloudflare Checkup page (Speed Brain off, Always Use HTTPS on, minimum TLS 1.2); reading the checkup uses the read-only Cloudflare usage token. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Specified Domains → this site's domain, add Zone → Read and Zone Settings → Edit; (3) create it, copy the token (shown once), paste it here and save. The Cloudflare Checkup page has a pre-filled form.",
+	},
+	backupsCloudflareToken: {
+		type: "secret",
+		label: "Backups — Cloudflare API token for retention",
+		description:
+			"Optional. Only for Retention on Cloudflare on the Backups page, which sets the backup bucket's lifecycle rule (and an optional lock) to match the retention days. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Workers R2 Storage → Edit (and D1 → Edit to use the same token for restores); (3) create it, copy the token (shown once), paste it here and save. The Backups page has a pre-filled form. Or add Workers R2 Storage → Edit to the BACKUPS_API_TOKEN Worker secret's token.",
+	},
+	socialImagesApiToken: {
+		type: "secret",
+		label: "Social Images — Cloudflare Browser Run API token",
+		description:
+			"Optional with a BROWSER binding. Makes the social images with Cloudflare Browser Run. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Browser Run → Edit; (3) create it, copy the token (shown once), paste it here and save. The Social Images page has a pre-filled form and the account ID field. Or set the BROWSER_RUN_API_TOKEN Worker secret.",
 	},
 	robotsRadarToken: {
 		type: "secret",
-		label: "Robots.txt Rules — Cloudflare Radar API token",
+		label: "Robots.txt — Cloudflare Radar API token",
 		description:
-			"Optional. Keeps the crawler list current from Cloudflare Radar each week. To get one: (1) Cloudflare dashboard → My Profile → API Tokens → Create Token → Create Custom Token; (2) add the permission Account → Radar → Read and include your account; (3) create it and copy the token (shown once); (4) paste it here and save. Or set the RADAR_API_TOKEN Worker secret. The full step-by-step guide is on the Robots.txt page → Bots.",
+			"Optional. Keeps the crawler list current from Cloudflare Radar each week. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Radar → Read; (3) create it and copy the token (shown once); (4) paste it here and save. Or set the RADAR_API_TOKEN Worker secret. The full step-by-step guide is on the Robots.txt page → Bots.",
+	},
+	insightsFathomApiKey: {
+		type: "secret",
+		label: "Insights — Fathom API key",
+		description:
+			"Optional. For the Fathom traffic card on the Insights page. To get one: (1) sign in to Fathom and open app.usefathom.com/api; (2) select Create new, name it after this site, and choose Read only (all sites), or this site's read access; (3) save and copy the key (shown once); (4) paste it here and save. The site ID and the full step-by-step guide are on the Insights page.",
+	},
+	insightsGoogleServiceAccount: {
+		type: "secret",
+		label: "Insights — Google service account key (JSON)",
+		description:
+			"Optional. For the Google Search Console card on the Insights page. To get one: (1) in Google Cloud, create a service account and turn on the Google Search Console API for its project; (2) create a JSON key for it; (3) in Search Console, add the service account's email as a user on the site's property; (4) paste the whole JSON key file on the Insights page and save. The Insights page has the full step-by-step guide.",
 	},
 } as const satisfies Record<string, SecretSettingField>;
 
@@ -79,7 +109,7 @@ export type SecretSettingKey = keyof typeof SECRET_SETTINGS;
  * declares. Non-secret fields are dropped, so they never appear on the
  * generic Settings page.
  */
-// biome-ignore lint/suspicious/noExplicitAny: SettingField shape is EmDash's.
+// any: SettingField shape is EmDash's.
 export function secretSettingsSchema(moduleSchemas: Array<Record<string, any> | undefined> = []): Record<string, SecretSettingField> {
 	const out: Record<string, SecretSettingField> = { ...SECRET_SETTINGS };
 	for (const schema of moduleSchemas) {

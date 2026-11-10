@@ -27,7 +27,7 @@ import {
 import { reviewsMetadata } from "./schema.js";
 import { invalidateReviewStyle } from "./settings.js";
 
-// biome-ignore lint/suspicious/noEmptyInterface: reserved for future options.
+// An empty interface: reserved for future options.
 export interface ReviewsOptions {}
 
 export const F = { main: "reviews", schema: "reviews.schema" } as const;
@@ -61,7 +61,7 @@ export function reviewsPack(_options: ReviewsOptions): PackModule {
 		routes: {
 			"reviews/settings": {
 				permission: "plugins:manage" as const,
-				// biome-ignore lint/suspicious/noExplicitAny: plugin context.
+				// any: plugin context.
 				handler: async (ctx: any) => ({ ...normalizeStyle(await ctx.settings.get(STYLE_SETTING)), defaultAccent: DEFAULT_ACCENT }),
 			},
 

@@ -3,17 +3,23 @@
  * collection, author profiles, per-entry overrides, custom markup, robots /
  * Open Graph settings, and a JSON-LD preview.
  */
-import { Badge, Banner, Button, Checkbox, Dialog, Input, Loader, Select, Switch, Tabs } from "@cloudflare/kumo";
-import { ImageSquare, MagnifyingGlass, PencilSimple, Plus, Trash, TreeStructure } from "@phosphor-icons/react";
-import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
+import { Badge, Banner, Button, Checkbox, Dialog, Input, Select, Switch, Tabs } from "@cloudflare/kumo";
+import { ImageSquare, MagnifyingGlass, PencilSimple, Plus, Trash } from "@phosphor-icons/react";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
+import { apiGet, apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { FEATURES_CHANGED, PartSwitches } from "./feature-switches.js";
 import { type CustomSite, CustomTab, MarkupEditor, WarningList, useMarkupCheck } from "./schema-custom.js";
+import { useSaveResult } from "./toast.js";
 import { type CustomMarkup, type LintWarning, entryContributionId } from "../schema/custom.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/schema";
+
+const post = apiPost(API);
+const get = apiGet(API);
 
 type RowValue = string | Record<string, string>;
 interface Row {
@@ -85,20 +91,6 @@ interface EntryHit {
 	title: string;
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
-async function get<T>(path: string): Promise<T> {
-	return parseApiResponse<T>(await apiFetch(`${API}/${path}`), "The request failed");
-}
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
-
 const INPUT_TYPES: Record<string, string> = { url: "url", image: "url", email: "email", tel: "tel", date: "date", number: "number" };
 
 function Section(props: { title: string; description?: React.ReactNode; children: React.ReactNode }) {
@@ -114,14 +106,6 @@ function Section(props: { title: string; description?: React.ReactNode; children
 }
 
 /** The last save's result ("Saved."), hidden again once there are new unsaved changes. */
-function SavedStatus(props: { status?: string; dirty: boolean }) {
-	return (
-		<p className="text-sm text-kumo-subtle" aria-live="polite">
-			{props.dirty ? "" : props.status}
-		</p>
-	);
-}
-
 // ── Media picker ─────────────────────────────────────────────────
 
 interface MediaItem {
@@ -179,9 +163,7 @@ function MediaDialog(props: { open: boolean; onClose: () => void; onPick: (item:
 					))}
 				</ul>
 				{loading && (
-					<div className="flex justify-center py-4">
-						<Loader />
-					</div>
+					<Loading className="flex justify-center py-4" />
 				)}
 				{!loading && !items.length && !error && <p className="py-6 text-center text-sm text-kumo-subtle">No images yet.</p>}
 				<div className="mt-4 flex justify-end gap-2">
@@ -233,7 +215,7 @@ function PropertyEditor(props: {
 			{props.rows.map((row, index) => {
 				const meta = props.inputs[row.prop] ?? {};
 				return (
-					// biome-ignore lint/suspicious/noArrayIndexKey: rows are positional and repeatable.
+					// Index keys: rows are positional and repeatable.
 					<div key={index} className="flex items-start gap-2 rounded border border-kumo-line p-2">
 						<div className="w-40 shrink-0 pt-2 font-mono text-xs">{row.prop}</div>
 						<div className="min-w-0 flex-1 space-y-2">
@@ -319,7 +301,7 @@ function PropertyEditor(props: {
 function SiteTab(props: { config: Config; bylines: Byline[] | undefined; onSaved: (site: SiteDetails) => void }) {
 	const [site, setSite] = React.useState<SiteDetails>(props.config.site);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<string>();
+	const saveResult = useSaveResult();
 	const [error, setError] = React.useState<string>();
 	const dirty = isDirty(site, props.config.site);
 
@@ -330,9 +312,9 @@ function SiteTab(props: { config: Config; bylines: Byline[] | undefined; onSaved
 			const result = await post<{ site: SiteDetails }>("site/save", site);
 			setSite(result.site);
 			props.onSaved(result.site);
-			setStatus("Saved.");
+			saveResult.saved("Site Details saved");
 		} catch (cause) {
-			setError(errorText(cause, "Could not save Site Details"));
+			saveResult.failed(errorText(cause, "Could not save Site Details"));
 		} finally {
 			setPending(false);
 		}
@@ -372,7 +354,7 @@ function SiteTab(props: { config: Config; bylines: Byline[] | undefined; onSaved
 				) : (
 					<div className="space-y-2">
 						{props.bylines === undefined ? (
-							<Loader />
+							<Loading className="" />
 						) : props.bylines.length === 0 ? (
 							<p className="text-sm text-kumo-subtle">Create a byline first (Content → Bylines).</p>
 						) : (
@@ -390,9 +372,8 @@ function SiteTab(props: { config: Config; bylines: Byline[] | undefined; onSaved
 					Without a name, url or logo, the site title, site URL and site logo from EmDash's settings are used.
 				</p>
 				{error && <Banner variant="error" role="alert" description={error} />}
-				<SavedStatus status={status} dirty={dirty} />
 			</Section>
-			<SaveBar dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setSite(props.config.site)} />
+			<SaveBar error={saveResult.error} dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setSite(props.config.site)} />
 		</div>
 	);
 }
@@ -403,7 +384,7 @@ function TypesTab(props: { config: Config; onSaved: (types: Record<string, TypeC
 	const { config } = props;
 	const [types, setTypes] = React.useState(config.types);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<string>();
+	const saveResult = useSaveResult();
 	const [error, setError] = React.useState<string>();
 	const dirty = isDirty(types, config.types);
 	const pageItems = [{ value: "", label: "Default (Web Page)" }, ...config.catalog.pageTypes.map(([value, label]) => ({ value, label }))];
@@ -425,9 +406,9 @@ function TypesTab(props: { config: Config; onSaved: (types: Record<string, TypeC
 			const result = await post<{ types: Record<string, TypeChoice> }>("types/save", { types });
 			setTypes(result.types);
 			props.onSaved(result.types);
-			setStatus("Saved.");
+			saveResult.saved("Page types saved");
 		} catch (cause) {
-			setError(errorText(cause, "Could not save types"));
+			saveResult.failed(errorText(cause, "Could not save types"));
 		} finally {
 			setPending(false);
 		}
@@ -473,9 +454,8 @@ function TypesTab(props: { config: Config; onSaved: (types: Record<string, TypeC
 					))}
 				</div>
 				{error && <Banner variant="error" role="alert" description={error} />}
-				<SavedStatus status={status} dirty={dirty} />
 			</Section>
-			<SaveBar dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setTypes(config.types)} />
+			<SaveBar error={saveResult.error} dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setTypes(config.types)} />
 		</div>
 	);
 }
@@ -496,7 +476,7 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 	// What the selected byline has saved, to tell when `rows` has unsaved changes.
 	const [baseline, setBaseline] = React.useState<Row[]>([]);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<string>();
+	const saveResult = useSaveResult();
 	const [error, setError] = React.useState<string>();
 	const byline = props.bylines?.find((b) => b.id === selected);
 
@@ -507,8 +487,9 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 		const initial = byline ? (byline.rows ?? defaultRows(byline)) : [];
 		setRows(initial);
 		setBaseline(initial);
-		setStatus(undefined);
+		saveResult.clear();
 		setError(undefined);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [byline]);
 
 	const dirty = !!byline && isDirty(rows, baseline);
@@ -522,10 +503,10 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 			const next = result.rows.length ? result.rows : defaultRows(byline);
 			setRows(next);
 			setBaseline(next);
-			setStatus("Saved.");
+			saveResult.saved("Author saved");
 			props.reload();
 		} catch (cause) {
-			setError(errorText(cause, "Could not save the author"));
+			saveResult.failed(errorText(cause, "Could not save the author"));
 		} finally {
 			setPending(false);
 		}
@@ -533,9 +514,7 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 
 	if (props.bylines === undefined)
 		return (
-			<div className="flex justify-center py-12">
-				<Loader />
-			</div>
+			<Loading />
 		);
 
 	return (
@@ -579,12 +558,12 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 							<Button variant="ghost" onClick={() => setRows(defaultRows(byline))}>
 								Reset to byline details
 							</Button>
-							<SavedStatus status={status} dirty={dirty} />
 						</div>
 					</>
 				)}
 			</Section>
 			<SaveBar
+				error={saveResult.error}
 				dirty={dirty}
 				saving={pending}
 				canSave={props.authorsOn}
@@ -650,7 +629,7 @@ function EntryPicker(props: { collections: Collection[]; onPick: (collection: st
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<div aria-live="polite">
 				{loading ? (
-					<Loader />
+					<Loading className="" />
 				) : items && items.length === 0 ? (
 					<p className="text-sm text-kumo-subtle">No entries match (searches the 100 most recently updated).</p>
 				) : (
@@ -858,7 +837,16 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 	);
 }
 
-function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) {
+/** "?entry=<collection>:<id>" (the entry editor's Schema & Social panel links here): the override to open. */
+export function entryFromSearch(search: string): { collection: string; entryId: string } | null {
+	const value = new URLSearchParams(search).get("entry") ?? "";
+	const at = value.indexOf(":");
+	if (at < 1 || at === value.length - 1) return null;
+	return { collection: value.slice(0, at), entryId: value.slice(at + 1) };
+}
+
+function OverridesTab(props: { config: Config; bylines: Byline[] | undefined; openEntry?: { collection: string; entryId: string } | null }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const [items, setItems] = React.useState<Override[]>();
 	const [error, setError] = React.useState<string>();
 	const [editing, setEditing] = React.useState<Override | null>(null);
@@ -881,8 +869,25 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) 
 		void load();
 	}, [load]);
 
+	// Opened from the entry editor: its override (or a new one for it), once the list has loaded.
+	const opened = React.useRef(false);
+	React.useEffect(() => {
+		const want = props.openEntry;
+		if (!want || !items || opened.current) return;
+		opened.current = true;
+		const existing = items.find((i) => i.collection === want.collection && i.entryId === want.entryId);
+		if (existing) {
+			setEditing(existing);
+			return;
+		}
+		void post<{ items: EntryHit[] }>("entries/find", { collection: want.collection })
+			.then((found) => found.items.find((i) => i.id === want.entryId)?.title)
+			.catch(() => undefined)
+			.then((title) => setEditing({ collection: want.collection, entryId: want.entryId, ...(title ? { title } : {}), ...(props.config.types[want.collection] ?? {}) }));
+	}, [items, props.openEntry, props.config.types]);
+
 	const remove = async (item: Override) => {
-		if (!window.confirm(`Remove the override for ${item.title ?? item.entryId}?`)) return;
+		if (!(await confirm({ title: `Remove the override for ${item.title ?? item.entryId}?`, confirmLabel: "Remove" }))) return;
 		try {
 			await post("entries/delete", { collection: item.collection, entryId: item.entryId });
 			setNotice("Override removed.");
@@ -897,6 +902,7 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) 
 			title="Per-entry overrides"
 			description="Give a single entry a different page or article type than its collection, say who or what it's about (its main subject), or add your own JSON-LD."
 		>
+			{confirmDialog}
 			<div className="flex justify-end">
 				<Button variant="primary" icon={<Plus aria-hidden="true" />} onClick={() => setEditing({ collection: "", entryId: "" })}>
 					New override
@@ -905,7 +911,7 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) 
 			<div aria-live="polite">{notice && <Banner variant="default" role="status" title={notice} />}</div>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!items && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : items && items.length === 0 ? (
 				<p className="py-6 text-center text-sm text-kumo-subtle">No overrides. Every entry uses its collection's types.</p>
 			) : (
@@ -968,7 +974,7 @@ const limit = (value: unknown): number | string => {
 function SettingsTab(props: { config: Config; onSaved: (settings: Config["settings"]) => void }) {
 	const [values, setValues] = React.useState(props.config.settings);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<string>();
+	const saveResult = useSaveResult();
 	const [error, setError] = React.useState<string>();
 	const dirty = isDirty(values, props.config.settings);
 	const str = (key: string) => String(values[key] ?? "");
@@ -994,9 +1000,9 @@ function SettingsTab(props: { config: Config; onSaved: (settings: Config["settin
 			const result = await post<{ settings: Config["settings"] }>("settings/save", body);
 			setValues(result.settings);
 			props.onSaved(result.settings);
-			setStatus("Saved.");
+			saveResult.saved("Settings saved");
 		} catch (cause) {
-			setError(errorText(cause, "Could not save settings"));
+			saveResult.failed(errorText(cause, "Could not save settings"));
 		} finally {
 			setPending(false);
 		}
@@ -1047,8 +1053,7 @@ function SettingsTab(props: { config: Config; onSaved: (settings: Config["settin
 				{text("schemaOgLocale", "og:locale", "en_US", "Leave empty to derive it from the site locale.")}
 			</Section>
 			{error && <Banner variant="error" role="alert" description={error} />}
-			<SavedStatus status={status} dirty={dirty} />
-			<SaveBar dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setValues(props.config.settings)} />
+			<SaveBar error={saveResult.error} dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setValues(props.config.settings)} />
 		</div>
 	);
 }
@@ -1127,7 +1132,7 @@ function PreviewTab(props: { config: Config }) {
 			)}
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<div aria-live="polite" aria-busy={pending}>
-				{pending && <Loader />}
+				{pending && <Loading className="" />}
 				{result && !pending && (
 					<div className="space-y-4">
 						<p className="text-sm text-kumo-subtle">
@@ -1206,7 +1211,9 @@ export function SchemaPage() {
 	const [bylines, setBylines] = React.useState<Byline[]>();
 	const [authorsOn, setAuthorsOn] = React.useState(false);
 	const [error, setError] = React.useState<string>();
-	const [tab, setTab] = React.useState("site");
+	// The entry editor's Schema & Social panel links to an entry's override: open that tab.
+	const [openEntry] = React.useState(() => (typeof window === "undefined" ? null : entryFromSearch(window.location.search)));
+	const [tab, setTab] = React.useState(openEntry ? "overrides" : "site");
 
 	const loadAuthors = React.useCallback(async () => {
 		try {
@@ -1246,15 +1253,15 @@ export function SchemaPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 min-w-0 items-center gap-2 text-2xl font-semibold leading-tight">
-					<TreeStructure aria-hidden="true" /> Schema
-				</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="Schema & Social"
+				description={
+					<>
 					Schema.org structured data, robots directives and Open Graph extras. The graph replaces EmDash's built-in JSON-LD and
 					keeps everything it had: headline, description, image, dates, author and publisher.
-				</p>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="schema" />
 
@@ -1263,14 +1270,12 @@ export function SchemaPage() {
 				<Banner
 					variant="default"
 					role="status"
-					description={`Off on the Coywolf Pack page: ${off.map(([, label]) => label).join(", ")}. Settings here are kept but not used until they're on.`}
+					description={`Off: ${off.map(([, label]) => label).join(", ")}. Settings here are kept but not used until they're on.`}
 				/>
 			)}
 
 			{!config && !error ? (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			) : config ? (
 				<>
 					<Tabs value={tab} onValueChange={setTab} tabs={SCHEMA_TABS} />
@@ -1278,7 +1283,7 @@ export function SchemaPage() {
 						{tab === "site" && <SiteTab config={config} bylines={bylines} onSaved={(site) => setConfig({ ...config, site })} />}
 						{tab === "types" && <TypesTab config={config} onSaved={(types) => setConfig({ ...config, types })} />}
 						{tab === "authors" && <AuthorsTab config={config} bylines={bylines} authorsOn={authorsOn} reload={() => void loadAuthors()} />}
-						{tab === "overrides" && <OverridesTab config={config} bylines={bylines} />}
+						{tab === "overrides" && <OverridesTab config={config} bylines={bylines} openEntry={openEntry} />}
 						{tab === "custom" && (
 							<CustomTab
 								site={config.custom}

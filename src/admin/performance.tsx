@@ -3,18 +3,22 @@
  * long Cloudflare's edge keeps pages (Workers Cache), the media host's Cache
  * Rule, and a button that clears every cached page plus the media host's
  * images. Cloudflare's zone "Purge Everything" doesn't reach the pages (the
- * cache belongs to the Worker, not the zone). Below them, Cloudflare usage
- * (./usage.tsx).
+ * cache belongs to the Worker, not the zone). Below them, Speculation Rules
+ * (./speculation.tsx) and Cloudflare usage (./usage.tsx).
  */
 import { Banner, Button, Checkbox, Input, Switch } from "@cloudflare/kumo";
 import { ArrowsClockwise, Fire, Lightning } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
-import { errorText } from "./settings-ui.js";
+import { apiPost, errorText } from "./api.js";
+import { DocsLink, PageHeader } from "./page.js";
+import { SpeculationCard } from "./speculation.js";
 import { UsageCard } from "./usage.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/cache";
+
+const post = apiPost(API, { fallback: "Something went wrong" });
 
 interface Lifetimes {
 	maxAgeDays: number;
@@ -75,14 +79,6 @@ function warmText(state: NonNullable<WarmStatus["state"]>): string {
 function dailyText(state: NonNullable<WarmStatus["state"]>): string | null {
 	if (state.phase !== "done" || state.rewarmAfter || !state.nextDailyAt) return null;
 	return `Next daily refresh: about ${new Date(state.nextDailyAt).toLocaleString()}.`;
-}
-
-async function post<T>(path: string, body?: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
-	});
-	return parseApiResponse<T>(response, "Something went wrong");
 }
 
 const days = (seconds?: number) => (seconds ? Math.round(seconds / 86400) : 0);
@@ -192,15 +188,17 @@ export function PerformancePage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Performance</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="Performance"
+				description={
+					<>
 					Cloudflare keeps copies of your public pages at its edge (Workers Cache), so visitors get them without waiting for the
 					site to build them. EmDash clears the pages that change when you publish or edit content, menus or settings; Coywolf
-					Pack clears everything after each deploy and whenever its settings change. These settings take effect on sites that
-					turn on Workers Cache (Astro's cacheCloudflare(); see docs/performance.md in the Coywolf Pack repository).
-				</p>
-			</header>
+					Pack clears the pages its settings change. Each deploy starts with an empty cache. These settings take effect on sites that
+					turn on Workers Cache (Astro's cacheCloudflare(); see <DocsLink doc="performance">the Performance docs</DocsLink>).
+					</>
+				}
+			/>
 
 			<section className="rounded-lg border border-kumo-line" aria-label="Performance settings">
 			<div className="divide-y divide-kumo-line">
@@ -247,7 +245,7 @@ export function PerformancePage() {
 								After a deploy or a full clear, every page is cold until someone visits it. Warming visits every page in your
 								sitemap (home page first, then newest posts) a few at a time, in the background of the requests your site already
 								gets, so the next visitors and search engine crawlers get cached pages. It warms the region your traffic comes
-								from; it doesn't run while nobody is visiting. Warming also runs a minute after content edits (saving or
+								from, with an hourly check in case nobody visits. Warming also runs a minute after content edits (saving or
 								publishing an entry, menus, categories, site settings), which clear the home page, archives and related pages.
 							</p>
 						</div>
@@ -323,6 +321,8 @@ export function PerformancePage() {
 				</div>
 			</div>
 			</section>
+
+			<SpeculationCard />
 
 			<UsageCard />
 		</div>

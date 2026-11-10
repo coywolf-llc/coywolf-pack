@@ -3,7 +3,7 @@
  * where each video is used; editing, captions, uploads (straight from the
  * browser to Stream), index rebuild and the Stream webhook.
  */
-import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea, Loader, Select, Tabs } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea, Select, Tabs } from "@cloudflare/kumo";
 import {
 	ArrowClockwise,
 	ClosedCaptioning,
@@ -18,14 +18,20 @@ import {
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
+import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import type { VideoDisplay } from "../videos/render.js";
 import { CredentialGuide } from "./guides.js";
 import { DisplaySettings, fromDisplayDraft, toDisplayDraft } from "./videos-display.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/videos";
+
+const post = apiPost(API, { body: {} });
 
 interface Usage {
 	title: string | null;
@@ -108,7 +114,6 @@ interface Caption {
 	status?: string;
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
 const numberFormat = new Intl.NumberFormat("en-US");
 
@@ -119,15 +124,6 @@ function clock(seconds: number): string {
 	const m = Math.floor((total % 3600) / 60);
 	const s = String(total % 60).padStart(2, "0");
 	return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
-}
-
-async function post<T>(path: string, body: unknown = {}): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
 }
 
 // ── Edit ─────────────────────────────────────────────────────────
@@ -208,9 +204,7 @@ function EditDialog(props: { video: Video | null; onClose: () => void; onSaved: 
 					and by schema and the video sitemap.
 				</Dialog.Description>
 				{!meta && !error ? (
-					<div className="py-8 text-center">
-						<Loader />
-					</div>
+					<Loading className="py-8 text-center" />
 				) : (
 					<form
 						className="mt-4 space-y-4"
@@ -293,6 +287,7 @@ function EditDialog(props: { video: Video | null; onClose: () => void; onSaved: 
 // ── Captions ─────────────────────────────────────────────────────
 
 function CaptionsDialog(props: { video: Video | null; onClose: () => void }) {
+	const [confirm, confirmDialog] = useConfirm();
 	const [captions, setCaptions] = React.useState<Caption[]>();
 	const [lang, setLang] = React.useState("en");
 	const [file, setFile] = React.useState<File | null>(null);
@@ -336,6 +331,7 @@ function CaptionsDialog(props: { video: Video | null; onClose: () => void }) {
 	return (
 		<Dialog.Root open={props.video !== null} onOpenChange={(open) => !open && !busy && props.onClose()}>
 			<Dialog className="p-6" size="lg">
+				{confirmDialog}
 				<Dialog.Title className="text-lg font-semibold">Captions{props.video ? `: ${props.video.name}` : ""}</Dialog.Title>
 				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
 					Upload a WebVTT file or have Stream generate captions from the audio. Ready tracks are copied to the site for
@@ -343,9 +339,7 @@ function CaptionsDialog(props: { video: Video | null; onClose: () => void }) {
 				</Dialog.Description>
 				<div className="mt-4 space-y-4">
 					{!captions && !error ? (
-						<div className="py-6 text-center">
-							<Loader />
-						</div>
+						<Loading className="py-6 text-center" />
 					) : captions && captions.length === 0 ? (
 						<p className="text-sm text-kumo-subtle">No captions yet.</p>
 					) : (
@@ -362,8 +356,8 @@ function CaptionsDialog(props: { video: Video | null; onClose: () => void }) {
 										icon={<Trash aria-hidden="true" />}
 										aria-label={`Delete ${c.language} captions`}
 										disabled={Boolean(busy)}
-										onClick={() => {
-											if (window.confirm(`Delete the ${c.language} captions?`)) void run("Delete", "captions/delete", { lang: c.language });
+										onClick={async () => {
+											if (await confirm({ title: `Delete the ${c.language} captions?`, confirmLabel: "Delete" })) void run("Delete", "captions/delete", { lang: c.language });
 										}}
 									/>
 								</li>
@@ -659,7 +653,8 @@ function ConnectForm(props: { onConnected: () => void }) {
 	);
 }
 
-function SettingsPanel(props: { onSaved: (message: string) => void }) {
+function SettingsPanel(props: { onSaved: () => void }) {
+	const result = useSaveResult();
 	const [saved, setSaved] = React.useState<VideosSettings>();
 	const toDraft = (s: VideosSettings) => ({
 		accountId: s.accountId,
@@ -697,9 +692,13 @@ function SettingsPanel(props: { onSaved: (message: string) => void }) {
 					...(clearToken ? { clearToken: true } : token.trim() ? { token: token.trim() } : {}),
 				}),
 			);
-			props.onSaved(clearToken ? "Stream API token removed." : "Videos settings saved.");
+			result.saved(clearToken ? "Stream API token removed" : "Videos settings saved");
+			props.onSaved();
 		} catch (cause) {
-			setError(errorText(cause, "Could not save the settings"));
+			const message = errorText(cause, "Could not save the settings");
+			result.failed(message);
+			// Removing the token happens with the form clean, when the Save bar (and its message) isn't showing.
+			if (clearToken) setError(message);
 		} finally {
 			setPending(undefined);
 		}
@@ -708,9 +707,7 @@ function SettingsPanel(props: { onSaved: (message: string) => void }) {
 		return error ? (
 			<Banner variant="error" role="alert" title="Could not load the settings" description={error} />
 		) : (
-			<div className="py-12 text-center">
-				<Loader />
-			</div>
+			<Loading className="py-12 text-center" />
 		);
 	const text = (key: "accountId" | "customerSubdomain" | "accentColor" | "defaultTags") => ({
 		value: draft[key],
@@ -789,6 +786,7 @@ function SettingsPanel(props: { onSaved: (message: string) => void }) {
 				{error && <Banner variant="error" role="alert" description={error} />}
 			</form>
 			<SaveBar
+				error={result.error}
 				form="cw-videos-settings-form"
 				dirty={dirty}
 				saving={pending === "save"}
@@ -898,10 +896,10 @@ export function VideosPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Videos</h1>
-					<div className="flex shrink-0 justify-end gap-2">
+			<PageHeader
+				title="Videos"
+				actions={
+					<>
 						{tab === "library" && status?.configured && (
 							<>
 								<Button variant="secondary" icon={<ArrowClockwise />} disabled={Boolean(busy)} onClick={() => void load(true)}>
@@ -912,12 +910,15 @@ export function VideosPage() {
 								</Button>
 							</>
 						)}
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Your Cloudflare Stream library. Add videos to posts with the <strong>Coywolf Video</strong> block; plays,
 						likes and the posts each video appears in show here.
-					</p>
-				</div>
+					</>
+				}
+			>
 				{tab === "library" && status?.configured && (
 					<div className="flex flex-wrap items-end gap-4">
 						<div className="w-full sm:w-72">
@@ -954,7 +955,7 @@ export function VideosPage() {
 						)}
 					</div>
 				)}
-			</header>
+			</PageHeader>
 
 			<PartSwitches module="videos" />
 
@@ -997,8 +998,7 @@ export function VideosPage() {
 
 			{tab === "settings" && (
 				<SettingsPanel
-					onSaved={(message) => {
-						setNotice(message);
+					onSaved={() => {
 						void load(true);
 					}}
 				/>
@@ -1019,9 +1019,7 @@ export function VideosPage() {
 			)}
 
 			{tab !== "library" ? null : !videos && !error ? (
-				<div className="py-12 text-center text-kumo-subtle">
-					<Loader />
-				</div>
+				<Loading className="py-12 text-center text-kumo-subtle" />
 			) : videos && status?.configured && videos.length === 0 ? (
 				<div className="py-10 text-center text-kumo-subtle">
 					<VideoCamera size={40} className="mx-auto mb-3 opacity-30" aria-hidden="true" />
@@ -1090,7 +1088,7 @@ export function VideosPage() {
 									<DropdownMenu.Content className="p-1">
 										<DropdownMenu.Item
 											className="py-1 data-highlighted:bg-kumo-fill"
-											icon={<PencilSimple className="me-1.5 size-3.5" aria-hidden="true" />}
+											icon={PencilSimple}
 											onClick={() => setEditing(v)}
 										>
 											Edit
@@ -1098,7 +1096,7 @@ export function VideosPage() {
 										{f.captions && (
 											<DropdownMenu.Item
 												className="py-1 data-highlighted:bg-kumo-fill"
-												icon={<ClosedCaptioning className="me-1.5 size-3.5" aria-hidden="true" />}
+												icon={ClosedCaptioning}
 												onClick={() => setCaptioning(v)}
 											>
 												Captions
@@ -1106,7 +1104,7 @@ export function VideosPage() {
 										)}
 										<DropdownMenu.Item
 											className="py-1 data-highlighted:bg-kumo-fill"
-											icon={<Copy className="me-1.5 size-3.5" aria-hidden="true" />}
+											icon={Copy}
 											onClick={() => {
 												void navigator.clipboard.writeText(v.uid);
 												setNotice(`Copied the ID of ${v.name}.`);
@@ -1114,9 +1112,9 @@ export function VideosPage() {
 										>
 											Copy video ID
 										</DropdownMenu.Item>
-										<DropdownMenu.Item
-											className="py-1 text-kumo-danger data-highlighted:bg-kumo-fill"
-											icon={<Trash className="me-1.5 size-3.5" aria-hidden="true" />}
+										<DropdownMenu.Item variant="danger"
+											className="py-1"
+											icon={Trash}
 											onClick={() => setDeleting(v)}
 										>
 											Delete

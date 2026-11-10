@@ -2,12 +2,13 @@
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-EmDash has full-text search built in: SQLite FTS5 with BM25 ranking, English stemming, prefix matching, highlighted snippets, a public API (`/_emdash/api/search`), and a `LiveSearch` component. This module adds what it leaves out. Turn on **Search** and its parts on the Coywolf Pack page. Search is off by default; once it's on, **Live results** is on too, and the other parts are off until you turn them on.
+EmDash has full-text search built in: SQLite FTS5 with BM25 ranking, English stemming, prefix matching, highlighted snippets, a public API (`/_emdash/api/search`), and a `LiveSearch` component. This module adds what it leaves out. Turn on **Search** and its parts on the **Features** page (**Coywolf Pack → Features** in the sidebar). Search is off by default; once it's on, **Live results** is on too, and the other parts are off until you turn them on.
 
 - **Search settings** (`search.settings`): a **Search** admin page to choose which collections are searchable, set field weights, pick the tokenizer (English stemming, exact words, or trigram substrings), and rebuild indexes with a progress readout and per-collection entry counts. It calls EmDash's own search API, so it needs EmDash's `search:manage` permission (admins). Fields are made searchable in each collection's schema.
 - **Live results** (`search.live`, on by default with Search): matching entries in a dropdown as visitors type into the site's search box, like the Coywolf Search WordPress plugin. See [Live results](#live-results).
 - **Search box** (`search.box`): a `SearchBox` component with as-you-type suggestions while **Live results** is on (titles first, then full text, with excerpts), arrow keys, Enter and Escape, a clear button, content-type labels, highlighted matches, screen-reader announcements, and a fade that respects reduced motion. When nothing matches every word, it shows results for any of the words, ranked by how many they contain. Without JavaScript it's a plain search form that submits to your search page.
-- **Search rate limit** (`search.rateLimit`): limits each visitor to 120 searches a minute (configurable) on EmDash's public search and suggestion endpoints and the pack's search and live results routes, answering `429` with `Retry-After`. Visitors are keyed by a salted hash of their IP address, never the address itself.
+- **Search insights** (`insights.search`, part of [Insights](insights.md#search-insights)): top searches and searches with no results on the Insights page. Only the normalized query and daily counts are stored, for 90 days. While it's on, live results and the SearchBox report a search the visitor settled on (no keystroke for 1.5 seconds, or a result opened) to `search/seen`.
+- **Search rate limit** (`search.rateLimit`): limits each visitor to 120 searches a minute (configurable) on EmDash's public search and suggestion endpoints and the pack's search and live results routes, answering `429` with `Retry-After`. Visitors are keyed by a salted hash of their IP address (an IPv6 address by its /64, since one connection gets a whole /64), never the address itself.
 
 ## Live results
 
@@ -24,11 +25,12 @@ Results come from `GET /_emdash/api/plugins/coywolf-pack/search/live?q=…` (opt
 
 **Speed and caching.** With the pack middleware installed (`coywolfPack()` in `src/middleware.ts`), the middleware answers both URLs itself, before EmDash's plugin routing:
 
-- Every answer is stored in Cloudflare's cache (the Cache API, per location; live answers for 5 minutes, title indexes for a day) and in a small per-isolate memory cache. The key is the query (trimmed, spaces collapsed, lower-cased), `limit`, `collections`, `locale` and the **search content version**. Browsers keep live answers for 60 seconds, and the title index for a year when the page's version matches (its URL changes with every version), 5 minutes otherwise.
+- With Astro route caching on (Workers Cache in front of the Worker), every successful answer is kept in the edge cache, so repeats don't run the Worker at all: live answers for 5 minutes, the title index for a day when the URL names the current content version (5 minutes for an old page's version). Each is tagged `coywolf-search` and with every searchable collection's slug, which EmDash clears whenever content in that collection changes, so a publish shows up in search at once. Bad input (400), the rate limit's 429, the warm-up's 204 and failures are never kept. Answers sent to the edge carry no `Server-Timing` or `X-Coywolf-Cache` (the edge would hand one render's timings to every later visitor).
+- Without route caching, every answer is stored in Cloudflare's cache (the Cache API, per location; live answers for 5 minutes, title indexes for a day) and in a small per-isolate memory cache instead. The key is the query (trimmed, spaces collapsed, lower-cased), `limit`, `collections`, `locale` and the **search content version**. With route caching those two layers are skipped: an isolate that hasn't read a new content version yet would put its old answer back at the edge right after EmDash cleared it. Browsers keep live answers for 60 seconds, and the title index for a year when the page's version matches (its URL changes with every version), 5 minutes otherwise.
 - The content version changes whenever published content does (publish, unpublish, update, delete, restore), and when search settings change on the **Search** admin page. New keys miss, so visitors never see results from before an edit; old copies just expire. Other Worker isolates pick up a new version within five minutes (it's read with the feature switches).
 - Cache hits skip the database and the rate limit. Misses count against **Search rate limit** when it's on.
 - A miss reads the database in a few batched round trips: search settings (cached per isolate for a minute), then title and full-text matches for every collection at once, then excerpts and URL terms at once. The any-word fallback adds one more. That's 2–3 D1 round trips (about 7 statements) where it was 25–31 queries.
-- Responses carry `Server-Timing` (`cw-search` says `hit-memory`, `hit-edge`, `miss` or `warm`; `cw-d1` counts statements and round trips) and `X-Coywolf-Cache: HIT` or `MISS`.
+- Without route caching, responses carry `Server-Timing` (`cw-search` says `hit-memory`, `hit-edge`, `miss` or `warm`; `cw-d1` counts statements and round trips) and `X-Coywolf-Cache: HIT` or `MISS`. With it, check `cf-cache-status` instead (`HIT` once the edge has the answer).
 
 Without the middleware, the plugin routes run the same batched search, without the Cache API layer.
 
@@ -43,9 +45,9 @@ coywolfPlugin({ search: { live: { limit: 8, minChars: 2, debounce: 120, enterOpe
 To measure on a live site:
 
 ```sh
-# A miss, then a hit (same query, any case or spacing).
-curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf%20$RANDOM" | grep -iE "server-timing|x-coywolf-cache|cache-control"
-curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf" | grep -iE "server-timing|x-coywolf-cache"
+# A miss, then a hit (same URL: the edge cache keys on the exact query string).
+curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf%20$RANDOM" | grep -iE "cf-cache-status|cache-control"
+curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?q=wolf" | grep -iE "cf-cache-status"
 # The title index and the warm-up.
 curl -s --compressed -o /dev/null -w "%{size_download} bytes, %{time_total}s\n" "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/index?v=x"
 curl -s -o /dev/null -D - "https://coywolf.com/_emdash/api/plugins/coywolf-pack/search/live?warm=1" | grep -i server-timing
@@ -94,19 +96,18 @@ Fallback results aren't paginated (the best 50 are ranked together).
 
 ## Rate limit setup
 
-The limit is enforced by a [Workers Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) binding when you add one. Its limit and period (10 or 60 seconds) come from `wrangler.jsonc`:
+The limit is enforced by a [Workers Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) binding named `COYWOLF_RATE_LIMITER` when the site has one; the same binding limits video plays and likes (see [Rate limiting](performance.md#rate-limiting)). Its limit and period (10 or 60 seconds) come from `wrangler.jsonc`:
 
 ```jsonc
+// wrangler.jsonc (coywolf.com)
 "ratelimits": [
-  { "name": "SEARCH_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }
+  { "name": "COYWOLF_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }
 ]
 ```
 
-```js
-coywolfPlugin({ search: { rateLimiter: "SEARCH_RATE_LIMITER" } });
-```
-
-- `rateLimiter`: the binding's name. Counting happens at Cloudflare (per location), so it holds across Worker isolates. Blocked requests get `Retry-After: 60`.
+- Counting happens at Cloudflare (per location), so it holds across Worker isolates. Blocked requests get `Retry-After: 60`. Search's keys are its own (`search:<hash>`), so plays and likes don't use up a visitor's searches.
+- `namespace_id` must be unique in the Cloudflare account: give each site its own number, or sites in one account share their counters.
+- `rateLimiter`: a binding with another name (`coywolfPlugin({ search: { rateLimiter: "SEARCH_RATE_LIMITER" } })`), for sites that added one before 0.35.19.
 - Without a binding, each Worker isolate counts on its own (`requestsPerMinute`, default 120; `0` turns it off). That's best effort: it stops one client hammering one isolate, but it isn't a hard limit.
 - Optional Worker secret `SEARCH_RATE_LIMIT_SALT` for the IP hash (recommended; a fixed built-in salt is used otherwise, so keys agree across isolates).
 - Requires the pack middleware (`coywolfPack()` in `src/middleware.ts`). The admin endpoints (enable, rebuild, stats) aren't limited.

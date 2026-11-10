@@ -1,18 +1,17 @@
 /**
  * Clean Image URLs module: resized copies of media-library images at short,
- * cacheable URLs, and cleanImageUrl() / originalImageUrl() for themes. Off by
- * default.
+ * cacheable URLs on the site's media host, and cleanImageUrl() /
+ * originalImageUrl() for themes. Off by default.
  *
- * Two modes:
- *  - Media host (recommended): an R2 custom domain on the media bucket with
- *    Cloudflare Image Transformations and two URL-rewrite rules
- *    (https://media.example.com/s/<w>x<h>/<file>). Images never touch the
- *    Worker. Set with `images: { cdn }` or on the Clean Image URLs page.
- *  - Worker route: /media/<id>-<w>x<h>.<format>, read from the media bucket,
- *    resized by the Images binding, cached at the edge for a year. With a
- *    media host set, these old URLs 301 to the media host.
+ * The media host is an R2 custom domain on the media bucket with Cloudflare
+ * Image Transformations and two URL-rewrite rules
+ * (https://media.example.com/s/<w>x<h>/<file>). Images never touch the
+ * Worker. It's EmDash's own `r2({ publicUrl })` when that's set, else the host
+ * saved on the Clean Image URLs page, else `images: { cdn }` (see lib.ts).
+ * Old Worker-route URLs (/media/<id>-<w>x<h>.<format>, from releases that
+ * resized in the Worker) answer 301 to the same size on the media host.
  *
- * Stored image sizes (with a media host): WebP and AVIF copies of each image
+ * Stored image sizes: WebP and AVIF copies of each image
  * at fixed widths, made once when the image is uploaded (or, when the site
  * opts in, by the backfill for existing images), plus the site's crops, made
  * when a page first shows them; all served as plain files. responsiveImage()
@@ -29,10 +28,10 @@ import { WARMER_AGENT, WARM_SETTING, WARM_STATE_OPTION, startWarm } from "../pag
 import type { PackMiddleware, PackModule } from "../core/module.js";
 import { CLOUDFLARE_API_HOST } from "./cloudflare.js";
 import { afterResponse, workerEnv } from "../shared.js";
-import { FORMATS, IMAGE_PATH, cdnOriginalUrl, cdnRedirectUrl, cleanImagePath, imageCdn, mediaFile, parseImagePath, parseCdnUrl, setImageCdn, snappedImagePath } from "./lib.js";
+import { IMAGE_PATH, cdnOriginalUrl, cdnRedirectUrl, cleanImagePath, imageCdn, mediaFile, parseImagePath, parseCdnUrl, setImageCdn } from "./lib.js";
 import { imagesModule } from "./module.js";
 import { markPendingMedia } from "./pending.js";
-import { configureMediaHostDatabase, refreshMediaHost, variantsBulkOn } from "./settings.js";
+import { configureMediaHostDatabase, loadStoragePublicUrl, refreshMediaHost, variantsBulkOn } from "./settings.js";
 import { type ImagesBinding, type VariantBucket, type VariantDoc, type Crop, VARIANTS_VERSION, cropSrcsets, cropState, currentDoc, eligible, generateVariants, parseDoc, setImageCrops, variantSrcsets } from "./variants.js";
 import {
 	type BackfillDeps,
@@ -58,9 +57,9 @@ export const F = { main: "images" } as const;
 export const FEATURES = [
 	{
 		id: F.main,
-		label: "Clean image URLs",
+		label: "Clean Image URLs",
 		description:
-			"Resized images at short addresses instead of /_image?href=…: on your own media host (media.example.com/s/600x315/<file>, set up on the Clean Image URLs page) or at /media/<id>-600x315.webp. Themes use cleanImageUrl() to build them.",
+			"Resized images at short addresses on your own media host (media.example.com/s/600x315/<file>, set up on the Clean Image URLs page) instead of /_image?href=…. Themes use cleanImageUrl() to build them.",
 		default: false,
 	},
 ];
@@ -69,12 +68,13 @@ registerFeatures(FEATURES);
 export interface ImagesOptions {
 	/** R2 binding of the media library. Default "MEDIA". */
 	bucket?: string;
-	/** Images binding. Default "IMAGES" (the Astro Cloudflare adapter's). */
+	/** Images binding, for stored sizes. Default "IMAGES" (the Astro Cloudflare adapter's). */
 	images?: string;
 	/**
 	 * Media host: an https origin serving the media bucket with the /s/ resize
-	 * rules, e.g. "https://media.coywolf.com" (see docs/images.md).
-	 * A host saved on the Clean Image URLs page takes precedence.
+	 * rules, e.g. "https://media.coywolf.com" (see docs/images.md). The
+	 * fallback: EmDash's `storage: r2({ publicUrl })` wins when it's set, then a
+	 * host saved on the Clean Image URLs page.
 	 */
 	cdn?: string;
 	/** D1 binding of the site database (for the saved media host). Default "DB". */
@@ -398,6 +398,8 @@ export function imagesPack(options: ImagesOptions = {}): PackModule {
 	if (options.cdn && !/^https:\/\//i.test(options.cdn.trim())) console.warn("coywolf-pack images: images.cdn must be an https origin like https://media.example.com; ignored.");
 	setImageCdn(options.cdn);
 	configureMediaHostDatabase(options.database);
+	// EmDash's publicUrl, read once per isolate (refreshMediaHost waits for it too).
+	void loadStoragePublicUrl();
 	return {
 		id: "images",
 		label: "Clean Image URLs",
@@ -428,9 +430,12 @@ export function imagesPack(options: ImagesOptions = {}): PackModule {
 }
 
 /**
- * A clean URL for a resized copy of a media-library image, or null when the
- * feature is off or `src` isn't a media-library file (use your usual image
- * code then). `height` crops to fill; without it the ratio is kept.
+ * A clean URL for a resized copy of a media-library image on the media host,
+ * or null when the feature is off, there's no media host, or `src` isn't a
+ * media-library file (use your usual image code then). `src` can be EmDash's
+ * /_emdash/api/media/file/<file> or, with EmDash's publicUrl set, its
+ * <publicUrl>/<file>. `height` crops to fill; without it the ratio is kept.
+ * `format` is ignored (the media host picks WebP or AVIF).
  */
 export async function cleanImageUrl(src: string | null | undefined, options: { width: number; height?: number; format?: string }): Promise<string | null> {
 	if (!(await siteFeatureOn(F.main))) return null;
@@ -764,6 +769,14 @@ async function findKey(bucket: R2Bucket, id: string): Promise<string | null> {
 
 const notFound = () => new Response("Not found", { status: 404, headers: { "Cache-Control": "public, max-age=300" } });
 
+/**
+ * The pack's middleware for images: the backfill's internal step endpoint, and
+ * old Worker-route addresses (/media/<id>-<w>x<h>.<format>), which earlier
+ * releases resized in the Worker. That duplicated EmDash's own /_image endpoint
+ * and no site used it (they all have a media host), so those addresses now only
+ * redirect (301) to the same size on the media host; without a media host they
+ * fall through to the site (a 404).
+ */
 export const imagesMiddleware: PackMiddleware = {
 	module: "images",
 	feature: F.main,
@@ -780,53 +793,14 @@ export const imagesMiddleware: PackMiddleware = {
 		if (!request) return undefined;
 		if (context.request.method !== "GET" && context.request.method !== "HEAD") return new Response(null, { status: 405, headers: { Allow: "GET, HEAD" } });
 
+		await refreshMediaHost();
+		if (!imageCdn()) return undefined;
 		const bucket = env[config.bucket] as R2Bucket | undefined;
 		if (!bucket) return undefined;
-		// With a media host, old Worker-route URLs move there (same size; the host picks the format).
-		await refreshMediaHost();
-		if (imageCdn()) {
-			const key = await findKey(bucket, request.id);
-			const target = key ? cdnRedirectUrl(request, key) : null;
-			if (!target) return notFound();
-			return new Response(null, { status: 301, headers: { Location: target, "Cache-Control": "public, max-age=86400" } });
-		}
-
-		// Only sizes on the grid are resized; anything else moves to the nearest one up.
-		const snapped = snappedImagePath(request);
-		if (snapped) return new Response(null, { status: 301, headers: { Location: snapped, "Cache-Control": "public, max-age=86400" } });
-
-		const cache = (globalThis as unknown as { caches?: { default?: Cache } }).caches?.default;
-		// Keyed by path alone: a query string can't force a fresh (billed) transform.
-		const cacheKey = new Request(`${context.url.origin}${pathname}`, { method: "GET" });
-		const hit = cache ? await cache.match(cacheKey) : undefined;
-		// Cached responses have immutable headers; hand back a copy later middleware can still change.
-		if (hit) return new Response(context.request.method === "HEAD" ? null : hit.body, { status: hit.status, headers: new Headers(hit.headers) });
-
-		const images = env[config.images] as ImagesBinding | undefined;
-		if (!images) return undefined;
+		// Old Worker-route URLs move to the media host (same size; the host picks the format).
 		const key = await findKey(bucket, request.id);
-		if (!key) return notFound();
-		const object = await bucket.get(key);
-		if (!object) return notFound();
-		if ((object.httpMetadata?.contentType ?? "").includes("svg")) return notFound();
-
-		let out: Response;
-		try {
-			const transformed = await images
-				.input(object.body)
-				.transform(request.height === undefined ? { width: request.width } : { width: request.width, height: request.height, fit: "cover" })
-				.output({ format: FORMATS[request.format], quality: 85 });
-			out = transformed.response();
-		} catch (error) {
-			console.error("coywolf-pack images: transform failed", key, error);
-			return new Response("Could not resize this image", { status: 502, headers: { "Cache-Control": "no-store" } });
-		}
-		const headers = new Headers(out.headers);
-		headers.set("Content-Type", FORMATS[request.format]);
-		headers.set("Cache-Control", "public, max-age=31536000, immutable");
-		headers.set("X-Content-Type-Options", "nosniff");
-		const response = new Response(out.body, { status: 200, headers });
-		if (cache) waitUntil(cache.put(cacheKey, response.clone()));
-		return context.request.method === "HEAD" ? new Response(null, { headers: new Headers(headers) }) : response;
+		const target = key ? cdnRedirectUrl(request, key) : null;
+		if (!target) return notFound();
+		return new Response(null, { status: 301, headers: { Location: target, "Cache-Control": "public, max-age=86400" } });
 	},
 };

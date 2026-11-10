@@ -10,8 +10,8 @@
  * byline id; a row may be marked profile-only).
  */
 import { getManyBatched } from "../core/storage.js";
-import { FORMATS, cdnOriginalUrl, imageCdn, parseCdnUrl, parseImagePath } from "../images/lib.js";
-import { refreshMediaHost } from "../images/settings.js";
+import { FORMATS, cdnOriginalUrl, imageCdn, mediaFile, parseCdnUrl, parseImagePath } from "../images/lib.js";
+import { loadStoragePublicUrl, refreshMediaHost } from "../images/settings.js";
 import { siteName } from "../core/site.js";
 import type { PageMetadataContribution, PluginContext, PublicPageContext } from "emdash";
 import { PluginRouteError, definePluginRoute } from "emdash";
@@ -36,6 +36,7 @@ import { noteReadFailure, readFailures } from "../core/read-failures.js";
 import { requestMemo, requestStore } from "../core/request-memo.js";
 import { parseInput, workerEnv } from "../shared.js";
 import { type MediaRow, cleanDefaultOgImage, mediaHostImageInfo, ogImageTags, ownImageOnMediaHost, packOwnsOgImage } from "./og-image.js";
+import { generatedImage, isThemeDefault, themeDefaultImages } from "../social/store.js";
 import { ARTICLE_TYPES, ORGANIZATION_PROPERTIES, ORGANIZATION_TYPES, PAGE_TYPES, PERSON_PROPERTIES, PROPERTY_INPUTS } from "./catalog.js";
 import {
 	type BylineFacts,
@@ -185,7 +186,7 @@ interface EntryOverride extends TypeChoice {
 	updatedAt?: string;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: storage collections are untyped at this layer.
+// any: storage collections are untyped at this layer.
 type Coll = any;
 const docs = (ctx: PluginContext): Coll => (ctx.storage as Record<string, Coll>).schemaDocs;
 const entries = (ctx: PluginContext): Coll => (ctx.storage as Record<string, Coll>).schemaEntries;
@@ -310,9 +311,10 @@ const mediaRowCache = new Map<string, { at: number; row: MediaRow | null }>();
 
 /**
  * A clean image URL (Clean image URLs module): on the media host
- * (https://media.example.com/<file> or /s/<w>[x<h>]/<file>) or the Worker
- * route (/media/<file id>-<w>x<h>.<format>). The media item, at the requested
- * dimensions. Undefined when it's neither.
+ * (https://media.example.com/<file> or /s/<w>[x<h>]/<file>, and originals
+ * under EmDash's publicUrl) or an old Worker-route address
+ * (/media/<file id>-<w>x<h>.<format>, which now redirects to the media host).
+ * The media item, at the requested dimensions. Undefined when it's neither.
  */
 async function lookupCleanMedia(options: SchemaOptions, url: string, origin: string): Promise<ImageInfo | null | undefined> {
 	const onHost = parseCdnUrl(url);
@@ -364,7 +366,10 @@ async function lookupCleanMedia(options: SchemaOptions, url: string, origin: str
 async function lookupMedia(options: SchemaOptions, url: string, origin: string): Promise<ImageInfo | null> {
 	const cleanInfo = await lookupCleanMedia(options, url, origin);
 	if (cleanInfo !== undefined) return cleanInfo;
-	const ref = mediaRefFromUrl(url, origin);
+	// EmDash's /_emdash/api/media/… routes on this site, else the original under EmDash's publicUrl
+	// (EmDash prints media there when it's set, the site-settings logo and default image included).
+	const file = mediaFile(url);
+	const ref = mediaRefFromUrl(url, origin) ?? (file ? { by: "storage_key" as const, value: `${file.id}.${file.ext}` } : null);
 	if (!ref) return null;
 	const cacheKey = `${ref.by}:${ref.value}`;
 	const hit = mediaCache.get(cacheKey);
@@ -400,7 +405,7 @@ interface SiteFacts {
 }
 
 async function siteFacts(ctx: PluginContext, page: PublicPageContext): Promise<SiteFacts> {
-	// biome-ignore lint/suspicious/noExplicitAny: SiteSettings is request-cached by EmDash; read loosely.
+	// any: SiteSettings is request-cached by EmDash; read loosely.
 	let settings: any = {};
 	try {
 		const { getSiteSettings } = await import("emdash");
@@ -690,8 +695,21 @@ export async function schemaContributions(
 	const graphOn = isOn(on, SCHEMA_FEATURES.graph);
 	const ogOn = isOn(on, SCHEMA_FEATURES.openGraph);
 	const cleanImages = isOn(on, "images");
-	const [config, site] = await Promise.all([loadConfig(ctx, options.database), siteFacts(ctx, page), cleanImages ? refreshMediaHost() : undefined]);
-	const imageRead = graphOn || ogOn ? primaryImage(options, page, site, cleanImages) : Promise.resolve(null);
+	// EmDash's publicUrl is read either way (once per isolate): media URLs under it are recognized for their sizes and alt text.
+	const [config, site] = await Promise.all([loadConfig(ctx, options.database), siteFacts(ctx, page), cleanImages ? refreshMediaHost() : loadStoragePublicUrl()]);
+	// Social Images: an entry without an image of its own gets its generated one as og:image, only when the page passes no
+	// image (neither page.image nor an SEO image) or only one of the theme's site-wide defaults (Social Images → Theme
+	// default images; read with the switches, no query of its own). Any other image the theme passes (a body image, a
+	// file or reference field) wins. The record is ignored once the entry has an image field set (src/social/store.ts).
+	const socialOn = isOn(on, "socialImages") && Boolean(page.content);
+	const themeDefaults = socialOn && (page.seo?.ogImage || page.image) ? await themeDefaultImages(options.database) : [];
+	const noImage = (url: string | null | undefined) => !url || isThemeDefault(url, themeDefaults);
+	const generatedRead =
+		socialOn && page.content && noImage(page.seo?.ogImage) && noImage(page.image)
+			? generatedImage(ctx, page.content, site.origin, options.database).catch(() => null)
+			: Promise.resolve(null);
+	const imageRead =
+		graphOn || ogOn || isOn(on, "socialImages") ? generatedRead.then((generated) => generated ?? (graphOn || ogOn ? primaryImage(options, page, site, cleanImages) : null)) : Promise.resolve(null);
 	// With the graph on: its nodes, the publisher's @id and the entry's override, for the custom markup.
 	let packGraph: Node[] | null = null;
 	let packPublisherId: string | null = null;
@@ -810,7 +828,13 @@ export async function schemaContributions(
 		if (locale) out.push({ kind: "property", property: "og:locale", content: locale });
 		// The default OG image at its clean URL, or the page's image on the media host: these win over EmDash's own og:image/twitter:image (first contribution wins).
 		const own = Boolean(page.seo?.ogImage || page.image);
-		out.push(...ogImageTags(image, Boolean(image && cleanImages && packOwnsOgImage(image.url, site.origin, own))));
+		const generated = await generatedRead;
+		out.push(...ogImageTags(image, Boolean(generated) || Boolean(image && cleanImages && packOwnsOgImage(image.url, site.origin, own))));
+		if (generated) out.push({ kind: "meta", name: "twitter:card", content: "summary_large_image" });
+	} else {
+		// Open Graph extras off: the generated image's tags alone (it replaces EmDash's default og:image).
+		const generated = await generatedRead;
+		if (generated) out.push(...ogImageTags(generated, true), { kind: "meta", name: "twitter:card", content: "summary_large_image" });
 	}
 	return out;
 }
@@ -1152,6 +1176,36 @@ export function schemaModule(options: SchemaOptions) {
 			},
 		})),
 
+		/**
+		 * One entry's override, for the entry editor's Schema panel: its types (and the collection's,
+		 * which apply when it has none), its main subject's name, and its custom markup's types.
+		 */
+		"schema/entry": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				await requireFeature(ctx, MAIN);
+				const { collection, entryId } = parseInput(z.object({ collection: z.string().min(1).max(100), entryId: z.string().min(1).max(100) }), ctx.input);
+				const [override, config, features] = await Promise.all([
+					entries(ctx).get(`${collection}:${entryId}`) as Promise<EntryOverride | null>,
+					loadConfig(ctx, options.database),
+					ctxFeatures(ctx),
+				]);
+				const labels = Object.fromEntries([...PAGE_TYPES, ...ARTICLE_TYPES]);
+				const bylineId = mainSubjectByline(override?.mainSubject);
+				const byline = bylineId && ctx.bylines ? await ctx.bylines.get(bylineId).catch(() => null) : null;
+				return {
+					override: override ?? null,
+					collectionTypes: config.types[collection] ?? {},
+					labels,
+					mainSubject: override?.mainSubject === "publisher" ? "The site publisher" : bylineId ? (byline?.displayName ?? "A byline") : null,
+					customTypes: override?.custom ? markupTypes(override.custom.markup) : [],
+					features: { graph: isOn(features, SCHEMA_FEATURES.graph), custom: isOn(features, SCHEMA_FEATURES.custom) },
+				};
+			},
+		})),
+
 		/** Recent entries of a collection, for picking one to override or preview. */
 		"schema/entries/find": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
@@ -1419,6 +1473,23 @@ export function schemaModule(options: SchemaOptions) {
 	};
 
 	return { routes };
+}
+
+/** The @types in custom markup (a node, an array, or { "@graph": [...] }), for a summary; empty when it doesn't parse. */
+export function markupTypes(markup: string): string[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(markup);
+	} catch {
+		return [];
+	}
+	const graph = parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray((parsed as { "@graph"?: unknown })["@graph"]) ? (parsed as { "@graph": unknown[] })["@graph"] : parsed;
+	const nodes = Array.isArray(graph) ? graph : [graph];
+	const types = nodes.flatMap((node) => {
+		const type = node && typeof node === "object" ? (node as { "@type"?: unknown })["@type"] : undefined;
+		return (Array.isArray(type) ? type : [type]).filter((t): t is string => typeof t === "string");
+	});
+	return [...new Set(types)].slice(0, 10);
 }
 
 /** The hook EmDash calls for each rendered page. */

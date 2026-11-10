@@ -5,6 +5,7 @@
  * - `/feed/`, `<term archive>/feed/`  RSS feeds
  * - `/llms.txt`                        llms.txt
  * - `<entry-url>/index.html.md`        Markdown source of an entry
+ * - `/.well-known/security.txt`        security.txt (and a redirect from `/security.txt`)
  *
  * The work happens in the module's public plugin routes (so it runs in the
  * plugin context, with EmDash's URL resolution and the plugin's KV cache);
@@ -17,13 +18,17 @@
  */
 import type { MiddlewareHandler } from "astro";
 
-import { PLUGIN_ID } from "../core/features.js";
+import { PLUGIN_ID, readSiteSetting, registerSiteOption, siteOption } from "../core/features.js";
 import { noteReadFailure, routeFailed } from "../core/read-failures.js";
 import type { PackMiddleware } from "../core/module.js";
+import { keepAtEdge } from "../pageCache/lib.js";
+import { LLMS_EDGE_MAX_AGE, LLMS_TAG, MARKDOWN_EDGE_MAX_AGE, MARKDOWN_TAG, NEWS_EDGE_MAX_AGE, NEWS_TAG } from "./build.js";
 import { FEED_EDGE_MAX_AGE, parseFeedPath } from "./feed.js";
 import { pagePathFromMarkdownPath } from "./markdown.js";
 import { MemoryCache } from "./memory-cache.js";
 import { FEATURE } from "./module.js";
+import { LEGACY_SECURITY_TXT_PATH, SECURITY_TXT_MAX_AGE, SECURITY_TXT_PATH, SECURITY_TXT_TAG, buildSecurityTxt } from "./security-txt.js";
+import { SETTINGS_KEY, settingsSchema } from "./settings.js";
 
 type Context = Parameters<MiddlewareHandler>[0];
 
@@ -64,6 +69,14 @@ async function callRoute<T>(context: Context, route: string, query: Record<strin
 
 const isRead = (context: Context) => context.request.method === "GET" || context.request.method === "HEAD";
 
+/**
+ * With Astro route caching (Workers Cache) on, answers go to the edge cache, so only misses are kept in
+ * memory: a copy from memory could put the version from before a publish back at the edge right after
+ * EmDash cleared it. Without it, everything is kept for a minute (the only cache there is).
+ */
+const edgeCaching = (context: Context) => Boolean((context as unknown as { cache?: { enabled?: boolean } }).cache?.enabled);
+const memoryKeep = (context: Context): "all" | "misses" => (edgeCaching(context) ? "misses" : "all");
+
 function respond(context: Context, body: string, headers: Record<string, string>): Response {
 	return new Response(context.request.method === "HEAD" ? null : body, { status: 200, headers });
 }
@@ -75,10 +88,14 @@ const NEWS_PATHS = new Set(["/news-sitemap.xml", "/coywolf-news-sitemap.xml"]);
 export const newsSitemapMiddleware: PackMiddleware = {
 	module: "discovery",
 	feature: FEATURE.news,
+	// Kept at the edge for five minutes, tagged with its collections (EmDash clears them on publish) and NEWS_TAG
+	// (cleared when a rebuild changes it).
+	ownsCache: true,
 	handle: async (context) => {
 		if (!isRead(context) || !NEWS_PATHS.has(context.url.pathname)) return undefined;
-		const result = await callRoute<{ body: string }>(context, "discovery/public/news");
+		const result = await callRoute<{ body: string; tags?: string[] }>(context, "discovery/public/news", {}, memoryKeep(context));
 		if (!result?.body) return undefined;
+		keepAtEdge(context, NEWS_EDGE_MAX_AGE, result.tags ?? [NEWS_TAG]);
 		return respond(context, result.body, {
 			"Content-Type": "application/xml; charset=utf-8",
 			"Cache-Control": "public, max-age=300",
@@ -127,18 +144,23 @@ interface MarkdownDoc {
 	body: string;
 	tokens: number;
 	markdownUrl: string;
+	tags?: string[];
 }
 
 export const llmsMiddleware: PackMiddleware = {
 	module: "discovery",
 	feature: FEATURE.llms,
+	// llms.txt is kept at the edge for an hour and a Markdown version for a day, tagged with their collections
+	// (and a Markdown version with its entry), which EmDash clears when content changes.
+	ownsCache: true,
 	handle: async (context) => {
 		if (!isRead(context)) return undefined;
 		const { pathname } = context.url;
 
 		if (pathname === "/llms.txt") {
-			const result = await callRoute<{ body: string }>(context, "discovery/public/llms");
+			const result = await callRoute<{ body: string; tags?: string[] }>(context, "discovery/public/llms", {}, memoryKeep(context));
 			if (!result?.body) return undefined;
+			keepAtEdge(context, LLMS_EDGE_MAX_AGE, result.tags ?? [LLMS_TAG]);
 			return respond(context, result.body, {
 				"Content-Type": "text/plain; charset=utf-8",
 				"Cache-Control": "public, max-age=3600",
@@ -148,8 +170,9 @@ export const llmsMiddleware: PackMiddleware = {
 
 		const pagePath = pagePathFromMarkdownPath(pathname);
 		if (pagePath) {
-			const doc = await callRoute<MarkdownDoc>(context, "discovery/public/markdown", { path: pagePath });
+			const doc = await callRoute<MarkdownDoc>(context, "discovery/public/markdown", { path: pagePath }, memoryKeep(context));
 			if (!doc?.body) return undefined;
+			keepAtEdge(context, MARKDOWN_EDGE_MAX_AGE, doc.tags ?? [MARKDOWN_TAG]);
 			return respond(context, doc.body, {
 				"Content-Type": "text/markdown; charset=utf-8",
 				"Cache-Control": "public, max-age=3600",
@@ -162,4 +185,53 @@ export const llmsMiddleware: PackMiddleware = {
 	},
 };
 
-export const discoveryMiddleware: PackMiddleware[] = [newsSitemapMiddleware, feedMiddleware, llmsMiddleware];
+// ── security.txt ─────────────────────────────────────────────────
+
+/** EmDash's Site URL setting (an option row), read with the feature switches. */
+const SITE_URL_OPTION = "site:url";
+registerSiteOption(SITE_URL_OPTION);
+
+/** The origin of a stored Site URL (a JSON string), or null when there's none or it isn't a URL. */
+export function siteUrlOrigin(raw: string | null | undefined): string | null {
+	if (!raw) return null;
+	try {
+		const value = JSON.parse(raw) as unknown;
+		return typeof value === "string" && /^https?:\/\//i.test(value.trim()) ? new URL(value.trim()).origin : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * /.well-known/security.txt from the Discovery settings (read with the feature switches: no query of its
+ * own), built per request so its Expires date is always about a year ahead, and kept at the edge for a day
+ * (tagged, cleared when the settings are saved). /security.txt, the legacy location, redirects to it.
+ * Without a contact there's no file: the request goes on to the site (a 404).
+ */
+export const securityTxtMiddleware: PackMiddleware = {
+	module: "discovery",
+	feature: FEATURE.securityTxt,
+	ownsCache: true,
+	handle: async (context) => {
+		if (!isRead(context)) return undefined;
+		const { pathname } = context.url;
+		if (pathname !== SECURITY_TXT_PATH && pathname !== LEGACY_SECURITY_TXT_PATH) return undefined;
+		const read = await readSiteSetting(SETTINGS_KEY);
+		if (!read) return undefined; // D1 unreadable (a noted read failure): the site answers.
+		const parsed = settingsSchema.safeParse(read.value ?? {});
+		// Canonical: EmDash's Site URL (read in the same query), else the address it was asked for.
+		const body = parsed.success ? buildSecurityTxt(parsed.data.securityTxt, siteUrlOrigin(siteOption(SITE_URL_OPTION)) ?? context.url.origin) : null;
+		if (!body) return undefined;
+		keepAtEdge(context, SECURITY_TXT_MAX_AGE, [SECURITY_TXT_TAG]);
+		if (pathname === LEGACY_SECURITY_TXT_PATH) {
+			return new Response(null, { status: 301, headers: { Location: SECURITY_TXT_PATH, "Cache-Control": `public, max-age=${SECURITY_TXT_MAX_AGE}` } });
+		}
+		return respond(context, body, {
+			"Content-Type": "text/plain; charset=utf-8",
+			"Cache-Control": `public, max-age=${SECURITY_TXT_MAX_AGE}`,
+			"X-Content-Type-Options": "nosniff",
+		});
+	},
+};
+
+export const discoveryMiddleware: PackMiddleware[] = [newsSitemapMiddleware, feedMiddleware, llmsMiddleware, securityTxtMiddleware];

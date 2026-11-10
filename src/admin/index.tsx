@@ -1,63 +1,57 @@
 import type { PluginAdminExports } from "emdash";
 
 import { injectAdminCss } from "./admin-css.js";
+import { packPage } from "./page.js";
 import { mountTrashPrompt } from "./trash-prompt.js";
-import { UpdateWidget, withUpdateNotice } from "./update-notice.js";
+import { UpdateWidget } from "./update-notice.js";
 
-import { AiPage } from "./ai.js";
-import { BackupStatusWidget, BackupsPage } from "./backups.js";
-import { CodeBlocksPage } from "./codeBlocks.js";
-import { CustomBlocksPage } from "./customBlocks.js";
-import { DiscoveryPage } from "./discovery.js";
-import { FeaturesPage } from "./features.js";
-import { HeadingsPage } from "./headings.js";
-import { ImagesPage } from "./images.js";
-import { PerformancePage } from "./performance.js";
+import { BackupStatusWidget } from "./backups-widget.js";
+import { LinksWidget } from "./links-widget.js";
 import { UsageWidget } from "./usage.js";
-import { BreadcrumbsPage } from "./breadcrumbs.js";
-import { FilesPage } from "./files.js";
-import { FormUploadsPage } from "./formUploads.js";
-import { LinksPage, LinksWidget } from "./links.js";
-import { RedirectsPage } from "./redirects.js";
-import { SchemaPage } from "./schema.js";
-import { SearchPage } from "./search.js";
-import { VideosPage } from "./videos.js";
-import { RobotsPage } from "./robots.js";
-import { WpImportPage } from "./wpImport.js";
-import { ReviewsPage } from "./reviews.js";
 
 // Rules for the layout classes EmDash's admin stylesheet lacks (see admin-css.ts).
 injectAdminCss();
-// Asks what a trashed or unpublished entry's old URL should do (Redirects → Removed content).
+// Asks what a trashed or unpublished entry's old URL should do (Redirect Manager → Removed content).
 mountTrashPrompt();
 
-const PAGES: PluginAdminExports["pages"] = {
-	"/features": FeaturesPage,
-	"/performance": PerformancePage,
-	"/backups": BackupsPage,
-	"/redirects": RedirectsPage,
-	"/headings": HeadingsPage,
-	"/breadcrumbs": BreadcrumbsPage,
-	"/code-blocks": CodeBlocksPage,
-	"/schema": SchemaPage,
-	"/files": FilesPage,
-	"/form-uploads": FormUploadsPage,
-	"/search": SearchPage,
-	"/ai": AiPage,
-	"/discovery": DiscoveryPage,
-	"/links": LinksPage,
-	"/videos": VideosPage,
-	"/robots": RobotsPage,
-	"/reviews": ReviewsPage,
-	"/custom-blocks": CustomBlocksPage,
-	// Called Content Blocks until 0.12.0: old bookmarks still open the page.
-	"/content-blocks": CustomBlocksPage,
-	"/wordpress-import": WpImportPage,
-	"/images": ImagesPage,
+/**
+ * Every pack page, loaded the first time it's opened: each is its own chunk,
+ * so an admin visit downloads only the pages it opens. The dashboard widgets
+ * and the trash prompt above stay in this entry. Each page also gets the
+ * update notice, an error boundary and toasts (packPage in page.tsx).
+ */
+const PAGES: Record<string, ReturnType<typeof packPage>> = {
+	"/features": packPage("Features", () => import("./features.js").then((m) => m.FeaturesPage)),
+	"/performance": packPage("Performance", () => import("./performance.js").then((m) => m.PerformancePage)),
+	"/cloudflare": packPage("Cloudflare Checkup", () => import("./cloudflare.js").then((m) => m.CloudflareCheckupPage)),
+	"/insights": packPage("Insights", () => import("./insights.js").then((m) => m.InsightsPage)),
+	"/backups": packPage("Backups", () => import("./backups.js").then((m) => m.BackupsPage)),
+	"/redirects": packPage("Redirect Manager", () => import("./redirects.js").then((m) => m.RedirectsPage)),
+	"/headings": packPage("Headings & TOC", () => import("./headings.js").then((m) => m.HeadingsPage)),
+	"/breadcrumbs": packPage("Breadcrumb Nav", () => import("./breadcrumbs.js").then((m) => m.BreadcrumbsPage)),
+	"/code-blocks": packPage("Code Blocks", () => import("./codeBlocks.js").then((m) => m.CodeBlocksPage)),
+	"/schema": packPage("Schema & Social", () => import("./schema.js").then((m) => m.SchemaPage)),
+	"/files": packPage("File Downloads", () => import("./files.js").then((m) => m.FilesPage)),
+	"/form-uploads": packPage("Private Form Uploads", () => import("./formUploads.js").then((m) => m.FormUploadsPage)),
+	"/search": packPage("Search", () => import("./search.js").then((m) => m.SearchPage)),
+	"/ai": packPage("AI Enrichment", () => import("./ai.js").then((m) => m.AiPage)),
+	"/discovery": packPage("Discovery", () => import("./discovery.js").then((m) => m.DiscoveryPage)),
+	"/links": packPage("Link Manager", () => import("./links-entries.js").then((m) => m.LinkManagerPage)),
+	"/videos": packPage("Videos", () => import("./videos.js").then((m) => m.VideosPage)),
+	"/robots": packPage("Robots.txt", () => import("./robots.js").then((m) => m.RobotsPage)),
+	"/reviews": packPage("Reviews", () => import("./reviews.js").then((m) => m.ReviewsPage)),
+	"/custom-blocks": packPage("Custom Blocks", () => import("./customBlocks.js").then((m) => m.CustomBlocksPage)),
+	"/wordpress-import": packPage("WordPress Migration", () => import("./wpImport.js").then((m) => m.WpImportPage)),
+	"/images": packPage("Clean Image URLs", () => import("./images.js").then((m) => m.ImagesPage)),
+	"/content-audit": packPage("Content Audit", () => import("./content-audit.js").then((m) => m.ContentAuditPage)),
+	"/alerts": packPage("Alerts & Digest", () => import("./alerts.js").then((m) => m.AlertsPage)),
+	"/social-images": packPage("Social Images", () => import("./social-images.js").then((m) => m.SocialImagesPage)),
 };
 
-// Every pack page shows the update notice at the top when a newer Coywolf Pack is out.
-export const pages: PluginAdminExports["pages"] = Object.fromEntries(Object.entries(PAGES).map(([path, Page]) => [path, withUpdateNotice(Page)]));
+// Called Content Blocks until 0.12.0: old bookmarks still open the page.
+PAGES["/content-blocks"] = PAGES["/custom-blocks"] as ReturnType<typeof packPage>;
+
+export const pages: PluginAdminExports["pages"] = PAGES;
 
 export const widgets: PluginAdminExports["widgets"] = {
 	"backup-status": BackupStatusWidget,
@@ -66,3 +60,10 @@ export const widgets: PluginAdminExports["widgets"] = {
 	// Listed by the server only while a Coywolf Pack update is waiting.
 	update: UpdateWidget,
 };
+
+/**
+ * EmDash 1.4+: the pack's sections in the entry editor sidebar (Schema & Social, AI suggestions,
+ * Link status) and its Links column in content lists, each only while its module is on
+ * (src/admin/editor-panels.tsx, src/admin/extensions.ts).
+ */
+export { contentEditorPanels, contentListColumns } from "./editor-panels.js";

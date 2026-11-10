@@ -5,10 +5,12 @@
  * dialog (./robots-wizard.tsx); every change is checked in the browser and
  * again on the server (including the self-check) before it's saved.
  */
-import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea, Loader, Switch, Tabs } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea, Switch, Tabs } from "@cloudflare/kumo";
 import { CheckCircle, Copy, DotsThree, DownloadSimple, FileArrowUp, Info, PencilSimple, Plus, Robot, Sparkle, Trash, Warning, X, XCircle } from "@phosphor-icons/react";
 import * as React from "react";
 
+import { errorText } from "./api.js";
+import { FeaturesLink, Loading, PageHeader } from "./page.js";
 import type { BotEntry } from "../robots/bots.js";
 import { describeRule, summarize } from "../robots/explain.js";
 import { evaluate } from "../robots/rep.js";
@@ -16,11 +18,12 @@ import { EMDASH_AI_TRAINING_CRAWLERS, type RobotsConfig, type RobotsRule, TEMPLA
 import { exportRobotsRules, readRobotsImport } from "../robots/transfer.js";
 import { type Finding, analyzeConfigChange, checkConfig } from "../robots/validate.js";
 import { BotsTab } from "./robots-bots.js";
-import { dateTimeFormat, errorText, get, newId, post, tokenIndex, useCopy } from "./robots-shared.js";
+import { dateTimeFormat, get, newId, post, tokenIndex, useCopy } from "./robots-shared.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { RuleWizard } from "./robots-wizard.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 interface SyncState {
 	at: string;
@@ -203,7 +206,9 @@ function ServedFile(props: { text: string; emdash: PageData["emdash"]; config: R
 				</div>
 			)}
 			<textarea readOnly aria-label="robots.txt being served" className="w-full resize-none rounded-lg border bg-kumo-tint/40 p-3 font-mono text-xs" rows={rows} value={props.text} />
-			<p className="text-xs text-kumo-subtle">Turn the Robots.txt Rules feature off (on Plugins → Coywolf Pack) to serve EmDash's own robots.txt again. Your rules are kept for next time.</p>
+			<p className="text-xs text-kumo-subtle">
+				Turn Robots.txt off on <FeaturesLink /> to serve EmDash's own robots.txt again. Your rules are kept for next time.
+			</p>
 			<details className="rounded-lg border border-kumo-line px-3 py-2">
 				<summary className="cursor-pointer text-sm font-medium">EmDash's original robots.txt (for reference)</summary>
 				<p className="mt-2 text-xs text-kumo-subtle">
@@ -376,14 +381,14 @@ function RulesList(props: {
 						<DropdownMenu>
 							<DropdownMenu.Trigger render={<Button type="button" variant="ghost" shape="square" icon={<DotsThree aria-hidden="true" />} aria-label={`Actions for ${rule.name}`} />} />
 							<DropdownMenu.Content className="p-1">
-								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<PencilSimple className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => props.onEdit(rule)}>
+								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={PencilSimple} onClick={() => props.onEdit(rule)}>
 									Edit
 								</DropdownMenu.Item>
-								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<Plus className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => props.onDuplicate(rule)}>
+								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={Plus} onClick={() => props.onDuplicate(rule)}>
 									Duplicate and edit
 								</DropdownMenu.Item>
 								<DropdownMenu.Separator className="my-0.5" />
-								<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<Trash className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => props.onDelete(rule)}>
+								<DropdownMenu.Item variant="danger" className="py-1" icon={Trash} onClick={() => props.onDelete(rule)}>
 									Delete
 								</DropdownMenu.Item>
 							</DropdownMenu.Content>
@@ -416,14 +421,16 @@ function SettingsTab(props: {
 	const [ack, setAck] = React.useState(false);
 	React.useEffect(() => setAck(false), [draft]);
 	const canSave = !problem && (risks.length === 0 || ack);
+	const result = useSaveResult();
 	const save = async () => {
 		if (!dirty || !canSave) return;
 		setSaving(true);
 		setError(undefined);
 		try {
 			await props.onSave(draft, "Changed settings");
+			result.saved("Settings saved");
 		} catch (cause) {
-			setError(errorText(cause, "Could not save"));
+			result.failed(errorText(cause, "Could not save"));
 		} finally {
 			setSaving(false);
 		}
@@ -581,6 +588,7 @@ function SettingsTab(props: {
 			</section>
 
 			<SaveBar
+				error={result.error}
 				dirty={dirty}
 				saving={saving}
 				canSave={canSave}
@@ -637,9 +645,7 @@ export function RobotsPage() {
 		return error ? (
 			<Banner variant="error" role="alert" title="Something went wrong" description={error} />
 		) : (
-			<div className="py-12 text-center text-kumo-subtle">
-				<Loader />
-			</div>
+			<Loading className="py-12 text-center text-kumo-subtle" />
 		);
 	}
 
@@ -675,10 +681,10 @@ export function RobotsPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Robots.txt</h1>
-					<div className="flex shrink-0 justify-end gap-2">
+			<PageHeader
+				title="Robots.txt"
+				actions={
+					<>
 						<DropdownMenu>
 							<DropdownMenu.Trigger render={<Button variant="secondary" icon={<Sparkle />}>Templates</Button>} />
 							<DropdownMenu.Content className="max-w-sm p-1">
@@ -693,12 +699,14 @@ export function RobotsPage() {
 						<Button variant="primary" icon={<Plus />} onClick={() => setWizard({ rule: null, id: newId() })}>
 							Add rule
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Decide which crawlers can visit which parts of your site, in plain English. Every change is checked before it's saved, and the file below is what crawlers get.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="robots" />
 

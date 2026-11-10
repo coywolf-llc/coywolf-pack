@@ -93,3 +93,32 @@ test("without a visitor address (no cf object), plays and likes aren't counted a
 	}
 	invalidateFeatures();
 });
+
+test("captions are served only for videos embedded in published content, like the other public video routes", async () => {
+	const { invalidateFeatures } = await import("../src/core/features.ts");
+	const { videosPack } = await import("../src/videos/pack.ts");
+	const { routes } = videosPack({});
+	const PUBLISHED = "a67dcf0925d0747f8c5419df6400c2b5";
+	const DRAFT_ONLY = "b67dcf0925d0747f8c5419df6400c2b5";
+	const ctx = (uid) => ({
+		...engagementCtx("203.0.113.9", []),
+		input: { uid, lang: "en" },
+		settings: { get: async (key) => (key === "features" ? { videos: true, "videos.captions": true } : null) },
+		storage: {
+			videosEmbeds: {
+				query: async () => ({
+					items: [
+						{ id: "posts:1", data: { status: "published", uids: [PUBLISHED] } },
+						{ id: "posts:2", data: { status: "draft", uids: [DRAFT_ONLY] } },
+					],
+					hasMore: false,
+				}),
+			},
+			videosCaptions: { get: async (id) => ({ uid: id.split(":")[0], language: "en", label: "English", vtt: "WEBVTT\n\n00:00.000 --> 00:01.000\nHi" }) },
+		},
+	});
+	invalidateFeatures();
+	assert.match((await routes["videos/caption"].handler(ctx(PUBLISHED))).vtt, /^WEBVTT/);
+	await assert.rejects(routes["videos/caption"].handler(ctx(DRAFT_ONLY)), /No such caption track/, "a draft's transcript stays private");
+	invalidateFeatures();
+});

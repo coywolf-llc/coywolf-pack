@@ -4,12 +4,17 @@
  * MODULES (and MIDDLEWARE if it serves site URLs).
  */
 import { aiPack } from "./ai/pack.js";
+import { alertsPack } from "./alerts/pack.js";
+import { auditPack } from "./audit/pack.js";
+import { socialImagesPack } from "./social/pack.js";
 import { backupsDownloadMiddleware, backupsPack } from "./backups/pack.js";
+import { cloudflarePack } from "./cloudflare/pack.js";
 import { codeBlocksPack } from "./codeBlocks/pack.js";
 import { customBlocksPack } from "./customBlocks/pack.js";
 import type { PackMiddleware, PackModule } from "./core/module.js";
 import { headingsPack } from "./headings/pack.js";
 import { imagesMiddleware, imagesPack } from "./images/pack.js";
+import { insightsPack } from "./insights/pack.js";
 import { pageCacheMiddleware, strayRobotsMiddleware, pageCachePack } from "./pageCache/pack.js";
 import { breadcrumbsPack } from "./breadcrumbs/pack.js";
 import { filesMiddleware, filesPack } from "./files/pack.js";
@@ -21,6 +26,7 @@ import { schemaPack } from "./schema/pack.js";
 import { searchLiveMiddleware, searchPack, searchRateLimitMiddleware } from "./search/pack.js";
 import { robotsMiddleware, robotsPack } from "./robots/pack.js";
 import { reviewsPack } from "./reviews/pack.js";
+import { speculationPack } from "./speculation/pack.js";
 import type { CoywolfOptions } from "./options.js";
 import { videosCaptionsMiddleware, videosPack, videosSitemapMiddleware } from "./videos/pack.js";
 import { updatesPack } from "./updates/pack.js";
@@ -50,7 +56,15 @@ export const MODULES: Factory[] = [
 	(o) => (o.reviews === false ? null : reviewsPack(o.reviews ?? {})),
 	(o) => (o.customBlocks === false || o.contentBlocks === false ? null : customBlocksPack()),
 	(o) => (o.images === false ? null : imagesPack(o.images ?? {})),
-	(o) => (o.pageCache === false ? null : pageCachePack()),
+	(o) => (o.pageCache === false ? null : pageCachePack(o.pageCache ?? {})),
+	(o) => (o.speculation === false ? null : speculationPack()),
+	(o) => (o.cloudflare === false ? null : cloudflarePack()),
+	// Reports only: its one hook (page:fragments, the Web Analytics beacon) doesn't depend on the others.
+	(o) => (o.insights === false ? null : insightsPack(o.insights ?? {})),
+	// Phase 5C. No middleware; their hooks (Social Images' publish hook) don't depend on the modules above.
+	(o) => (o.audit === false ? null : auditPack()),
+	(o) => (o.alerts === false ? null : alertsPack()),
+	(o) => (o.socialImages === false ? null : socialImagesPack(o.socialImages ?? {})),
 ];
 
 export const MIDDLEWARE: PackMiddleware[] = [pageCacheMiddleware, strayRobotsMiddleware, imagesMiddleware, backupsDownloadMiddleware, redirectsMiddleware, robotsMiddleware, filesMiddleware, searchLiveMiddleware, searchRateLimitMiddleware, ...discoveryMiddleware, videosSitemapMiddleware, videosCaptionsMiddleware];

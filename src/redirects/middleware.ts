@@ -1,12 +1,19 @@
 /**
  * Serves Coywolf redirects (through the pack middleware in src/middleware.ts).
- * Each request reads its exact rule, if any, from D1: one row through the
- * (source, is_regex) index. Pattern rules (few) are kept in memory per
- * Worker isolate, compiled in source order, and read again after a redirect
- * edit (in this isolate at once; in others when they see the new settings
- * generation, see src/core/generation.ts), or after `cacheSeconds`. Reading
- * never writes: the table is created by the first admin write. Hits are
- * counted after the response is sent.
+ * Each Worker isolate keeps the rules' index in memory: the pattern rules
+ * (few), compiled in source order, and the set of exact sources (up to
+ * MAX_EXACT_IN_MEMORY). A request whose path is no exact source (almost every
+ * request) reads nothing from D1 for its redirect; one whose path is reads its
+ * rule (one row through the (source, is_regex) index), so an exact rule that
+ * was changed or deleted in another isolate is never served from memory. On
+ * a site with more exact rules than that, every request reads its own, as
+ * before. The index is read again after a redirect change: in this isolate at
+ * once, in others when they see the new settings generation (pack admin
+ * saves, src/core/generation.ts) or the new redirects version (changes made
+ * by content hooks, such as slug changes, noteRedirectsChanged), both read
+ * with the feature switches, or after `cacheSeconds`. Reading never writes:
+ * the table is created by the first admin write. Hits are counted after the
+ * response is sent, batched per isolate (one D1 write a second at most).
  *
  * With Astro's cacheCloudflare() provider, GET and HEAD redirects are kept in
  * the edge cache (Workers Cache) for 30 days, tagged REDIRECTS_TAG; any
@@ -15,12 +22,13 @@
  */
 import type { MiddlewareHandler } from "astro";
 
-import { isCurrent, settingsEpoch } from "../core/features.js";
+import { isCurrent, registerSiteOption, rememberSiteOption, settingsEpoch, siteOption } from "../core/features.js";
 import { noteReadFailure } from "../core/read-failures.js";
 import { sharedRead, sharedSlot } from "../core/single-flight.js";
+import { createBatchedCounter } from "../files/counts.js";
 import { REDIRECTS_TAG } from "../pageCache/lib.js";
 import { afterResponse } from "../shared.js";
-import { type CompiledRules, compile, findExactRule, loadPatternRules, match, recordHit } from "./rules.js";
+import { type CompiledRules, compile, findExactRule, hitStatement, loadExactSources, loadPatternRules, match, normalizePath } from "./rules.js";
 
 export interface CoywolfRedirectsOptions {
 	/** D1 binding of the site database. Default "DB". */
@@ -31,55 +39,122 @@ export interface CoywolfRedirectsOptions {
 
 type Patterns = CompiledRules["patterns"];
 
-let cache: { patterns: Patterns; at: number; epoch: number } | null = null;
+/** Most exact sources kept in memory per isolate; a site with more looks each request's up in D1. */
+export const MAX_EXACT_IN_MEMORY = 5000;
+
+/**
+ * Option row that changes whenever redirects change outside the pack's admin saves (which record a settings
+ * generation): slug changes and removed-content rules made by content hooks. Read with the feature switches,
+ * so every isolate notices within FEATURES_TTL_MS without a query of its own.
+ */
+export const REDIRECTS_VERSION_OPTION = "plugin:coywolf-pack:redirects:version";
+registerSiteOption(REDIRECTS_VERSION_OPTION);
+
+interface RuleIndex {
+	patterns: Patterns;
+	/** The enabled exact rules' sources; null when there are more than MAX_EXACT_IN_MEMORY (look each one up). */
+	exact: Set<string> | null;
+}
+
+let cache: { index: RuleIndex; at: number; epoch: number; version: string | null | undefined } | null = null;
 /**
  * A load in progress: concurrent requests of a cold isolate share it, for a
  * bounded time, and it's anchored with waitUntil (src/core/single-flight.ts).
  * prefetchRedirects starts it from requests that may answer before the
  * redirect handler runs (robots.txt, /media/, downloads) and never wait for it.
  */
-const loading = sharedSlot<Patterns>();
+const loading = sharedSlot<RuleIndex>();
 /** Bumped by invalidateRedirectCache, so a load that started before an edit isn't cached. */
 let edits = 0;
 
-/** Drop the in-memory pattern rules so the next request reloads them (called after admin edits). */
+/** Drop the in-memory rules so the next request reloads them (called after admin edits). */
 export function invalidateRedirectCache(): void {
 	cache = null;
 	loading.flight = null;
 	edits++;
 }
 
-function patterns(db: D1Database, ttl: number): Promise<Patterns> {
-	if (cache && isCurrent(cache, ttl)) return Promise.resolve(cache.patterns);
+/**
+ * After changing redirects outside a pack admin save (content hooks): drop this isolate's rules and give the
+ * redirects a new version, so other isolates reload theirs on their next read of the switches. Pack admin
+ * saves don't need it (their settings generation does the same), but it does no harm.
+ */
+export async function noteRedirectsChanged(db: D1Database): Promise<void> {
+	invalidateRedirectCache();
+	const version = JSON.stringify(crypto.randomUUID());
+	try {
+		await db
+			.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value")
+			.bind(REDIRECTS_VERSION_OPTION, version)
+			.run();
+		rememberSiteOption(REDIRECTS_VERSION_OPTION, version);
+	} catch (error) {
+		// The change itself is saved; other isolates then see it when their index expires (cacheSeconds).
+		console.error("coywolf-pack: could not record the redirects version", error);
+	}
+}
+
+/** The index this isolate holds, if it's still current (no edit, no new generation or redirects version, not expired). */
+function currentIndex(ttl: number): RuleIndex | null {
+	if (!cache || !isCurrent(cache, ttl)) return null;
+	// Undefined: the switches' read has expired; the epoch and the lifetime still apply.
+	const version = siteOption(REDIRECTS_VERSION_OPTION);
+	if (version !== undefined && version !== cache.version) return null;
+	return cache.index;
+}
+
+function ruleIndex(db: D1Database, ttl: number): Promise<RuleIndex> {
+	const held = currentIndex(ttl);
+	if (held) return Promise.resolve(held);
 	return sharedRead(
 		loading,
 		() => {
 			const epoch = settingsEpoch();
 			const seen = edits;
-			return loadPatternRules(db).then((list) => {
-				const compiled = compile(list).patterns;
-				if (seen === edits && epoch === settingsEpoch()) cache = { patterns: compiled, at: Date.now(), epoch };
-				return compiled;
+			const version = siteOption(REDIRECTS_VERSION_OPTION);
+			// Both in the same tick: one D1 batch (with the switches, on a cold isolate).
+			return Promise.all([loadPatternRules(db), loadExactSources(db, MAX_EXACT_IN_MEMORY)]).then(([list, sources]) => {
+				const index: RuleIndex = { patterns: compile(list).patterns, exact: sources.length > MAX_EXACT_IN_MEMORY ? null : new Set(sources) };
+				if (seen === edits && epoch === settingsEpoch()) cache = { index, at: Date.now(), epoch, version };
+				return index;
 			});
 		},
-		{ anchor: afterResponse, label: "the redirect patterns" },
+		{ anchor: afterResponse, label: "the redirect rules" },
 	);
 }
 
 /** The rules that can match a request (its exact rule and the patterns), read once per request URL. */
 const lookups = new WeakMap<URL, Promise<CompiledRules>>();
+/** Request URLs whose exact rule wasn't read, because this isolate's index has no such source (see serveLateRedirect). */
+const skippedExact = new WeakSet<URL>();
+
+const exactMap = (exact: Awaited<ReturnType<typeof findExactRule>>): CompiledRules["exact"] => new Map(exact ? [[exact.source, exact]] : []);
 
 function rulesFor(url: URL, db: D1Database, ttl: number): Promise<CompiledRules> {
 	let found = lookups.get(url);
 	if (!found) {
-		// Issued in the same tick, so both reads go to D1 in one batch.
-		found = Promise.all([findExactRule(db, url.pathname), patterns(db, ttl)]).then(([exact, list]) => ({
-			exact: new Map(exact ? [[exact.source, exact]] : []),
-			patterns: list,
-		}));
+		const held = currentIndex(ttl);
+		if (held) {
+			// Most requests: no exact rule for this path, so no D1 read at all.
+			const known = held.exact === null || held.exact.has(normalizePath(url.pathname));
+			if (!known) skippedExact.add(url);
+			const lookup = known ? findExactRule(db, url.pathname) : Promise.resolve(null);
+			found = lookup.then((exact) => ({ exact: exactMap(exact), patterns: held.patterns }));
+		} else {
+			// A cold isolate (or after an edit): the request's own lookup goes in the same D1 batch as the index.
+			found = Promise.all([findExactRule(db, url.pathname), ruleIndex(db, ttl)]).then(([exact, index]) => ({ exact: exactMap(exact), patterns: index.patterns }));
+		}
 		lookups.set(url, found);
 	}
 	return found;
+}
+
+/** Hits, batched per isolate: a flood of uncached requests (a query string skips the edge cache) can't write once each. */
+const hits = createBatchedCounter((db, id, n, now) => hitStatement(db, id, n, now), { label: "redirect hits" });
+
+/** For tests: write counted hits after `ms` (default a second). */
+export function setRedirectHitDelay(ms: number): void {
+	hits.setDelay(ms);
 }
 
 const SKIP = /^\/(_emdash|_astro|_image)\//;
@@ -106,6 +181,7 @@ export async function serveRedirect(
 	waitUntil: (p: Promise<unknown>) => void,
 	options: CoywolfRedirectsOptions = {},
 	edge = false,
+	countHit = true,
 ): Promise<Response | undefined> {
 	const { pathname, search } = url;
 	if (SKIP.test(pathname)) return undefined;
@@ -122,10 +198,33 @@ export async function serveRedirect(
 		return undefined;
 	}
 
-	const found = match(compiled, pathname, search);
-	if (!found) return undefined;
+	return redirectFor(url, db, compiled, waitUntil, edge, countHit);
+}
 
-	waitUntil(recordHit(db, found.rule.id).catch(() => undefined));
+/**
+ * A browser fetching the page ahead of a click (Speculation Rules, link prefetch): `Sec-Purpose: prefetch`
+ * (or `prefetch;prerender`), or the older `Purpose: prefetch`. Not a visit, so it isn't a redirect hit.
+ */
+export function isSpeculative(request: Request): boolean {
+	return /\bprefetch\b/i.test(request.headers.get("Sec-Purpose") ?? "") || /\bprefetch\b/i.test(request.headers.get("Purpose") ?? "");
+}
+
+/**
+ * The answer to a prefetch of a redirect source: declined (503, never stored), as Cloudflare's Speed Brain
+ * declines prefetches it won't serve. A browser drops a prefetch that doesn't end in a 2xx, so the click
+ * itself then reaches the site and counts as the hit, once. Serving the redirect to the prefetch instead
+ * would count a hover that may never become a click, and a click on it would then reuse the prefetched
+ * redirect without reaching the site at all.
+ */
+const declinedPrefetch = () => new Response(null, { status: 503, headers: { "Cache-Control": "no-store" } });
+
+/** The response for the rule that matches `url`, if any (its hit counted; a prefetch, `countHit` false, is declined). */
+function redirectFor(url: URL, db: D1Database, compiled: CompiledRules, waitUntil: (p: Promise<unknown>) => void, edge: boolean, countHit = true): Response | undefined {
+	const found = match(compiled, url.pathname, url.search);
+	if (!found) return undefined;
+	if (!countHit) return declinedPrefetch();
+
+	hits.count(db as unknown as Parameters<typeof hits.count>[0], found.rule.id, waitUntil);
 
 	// Browsers may keep a redirect for an hour. Unless it goes in the edge cache
 	// (whose lifetime Astro sets in Cloudflare-CDN-Cache-Control), "private" keeps
@@ -169,10 +268,42 @@ export async function serveCachedRedirect(
 	const cache = (context as unknown as { cache?: RouteCache }).cache;
 	const method = context.request.method;
 	const edge = Boolean(cache?.enabled) && (method === "GET" || method === "HEAD");
-	const response = await serveRedirect(context.url, env, waitUntil, {}, edge);
-	if (response && edge) {
-		cache!.set(false);
-		cache!.set({ maxAge: REDIRECT_EDGE_MAX_AGE, tags: [REDIRECTS_TAG] });
-	}
+	const speculative = isSpeculative(context.request);
+	const response = await serveRedirect(context.url, env, waitUntil, {}, edge && !speculative, !speculative);
+	if (response && speculative) cache?.set(false);
+	else if (response && edge) keepRedirectAtEdge(cache!);
+	return response;
+}
+
+function keepRedirectAtEdge(cache: RouteCache): void {
+	cache.set(false);
+	cache.set({ maxAge: REDIRECT_EDGE_MAX_AGE, tags: [REDIRECTS_TAG] });
+}
+
+/**
+ * For a request that rendered a 404 after its exact-rule lookup was skipped
+ * (this isolate's index had no such source): read the rule after all. A rule
+ * another isolate just added (a slug change, a new redirect) then works at
+ * once instead of within FEATURES_TTL_MS, at no cost for pages that render.
+ * A rule found this way also drops this isolate's index, which is out of date.
+ */
+export async function serveLateRedirect(
+	context: Parameters<MiddlewareHandler>[0],
+	env: Record<string, unknown>,
+	waitUntil: (p: Promise<unknown>) => void,
+): Promise<Response | undefined> {
+	if (!skippedExact.has(context.url)) return undefined;
+	const db = env.DB as D1Database | undefined;
+	if (!db) return undefined;
+	const rule = await findExactRule(db, context.url.pathname).catch(() => null);
+	if (!rule) return undefined;
+	invalidateRedirectCache();
+	const cache = (context as unknown as { cache?: RouteCache }).cache;
+	const method = context.request.method;
+	const edge = Boolean(cache?.enabled) && (method === "GET" || method === "HEAD");
+	const speculative = isSpeculative(context.request);
+	const response = redirectFor(context.url, db, { exact: exactMap(rule), patterns: [] }, waitUntil, edge && !speculative, !speculative);
+	if (response && speculative) cache?.set(false);
+	else if (response && edge) keepRedirectAtEdge(cache!);
 	return response;
 }
