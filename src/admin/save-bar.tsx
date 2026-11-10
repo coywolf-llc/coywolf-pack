@@ -2,8 +2,12 @@
  * The shared "unsaved changes" bar for settings pages: pinned to the bottom of
  * the page's content column (position: sticky inside EmDash's scrolling
  * <main>, so it never covers the sidebar) and shown only while the draft
- * differs from what's saved. Ctrl/⌘+S saves, and leaving the page while
- * dirty asks first.
+ * differs from what's saved. Ctrl/⌘+S saves. Leaving the page while dirty
+ * asks first: a link to another admin page (or Back) opens EmDash's "Leave
+ * without saving?" dialog, through the admin router's blocker as EmDash's
+ * own UnsavedChangesGuard does (src/admin/router.ts), and reloading or
+ * closing the tab shows the browser's prompt. A failed save's message stays
+ * on the bar (`error`, from useSaveResult in toast.tsx).
  *
  * Place it as the LAST child of the page's root container. For a <form>,
  * give the form an id and pass it as `form`: Save becomes that form's submit
@@ -16,15 +20,18 @@ import { FloppyDisk } from "@phosphor-icons/react";
 import * as React from "react";
 
 import { SAVE_BAR_CSS } from "./admin-css.js";
+import { ConfirmDialog } from "./confirm-dialog.js";
+import { adminRouter, guardNavigation } from "./router.js";
 
 export { isDirty } from "./dirty.js";
 
 /**
- * While `dirty`: warn before leaving the page, and Ctrl/⌘+S calls `onSave`
- * (when `canSave`). The browser's own Save dialog is suppressed whenever the
- * page is mounted, dirty or not.
+ * While `dirty`: ask before leaving the page, and Ctrl/⌘+S calls `onSave`
+ * (when `canSave`). Returns the "Leave without saving?" dialog, to render.
+ * The browser's own Save dialog is suppressed whenever the page is mounted,
+ * dirty or not.
  */
-export function useUnsavedChanges(dirty: boolean, onSave: () => void, canSave = true) {
+export function useUnsavedChanges(dirty: boolean, onSave: () => void, canSave = true): React.ReactNode {
 	const latest = React.useRef({ dirty, onSave, canSave });
 	latest.current = { dirty, onSave, canSave };
 
@@ -33,6 +40,33 @@ export function useUnsavedChanges(dirty: boolean, onSave: () => void, canSave = 
 		const warn = (event: BeforeUnloadEvent) => event.preventDefault();
 		window.addEventListener("beforeunload", warn);
 		return () => window.removeEventListener("beforeunload", warn);
+	}, [dirty]);
+
+	// In-app navigation (the sidebar, links, Back and Forward): the admin router's blocker, answered in the dialog below.
+	const [asking, setAsking] = React.useState<{ answer: (leave: boolean) => void } | null>(null);
+	React.useEffect(() => {
+		if (!dirty) return;
+		const router = adminRouter();
+		if (!router) return;
+		let open: ((leave: boolean) => void) | null = null;
+		const release = guardNavigation(
+			router,
+			() =>
+				new Promise<boolean>((resolve) => {
+					const answer = (leave: boolean) => {
+						open = null;
+						setAsking(null);
+						resolve(leave);
+					};
+					open = answer;
+					setAsking({ answer });
+				}),
+		);
+		return () => {
+			release();
+			// Saved or discarded while the dialog was open: nothing would be lost now.
+			(open as ((leave: boolean) => void) | null)?.(true);
+		};
 	}, [dirty]);
 
 	React.useEffect(() => {
@@ -45,6 +79,18 @@ export function useUnsavedChanges(dirty: boolean, onSave: () => void, canSave = 
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
 	}, []);
+
+	return (
+		<ConfirmDialog
+			open={asking !== null}
+			title="Leave without saving?"
+			description="Your unsaved changes will be lost."
+			confirmLabel="Leave"
+			cancelLabel="Stay"
+			onConfirm={() => asking?.answer(true)}
+			onClose={() => asking?.answer(false)}
+		/>
+	);
 }
 
 export function SaveBar(props: {
@@ -61,6 +107,8 @@ export function SaveBar(props: {
 	label?: string;
 	/** Id of the <form> whose submit button Save is. */
 	form?: string;
+	/** Why the last save failed (useSaveResult().error): shown on the bar until the next save. */
+	error?: string | null;
 }) {
 	const canSave = props.canSave ?? true;
 	const { onSave, form, saving } = props;
@@ -69,7 +117,7 @@ export function SaveBar(props: {
 		if (form) (document.getElementById(form) as HTMLFormElement | null)?.requestSubmit();
 		else onSave?.();
 	}, [onSave, form, saving]);
-	useUnsavedChanges(props.dirty, save, canSave);
+	const leaveDialog = useUnsavedChanges(props.dirty, save, canSave);
 
 	// Sticky bottom: 0 stops at the top of the scroll container's bottom padding
 	// (EmDash's <main> has p-6), leaving a strip of page showing under the bar.
@@ -89,6 +137,7 @@ export function SaveBar(props: {
 			<p className="sr-only" role="status" aria-live="polite">
 				{props.dirty ? "Unsaved changes" : ""}
 			</p>
+			{leaveDialog}
 			{props.dirty && (
 				<div
 					ref={bar}
@@ -111,6 +160,7 @@ export function SaveBar(props: {
 					<div className="min-w-0 text-sm">
 						<span className="font-medium">Unsaved changes</span>
 						{props.detail && <span className="text-kumo-subtle"> · {props.detail}</span>}
+						{props.error && <p className="mt-1 text-kumo-danger">{props.error}</p>}
 					</div>
 					<div className="flex shrink-0 gap-2">
 						<Button type="button" variant="secondary" disabled={props.saving} onClick={props.onDiscard}>
