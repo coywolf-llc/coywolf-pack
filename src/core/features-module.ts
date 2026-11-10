@@ -38,7 +38,9 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 			handler: async (ctx) => {
 				const { features } = parseInput(z.object({ features: z.record(z.string(), z.boolean()) }), ctx.input);
 				const known = new Set(featureCatalog().map((f) => f.id));
-				// A save before the defaults were recorded records them too (an existing site: it had the pack's switches page).
+				// Record the defaults first if they aren't yet (a fresh install's flag still counts); should that fail,
+				// the save records them as an existing site's.
+				await recordDefaults(ctx).catch((error: unknown) => ctx.log.warn("Could not record the feature defaults", { error: String(error) }));
 				const stored = withRecordedDefaults(await ctx.settings.get<FeatureMap>(FEATURES_SETTING), true);
 				for (const [id, on] of Object.entries(features)) if (known.has(id)) stored[id] = on;
 				await ctx.settings.set(FEATURES_SETTING, stored);

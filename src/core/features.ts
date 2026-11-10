@@ -136,19 +136,42 @@ interface DefaultsCtx {
 		getVersioned<T>(key: string): Promise<{ value: T; revision: string } | null>;
 		compareAndSet(key: string, expectedRevision: string | null, value: unknown): Promise<{ applied: boolean }>;
 	};
-	kv: { list(prefix?: string): Promise<unknown[]> };
+	kv: {
+		list(prefix?: string): Promise<Array<{ key: string }>>;
+		get<T>(key: string): Promise<T | null>;
+		set(key: string, value: unknown): Promise<void>;
+		delete(key: string): Promise<boolean>;
+	};
 	storage?: Record<string, { count(): Promise<number> } | undefined>;
 }
 
 /**
+ * Left by plugin:install until the defaults are recorded, so a fresh install
+ * whose recording failed there is still recorded as one later (a KV row, and
+ * a flag in this isolate for when that write failed too).
+ */
+export const FRESH_INSTALL_KEY = "state:freshInstall";
+let freshInstall = false;
+
+/**
+ * KV rows the pack writes by itself on any site, whether or not anyone has
+ * used a feature: they don't make a site "existing". The fresh-install flag;
+ * the deployed version the page cache middleware records on the first request
+ * (src/pageCache/lib.ts VERSION_OPTION) and its warming progress
+ * (src/pageCache/warm.ts WARM_STATE_OPTION); Discovery's IndexNow clean-up
+ * marker (src/discovery/module.ts RETIRED_MARKER, set in plugin:activate).
+ */
+export const HOUSEKEEPING_KEYS: ReadonlySet<string> = new Set([FRESH_INSTALL_KEY, "pageCache:version", "pageCache:warmState", "state:discovery:indexnowRetired"]);
+
+/**
  * Anything the pack has stored on this site: a plugin setting or KV row
  * (EmDash's options table, where the switches, the settings generation and
- * every module's settings live), or a document in one of its storage
- * collections. A read that fails counts as yes.
+ * every module's settings live) other than its housekeeping rows, or a
+ * document in one of its storage collections. A read that fails counts as yes.
  */
 async function hasPackState(ctx: DefaultsCtx): Promise<boolean> {
 	try {
-		if ((await ctx.kv.list()).length > 0) return true;
+		if ((await ctx.kv.list()).some((row) => !HOUSEKEEPING_KEYS.has(row.key))) return true;
 		for (const collection of Object.values(ctx.storage ?? {})) if (collection && (await collection.count()) > 0) return true;
 		return false;
 	} catch {
@@ -161,22 +184,46 @@ async function hasPackState(ctx: DefaultsCtx): Promise<boolean> {
  * (withRecordedDefaults), so an existing site keeps Redirect Manager, Slug
  * changes and Backups as they were while new sites start with them off.
  *
- * A site counts as new only when `fresh` (plugin:install, which EmDash runs
- * once, when it first records the plugin on a site) and the pack has nothing
- * stored there yet. Every other call (plugin:activate, the Features page, a
- * save of the switches) and any doubt (stored switches, any pack setting or
- * data, a read that fails) count as an existing site. Writes only if the
- * switches didn't change meanwhile (compare-and-set); a save of the switches
- * records them itself. Returns true when the map records them now.
+ * A site counts as new only after a fresh install (`fresh`: plugin:install,
+ * which EmDash runs once, when it first records the plugin on a site; or the
+ * flag it leaves, FRESH_INSTALL_KEY, when recording failed there) and while
+ * the pack has nothing stored there but its housekeeping rows. Every other
+ * call (plugin:activate, the Features page, a save of the switches) and any
+ * doubt (stored switches, any pack setting or data, a read that fails) count
+ * as an existing site. Writes only if the switches didn't change meanwhile
+ * (compare-and-set); a save of the switches records them itself. Returns
+ * true when the map records them now.
  */
 export async function recordDefaults(ctx: DefaultsCtx, options: { fresh?: boolean } = {}): Promise<boolean> {
+	if (options.fresh) {
+		freshInstall = true;
+		// Before anything that can fail: a later call retries as a fresh install.
+		await ctx.kv.set(FRESH_INSTALL_KEY, true).catch(() => undefined);
+	}
 	const current = await ctx.settings.getVersioned<FeatureMap>(FEATURES_SETTING);
 	const stored = current?.value ?? null;
-	if (stored?.[DEFAULTS_RECORDED] === true) return true;
-	const existing = !options.fresh || stored !== null || (await hasPackState(ctx));
+	if (stored?.[DEFAULTS_RECORDED] === true) {
+		await forgetFreshInstall(ctx);
+		return true;
+	}
+	const fresh = options.fresh || freshInstall || (await ctx.kv.get<boolean>(FRESH_INSTALL_KEY).catch(() => null)) === true;
+	const existing = !fresh || stored !== null || (await hasPackState(ctx));
 	const { applied } = await ctx.settings.compareAndSet(FEATURES_SETTING, current?.revision ?? null, withRecordedDefaults(stored, existing));
-	if (applied) invalidateFeatures();
+	if (applied) {
+		invalidateFeatures();
+		await forgetFreshInstall(ctx);
+	}
 	return applied;
+}
+
+async function forgetFreshInstall(ctx: DefaultsCtx): Promise<void> {
+	freshInstall = false;
+	await ctx.kv.delete(FRESH_INSTALL_KEY).catch(() => undefined);
+}
+
+/** Tests: forget this isolate's fresh-install flag. */
+export function resetFreshInstallForTests(): void {
+	freshInstall = false;
 }
 
 /** The switches most recently read in this isolate (null before the first read). */
