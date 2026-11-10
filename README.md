@@ -148,7 +148,7 @@ A good first set for most sites:
 | **Schema & Social** | Schema.org markup and Open Graph tags | Review the publisher on the Schema page |
 | **Redirect Manager** | Redirects EmDash's own can't handle, plus slug-change and removed-content redirects | Import old redirects on the Redirect Manager page |
 | **Discovery** | An RSS feed, a news sitemap, llms.txt; Crawler Hints status | Turn on the parts you want on the Discovery page |
-| **Backups** | Backups of the database and media, on demand or daily | Add `backups: { name: "coywolf" }` (step 2) and the `BACKUPS` bucket, then turn on the daily backup (see [Backups](docs/backups.md)) |
+| **Backups** | Backups of the database and media, on demand or daily | Add `backups: { name: "coywolf" }` (step 2) and the `BACKUPS` bucket, then turn on the daily backup; optionally let Cloudflare delete old ones ([Retention on Cloudflare](docs/backups.md#retention-on-cloudflare)) |
 
 ### Using the admin
 

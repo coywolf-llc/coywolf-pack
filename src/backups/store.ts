@@ -192,6 +192,10 @@ export async function writeDumpStream(
 }
 
 /** Write (or rewrite) a backup's manifest for a dump already stored. */
+/**
+ * Write (or rewrite) a backup's manifest. With a bucket lock on d1/ a manifest can be written once only:
+ * R2 refuses to overwrite a locked object, so the backup then writes it after the mirrors (see runBackup).
+ */
 export async function writeManifest(
 	bucket: R2Bucket,
 	stamp: string,
@@ -379,10 +383,16 @@ export async function restoreMissingMedia(
 	return { restored, checked, pending };
 }
 
-/** Delete database backups and replaced media and upload copies older than `days`. Returns the number of stamps pruned. */
+/**
+ * Delete database backups and replaced media and upload copies older than `days`. Returns the number of
+ * stamps pruned. A folder R2 refuses to delete (a bucket lock that keeps it longer than `days`) is left
+ * for a later run, and the rest are still pruned. Not needed once the backup bucket has a lifecycle rule
+ * doing the same (see retention.ts): the daily task then skips it.
+ */
 export async function pruneBackups(bucket: R2Bucket, days: number): Promise<number> {
 	const cutoff = makeStamp(new Date(Date.now() - days * 86_400_000));
 	let pruned = 0;
+	let refused = 0;
 	for (const prefix of ["d1/", "media/changed/", "uploads/changed/"]) {
 		let cursor: string | undefined;
 		do {
@@ -390,8 +400,13 @@ export async function pruneBackups(bucket: R2Bucket, days: number): Promise<numb
 			for (const dir of page.delimitedPrefixes) {
 				const stamp = dir.slice(prefix.length, -1);
 				if (!STAMP.test(stamp) || stamp >= cutoff) continue;
-				await deletePrefix(bucket, dir);
-				if (prefix === "d1/") pruned++;
+				try {
+					await deletePrefix(bucket, dir);
+					if (prefix === "d1/") pruned++;
+				} catch (error) {
+					refused++;
+					if (refused === 1) console.warn(`coywolf backups: couldn't delete ${dir} (a bucket lock may still keep it); trying again tomorrow`, error);
+				}
 			}
 			cursor = page.truncated ? page.cursor : undefined;
 		} while (cursor);

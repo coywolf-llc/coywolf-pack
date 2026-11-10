@@ -64,6 +64,12 @@ export const SECRET_SETTINGS = {
 		description:
 			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Account Analytics → Read, Workers → Metadata Read-Only (finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. The Performance page has a pre-filled form. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account). With Zone → Read added too, in a policy scoped to All Domains or this site's domain, the Discovery page shows whether Cloudflare's Crawler Hints is on.",
 	},
+	backupsCloudflareToken: {
+		type: "secret",
+		label: "Backups — Cloudflare API token for retention",
+		description:
+			"Optional. Only for Retention on Cloudflare on the Backups page, which sets the backup bucket's lifecycle rule (and an optional lock) to match the retention days. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Workers R2 Storage → Edit (and D1 → Edit to use the same token for restores); (3) create it, copy the token (shown once), paste it here and save. The Backups page has a pre-filled form. Or add Workers R2 Storage → Edit to the BACKUPS_API_TOKEN Worker secret's token.",
+	},
 	robotsRadarToken: {
 		type: "secret",
 		label: "Robots.txt — Cloudflare Radar API token",

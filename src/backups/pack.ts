@@ -1,5 +1,6 @@
 import type { PluginContext } from "emdash";
 
+import { CLOUDFLARE_API_HOST } from "../core/cloudflare-api.js";
 import { registerFeatures } from "../core/features.js";
 import type { PackMiddleware, PackModule } from "../core/module.js";
 import { configureBackupDownloads, serveBackupDownload } from "./download.js";
@@ -23,6 +24,9 @@ export function backupsPack(options: BackupsOptions): PackModule {
 		tasks: [{ name: BACKUPS_TASK, schedule: "@daily", handler: (ctx: PluginContext) => backups.daily(ctx) }],
 		adminPages: [{ path: "/backups", label: "Backups", icon: "database" }],
 		widgets: [{ id: "backup-status", title: "Backups", size: "third" }],
+		// Restores and Retention on Cloudflare call Cloudflare's API (through ctx.http where the route has it).
+		capabilities: ["network:request"],
+		allowedHosts: [CLOUDFLARE_API_HOST],
 	};
 }
 

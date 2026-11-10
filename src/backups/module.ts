@@ -2,9 +2,11 @@
  * Backups module: D1 dumps + R2 media mirror, with rewind (D1 Time Travel),
  * undo, restore to a new database, and missing-media restore.
  */
+import type { PluginContext } from "emdash";
 import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
+import { CloudflareApiError, contextFetch } from "../core/cloudflare-api.js";
 import { type CronScheduler, type SettingsReader, parseInput, secret, workerEnv } from "../shared.js";
 import { createDownloadLink } from "./download.js";
 import { dumpLines } from "./dump.js";
@@ -17,6 +19,21 @@ import {
 	rewind,
 	undoRewind,
 } from "./restore.js";
+import {
+	PROBE_PREFIX,
+	type RetentionAccess,
+	type RetentionStatus,
+	bucketHasKey,
+	getLifecycle,
+	getLocks,
+	lockRules,
+	mergeRules,
+	pruningRedundant,
+	putLifecycle,
+	putLocks,
+	retentionRules,
+	retentionStatus,
+} from "./retention.js";
 import { FILE, type Manifest, STAMP, listBackups, makeStamp, mirrorBucket, mirrorMedia, pruneBackups, writeDumpStream, writeManifest } from "./store.js";
 import { readOnlyRoute } from "../core/routes.js";
 
@@ -63,6 +80,27 @@ async function settings(ctx: SettingsReader) {
 	};
 }
 
+/**
+ * Retention on Cloudflare (the Backups page's card): where the account ID and
+ * bucket name are saved (plain settings), the optional saved token (a secret,
+ * src/core/secrets.ts), and what the last look at the bucket found (KV).
+ */
+export const RETENTION_SETTINGS = { accountId: "backupsAccountId", bucket: "backupsBucketName", token: "backupsCloudflareToken" } as const;
+export const RETENTION_STATE_KEY = "backups:cloudflare";
+
+/** What the last look at the backup bucket's rules found. */
+export interface RetentionState {
+	checkedAt: string;
+	bucket: string;
+	retentionDays: number;
+	status: RetentionStatus;
+}
+
+const DAY_MS = 86_400_000;
+/** The daily task re-reads the bucket's rules once this old (when it has a token), and stops trusting a look older than RETENTION_TRUST_MS. */
+const RETENTION_RECHECK_MS = DAY_MS;
+const RETENTION_TRUST_MS = 7 * DAY_MS;
+
 /** Daily task for scheduled backups and retention. schedule() is an upsert, so it's safe to repeat. */
 export const BACKUPS_TASK = "backups-daily";
 export async function ensureBackupsTask(ctx: CronScheduler) {
@@ -106,7 +144,11 @@ export function backupsModule(options: BackupsOptions) {
 		return { manifest, sql: await new Response(dump.body.pipeThrough(new DecompressionStream("gzip"))).text() };
 	}
 
-	async function runBackup(source: "admin" | "scheduled") {
+	/**
+	 * `writeOnce`: the backup bucket has a lock on d1/, which refuses to overwrite a manifest, so it's
+	 * written once, after the mirrors (their counts in it), instead of first and again after each mirror.
+	 */
+	async function runBackup(source: "admin" | "scheduled", writeOnce = false) {
 		const { db, media, backups, uploads, restore } = await bindings();
 		const stamp = makeStamp();
 		const timeTravelBookmark = restore ? await currentBookmark(restore).catch(() => undefined) : undefined;
@@ -114,33 +156,132 @@ export function backupsModule(options: BackupsOptions) {
 		// Streamed: rows are read a page at a time and gzipped straight into the bucket.
 		const counts = { tables: 0, rows: 0 };
 		const written = await writeDumpStream(backups, stamp, file, dumpLines(db, counts));
-		const extra = { database: name, source, timeTravelBookmark, tables: counts.tables, rows: counts.rows };
-		// Save the database first so a media problem can't cost the dump.
-		const manifest = await writeManifest(backups, stamp, file, written, extra);
-		let result = manifest;
+		const extra: Partial<Manifest> = { database: name, source, timeTravelBookmark, tables: counts.tables, rows: counts.rows };
+		// Save the database first so a media problem can't cost the dump (unless the manifest can be written only once).
+		let result = writeOnce ? ({ ...extra } as Manifest) : await writeManifest(backups, stamp, file, written, extra);
 		try {
 			const mediaResult = await mirrorMedia(media, backups, stamp);
-			result = await writeManifest(backups, stamp, file, written, { ...extra, media: mediaResult });
+			result = writeOnce ? { ...result, media: mediaResult } : await writeManifest(backups, stamp, file, written, { ...extra, media: mediaResult });
 		} catch (error) {
 			console.error("coywolf backups: media mirror failed; the database backup was saved", error);
 		}
 		if (uploads) {
 			try {
 				const uploadsResult = await mirrorBucket(uploads, backups, stamp, "uploads");
-				result = await writeManifest(backups, stamp, file, written, { ...result, uploads: uploadsResult });
+				result = writeOnce ? { ...result, uploads: uploadsResult } : await writeManifest(backups, stamp, file, written, { ...result, uploads: uploadsResult });
 			} catch (error) {
 				console.error("coywolf backups: form uploads mirror failed; the database backup was saved", error);
 			}
 		}
+		if (writeOnce) result = await writeManifest(backups, stamp, file, written, result);
 		return result;
 	}
 
-	async function daily(ctx: SettingsReader & { log: { info(msg: string, data?: unknown): void } }) {
+	// ── Retention on Cloudflare ─────────────────────────────────────
+
+	const retentionInput = z.object({
+		accountId: z
+			.string()
+			.trim()
+			.regex(/^([0-9a-f]{32})?$/i, "The account ID is 32 letters and numbers (0-9, a-f).")
+			.optional(),
+		bucket: z
+			.string()
+			.trim()
+			.regex(/^([a-z0-9][a-z0-9-]{1,61}[a-z0-9])?$/, "Bucket names use lowercase letters, numbers and hyphens (3-63 characters).")
+			.optional(),
+		token: z.string().trim().max(400).optional(),
+	});
+
+	const tokenSecretName = () => options.restore?.tokenSecret ?? "BACKUPS_API_TOKEN";
+
+	/** The token, account and bucket: the request's, then the saved ones, then Worker secrets (the restore token, which can carry R2 Edit too). */
+	async function retentionAccess(ctx: PluginContext, input: z.infer<typeof retentionInput> = {}): Promise<RetentionAccess> {
+		const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
+		const saved = async (key: string) => ((await ctx.settings.get<string>(key).catch(() => null)) ?? "").trim();
+		const token = input.token || (await saved(RETENTION_SETTINGS.token)) || secret(env, tokenSecretName()) || secret(env, "CLOUDFLARE_API_TOKEN") || "";
+		const accountId =
+			input.accountId || (await saved(RETENTION_SETTINGS.accountId)) || options.restore?.accountId || secret(env, "CF_ACCOUNT_ID") || secret(env, "CLOUDFLARE_ACCOUNT_ID") || "";
+		const bucket = input.bucket || (await saved(RETENTION_SETTINGS.bucket));
+		const missing = [!accountId && "Cloudflare account ID", !bucket && "backup bucket name", !token && "Cloudflare API token"].filter(Boolean);
+		if (missing.length) throw PluginRouteError.badRequest(`Enter the ${missing.join(", ")} first.`);
+		return { token, accountId, bucket, fetch: contextFetch(ctx) };
+	}
+
+	/**
+	 * Make sure the named bucket is the one bound as the backup bucket: write a small probe through the
+	 * binding and look for it through Cloudflare's API (the sites share an account, so another site's
+	 * backup bucket is one typo away). The probe is deleted again.
+	 */
+	async function verifyBucket(access: RetentionAccess): Promise<void> {
+		const { backups } = await bindings();
+		const key = `${PROBE_PREFIX}${crypto.randomUUID()}.txt`;
+		await backups.put(key, "Coywolf Pack checks which bucket this is. Safe to delete.");
+		try {
+			if (!(await bucketHasKey(access, key))) {
+				throw PluginRouteError.badRequest(
+					`The bucket ${access.bucket} isn't the one bound as ${options.backups ?? "BACKUPS"} in wrangler.jsonc. Check its bucket_name there.`,
+				);
+			}
+		} finally {
+			await backups.delete(key).catch(() => undefined);
+		}
+	}
+
+	async function readRetentionState(ctx: { kv: PluginContext["kv"] }): Promise<RetentionState | null> {
+		return ((await ctx.kv.get<RetentionState>(RETENTION_STATE_KEY).catch(() => null)) ?? null) as RetentionState | null;
+	}
+
+	/** Read the bucket's lifecycle and lock rules, and remember what they do for `retentionDays`. */
+	async function inspectRetention(ctx: PluginContext, access: RetentionAccess, retentionDays: number): Promise<RetentionState> {
+		const [lifecycle, locks] = await Promise.all([getLifecycle(access), getLocks(access)]);
+		const state: RetentionState = { checkedAt: new Date().toISOString(), bucket: access.bucket, retentionDays, status: retentionStatus(lifecycle, locks, retentionDays) };
+		await ctx.kv.set(RETENTION_STATE_KEY, state);
+		return state;
+	}
+
+	const cloudflareError = (error: unknown): never => {
+		if (error instanceof CloudflareApiError) throw PluginRouteError.badRequest(error.message);
+		throw error;
+	};
+
+	/** Save the account and bucket that worked (and the token, when asked to). */
+	async function rememberAccess(ctx: PluginContext, input: z.infer<typeof retentionInput> & { saveToken?: boolean }, access: RetentionAccess) {
+		if (input.accountId) await ctx.settings.set(RETENTION_SETTINGS.accountId, access.accountId);
+		if (input.bucket) await ctx.settings.set(RETENTION_SETTINGS.bucket, access.bucket);
+		if (input.saveToken && input.token) await ctx.settings.set(RETENTION_SETTINGS.token, input.token);
+	}
+
+	/**
+	 * Whether today's pruning can be skipped: the bucket's lifecycle rule deletes every prefix that ages
+	 * out, at the retention days or sooner, as last seen within RETENTION_TRUST_MS. The rules are read
+	 * again once a day when a token is available (saved or a Worker secret); without one, a look from the
+	 * Backups page counts for a week, then the pack prunes again (redundant, never harmful).
+	 */
+	async function pruningSkippable(ctx: PluginContext, retentionDays: number): Promise<{ skip: boolean; state: RetentionState | null }> {
+		let state = await readRetentionState(ctx);
+		if (state && Date.now() - Date.parse(state.checkedAt) > RETENTION_RECHECK_MS) {
+			const access = await retentionAccess(ctx).catch(() => null);
+			if (access) {
+				state = await inspectRetention(ctx, access, retentionDays).catch((error: unknown) => {
+					ctx.log.warn("Backups: couldn't read the backup bucket's lifecycle rules", { error: String(error).slice(0, 300) });
+					return state;
+				});
+			}
+		}
+		const fresh = Boolean(state && Date.now() - Date.parse(state.checkedAt) <= RETENTION_TRUST_MS);
+		return { skip: fresh && pruningRedundant(state?.status, retentionDays), state };
+	}
+
+	async function daily(ctx: PluginContext) {
 		const s = await settings(ctx);
+		const retention = await pruningSkippable(ctx, s.retentionDays);
 		if (s.scheduled) {
-			const manifest = await runBackup("scheduled");
+			const manifest = await runBackup("scheduled", retention.state?.status.d1Locked === true);
 			ctx.log.info("Scheduled backup complete", { stamp: manifest.stamp, bytes: manifest.bytes });
 		}
+		// The backup bucket's lifecycle rule deletes old backups itself: pruning here would only repeat it.
+		if (retention.skip) return;
 		const { backups } = await bindings();
 		const pruned = await pruneBackups(backups, s.retentionDays);
 		if (pruned) ctx.log.info("Pruned old backups", { pruned });
@@ -178,10 +319,14 @@ export function backupsModule(options: BackupsOptions) {
 			request: { body: "none" },
 			handler: async (ctx) => {
 				await ensureBackupsTask(ctx);
-				const manifest = await runBackup("admin");
+				const state = await readRetentionState(ctx);
+				const manifest = await runBackup("admin", state?.status.d1Locked === true);
 				ctx.log.info("Backup complete", { stamp: manifest.stamp, bytes: manifest.bytes });
-				const { backups } = await bindings();
-				await pruneBackups(backups, (await settings(ctx)).retentionDays);
+				const { retentionDays } = await settings(ctx);
+				if (!pruningRedundant(state?.status, retentionDays)) {
+					const { backups } = await bindings();
+					await pruneBackups(backups, retentionDays);
+				}
 				return manifest;
 			},
 		}),
@@ -253,6 +398,103 @@ export function backupsModule(options: BackupsOptions) {
 				return combined;
 			},
 		}),
+
+		/** Retention on Cloudflare: what's saved and what the last look at the bucket found (no Cloudflare call). */
+		"backups/cloudflare": {
+			permission: "plugins:manage" as const,
+			handler: async (ctx: PluginContext) => {
+				const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
+				const saved = async (key: string) => ((await ctx.settings.get<string>(key).catch(() => null)) ?? "").trim();
+				const { retentionDays } = await settings(ctx);
+				return {
+					accountId: (await saved(RETENTION_SETTINGS.accountId)) || options.restore?.accountId || "",
+					bucket: await saved(RETENTION_SETTINGS.bucket),
+					suggestedBucket: `${name}-backups`,
+					tokenSaved: Boolean(await saved(RETENTION_SETTINGS.token)),
+					envToken: Boolean(secret(env, tokenSecretName()) || secret(env, "CLOUDFLARE_API_TOKEN")),
+					envTokenName: tokenSecretName(),
+					envAccountId: Boolean(options.restore?.accountId || secret(env, "CF_ACCOUNT_ID") || secret(env, "CLOUDFLARE_ACCOUNT_ID")),
+					retentionDays,
+					state: await readRetentionState(ctx),
+				};
+			},
+		},
+
+		/** Look at the backup bucket's lifecycle and lock rules (after checking it's the bound bucket). Changes nothing on Cloudflare. */
+		"backups/cloudflare/check": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				const input = parseInput(retentionInput, ctx.input ?? {});
+				const access = await retentionAccess(ctx, input);
+				const { retentionDays } = await settings(ctx);
+				try {
+					await verifyBucket(access);
+					const state = await inspectRetention(ctx, access, retentionDays);
+					await rememberAccess(ctx, input, access);
+					return state;
+				} catch (error) {
+					return cloudflareError(error);
+				}
+			},
+		})),
+
+		/**
+		 * Set the lifecycle rule to the retention days, and the lock to match (`lock`: on) or remove the
+		 * pack's lock (off). The bucket's other rules are kept. Turning the lock on takes LOCK typed.
+		 * Nothing a page shows changes, so no cache is cleared.
+		 */
+		"backups/cloudflare/apply": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				const input = parseInput(
+					retentionInput.extend({ saveToken: z.boolean().optional(), lock: z.boolean(), confirm: z.string().optional() }).refine((v) => !v.lock || v.confirm === "LOCK", {
+						message: "Type LOCK to confirm the bucket lock.",
+					}),
+					ctx.input,
+				);
+				const access = await retentionAccess(ctx, input);
+				const { retentionDays } = await settings(ctx);
+				try {
+					await verifyBucket(access);
+					const [lifecycle, locks] = await Promise.all([getLifecycle(access), getLocks(access)]);
+					await putLifecycle(access, mergeRules(lifecycle, retentionRules(retentionDays)));
+					const hadLock = locks.some((rule) => rule.id.startsWith("coywolf-pack-backups-"));
+					if (input.lock || hadLock) await putLocks(access, mergeRules(locks, input.lock ? lockRules(retentionDays) : []));
+					await rememberAccess(ctx, input, access);
+					const state = await inspectRetention(ctx, access, retentionDays);
+					ctx.log.info("Backups: retention set on the backup bucket", { bucket: access.bucket, days: retentionDays, lock: input.lock });
+					return state;
+				} catch (error) {
+					return cloudflareError(error);
+				}
+			},
+		})),
+
+		/** Remove the pack's lifecycle and lock rules from the backup bucket (the pack prunes again from the next day). */
+		"backups/cloudflare/remove": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (ctx) => {
+				const input = parseInput(retentionInput, ctx.input ?? {});
+				const access = await retentionAccess(ctx, input);
+				const { retentionDays } = await settings(ctx);
+				try {
+					const [lifecycle, locks] = await Promise.all([getLifecycle(access), getLocks(access)]);
+					await putLifecycle(access, mergeRules(lifecycle, []));
+					if (locks.some((rule) => rule.id.startsWith("coywolf-pack-backups-"))) await putLocks(access, mergeRules(locks, []));
+					const state = await inspectRetention(ctx, access, retentionDays);
+					ctx.log.info("Backups: the pack's retention rules were removed from the backup bucket", { bucket: access.bucket });
+					return state;
+				} catch (error) {
+					return cloudflareError(error);
+				}
+			},
+		})),
 
 		/**
 		 * A ten-minute link that streams one backup file (see ./download.ts).
