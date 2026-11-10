@@ -6,7 +6,8 @@ import { configureBackupDownloads, serveBackupDownload } from "./download.js";
 import { BACKUPS_TASK, type BackupsOptions, backupsModule } from "./module.js";
 
 const FEATURES = [
-	{ id: "backups", label: "Backups", description: "Database and media backups, rewind, and restore.", default: true },
+	// On by default before 0.36.0: sites set up earlier keep it on (recordDefaults in src/core/features.ts).
+	{ id: "backups", label: "Backups", description: "Database and media backups, rewind, and restore.", default: false, legacyDefault: true },
 ];
 registerFeatures(FEATURES);
 

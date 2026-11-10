@@ -12,7 +12,9 @@ const FEATURES = [
 		id: "redirects",
 		label: "Redirects",
 		description: "External and file-path redirects, regular expressions, hit counts, and import.",
-		default: true,
+		// On by default before 0.36.0: sites set up earlier keep it on (recordDefaults in src/core/features.ts).
+		default: false,
+		legacyDefault: true,
 	},
 	{
 		id: TRASH_PROMPT_FEATURE,
@@ -26,7 +28,8 @@ const FEATURES = [
 		label: "Slug changes",
 		description:
 			"When a published entry's URL changes (a new slug, category or parent page), add a 301 from the old URL to the new one. EmDash's own slug-change redirect uses the collection's URL pattern, which can't express category or parent paths.",
-		default: true,
+		default: false,
+		legacyDefault: true,
 	},
 ];
 registerFeatures(FEATURES);

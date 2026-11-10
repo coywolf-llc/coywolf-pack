@@ -3,7 +3,7 @@
  */
 import type { PluginContext } from "emdash";
 
-import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn } from "./features.js";
+import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn, recordDefaults } from "./features.js";
 import type { PackModule, TaskDef } from "./module.js";
 import { noteReadFailure } from "./read-failures.js";
 import { requestStore } from "./request-memo.js";
@@ -110,7 +110,7 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 	const hooks: Record<string, Handler | { handler: Handler; timeout?: number; priority?: number }> = {};
 
 	for (const name of names) {
-		if (name === "cron" || name === "plugin:activate") continue; // Composed below.
+		if (name === "cron" || name === "plugin:activate" || name === "plugin:install") continue; // Composed below.
 		const participants = modules.filter((m) => m.hooks?.[name as keyof NonNullable<PackModule["hooks"]>]);
 		if (BACKGROUND.has(name)) {
 			// Priority 0 (EmDash's default is 100, lower runs first): the pipeline runs plugins' handlers one
@@ -187,6 +187,22 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 	// EmDash 1.2.0 runs install → activate once at boot for a config plugin with no _plugin_state row, and a
 	// hook that fails (its 5-second default timeout included) disables the plugin until an admin re-enables
 	// it. Scheduling a dozen tasks is a dozen D1 writes: give it room.
+	//
+	// plugin:install runs only then, on a site that has never had the pack (or lost EmDash's record of it):
+	// a site with nothing of the pack's stored yet takes the 0.36.0 defaults (Redirect Manager, Slug changes
+	// and Backups off); anything else is recorded as an existing site (src/core/features.ts recordDefaults).
+	hooks["plugin:install"] = {
+		timeout: ACTIVATE_TIMEOUT_MS,
+		// Never throws, like plugin:activate. Unrecorded, the switches keep the pre-0.36.0 defaults (on).
+		handler: async (_event, ctx) => {
+			try {
+				await recordDefaults(ctx, { fresh: true });
+			} catch (error) {
+				ctx.log.error("plugin:install: recording the feature defaults failed; they're recorded when the Features page opens", { error: String(error) });
+			}
+		},
+	};
+
 	hooks["plugin:activate"] = {
 		timeout: ACTIVATE_TIMEOUT_MS,
 		// Never throws: EmDash leaves a plugin whose activation fails turned off, and a brief D1 error here
@@ -197,6 +213,12 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 				await ensureTasks(ctx, tasks);
 			} catch (error) {
 				ctx.log.error("plugin:activate: scheduling tasks failed; they're scheduled again when the Features page opens", { error: String(error) });
+			}
+			try {
+				// After plugin:install on a new site this finds the defaults recorded; on an existing one it records them.
+				await recordDefaults(ctx);
+			} catch (error) {
+				ctx.log.error("plugin:activate: recording the feature defaults failed; they're recorded when the Features page opens", { error: String(error) });
 			}
 			for (const module of modules) {
 				try {

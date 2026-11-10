@@ -842,3 +842,31 @@ test("Astro's cookies (on the response under Symbol.for(\"astro.cookies\")) surv
 	assert.equal(getCookiesFromResponse(out), cookies);
 	assert.match(await out.text(), /<script data-coywolf-pack>/);
 });
+
+// ── Admin pages: router, toasts, plugin page rendering ─────────
+
+test("the admin is a TanStack Router app at /_emdash/admin, and the router puts itself on window.__TSR_ROUTER__ (src/admin/router.ts: the unsaved-changes guard and in-admin links)", () => {
+	assert.ok(adminPkg.dependencies?.["@tanstack/react-router"], `@emdash-cms/admin ${adminPkg.version} no longer depends on @tanstack/react-router`);
+	assert.match(admin, /createRouter\(\{[\s\S]{0,200}?basepath: "\/_emdash\/admin"/);
+	// EmDash's own guard blocks through the same history (useBlocker → router.history.block), which the pack's guard uses too.
+	assert.match(functionSource(admin, "UnsavedChangesGuard"), /useBlocker\(\{/);
+	const routerCore = packageDir("@tanstack/router-core", packageDir("@tanstack/react-router", adminDir));
+	const router = readFileSync(join(routerCore, "dist/esm/router.js"), "utf8");
+	assert.match(router, /self\.__TSR_ROUTER__ = this/, "TanStack's Router no longer sets window.__TSR_ROUTER__: the pack's guard falls back to the browser's prompt only");
+	const history = readFileSync(join(packageDir("@tanstack/history", routerCore), "dist/esm/index.js"), "utf8");
+	assert.match(history, /block: \(blocker\) =>/);
+	assert.match(history, /const isBlocked = await blocker\.blockerFn\(\{/);
+});
+
+test("plugin pages render inside the admin's <Toasty> and RouterProvider, bare (src/admin/page.tsx adds the boundary and Suspense)", () => {
+	assert.match(admin, /jsx\(Toasty, \{ children:[\s\S]{0,1200}?jsx\(RouterProvider, \{ router \}\)/);
+	assert.match(functionSource(admin, "PluginPage"), /if \(PluginComponent\) return \/\* @__PURE__ \*\/ jsx\(PluginComponent, \{\}\)/);
+});
+
+test("EmDash runs plugin:install, then plugin:activate, once for a config plugin with no _plugin_state row (the 0.36.0 defaults: src/core/features.ts recordDefaults)", () => {
+	const runtime = [...emdashDist.values()].find((src) => src.includes("installUnrecordedConfigPlugins(configPlugins"));
+	assert.ok(runtime, `EmDash ${emdashVersion} no longer installs unrecorded config plugins at boot`);
+	const install = runtime.slice(runtime.indexOf("installUnrecordedConfigPlugins(configPlugins"));
+	assert.match(install, /if \(recordedStates\.has\(plugin\.id\)\) continue;[\s\S]{0,300}?createActiveIfAbsent\(plugin\.id[\s\S]{0,300}?runPluginInstall\(plugin\.id\)[\s\S]{0,600}?runPluginActivate\(plugin\.id\)/);
+	assert.match(runtime, /runtime\.installUnrecordedConfigPlugins\(/, "the boot no longer calls it");
+});

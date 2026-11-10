@@ -16,6 +16,13 @@ export interface FeatureDef {
 	/** Default when the site hasn't chosen. Keep new features off so installing changes nothing. */
 	default?: boolean;
 	/**
+	 * The default before 0.36.0, for a feature that was on by default then. A
+	 * site set up earlier keeps it: it applies until the site's stored switches
+	 * record the change, which records this value for sites that already had
+	 * the pack (recordDefaults in src/core/features.ts).
+	 */
+	legacyDefault?: boolean;
+	/**
 	 * Legacy ids this feature took over (e.g. a sub-feature that became its own
 	 * module). When the stored map has no value for `id`, the first legacy id
 	 * found there decides, so existing sites keep their choice.
