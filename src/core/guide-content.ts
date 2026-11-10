@@ -192,11 +192,11 @@ export const GUIDES: Record<GuideId, Guide> = {
 	"tracking-params": {
 		summary: "How to serve links with tracking parameters from the cache",
 		steps: [
-			`Open the site's ${code("src/worker.ts")} (EmDash's Cloudflare starter has one; it exports ${code("default")} from ${code("@emdash-cms/cloudflare/worker")}).`,
+			`Open the site's ${code("src/worker.ts")}. On the Coywolf sites it exports ${code("default")} as ${code("{ ...handler, async fetch(…) { return emdashUncachedByDefault(…) }, scheduled: createScheduledHandler() }")}.`,
 			`Add ${code('import { stripTrackingParams } from "@coywolf/emdash/worker";')} at the top.`,
-			`Wrap the default export: ${code("export default stripTrackingParams({ ...handler, scheduled: createScheduledHandler() } satisfies ExportedHandler);")} (keep whatever your export already has inside the braces).`,
+			`Wrap that whole object, changing nothing inside it: ${code("export default stripTrackingParams({ …the same object… } satisfies ExportedHandler);")}. Keep the ${code("fetch")} with ${code("emdashUncachedByDefault")}: it keeps the admin's login redirect out of the cache. The docs have the full file.`,
 			`Check the compatibility date in ${code("wrangler.jsonc")}: 2025-11-17 or later (or the ${code("enable_ctx_exports")} flag), so the Worker can call itself through its cache. A ${code("SELF")} service binding works too.`,
-			`Deploy, then check: ${code("curl -sI 'https://your-site/?utm_source=test' | grep -i coywolf-tracking")} prints ${code("coywolf-tracking-params: removed")}.`,
+			`Deploy, then request a page twice with a tracking parameter: ${code("curl -sI 'https://your-site/?utm_source=test' | grep -i coywolf-tracking")} prints ${code("coywolf-tracking-params: removed")}. Then come back here: the row says ${b("Removed before the cache")} once a tracked visit was answered from the cache. Try one site first (the docs' first rollout step).`,
 		],
 		note: "Only links with tracking parameters run the Worker (once, without rendering); every other request is served from the cache as before. Analytics in the browser still see the parameters. Each such request is billed twice: the request and the call through the cache.",
 	},

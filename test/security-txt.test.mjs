@@ -17,7 +17,7 @@ test("contacts become RFC 9116 URIs; anything else is refused", () => {
 	assert.equal(contactUri("mailto:security@coywolf.com"), "mailto:security@coywolf.com");
 	assert.equal(contactUri("https://coywolf.com/security/"), "https://coywolf.com/security/");
 	assert.equal(contactUri("tel:+1 (555) 010-0000"), "tel:+1555010-0000");
-	for (const bad of ["http://coywolf.com/security", "security", "mailto:nope", "javascript:alert(1)", ""]) assert.equal(contactUri(bad), null, bad);
+	for (const bad of ["http://coywolf.com/security", "security", "mailto:nope", "javascript:alert(1)", "", "tel:555-0100", "tel:1 555 0100"]) assert.equal(contactUri(bad), null, bad);
 	assert.deepEqual(securityTxtProblems(settings({ contacts: ["security@coywolf.com", "http://x.test"] })).length, 1);
 	assert.deepEqual(securityTxtProblems(settings({ policy: "http://coywolf.com/policy" })), ["The policy must be an https:// URL."]);
 	assert.deepEqual(securityTxtProblems(settings({ languages: "en, fr-CA, english!" })).length, 1);

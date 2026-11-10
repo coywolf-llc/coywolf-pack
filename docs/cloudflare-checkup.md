@@ -13,7 +13,7 @@ The settings of your site's Cloudflare zone that matter for an EmDash site serve
 | Row | Recommended for a Workers-served EmDash site | One-click fix |
 | --- | --- | --- |
 | **Speed Brain** | Off. Cloudflare's docs say it ["will not prefetch on routes that run Workers"](https://developers.cloudflare.com/speed/optimization/content/speed-brain/), which is every page of the site, so it only adds a `Speculation-Rules` header and a request for its rules file. Use the pack's [Speculation Rules](performance.md#speculation-rules) instead. | **Turn off Speed Brain** |
-| **Tracking parameters** | Served from the cache (see [below](#tracking-parameters)). A site step, not a button. | No |
+| **Tracking parameters** | Served from the cache (see [below](#tracking-parameters)). A site code change, not a button; the row says whether it's installed and working. | No |
 | **Crawler Hints** | On. Read as the [Discovery page](discovery.md#crawler-hints) reads it; Cloudflare doesn't let API tokens switch it. | No (dashboard only) |
 | **Early Hints** | On (optional, low risk). Cloudflare sends a page's `Link` headers (the pack's preconnect to the media host) as a `103` before the page. The gain is small when pages answer from the cache in 60–90 ms. | No |
 | **HTTP/3** | On. Free, and browsers fall back to HTTP/2 on their own. | No |
@@ -29,11 +29,11 @@ The settings of your site's Cloudflare zone that matter for an EmDash site serve
 | **Cloudflare-managed robots.txt** | Off: Cloudflare adds its own lines to the top of the site's robots.txt, and two sets of rules can contradict each other. | No |
 | **AI Labyrinth** | Either: it only affects crawlers that ignore robots.txt. | No |
 
-Each row links to its page in the Cloudflare dashboard (with the account and zone in the address once the zone is found). Settings are read from `GET /zones/{id}/settings`, plus `GET /zones/{id}/settings/{name}` for any the bulk answer leaves out; the bot rows from `GET /zones/{id}/bot_management`.
+Each row links to its page in the Cloudflare dashboard (with the account and zone in the address once the zone is found). Settings are read from `GET /zones/{id}/settings`, plus `GET /zones/{id}/settings/{name}` for any the bulk answer leaves out (or for each of them when the bulk read fails for a reason other than permissions); the bot rows from `GET /zones/{id}/bot_management`.
 
 ## Zone-wide settings
 
-Every row except Tracking parameters is a setting of the zone, so it applies to **every hostname in the zone**, not only the site. Some zones serve apps besides the site (`essential.support` and `recollect.fyi` do). The page lists the zone's other proxied hostnames (from its DNS records, with **DNS → Read** on the token), and every fix's confirmation repeats which hostnames it reaches. A zone whose only proxied hostname is the site says so.
+Every row except Tracking parameters is a setting of the zone, so it applies to **every hostname in the zone**, not only the site. Some zones serve apps besides the site (`essential.support` and `recollect.fyi` do). The page lists the zone's other proxied hostnames (from its DNS records, with **DNS → Read** on the token; the first 500 proxied records, and "and more" beyond that), and every fix's confirmation repeats which hostnames it reaches. A zone whose only proxied hostname is the site says so.
 
 ## One-click fixes
 
@@ -65,7 +65,7 @@ Workers Cache keys a page by its path and query string, so `/?utm_source=newslet
 
 **Why it isn't a setup button.** The owner's plan was a zone URL Rewrite (Transform) Rule that drops the parameters before the cache. Cloudflare's Workers Cache docs rule that out: under [Limitations](https://developers.cloudflare.com/workers/cache/limitations/), "Rulesets that modify request or response before cache" are among the zone features that don't apply to Workers Caching, with the advice to transform the request in the Worker; the [cache key docs](https://developers.cloudflare.com/workers/cache/cache-keys/) and the [overview](https://developers.cloudflare.com/workers/cache/) suggest a gateway in the Worker for exactly this ("strip a tracking query parameter before caching? Rewrite the URL … in a gateway Worker"). Rules language does have a `remove_query_args()` function for URL rewrites, but a rule using it wouldn't change what Workers Cache keys on. So the pack exports a wrapper for the site's Worker instead (checked November 2026).
 
-**The site step.** In the site's `src/worker.ts`:
+**The site step.** Wrap the site's whole default export in `src/worker.ts`, its own `fetch` wrapper included. All eight Coywolf sites have the same `src/worker.ts` (checked November 2026): EmDash's handler, plus `emdashUncachedByDefault`, which keeps EmDash's admin responses (the signed-out redirect to the login page) out of Workers Cache. Keep that function and its call exactly as they are, or the cached login-redirect loop comes back. The change is one import and wrapping the export:
 
 ```ts
 // src/worker.ts (coywolf.com)
@@ -74,30 +74,58 @@ import { stripTrackingParams } from "@coywolf/emdash/worker";
 
 export { PluginBridge };
 
+function emdashUncachedByDefault(request: Request, response: Response): Response {
+	// …unchanged…
+}
+
 export default stripTrackingParams({
 	...handler,
-	// keep the site's own fetch wrapper, if it has one
+	async fetch(request, env, ctx) {
+		return emdashUncachedByDefault(request, await handler.fetch!(request, env, ctx));
+	},
 	scheduled: createScheduledHandler(),
 } satisfies ExportedHandler);
 ```
 
-It needs a compatibility date of 2025-11-17 or later (or the `enable_ctx_exports` flag) so the Worker can call itself through its cache (`ctx.exports.default`); a `SELF` service binding works too. Without either, requests are served as they come.
+It needs a compatibility date of 2025-11-17 or later (or the `enable_ctx_exports` flag) so the Worker can call itself through its cache (`ctx.exports.default`); a `SELF` service binding works too (every Coywolf site has one). Without either, requests are served as they come, and the checkup says so.
+
+**First rollout: check that it works, on one site.** Cloudflare documents calling a Worker's own cache through `ctx.exports` and service bindings, but the pack's use of it hasn't run on a live site yet. Start with one low-traffic site (recollect.fyi) and check:
+
+1. Deploy the site with the wrapper.
+2. Visit the home page once without parameters, so it's cached: `curl -sI https://recollect.fyi/ | grep -i cf-cache-status` (run it twice; the second says `HIT`).
+3. Request it with a tracking parameter, twice: `curl -sI 'https://recollect.fyi/?utm_source=t' | grep -iE 'coywolf-tracking|cf-cache-status|cache-control'`. Expect `coywolf-tracking-params: removed` and `cache-control: private, …` both times: the answer is never stored under the tracking URL.
+4. Open **Cloudflare Checkup**: the Tracking parameters row should say **Removed before the cache**, which it only says once the call through the cache came back as a `HIT` (the wrapper records that cache status).
+5. Request `https://recollect.fyi/` again: still a `HIT`, the same cache entry.
+
+If the row stays at **Installed, no cache hit seen yet** after a few tracked visits to a cached page, the call isn't sharing the page cache: take the wrapper out again (it then only costs a second billed request per tracked visit, with no gain).
 
 **How it works.**
 
 - Requests without tracking parameters (nearly all of them) never run the wrapper: they're answered from the cache before the Worker runs, as now.
 - A GET or HEAD whose URL has tracking parameters misses the cache and reaches the Worker. The wrapper asks the Worker again, through its cache, for the same URL without them: usually a cache hit, so nothing is rendered and D1 isn't read. On a miss the clean page is rendered and cached, as a plain visit would.
 - The answer isn't stored again under the tracking URL (`Cache-Control: private`), so EmDash's and the pack's purges of the clean page keep working.
-- A same-origin redirect (a slash-less URL, a moved page) gets the removed parameters added back to its `Location`, so the visitor lands with them in the address bar. A redirect to another site never gets them.
+- A redirect that stays on the site gets the removed parameters added back to its `Location`, so the visitor lands with them in the address bar: a slash-less URL, a moved page, and `www.` to the bare domain (or back). Add other hostnames the Worker sends visitors to with `hosts: ["example.net"]`. A redirect to any other site never gets them. A relative `Location` whose path would start with `//` once resolved is given as an absolute URL, so it can't be read as another host.
+- If the call through the cache fails or answers with a server error (5xx), the request is served as it came.
 - EmDash's admin and API (`/_emdash/`), Astro's `/_astro/` and `/_image` are never touched, nor are other methods.
+- What the call did is recorded for the checkup (whether there's a way to call itself, and the call's `cf-cache-status`) in plugin KV (`state:cloudflare:tracking`), a couple of D1 writes per isolate at most, after the response. The D1 binding is `DB` unless you pass `database: "NAME"`.
+
+**The checkup's Tracking parameters row:**
+
+| Shows | Meaning |
+| --- | --- |
+| Each one is its own cache entry | The Worker isn't wrapped (the step-by-step guide is in the row). |
+| Installed, waiting for the first tracked visit | Wrapped, but no request with tracking parameters has reached it since the record was cleared or the wrapper was deployed. |
+| Installed, but the Worker can't call itself | No `ctx.exports.default` (compatibility date before 2025-11-17) and no `SELF` binding: requests are served as they come. |
+| Installed, no cache hit seen yet | It calls itself, but that call hasn't come back from the cache yet (a page nobody had visited, or the cache isn't shared: see the rollout check). |
+| Removed before the cache | A tracked visit was answered from the clean page's cache entry. |
 
 **Analytics.** Fathom, Google Analytics and other analytics that run in the browser read the address bar, which still has the parameters: a server-side change doesn't reach them. Only code on the server would stop seeing them.
 
 **Cost.** Each request with tracking parameters runs the Worker once (the wrapper only, a few milliseconds of CPU) and is billed twice: the request and the call through the cache. Requests without them cost nothing extra.
 
-**Parameters removed** (`TRACKING_PARAMS` and `TRACKING_PREFIXES`, exported): every `utm_…`, `fbclid`, `gclid`, `gclsrc`, `gbraid`, `wbraid`, `dclid`, `msclkid`, `twclid`, `ttclid`, `li_fat_id`, `igshid`, `yclid`, `srsltid`, `mc_cid`, `mc_eid`, `_hsenc`, `_hsmi`, `mkt_tok`, `_ga`, `_gl` and `ref`. Names match case-insensitively; everything else in the query stays exactly as sent. A site whose server code reads one of them passes its own list: `stripTrackingParams(handler, { params: TRACKING_PARAMS.filter((p) => p !== "ref") })`.
+**Parameters removed** (`TRACKING_PARAMS` and `TRACKING_PREFIXES`, exported): every `utm_…`, `fbclid`, `gclid`, `gclsrc`, `gbraid`, `wbraid`, `dclid`, `msclkid`, `twclid`, `ttclid`, `li_fat_id`, `igshid`, `yclid`, `srsltid`, `mc_cid`, `mc_eid`, `_hsenc`, `_hsmi`, `mkt_tok`, `_ga`, `_gl` and `ref`. Names match case-insensitively; everything else in the query stays exactly as sent. `ref` is in the list because referral links add it (Product Hunt, newsletters) and none of the Coywolf sites reads it on the server (checked November 2026). A site whose server code reads one of them keeps it: `stripTrackingParams(handler, { keep: ["ref"] })`. A whole list of your own goes in `params` (and `prefixes`).
 
-**Check it.** `curl -sI 'https://coywolf.com/?utm_source=test' | grep -i coywolf-tracking` prints `coywolf-tracking-params: removed`. The checkup's Tracking parameters row shows **Removed before the cache** once the wrapper is deployed.
+**Check it any time.** `curl -sI 'https://coywolf.com/?utm_source=test' | grep -i coywolf-tracking` prints `coywolf-tracking-params: removed`.
 
 ## Setup
 

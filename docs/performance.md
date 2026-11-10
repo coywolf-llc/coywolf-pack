@@ -152,12 +152,14 @@ Settings, on the Performance page's **Speculation Rules** card (one setting, `sp
 
 Always left out:
 
-- EmDash's admin, API and previews (`/_emdash/*`) and Astro's assets (`/_astro/*`);
+- EmDash's admin, API and previews (`/_emdash` and `/_emdash/*`) and Astro's assets (`/_astro/*`);
 - any URL with a query string (search results, previews, filters, tracking links);
-- links to files: `.pdf`, `.zip`, images, feeds, `.txt`, `.md` and similar;
+- links to files: `.pdf`, `.zip`, images, feeds, `.txt`, `.md` and similar, in either case (`.PDF` too);
 - File Downloads' links (`/download/*`, or its URL base) while that module is on;
 - links with `rel="nofollow"` or `rel="sponsored"`, links with a `download` attribute, and anything with the `no-prefetch` class (on the link or around it).
 
-Saving the settings, or turning the switch on or off, clears the cached pages (each one carries the rules), so new visits get the new rules. A prefetch of a page that isn't cached yet costs a Worker request like any visit.
+Saving the settings, or turning the switch on or off, clears the cached pages (each one carries the rules), so new visits get the new rules. The settings can be saved only while the switch is on (the card shows them only then), so a save never clears the cache for rules no page carries. A prefetch of a page that isn't cached yet costs a Worker request like any visit.
+
+**Redirects aren't prefetched.** A prefetch (`Sec-Purpose: prefetch`) of a [Redirect Manager](redirects.md) source is declined with a `503` that's never stored, as Cloudflare's Speed Brain declines prefetches it won't serve: the browser drops it, the click itself reaches the site and counts as the rule's hit once, and a hover that never becomes a click counts nothing. Affiliate links should still carry `rel="sponsored"` (never fetched ahead), or go under **Never fetch these paths ahead** (`/visit/*`).
 
 **Removing a theme's own rules.** Seven of the eight Coywolf sites carry a hand-copied rule set in `src/layouts/Base.astro` (the `<script is:inline type="speculationrules">…</script>` element just before `<slot name="head" />`). When the switch is on, delete that element and deploy, or pages carry two rule sets (browsers would act on both). Two of them used other settings than the pack's defaults: coywolf.com prerenders on hover (`prerender`, `moderate`) and leaves out `/download/*` and `/theme/*`; glossary.io prefetches on hover and leaves out `/api/*`. To keep that, set **Prerender a page** to **On hover**, or add the paths under **Never fetch these paths ahead**.

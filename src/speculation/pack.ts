@@ -7,7 +7,7 @@
  */
 import { type PluginContext, definePluginRoute } from "emdash";
 
-import { cachedCtxFeatures, ctxFeatures, isOn, readSiteSetting, registerFeatures, registerSiteSetting, rememberSiteSetting } from "../core/features.js";
+import { cachedCtxFeatures, ctxFeatures, isOn, readSiteSetting, registerFeatures, registerSiteSetting, rememberSiteSetting, requireFeature } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
 import { normalizeBase } from "../files/format.js";
 import { parseInput } from "../shared.js";
@@ -82,12 +82,17 @@ export function speculationPack(): PackModule {
 				},
 			},
 
-			/** Save the settings. Every cached page carries the rule set, so the pack's purge-after-save clears them. */
+			/**
+			 * Save the settings. Every cached page carries the rule set, so the pack's purge-after-save clears them.
+			 * Only while the switch is on (the card shows the settings only then): with it off the route answers 404,
+			 * so a save can't clear every cached page for rules no page carries.
+			 */
 			"speculation/save": definePluginRoute({
 				permission: "plugins:manage",
 				methods: ["POST"],
 				request: { body: "json" },
 				handler: async (ctx) => {
+					await requireFeature(ctx, SPECULATION_FEATURE);
 					const settings = parseInput(speculationSettingsSchema, ctx.input);
 					await ctx.settings.set(SPECULATION_SETTING, settings);
 					rememberSiteSetting(SPECULATION_SETTING, settings);

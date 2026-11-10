@@ -124,12 +124,70 @@ test("rows from a zone that needs work: what's flagged, what's offered, what's o
 
 test("rows from a zone in good shape offer no fixes", () => {
 	const good = { ...SETTINGS, speed_brain: "off", always_use_https: "on", min_tls_version: "1.2", rocket_loader: "off", email_obfuscation: "off", security_header: { strict_transport_security: { enabled: true, max_age: 31536000, include_subdomains: false } } };
-	const rows = checkupRows({ zone: ZONE, settings: new Map(Object.entries(good)), bots: { fight_mode: false }, crawlerHints: true, trackingWrapper: true, speculationOn: true, robotsOn: false });
+	const rows = checkupRows({
+		zone: ZONE,
+		settings: new Map(Object.entries(good)),
+		bots: { fight_mode: false },
+		crawlerHints: true,
+		trackingWrapper: true,
+		trackingState: { at: "2026-11-10T09:00:00.000Z", loopback: true, status: 200, cache: "HIT" },
+		speculationOn: true,
+		robotsOn: false,
+	});
 	assert.deepEqual(rows.filter((r) => r.fix).map((r) => r.id), []);
 	assert.deepEqual(rows.filter((r) => r.status === "warn").map((r) => r.id), []);
 	assert.equal(rows.find((r) => r.id === "hsts").value, "On, 1 year");
 	assert.equal(rows.find((r) => r.id === "tracking_params").status, "good");
 	assert.match(rows.find((r) => r.id === "speed_brain").recommendation, /Speculation Rules does the prefetching/);
+});
+
+test("the tracking row says 'Removed before the cache' only once a tracked visit came from the cache", async () => {
+	const { trackingRow } = await import("../src/cloudflare/checkup-core.ts");
+	const at = "2026-11-10T09:00:00.000Z";
+	assert.deepEqual([trackingRow(false, null).status, trackingRow(false, null).guide], ["info", "tracking-params"]);
+	assert.match(trackingRow(true, null).value, /waiting for the first tracked visit/);
+	assert.equal(trackingRow(true, null).guide, undefined);
+	const noLoop = trackingRow(true, { at, loopback: false });
+	assert.deepEqual([noLoop.status, noLoop.value], ["warn", "Installed, but the Worker can't call itself"]);
+	assert.match(noLoop.recommendation, /2025-11-17|SELF/);
+	const miss = trackingRow(true, { at, loopback: true, status: 200, cache: "MISS" });
+	assert.deepEqual([miss.status, miss.value], ["info", "Installed, no cache hit seen yet"]);
+	assert.equal(trackingRow(true, { at, loopback: true, status: 200, cache: null }).value, "Installed, no cache hit seen yet");
+	const hit = trackingRow(true, { at, loopback: true, status: 200, cache: "HIT" });
+	assert.deepEqual([hit.status, hit.value], ["good", "Removed before the cache"]);
+	assert.match(hit.recommendation, /2026-11-10 09:00 UTC/);
+	// In the rows, wrapped without a record is not "good".
+	const rows = checkupRows({ zone: ZONE, settings: new Map(Object.entries(SETTINGS)), bots: {}, crawlerHints: true, trackingWrapper: true, trackingState: null, speculationOn: false, robotsOn: false });
+	assert.equal(rows.find((r) => r.id === "tracking_params").status, "info");
+});
+
+test("a bulk settings read that fails for another reason than permissions falls back to one read per setting", async () => {
+	const cf = cloudflare();
+	const flaky = async (url, init) => (new URL(url).pathname.endsWith("/zones/zone-1/settings") ? new Response(JSON.stringify({ success: false, errors: [{ code: 1000, message: "Internal" }] }), { status: 500 }) : cf.fetch(url, init));
+	const result = await readCheckup("recollect.fyi", { token: TOKEN, fetch: flaky, ...local });
+	assert.equal(result.problem, undefined);
+	assert.equal(result.rows.find((r) => r.id === "always_use_https").value, "Off");
+	assert.equal(result.rows.find((r) => r.id === "speed_brain").value, "On");
+	// Nothing at all could be read: one problem, not a row per setting.
+	const down = async (url, init) => (/\/zones\/zone-1\/settings/.test(new URL(url).pathname) ? new Response("{}", { status: 503 }) : cf.fetch(url, init));
+	const none = await readCheckup("recollect.fyi", { token: TOKEN, fetch: down, ...local });
+	assert.equal(none.problem.kind, "error");
+	assert.match(none.problem.message, /Couldn't read the zone's settings/);
+});
+
+test("a zone with more proxied records than one page says so", async () => {
+	const cf = cloudflare();
+	const many = async (url, init) => {
+		if (new URL(url).pathname.endsWith("/dns_records")) {
+			const records = Array.from({ length: 500 }, (_, i) => ({ name: `h${i}.recollect.fyi`, type: "CNAME", proxied: true }));
+			return new Response(JSON.stringify({ success: true, errors: [], result: records }), { headers: { "content-type": "application/json" } });
+		}
+		return cf.fetch(url, init);
+	};
+	const result = await readCheckup("recollect.fyi", { token: TOKEN, fetch: many, ...local });
+	assert.equal(result.otherHostsMore, true);
+	assert.equal(result.otherHosts.length, 500);
+	assert.equal((await readCheckup("recollect.fyi", { token: TOKEN, fetch: cf.fetch, ...local })).otherHostsMore, undefined);
 });
 
 test("dashboard links and the zone's other hostnames", () => {

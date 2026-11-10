@@ -40,7 +40,8 @@ export function contactUri(value: string): string | null {
 	const v = value.trim();
 	if (!v) return null;
 	if (/^mailto:/i.test(v)) return EMAIL.test(v.slice(7)) ? `mailto:${v.slice(7)}` : null;
-	if (/^tel:\+?[0-9][0-9\-. ()]{3,30}$/i.test(v)) return `tel:${v.slice(4).replace(/[ ()]/g, "")}`;
+	// A global number (RFC 3966): + and the country code.
+	if (/^tel:\+[0-9][0-9\-. ()]{3,30}$/i.test(v)) return `tel:${v.slice(4).replace(/[ ()]/g, "")}`;
 	if (HTTPS_URL.test(v)) return v;
 	if (EMAIL.test(v)) return `mailto:${v}`;
 	return null;
@@ -59,7 +60,7 @@ export function languageList(value: string): string[] {
 /** What's wrong with these settings, in plain words (empty when they can be saved). */
 export function securityTxtProblems(s: SecurityTxtSettings): string[] {
 	const problems: string[] = [];
-	for (const contact of s.contacts) if (contact.trim() && !contactUri(contact)) problems.push(`"${contact}" isn't an email address, an https:// URL or a tel: number.`);
+	for (const contact of s.contacts) if (contact.trim() && !contactUri(contact)) problems.push(`"${contact}" isn't an email address, an https:// URL or a tel: number with its country code (tel:+1…).`);
 	const fields: Array<[keyof SecurityTxtSettings, string]> = [
 		["policy", "The policy"],
 		["encryption", "The encryption key"],

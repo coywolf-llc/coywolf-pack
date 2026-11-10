@@ -23,7 +23,7 @@ Only published, non-noindex entries in routable collections are included. URLs c
 
 A [security.txt](https://securitytxt.org/) file ([RFC 9116](https://www.rfc-editor.org/rfc/rfc9116)) at `/.well-known/security.txt` tells security researchers how to report a problem with the site. Fill in the **security.txt** section on the Discovery page and turn its switch on:
 
-- **Contacts** (required): one per line, most preferred first: an email address (served as `mailto:`), an `https://` page or form, or a `tel:` number. Without one there's no file, and the address answers 404.
+- **Contacts** (required): one per line, most preferred first: an email address (served as `mailto:`), an `https://` page or form, or a `tel:` number with its country code (`tel:+1…`). Without one there's no file, and the address answers 404.
 - **Policy**, **Encryption key**, **Acknowledgments** and **Security jobs** (optional): `https://` links.
 - **Preferred languages**: language codes, such as `en` or `en, fr` (default `en`).
 
@@ -40,7 +40,7 @@ Policy: https://coywolf.com/security-policy/
 
 - Served by the pack middleware as `text/plain`, and kept in the edge cache (Workers Cache) for a day, tagged `coywolf:security-txt`, which saving the Discovery settings clears. Browsers may keep it for a day (`Cache-Control: public, max-age=86400`), so Expires moves forward daily.
 - `/security.txt`, the legacy location, redirects there (301), as RFC 9116 allows.
-- Entries that aren't valid (an `http://` link, a contact that isn't an email address, `https://` URL or `tel:` number) can't be saved; the section says which.
+- Entries that aren't valid (an `http://` link, a contact that isn't an email address, `https://` URL or `tel:+…` number) can't be saved; the section says which.
 - The contact becomes public. The file isn't signed (an OpenPGP signature would have to be redone every day as Expires moves).
 - [Robots.txt Rules](robots.md) already keeps `/.well-known/` readable.
 

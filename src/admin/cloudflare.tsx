@@ -33,6 +33,7 @@ interface Row {
 	fix?: FixId;
 	caution?: string;
 	docs?: string;
+	guide?: "tracking-params";
 }
 
 interface Checkup {
@@ -41,6 +42,7 @@ interface Checkup {
 	problem?: { kind: "no-token" | "bad-token" | "no-zone" | "no-access" | "error"; message: string };
 	rows: Row[];
 	otherHosts: string[] | null;
+	otherHostsMore?: boolean;
 	otherHostsProblem?: string;
 	checkedAt: string;
 	setupToken: { saved: boolean; unreadable: boolean };
@@ -95,7 +97,7 @@ function RowItem(props: { row: Row; onFix: (fix: FixId) => void; busy: boolean; 
 						{row.caution}
 					</p>
 				)}
-				{row.id === "tracking_params" && row.status !== "good" && (
+				{row.guide && (
 					<div className="pt-1 sm:max-w-md">
 						<CredentialGuide id="tracking-params" />
 					</div>
@@ -125,9 +127,9 @@ function RowItem(props: { row: Row; onFix: (fix: FixId) => void; busy: boolean; 
 function zoneReach(data: Checkup): string {
 	const zone = data.zone?.name ?? "the zone";
 	if (data.otherHosts === null) return `Zone settings apply to every hostname in ${zone}, not just ${data.host}.`;
-	if (!data.otherHosts.length) return `${data.host} is the only proxied hostname in ${zone}, so zone settings affect only this site.`;
-	const list = data.otherHosts.slice(0, 12).join(", ");
-	const more = data.otherHosts.length > 12 ? ` and ${data.otherHosts.length - 12} more` : "";
+	if (!data.otherHosts.length && !data.otherHostsMore) return `${data.host} is the only proxied hostname in ${zone}, so zone settings affect only this site.`;
+	const list = data.otherHosts.slice(0, 12).join(", ") || "others";
+	const more = data.otherHostsMore ? " and more (the zone has over 500 proxied DNS records)" : data.otherHosts.length > 12 ? ` and ${data.otherHosts.length - 12} more` : "";
 	return `Zone settings apply to every hostname in ${zone}: besides ${data.host}, that's ${list}${more}. A change here changes them too.`;
 }
 

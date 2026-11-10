@@ -29,8 +29,13 @@ test("defaults: prefetch same-site links on hover, no prerender, nothing extra e
 	const [same, paths, links] = rule.where.and;
 	assert.deepEqual(same, { href_matches: "/*" });
 	const excluded = paths.not.href_matches;
-	for (const path of ["/_emdash/*", "/_astro/*", QUERY_EXCLUDED]) assert.ok(excluded.includes(path), path);
-	assert.ok(excluded.some((p) => p.startsWith("/*.(") && p.includes("pdf")), "file links");
+	for (const path of ["/_emdash", "/_emdash/*", "/_astro/*", QUERY_EXCLUDED]) assert.ok(excluded.includes(path), path);
+	// File links in either case: URL patterns in speculation rules take no flags, so each letter is a class.
+	const files = excluded.find((p) => p.startsWith("/*.("));
+	assert.ok(files.includes("[pP][dD][fF]") && files.includes("[mM][pP]4"), files);
+	const regex = new RegExp(`^${files.slice("/*.".length)}$`);
+	for (const ext of ["pdf", "PDF", "Pdf", "mp4", "MP4", "jpeg"]) assert.ok(regex.test(ext), ext);
+	assert.ok(!regex.test("html"));
 	// The same query-string pattern the hand-copied theme rules use.
 	assert.equal(QUERY_EXCLUDED, "/*\\?(.+)");
 	for (const selector of ['a[rel~="nofollow"]', 'a[rel~="sponsored"]', "a[download]", ".no-prefetch"]) assert.ok(links.not.selector_matches.includes(selector), selector);
@@ -99,11 +104,15 @@ test("page:fragments adds one head script built from the saved settings (only re
 	assert.equal(pack.features[0].id, "speculation");
 });
 
-test("saving goes through the settings schema; the route purges like any pack save", async () => {
+test("saving goes through the settings schema, only while the switch is on; the route purges like any pack save", async () => {
 	const pack = speculationPack();
 	const stored = new Map();
 	const ctx = { input: { eagerness: "eager", prerender: "moderate", exclude: ["/visit/*"] }, settings: { get: async (k) => stored.get(k) ?? null, set: async (k, v) => stored.set(k, v) } };
 	const route = pack.routes["speculation/save"];
+	// Off: refused (a 404), so the pack's purge-after-save doesn't run for rules no page carries.
+	await assert.rejects(route.handler(ctx), /turned off/);
+	assert.equal(stored.has("speculationRules"), false);
+	stored.set("features", { speculation: true });
 	const result = await route.handler(ctx);
 	assert.deepEqual(stored.get("speculationRules"), { eagerness: "eager", prerender: "moderate", exclude: ["/visit/*"] });
 	assert.equal(result.rules.prerender[0].eagerness, "moderate");

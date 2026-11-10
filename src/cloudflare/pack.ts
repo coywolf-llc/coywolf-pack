@@ -13,7 +13,7 @@ import { CLOUDFLARE_API_HOST, CloudflareApiError, contextFetch } from "../core/c
 import { ctxFeatures, isOn, registerFeatures, requireFeature } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
 import { readOnlyRoute } from "../core/routes.js";
-import { trackingWrapperInstalled } from "../core/tracking-params.js";
+import { TRACKING_STATE_KEY, type TrackingState, trackingWrapperInstalled } from "../core/tracking-params.js";
 import { siteOrigin } from "../discovery/urls.js";
 import { readCloudflareToken } from "../pageCache/usage.js";
 import { parseInput, workerEnv } from "../shared.js";
@@ -72,7 +72,16 @@ export function cloudflarePack(): PackModule {
 					const { token, unreadable } = await readCloudflareToken(ctx, env);
 					const features = await ctxFeatures(ctx);
 					const known = await storedZone(ctx, host);
-					const deps = { token, fetch: contextFetch(ctx), trackingWrapper: trackingWrapperInstalled() !== null, speculationOn: isOn(features, "speculation"), robotsOn: isOn(features, "robots") };
+					// What the Worker wrapper last recorded (src/worker.ts): whether it could call itself, and the cache status.
+					const trackingState = await ctx.kv.get<TrackingState>(TRACKING_STATE_KEY).catch(() => null);
+					const deps = {
+						token,
+						fetch: contextFetch(ctx),
+						trackingWrapper: trackingWrapperInstalled() !== null,
+						trackingState: trackingState && typeof trackingState === "object" ? trackingState : null,
+						speculationOn: isOn(features, "speculation"),
+						robotsOn: isOn(features, "robots"),
+					};
 					let result = await readCheckup(host, { ...deps, knownZone: known });
 					// The remembered zone stopped working (deleted and added again, moved): look it up again, once.
 					if (known && !result.zone && result.problem?.kind !== "bad-token") {

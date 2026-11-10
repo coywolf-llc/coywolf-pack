@@ -13,7 +13,7 @@
 import { CloudflareApiError, type Fetch, cloudflareApi } from "../core/cloudflare-api.js";
 import { DEADLINES } from "../core/single-flight.js";
 import { type CrawlerHintsProblem, readCrawlerHints, zoneCandidates } from "../discovery/crawler-hints.js";
-import { type BotSettings, CHECKUP_SETTINGS, type CheckupRow, type CheckupZone, FIXES, type FixId, checkupRows, otherHostnames } from "./checkup-core.js";
+import { type BotSettings, CHECKUP_SETTINGS, type CheckupInput, type CheckupRow, type CheckupZone, FIXES, type FixId, checkupRows, otherHostnames } from "./checkup-core.js";
 
 export interface CheckupResult {
 	host: string;
@@ -23,6 +23,8 @@ export interface CheckupResult {
 	rows: CheckupRow[];
 	/** Proxied hostnames in the zone besides the site's; null when they couldn't be read (otherHostsProblem). */
 	otherHosts: string[] | null;
+	/** The zone has more proxied records than one page (DNS_PAGE): otherHosts may be incomplete. */
+	otherHostsMore?: boolean;
 	otherHostsProblem?: string;
 	checkedAt: string;
 }
@@ -32,6 +34,7 @@ export interface CheckupDeps {
 	fetch: Fetch;
 	knownZone?: CheckupZone | null;
 	trackingWrapper: boolean;
+	trackingState?: CheckupInput["trackingState"];
 	speculationOn: boolean;
 	robotsOn: boolean;
 	now?: () => number;
@@ -44,22 +47,23 @@ async function read<T>(deps: { token: string; fetch: Fetch }, path: string): Pro
 	return (await cloudflareApi<T>(path, { token: deps.token, fetch: deps.fetch, deadlineMs: DEADLINES.cloudflareReadMs, label: "Cloudflare's API" })).result;
 }
 
-/** The zone settings the rows need: one bulk read, then one read per setting it left out. */
+/**
+ * The zone settings the rows need: one bulk read, then one read per setting it
+ * left out. When the bulk read fails for another reason than permissions (a
+ * timeout, a server error), each setting is read on its own instead.
+ */
 async function readSettings(deps: { token: string; fetch: Fetch }, zoneId: string): Promise<{ settings: Map<string, unknown> | null; problem?: string; refused?: boolean }> {
-	let all: Array<{ id?: string; value?: unknown }>;
-	try {
-		all = (await read<Array<{ id?: string; value?: unknown }>>(deps, `/zones/${encodeURIComponent(zoneId)}/settings`)) ?? [];
-	} catch (error) {
-		return {
-			settings: null,
-			refused: refused(error),
-			problem: refused(error)
-				? "The read-only token can't read this zone's settings. Add Zone → Zone Settings → Read to it (the steps are below)."
-				: `Couldn't read the zone's settings: ${message(error)}`,
-		};
-	}
 	const settings = new Map<string, unknown>();
-	for (const s of Array.isArray(all) ? all : []) if (typeof s?.id === "string") settings.set(s.id, s.value);
+	let bulkError: unknown = null;
+	try {
+		const all = (await read<Array<{ id?: string; value?: unknown }>>(deps, `/zones/${encodeURIComponent(zoneId)}/settings`)) ?? [];
+		for (const s of Array.isArray(all) ? all : []) if (typeof s?.id === "string") settings.set(s.id, s.value);
+	} catch (error) {
+		if (refused(error)) {
+			return { settings: null, refused: true, problem: "The read-only token can't read this zone's settings. Add Zone → Zone Settings → Read to it (the steps are below)." };
+		}
+		bulkError = error;
+	}
 	const missing = CHECKUP_SETTINGS.filter((id) => !settings.has(id));
 	await Promise.all(
 		missing.map(async (id) => {
@@ -71,6 +75,7 @@ async function readSettings(deps: { token: string; fetch: Fetch }, zoneId: strin
 			}
 		}),
 	);
+	if (bulkError && settings.size === 0) return { settings: null, problem: `Couldn't read the zone's settings: ${message(bulkError)}` };
 	return { settings };
 }
 
@@ -85,10 +90,14 @@ async function readBots(deps: { token: string; fetch: Fetch }, zoneId: string): 
 	}
 }
 
-async function readOtherHosts(deps: { token: string; fetch: Fetch }, zoneId: string, host: string): Promise<{ hosts: string[] | null; problem?: string }> {
+/** Proxied DNS records read for the zone's other hostnames: one page of them (a zone with more is said to have more). */
+export const DNS_PAGE = 500;
+
+async function readOtherHosts(deps: { token: string; fetch: Fetch }, zoneId: string, host: string): Promise<{ hosts: string[] | null; more?: boolean; problem?: string }> {
 	try {
-		const records = await read<Array<{ name?: string; type?: string; proxied?: boolean }>>(deps, `/zones/${encodeURIComponent(zoneId)}/dns_records?proxied=true&per_page=500`);
-		return { hosts: otherHostnames(Array.isArray(records) ? records : [], host) };
+		const records = await read<Array<{ name?: string; type?: string; proxied?: boolean }>>(deps, `/zones/${encodeURIComponent(zoneId)}/dns_records?proxied=true&per_page=${DNS_PAGE}`);
+		const list = Array.isArray(records) ? records : [];
+		return { hosts: otherHostnames(list, host), ...(list.length >= DNS_PAGE ? { more: true } : {}) };
 	} catch (error) {
 		return {
 			hosts: null,
@@ -107,7 +116,7 @@ export async function readCheckup(host: string, deps: CheckupDeps): Promise<Chec
 	const checkedAt = new Date((deps.now ?? Date.now)()).toISOString();
 	// Finds the zone (or says why it can't) and reads Crawler Hints, as the Discovery page does.
 	const hints = await readCrawlerHints(host, { token: deps.token, fetch: deps.fetch, knownZone: deps.knownZone ?? null, now: deps.now });
-	const local = { trackingWrapper: deps.trackingWrapper, speculationOn: deps.speculationOn, robotsOn: deps.robotsOn };
+	const local = { trackingWrapper: deps.trackingWrapper, trackingState: deps.trackingState ?? null, speculationOn: deps.speculationOn, robotsOn: deps.robotsOn };
 	if (!hints.zone || !deps.token) {
 		// Only what doesn't need Cloudflare: the tracking-parameter row.
 		const rows = checkupRows({ zone: null, settings: null, bots: null, crawlerHints: null, ...local }).filter((r) => !r.zoneWide);
@@ -141,6 +150,7 @@ export async function readCheckup(host: string, deps: CheckupDeps): Promise<Chec
 		...(settings.problem ? { problem: { kind: settings.refused ? ("no-access" as const) : ("error" as const), message: settings.problem } } : {}),
 		rows,
 		otherHosts: others.hosts,
+		...(others.more ? { otherHostsMore: true } : {}),
 		...(others.problem ? { otherHostsProblem: others.problem } : {}),
 		checkedAt,
 	};

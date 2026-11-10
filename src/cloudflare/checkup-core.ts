@@ -38,6 +38,8 @@ export interface CheckupRow {
 	caution?: string;
 	/** A page of the pack's docs ("cloudflare-checkup#tracking-parameters"). */
 	docs?: string;
+	/** A step-by-step guide shown in the row (src/core/guide-content.ts). */
+	guide?: "tracking-params";
 }
 
 export interface CheckupZone {
@@ -72,8 +74,10 @@ export interface CheckupInput {
 	/** Crawler Hints: true/false, or null when it couldn't be read. */
 	crawlerHints: boolean | null;
 	crawlerHintsProblem?: string;
-	/** The site's Worker strips tracking parameters (stripTrackingParams in its src/worker.ts). */
+	/** The site's Worker is wrapped with stripTrackingParams (its src/worker.ts). */
 	trackingWrapper: boolean;
+	/** What the wrapper last recorded (src/core/tracking-params.ts TrackingState); null before the first tracked request. */
+	trackingState?: { at: string; loopback: boolean; status?: number; cache?: string | null } | null;
 	/** The pack's Speculation Rules switch. */
 	speculationOn: boolean;
 	/** The pack's Robots.txt Rules switch. */
@@ -162,6 +166,56 @@ export const FIXES: Record<FixId, { setting: string; target: string; targetLabel
 
 export const isFixId = (value: unknown): value is FixId => typeof value === "string" && Object.hasOwn(FIXES, value);
 
+/**
+ * The tracking-parameter row: installed or not, and what the wrapper has seen.
+ * "Removed before the cache" only once a request with tracking parameters was
+ * served from the cache (a HIT on the call through it).
+ */
+export function trackingRow(installed: boolean, state: CheckupInput["trackingState"] | null): Pick<CheckupRow, "label" | "value" | "status" | "recommendation" | "guide"> {
+	const label = "Tracking parameters";
+	if (!installed) {
+		return {
+			label,
+			value: "Each one is its own cache entry",
+			guide: "tracking-params",
+			status: "info",
+			recommendation:
+				"Cloudflare's docs say zone rules that change the request (URL Rewrite Rules) don't apply to Workers Cache, so this can't be a setup button. It's a short change to the site's src/worker.ts: see the docs.",
+		};
+	}
+	const seen = state?.at ? ` (last seen ${state.at.slice(0, 16).replace("T", " ")} UTC)` : "";
+	if (!state) {
+		return {
+			label,
+			value: "Installed, waiting for the first tracked visit",
+			status: "info",
+			recommendation: "The Worker is wrapped, but no link with tracking parameters has reached it yet. Open the site with ?utm_source=test twice (the docs' first rollout step), then check again.",
+		};
+	}
+	if (!state.loopback) {
+		return {
+			label,
+			value: "Installed, but the Worker can't call itself",
+			status: "warn",
+			recommendation: `Requests are served as they come${seen}. Set the compatibility date in wrangler.jsonc to 2025-11-17 or later (or add the enable_ctx_exports flag), or add a SELF service binding, and deploy.`,
+		};
+	}
+	if (String(state.cache).toUpperCase() === "HIT") {
+		return {
+			label,
+			value: "Removed before the cache",
+			status: "good",
+			recommendation: `Links with tracking parameters are served from the cached page${seen}. Analytics still see the parameters: they read the address bar.`,
+		};
+	}
+	return {
+		label,
+		value: "Installed, no cache hit seen yet",
+		status: "info",
+		recommendation: `The Worker calls itself without the parameters, but that call hasn't come from the cache yet (cf-cache-status: ${state.cache ?? "none"}${seen}). Open the same link twice; if the second visit isn't a HIT either, see the docs.`,
+	};
+}
+
 /** The checkup's rows, in the order the page shows them. */
 export function checkupRows(input: CheckupInput): CheckupRow[] {
 	const z = input.zone;
@@ -194,14 +248,9 @@ export function checkupRows(input: CheckupInput): CheckupRow[] {
 	rows.push({
 		id: "tracking_params",
 		group: "speed",
-		label: "Tracking parameters",
-		value: input.trackingWrapper ? "Removed before the cache" : "Each one is its own cache entry",
-		status: input.trackingWrapper ? "good" : "info",
+		...trackingRow(input.trackingWrapper, input.trackingState ?? null),
 		explanation:
 			"Links with utm_source, fbclid, gclid and similar parameters are different addresses to Workers Cache, so campaign, newsletter and social visitors get a page built for them (about 250 ms) instead of the cached one (60–90 ms). Click IDs are unique per click, so those visitors always do.",
-		recommendation: input.trackingWrapper
-			? "The site's Worker serves these from the cached page. Analytics still see the parameters: they read the address bar."
-			: "Cloudflare's docs say zone rules that change the request (URL Rewrite Rules) don't apply to Workers Cache, so this can't be a setup button. It's a two-line change to the site's src/worker.ts: see the docs.",
 		dashboardUrl: "https://developers.cloudflare.com/workers/cache/cache-keys/",
 		zoneWide: false,
 		docs: "cloudflare-checkup#tracking-parameters",

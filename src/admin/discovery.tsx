@@ -468,7 +468,7 @@ function SecurityTxtFields(props: { value: SecurityTxtSettings; origin: string; 
 		<>
 			<InputArea
 				label="Contacts"
-				description="One per line, most preferred first: an email address (security@example.com), an https:// page or form, or a tel: number. At least one is required for the file to be served."
+				description="One per line, most preferred first: an email address (security@example.com), an https:// page or form, or a tel: number with its country code (tel:+1…). At least one is required for the file to be served."
 				rows={3}
 				value={value.contacts.join("\n")}
 				onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => props.onChange({ contacts: e.target.value.split("\n").slice(0, 10) })}

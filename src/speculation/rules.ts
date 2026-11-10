@@ -57,7 +57,7 @@ export function parseSpeculationSettings(raw: unknown): SpeculationSettings {
 }
 
 /** Never fetched ahead: EmDash's admin, API and previews, and Astro's own assets. */
-export const ALWAYS_EXCLUDED = ["/_emdash/*", "/_astro/*"];
+export const ALWAYS_EXCLUDED = ["/_emdash", "/_emdash/*", "/_astro/*"];
 /** Any URL with a query string: search results, previews, filters, tracking links. */
 export const QUERY_EXCLUDED = "/*\\?(.+)";
 /** Files a link may point at directly: fetching them on hover would download them for nothing. */
@@ -72,9 +72,15 @@ export interface SpeculationContext {
 	downloadBase?: string | null;
 }
 
+/**
+ * The file-link pattern: `/*.(pdf|zip|…)`, each extension in either case
+ * (`[pP][dD][fF]`: URL patterns in speculation rules take no flags).
+ */
+export const FILE_PATTERN = `/*.(${FILE_EXTENSIONS.map((ext) => [...ext].map((c) => (/[a-z]/.test(c) ? `[${c}${c.toUpperCase()}]` : c)).join("")).join("|")})`;
+
 /** The URL paths never fetched ahead, in order: the built-in ones, then the site's. */
 export function excludedPaths(settings: SpeculationSettings, context: SpeculationContext = {}): string[] {
-	const paths = [...ALWAYS_EXCLUDED, QUERY_EXCLUDED, `/*.(${FILE_EXTENSIONS.join("|")})`];
+	const paths = [...ALWAYS_EXCLUDED, QUERY_EXCLUDED, FILE_PATTERN];
 	if (context.downloadBase) paths.push(`/${context.downloadBase}/*`);
 	for (const path of settings.exclude) if (!paths.includes(path)) paths.push(path);
 	return paths;

@@ -50,10 +50,20 @@ export const TRACKING_PARAMS: readonly string[] = [
 export const TRACKING_PREFIXES: readonly string[] = ["utm_"];
 
 export interface TrackingOptions {
-	/** Exact parameter names to remove (default TRACKING_PARAMS). Pass your own list to keep one, e.g. `TRACKING_PARAMS.filter((p) => p !== "ref")`. */
+	/** Exact parameter names to remove (default TRACKING_PARAMS). */
 	params?: readonly string[];
 	/** Name prefixes to remove (default TRACKING_PREFIXES). */
 	prefixes?: readonly string[];
+	/**
+	 * Parameters to leave alone even though they're in the list, for a site whose server code reads one,
+	 * e.g. `keep: ["ref"]` (`ref` is removed by default: referral links such as Product Hunt's add it).
+	 */
+	keep?: readonly string[];
+	/**
+	 * Other hostnames a redirect may send a visitor to with the parameters added back (besides the request's
+	 * own host and its `www.` twin), such as a second domain the Worker redirects to.
+	 */
+	hosts?: readonly string[];
 }
 
 /** Paths that are never touched: EmDash's admin and API, and Astro's assets and image endpoint. */
@@ -79,12 +89,13 @@ export function stripTrackingQuery(search: string, options: TrackingOptions = {}
 	if (!query) return { search: "", removed: [] };
 	const names = new Set((options.params ?? TRACKING_PARAMS).map((p) => p.toLowerCase()));
 	const prefixes = (options.prefixes ?? TRACKING_PREFIXES).map((p) => p.toLowerCase());
+	const keep = new Set((options.keep ?? []).map((p) => p.toLowerCase()));
 	const kept: string[] = [];
 	const removed: string[] = [];
 	for (const pair of query.split("&")) {
 		if (!pair) continue;
 		const name = paramName(pair);
-		if (name !== null && (names.has(name) || prefixes.some((p) => p && name.startsWith(p)))) removed.push(pair);
+		if (name !== null && !keep.has(name) && (names.has(name) || prefixes.some((p) => p && name.startsWith(p)))) removed.push(pair);
 		else kept.push(pair);
 	}
 	return { search: kept.length ? `?${kept.join("&")}` : "", removed };
@@ -104,14 +115,32 @@ export function trackingFreeUrl(url: URL, method: string, options: TrackingOptio
 	return { url: clean, removed };
 }
 
+const bareHost = (host: string) => host.toLowerCase().replace(/^www\./, "");
+
+/**
+ * Whether a redirect from `from` to `to` stays on the site: the same origin,
+ * the same host with or without `www.` (a Worker that answers both and sends
+ * one to the other), or one of the site's `hosts`. Over http(s) only.
+ */
+function sameSite(from: URL, to: URL, hosts: readonly string[]): boolean {
+	if (to.origin === from.origin) return true;
+	if (to.protocol !== "https:" && to.protocol !== "http:") return false;
+	if (to.port !== from.port) return false;
+	return bareHost(to.hostname) === bareHost(from.hostname) || hosts.some((h) => h.toLowerCase() === to.hostname.toLowerCase());
+}
+
 /**
  * A redirect's Location with the removed parameters added back, so a visitor
- * sent on from a campaign link (a slash-less URL, a moved page) still lands
- * with them in the address bar, where analytics read them. Only for a
- * same-origin target: a redirect to another site never gets this site's
- * tracking parameters. Unchanged otherwise.
+ * sent on from a campaign link (a slash-less URL, a moved page, www to the
+ * bare domain) still lands with them in the address bar, where analytics read
+ * them. Only for a target on the site (see sameSite): a redirect to another
+ * site never gets this site's tracking parameters. Unchanged otherwise.
+ *
+ * A relative Location stays relative, except when its path starts with `//`
+ * or `/\` once resolved ("/.//evil.com/" → "//evil.com/"): a browser would
+ * read that as another host, so it's given as an absolute URL instead.
  */
-export function withTrackingParams(location: string, requestUrl: URL, removed: string[]): string {
+export function withTrackingParams(location: string, requestUrl: URL, removed: string[], hosts: readonly string[] = []): string {
 	if (!removed.length) return location;
 	let target: URL;
 	try {
@@ -119,9 +148,10 @@ export function withTrackingParams(location: string, requestUrl: URL, removed: s
 	} catch {
 		return location;
 	}
-	if (target.origin !== requestUrl.origin) return location;
+	if (!sameSite(requestUrl, target, hosts)) return location;
 	const query = target.search ? `${target.search}&${removed.join("&")}` : `?${removed.join("&")}`;
-	const relative = !/^[a-z][a-z0-9+.-]*:/i.test(location) && !location.startsWith("//");
+	const relative =
+		target.origin === requestUrl.origin && !/^[a-z][a-z0-9+.-]*:/i.test(location) && !/^[/\\]{2}/.test(location) && !/^\/[/\\]/.test(target.pathname);
 	return relative ? `${target.pathname}${query}${target.hash}` : `${target.origin}${target.pathname}${query}${target.hash}`;
 }
 
@@ -141,6 +171,25 @@ export function privateCacheControl(value: string | null): string {
 
 /** Response header on answers whose tracking parameters were removed (to check the setup with curl). */
 export const TRACKING_HEADER = "Coywolf-Tracking-Params";
+
+/**
+ * What the wrapper last saw, in plugin KV (the options row TRACKING_STATE_OPTION), for the
+ * Cloudflare Checkup: whether the Worker could call itself, and the cache status of that call
+ * (a HIT shows the clean page came from the same cache a plain visit uses). Written at most a
+ * couple of times per isolate (src/worker.ts).
+ */
+export const TRACKING_STATE_KEY = "state:cloudflare:tracking";
+export const TRACKING_STATE_OPTION = `plugin:coywolf-pack:${TRACKING_STATE_KEY}`;
+
+export interface TrackingState {
+	at: string;
+	/** False: no ctx.exports.default and no SELF binding, so requests are served as they come. */
+	loopback: boolean;
+	/** The loopback's HTTP status. */
+	status?: number;
+	/** The loopback's cf-cache-status (HIT, MISS…), or null when it had none. */
+	cache?: string | null;
+}
 
 const MARKER = Symbol.for("coywolf-pack.trackingParams");
 
