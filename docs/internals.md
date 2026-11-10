@@ -43,6 +43,9 @@ Some features depend on EmDash behavior that EmDash doesn't promise to plugins. 
 - **Settings saves.** The body of `POST /_emdash/api/settings` has `seo` at its top level. Once EmDash has a staging setting (1.5), the test fails if staging isn't saved there too.
 - **Settings page guides.** The page is `/_emdash/admin/plugins-manager/<id>/settings`, its form is `#plugin-settings-form`, and each secret is Kumo's `Input` with the schema's label and description. Rendered with the installed Kumo, that input points to its label and description with `aria-labelledby` and `aria-describedby`. The pack's script then finds every guided field by its label and adds the guides.
 - **Cookies.** Astro keeps a request's cookies on the response under `Symbol.for("astro.cookies")`, and they survive the pack's admin page rewrite.
+- **Admin router.** EmDash's admin is a TanStack Router app with basepath `/_emdash/admin`, and TanStack's Router puts itself on `window.__TSR_ROUTER__`. The pack's admin pages use it (`src/admin/router.ts`) for in-admin links that don't reload the app and for the unsaved-changes guard, which blocks through `router.history.block` as EmDash's own `UnsavedChangesGuard` does with `useBlocker`. Without it, links load the page and the guard falls back to the browser's prompt on reload or close.
+- **Plugin pages.** EmDash renders a plugin page bare (no error boundary or `Suspense`) inside its `<Toasty>` and `RouterProvider`, so the pack's `packPage()` adds the boundary and `Suspense` for its lazy-loaded pages, and its save results use EmDash's toast stack.
+- **First install.** EmDash runs `plugin:install`, then `plugin:activate`, once for a config plugin with no `_plugin_state` row. That's how the pack tells a new site from one set up before 0.36.0 (the 0.36.0 defaults, below).
 - **Versions.** The installed Kumo is the version EmDash's admin pins. EmDash's admin uses React, React Query and Phosphor majors that are in the pack's peer ranges, so they share one copy.
 
 **Not checked (review by hand at an EmDash upgrade):**
@@ -52,3 +55,14 @@ Some features depend on EmDash behavior that EmDash doesn't promise to plugins. 
 - How EmDash's admin behaves in a browser beyond the Settings page markup above, such as single-page navigation to the Settings page and when the guides script's `MutationObserver` runs.
 - Raw writes and revisions. The pack's raw upserts of `options` rows don't change their `revision`, so a key the pack writes raw must not also be compare-and-set through `ctx.kv` or `ctx.settings`. Today none is (the settings generation, cache warming state, page cache version, image sizes state and video posters are only written raw). The robots.txt config's first write is a raw insert with a new revision, and later writes go through `ctx.settings`.
 - Class names in EmDash's precompiled admin stylesheet: `test/admin-classes.test.mjs` checks those.
+
+## The 0.36.0 feature defaults
+
+Redirect Manager, its Slug changes part and Backups were on by default until 0.36.0; they now start off. Their `FeatureDef`s have `default: false` and `legacyDefault: true` (`src/redirects/pack.ts`, `src/backups/pack.ts`). The stored switches (`plugin:coywolf-pack:settings:features`) carry a `_defaults036: true` marker once a site's defaults are recorded; until then, `resolveFeatures` uses `legacyDefault`, so an existing site, and any read that comes first or fails (the middleware's fallback resolves from nothing), keeps them on.
+
+`recordDefaults` (`src/core/features.ts`) records them once, by compare-and-set on the switches:
+
+- In `plugin:install`, which EmDash runs only when it first records the plugin on a site: if the pack has nothing stored (no switches, no setting or KV row, no storage document), it's a new site, so only the marker is stored and the new defaults apply.
+- Everywhere else (`plugin:activate`, the Features page's list, a save of the switches), and on any doubt (stored switches, any pack data, a read that fails): it's an existing site, so `legacyDefault` is stored for each of those features the site hadn't chosen, then the marker.
+
+A new feature that starts off needs none of this. Use `legacyDefault` only when changing a default an existing feature already had.
