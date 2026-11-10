@@ -254,8 +254,11 @@ const templateInput = z.object({
 export function socialImagesPack(options: SocialImagesOptions = {}): PackModule {
 	const bucket = options.bucket ?? "MEDIA";
 
-	/** Jobs under way in this isolate, by entry: a publish fires content:afterSave and content:afterPublish, one job serves both. */
-	const inFlight = new Set<string>();
+	/**
+	 * Jobs under way in this isolate, by entry. A save or publish while one runs sets `again`, and the job checks
+	 * the entry once more when it's done (a publish fires afterSave and afterPublish: one job, then one cheap re-check).
+	 */
+	const inFlight = new Map<string, { again: boolean }>();
 
 	/**
 	 * After a save or publish: compare the entry as published (EmDash hands
@@ -268,9 +271,14 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 		const id = (event.content as { id?: unknown })?.id;
 		if (typeof id !== "string" || !id) return;
 		const key = docId(event.collection, id);
-		if (inFlight.has(key)) return;
-		inFlight.add(key);
-		const job = (async () => {
+		const running = inFlight.get(key);
+		if (running) {
+			running.again = true;
+			return;
+		}
+		const flags = { again: false };
+		inFlight.set(key, flags);
+		const check = async () => {
 			const settings = await readSocialSettings(ctx);
 			if (!wanted(settings.collections, event.collection)) return;
 			const schema = (await collections(ctx)).find((c) => c.slug === event.collection);
@@ -288,9 +296,15 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 				if (error instanceof RenderError && (error.status === 429 || error.status === NOT_SET_UP)) await markPending(ctx, event.collection, id, error.message);
 				else ctx.log.warn("social images: render after publish failed; the hourly job retries", { entry: key, error: String(error) });
 			}
-		})()
-			.catch((error: unknown) => ctx.log.warn("social images: couldn't check the entry after a save", { entry: key, error: String(error) }))
-			.finally(() => inFlight.delete(key));
+		};
+		const job = (async () => {
+			// At most a few passes: a save during a pass asks for one more (the entry as published then).
+			for (let pass = 0; pass < 3; pass++) {
+				flags.again = false;
+				await check().catch((error: unknown) => ctx.log.warn("social images: couldn't check the entry after a save", { entry: key, error: String(error) }));
+				if (!flags.again) break;
+			}
+		})().finally(() => inFlight.delete(key));
 		afterResponse(job);
 	};
 

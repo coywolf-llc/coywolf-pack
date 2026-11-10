@@ -38,6 +38,17 @@ test("ensureTasks: an onlyWhileOn task is cancelled while its feature is off, sc
 	assert.deepEqual(cron.calls.map((c) => c[0]), ["schedule", "schedule"], "switches unknown: scheduled, and the handler stays gated");
 });
 
+test("ensureTasks reports tasks it couldn't schedule (the Features save shows it) and still does the rest", async () => {
+	const cron = fakeCron();
+	cron.schedule = async (name) => {
+		if (name === "while-on") throw new Error("D1 is busy");
+		cron.calls.push(["schedule", name]);
+	};
+	const failures = await ensureTasks({ cron, log: quietLog() }, tasks, { quiet: true });
+	assert.deepEqual(failures, [{ task: "while-on", scheduling: true, error: "D1 is busy" }]);
+	assert.deepEqual(cron.calls, [["schedule", "always"]]);
+});
+
 test("a task that fires while its feature is off cancels itself (onlyWhileOn) and doesn't run", async () => {
 	let ran = 0;
 	const module = { id: "quiet", label: "Quiet", features: [{ id: "quiet", label: "Quiet", description: "" }], tasks: [{ name: "while-on", schedule: "@hourly", onlyWhileOn: true, handler: async () => void ran++ }] };

@@ -48,8 +48,17 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 				invalidateFeatures();
 				ctx.log.info("Features saved", stored);
 				const now = await ctxFeatures(ctx);
-				// A switch turned on schedules its tasks that run only while on; turned off, cancels them.
-				await ensureTasks(ctx, tasks.filter((t) => t.onlyWhileOn), now);
+				// A switch turned on schedules its tasks that run only while on; turned off, cancels them (a task that
+				// fires while off cancels itself too). A task that couldn't be scheduled is reported, not just logged.
+				const failed = (await ensureTasks(ctx, tasks.filter((t) => t.onlyWhileOn), now)).filter((f) => f.scheduling);
+				if (failed.length) {
+					const { PluginRouteError } = await import("emdash");
+					throw new PluginRouteError(
+						"TASK_SCHEDULE_FAILED",
+						`The switches are saved, but ${failed.map((f) => f.task).join(", ")} couldn't be scheduled, so ${failed.length === 1 ? "it" : "they"} won't run yet: ${failed[0].error}. Open the Features page again to retry.`,
+						500,
+					);
+				}
 				return { features: now };
 			},
 		}),

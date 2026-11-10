@@ -177,6 +177,26 @@ test("a save reads the entry as published: a draft's title is never stored (and 
 	assert.ok(!JSON.stringify([...ctx.storage.socialImages.rows.values()]).includes("Draft title"));
 });
 
+test("a save while a check of the same entry runs isn't dropped: the entry is checked once more after it", async () => {
+	const { socialImagesPack } = await import("../src/social/pack.ts");
+	const live = { id: "e2", slug: "two", status: "published", data: { title: "Two" } };
+	const ctx = fakeCtx([live]);
+	let reads = 0;
+	const get = ctx.content.get;
+	ctx.content.get = async (...args) => {
+		reads++;
+		await new Promise((r) => setTimeout(r, 5));
+		return get(...args);
+	};
+	const hooks = socialImagesPack().hooks;
+	const event = { collection: "posts", content: { id: "e2", status: "published" } };
+	await hooks["content:afterSave"](event, ctx);
+	await hooks["content:afterPublish"](event, ctx);
+	await hooks["content:afterPublish"](event, ctx);
+	await new Promise((r) => setTimeout(r, 60));
+	assert.equal(reads, 2, "one check, then one more for the saves that came during it");
+});
+
 test("a deleted entry's images and record are removed", async () => {
 	const { socialImagesPack } = await import("../src/social/pack.ts");
 	const ctx = fakeCtx();

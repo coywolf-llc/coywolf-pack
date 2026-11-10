@@ -268,16 +268,20 @@ export async function ensureTasks(
 	},
 	tasks: TaskDef[],
 	features?: FeatureMap | null,
-) {
-	// One bad task must not break the routes that call this (e.g. the Features page).
+): Promise<Array<{ task: string; scheduling: boolean; error: string }>> {
+	// One bad task must not break the routes that call this (e.g. the Features page): failures are logged and returned.
+	const failures: Array<{ task: string; scheduling: boolean; error: string }> = [];
 	for (const task of tasks) {
+		const cancel = Boolean(task.onlyWhileOn && features && task.feature && !isOn(features, task.feature));
 		try {
-			if (task.onlyWhileOn && features && task.feature && !isOn(features, task.feature)) await ctx.cron?.cancel?.(task.name);
+			if (cancel) await ctx.cron?.cancel?.(task.name);
 			else await ctx.cron?.schedule(task.name, { schedule: task.schedule });
 		} catch (error) {
-			ctx.log?.error(`coywolf-pack: could not schedule task ${task.name}`, { error: String(error) });
+			ctx.log?.error(`coywolf-pack: could not ${cancel ? "cancel" : "schedule"} task ${task.name}`, { error: String(error) });
+			failures.push({ task: task.name, scheduling: !cancel, error: error instanceof Error ? error.message : String(error) });
 		}
 	}
+	return failures;
 }
 
 /** EmDash's task-name rule (emdash/src/plugins/cron.ts validateTaskName). */
