@@ -23,16 +23,40 @@ const link = (href: string, text: string) => `<a href="${href}" target="_blank" 
 const code = (text: string) => `<code class="rounded bg-kumo-tint px-1 text-xs">${text}</code>`;
 const b = (text: string) => `<strong class="font-medium">${text}</strong>`;
 
-/** Creating a Cloudflare API token: the steps every token guide shares. */
-const cloudflareTokenSteps = (permission: string, zone = false) => [
-	`Sign in to the ${link("https://dash.cloudflare.com/profile/api-tokens", "Cloudflare dashboard → My Profile → API Tokens")}.`,
-	`Select ${b("Create Token")}, then ${b("Create Custom Token → Get started")}.`,
-	"Name it after this site so you'll recognize it later.",
-	`Under Permissions, choose ${permission}.`,
-	`Under Account Resources, choose ${b("Include → your account")}.`,
-	...(zone ? [`Under Zone Resources, choose ${b("Include → Specific zone → your site's domain")}.`] : []),
-	`Select ${b("Continue to summary")}, then ${b("Create Token")}.`,
-	"Copy the token right away. Cloudflare shows it only once.",
+/** A permission for Cloudflare's pre-filled token form: a short key from Cloudflare's permission reference. */
+export interface TokenPermission {
+	key: string;
+	type: "read" | "edit";
+}
+
+/**
+ * Cloudflare's pre-filled form for a new account API token, with the name and
+ * the permissions it can pre-select (developers.cloudflare.com/fundamentals/
+ * api/how-to/account-owned-token-template/; a key it can't resolve is named in
+ * a notice on the form, not dropped silently).
+ */
+export function tokenFormUrl(name: string, permissions: TokenPermission[]): string {
+	return `https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=${encodeURIComponent(JSON.stringify(permissions))}&name=${encodeURIComponent(name)}`;
+}
+
+/**
+ * Creating a Cloudflare API token in Cloudflare's token editor: the steps
+ * every token guide shares. In the editor a token has permission policies,
+ * each with a scope (Entire Account, All Domains or Specified Domains), and
+ * zone permissions are listed only in a policy scoped to domains.
+ *
+ * `prefill`: the token's name and what the pre-filled form can select, and
+ * `shows`, what the form should show then. `add`: what to add by hand (what
+ * the form can't pre-select). `zone`: the token needs zone permissions.
+ */
+const cloudflareTokenSteps = (o: { permissions: string; prefill?: { name: string; keys: TokenPermission[]; shows: string }; add?: string; zone?: boolean }) => [
+	o.prefill
+		? `Open ${link(tokenFormUrl(o.prefill.name, o.prefill.keys), "Cloudflare's token form, pre-filled")} (Cloudflare dashboard → Manage Account → Account API Tokens → Create Token). If you have more than one account, pick the site's. The form should show the name ${b(o.prefill.name)} and ${o.prefill.shows}.`
+		: `Open the ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")}, select ${b("Create Token")}, then ${b("Create Custom Token")} (${b("Get started")}). Name it after this site so you'll recognize it later.`,
+	`The token needs ${o.permissions}.${o.add ? ` ${o.add}` : ""} Under ${b("Permission policies")}, each policy has a scope dropdown: ${b("Entire Account")} lists account permissions; zone permissions show only in a policy set to ${b("All Domains")} or ${b("Specified Domains")} (select ${b("+ Add policy")} for one).`,
+	...(o.zone ? [`Set the zone policy's scope to ${b("Specified Domains")} and pick your site's domain (or ${b("All Domains")}).`] : []),
+	`Select ${b("Create Token")} at the bottom. (In Cloudflare's older token editor: Permissions, then Account Resources and Zone Resources, then ${b("Continue to summary")} and ${b("Create Token")}.)`,
+	`Copy the token right away. Cloudflare shows it only once. (If Cloudflare later refuses it, an account token may not cover that API yet: create the same token under ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")} instead.)`,
 ];
 
 export const GUIDES: Record<GuideId, Guide> = {
@@ -92,14 +116,20 @@ export const GUIDES: Record<GuideId, Guide> = {
 		summary: "How to get the Stream account ID and API token",
 		steps: [
 			`In the ${link("https://dash.cloudflare.com/?to=/:account/stream", "Cloudflare dashboard → Stream")}, copy your ${b("Account ID")} (in the right-hand column, or from the address bar after dash.cloudflare.com/) into Cloudflare account ID on the Videos page → Settings.`,
-			...cloudflareTokenSteps(b("Account → Stream → Edit")),
+			...cloudflareTokenSteps({
+				permissions: b("Account → Stream → Edit"),
+				prefill: { name: "Coywolf Pack Stream", keys: [{ key: "stream", type: "edit" }], shows: `one policy, scoped to ${b("Entire Account")}, with ${b("Stream → Edit")}` },
+			}),
 			"Paste the token into Stream API token and save. It's stored encrypted.",
 		],
 		note: `Or set them as Worker variables instead: ${code("CF_ACCOUNT_ID")}, and the token with ${code("npx wrangler secret put CF_STREAM_TOKEN")}.`,
 	},
 	radar: {
 		summary: "How to get a Cloudflare Radar API token",
-		steps: [...cloudflareTokenSteps(b("Account → Radar → Read")), "Paste the token into Cloudflare Radar API token and save. It's stored encrypted."],
+		steps: [
+			...cloudflareTokenSteps({ permissions: b("Account → Radar → Read"), add: `In the policy scoped to ${b("Entire Account")}, search for ${code("Radar")} and select ${b("Read")}.` }),
+			"Paste the token into Cloudflare Radar API token and save. It's stored encrypted.",
+		],
 		note: `Radar's API is free. Or set the token as a Worker secret instead: ${code("npx wrangler secret put RADAR_API_TOKEN")}.`,
 	},
 	"crawler-hints-token": {
@@ -108,7 +138,7 @@ export const GUIDES: Record<GuideId, Guide> = {
 			`If the Performance page already shows Cloudflare usage, add one permission to that token: ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}, wherever you created it), then ${b("⋯ → Edit")} next to the token.`,
 			`Under Permission policies, select ${b("+ Add policy")}. Set the new policy's scope (it starts as Entire Account, which lists only account permissions) to ${b("All Domains")}, or ${b("Specified Domains")} with your site's domain. Search for ${code("zone")} and tick ${b("Read")} on the ${b("Zone")} row. In Cloudflare's older token editor, it's ${b("+ Add more → Zone → Zone → Read")}, with Zone Resources ${b("Include → All zones from an account")}.`,
 			`Save the token (${b("Update token")} or ${b("Save")} at the bottom). The token itself doesn't change, so there's nothing to paste again.`,
-			`No token yet? Create one with ${link("https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%5D&name=Coywolf%20Pack%20read-only", "this pre-filled form")}: it should show the name ${b("Coywolf Pack read-only")} and the permission ${b("Zone → Zone → Read")}. Choose your zones, create it, and copy the token (it's shown once).`,
+			`No token yet? Create one with ${link(tokenFormUrl("Coywolf Pack read-only", [{ key: "zone", type: "read" }]), "this pre-filled form")}: it should show the name ${b("Coywolf Pack read-only")} and the permission ${b("Zone → Zone → Read")}. Choose your zones, create it, and copy the token (it's shown once).`,
 			`Set it as the ${code("USAGE_API_TOKEN")} Worker secret (${code("npx wrangler secret put USAGE_API_TOKEN")}; one token works for every site in the account), or paste it in ${b("Cloudflare usage")} on the plugin's Settings page. The Performance page's usage figures need three more read permissions, listed there.`,
 			"Come back to this page: the Crawler Hints card shows On or Off.",
 		],
@@ -132,10 +162,21 @@ export const GUIDES: Record<GuideId, Guide> = {
 		summary: "How to get a Cloudflare API token for Set up media host",
 		steps: [
 			`In the ${link("https://dash.cloudflare.com/", "Cloudflare dashboard")}, open the site's domain and copy the ${b("Account ID")} from the right-hand column (API section) into Cloudflare account ID.`,
-			...cloudflareTokenSteps(
-				`these six: ${b("Zone → Zone → Read")}, ${b("Zone → Zone Settings → Edit")}, ${b("Zone → Transform Rules → Edit")}, ${b("Zone → DNS → Edit")}, ${b("Account → Workers R2 Storage → Edit")} and ${b("Account → Account Rulesets → Read")}`,
-				true,
-			),
+			...cloudflareTokenSteps({
+				permissions: `these six: ${b("Zone → Zone → Read")}, ${b("Zone → Zone Settings → Edit")}, ${b("Zone → Transform Rules → Edit")}, ${b("Zone → DNS → Edit")}, ${b("Account → Workers R2 Storage → Edit")} and ${b("Account → Account Rulesets → Read")}`,
+				prefill: {
+					name: "Coywolf Pack media host setup",
+					keys: [
+						{ key: "zone", type: "read" },
+						{ key: "zone_settings", type: "edit" },
+						{ key: "dns", type: "edit" },
+						{ key: "workers_r2", type: "edit" },
+					],
+					shows: `four of the six permissions: ${b("Zone → Read")}, ${b("Zone Settings → Edit")} and ${b("DNS → Edit")} in a policy scoped to domains, and ${b("Workers R2 Storage → Edit")} in one scoped to ${b("Entire Account")}`,
+				},
+				add: `Add the two the form can't pre-fill: ${b("Transform Rules → Edit")} in the domains policy (search for ${code("transform")}), and ${b("Account Rulesets → Read")} in the Entire Account policy (search for ${code("rulesets")}).`,
+				zone: true,
+			}),
 			"Paste the token into Cloudflare API token. Save it to keep it (stored encrypted), or leave it unsaved to use it just this once.",
 		],
 		note: `The token is used only for the setup, and only with api.cloudflare.com. You can delete it in Cloudflare afterward. Or set it as a Worker secret instead: ${code("npx wrangler secret put IMAGES_API_TOKEN")}.`,

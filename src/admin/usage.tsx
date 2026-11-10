@@ -13,6 +13,7 @@ import { Loading } from "./page.js";
 import { errorText } from "./api.js";
 import { FREE, PAID } from "../pageCache/usage-core.js";
 import type { UsageResult } from "../pageCache/usage.js";
+import { tokenFormUrl } from "../core/guide-content.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/cache/usage";
 const ADMIN = "/_emdash/admin";
@@ -98,17 +99,34 @@ const SITE_ROWS: Array<{ label: string; value: (t: Totals) => string }> = [
 	{ label: "D1 queries", value: (t) => num(t.d1.readQueries + t.d1.writeQueries) },
 ];
 
+/** The read-only token's pre-filled form (what it can pre-select; the Workers permission is added by hand). */
+const USAGE_TOKEN_FORM = tokenFormUrl("Coywolf Pack read-only", [
+	{ key: "account_analytics", type: "read" },
+	{ key: "account_settings", type: "read" },
+]);
+
 function Setup(props: { reason: string }) {
 	return (
 		<div className="space-y-3 text-sm">
 			<p className="text-kumo-subtle">{props.reason}</p>
 			<ol className="space-y-1" style={{ listStyle: "decimal", paddingInlineStart: "1.25rem" }}>
-				<li>Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token.</li>
-				<li>Add Account → Account Analytics → Read.</li>
-				<li>Add Workers → Metadata Read-Only, for All Workers (finds this site's Worker and database, and reads Workers Logs for the cache-warming estimate).</li>
-				<li>Add Account → Account Settings → Read (detects your plan).</li>
-				<li>Optional: add Zone → Zone → Read (all zones, or this site's), so the Discovery page can show whether Crawler Hints is on.</li>
-				<li>Create the token and copy it (it's shown once).</li>
+				<li>
+					Open{" "}
+					<a href={USAGE_TOKEN_FORM} target="_blank" rel="noreferrer" className="text-kumo-link underline">
+						Cloudflare's token form, pre-filled
+					</a>{" "}
+					(Cloudflare dashboard → Manage Account → Account API Tokens → Create Token). It should show the name <strong>Coywolf Pack read-only</strong> and, in a
+					policy scoped to Entire Account, <strong>Account Analytics → Read</strong> and <strong>Account Settings → Read</strong> (detects your plan).
+				</li>
+				<li>
+					In that policy, add <strong>Workers → Metadata Read-Only</strong> (search for <code>workers</code>; it finds this site's Worker and database, and reads Workers
+					Logs for the cache-warming estimate).
+				</li>
+				<li>
+					Optional: select <strong>+ Add policy</strong>, set its scope to <strong>All Domains</strong> (or <strong>Specified Domains</strong> → this site's), and add{" "}
+					<strong>Zone → Read</strong>, so the Discovery page can show whether Crawler Hints is on. Zone permissions only show in a policy scoped to domains.
+				</li>
+				<li>Select Create Token and copy the token (it's shown once).</li>
 				<li>
 					Set it as the <code>USAGE_API_TOKEN</code> Worker secret (one token works for every site in the account), or paste it in Cloudflare usage on the plugin's Settings page.
 				</li>
