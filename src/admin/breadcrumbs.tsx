@@ -8,6 +8,7 @@ import { Check, Copy } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { errorText } from "./api.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/breadcrumbs";
@@ -36,8 +37,6 @@ const SEPARATOR_ITEMS = [
 	{ value: "arrow", label: "→  Arrow" },
 	{ value: "gt", label: ">  Greater-than" },
 ];
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 
 function Section(props: { title: string; description: React.ReactNode; children: React.ReactNode; collapsed?: boolean }) {
 	const id = `cw-breadcrumbs-${props.title.toLowerCase().replace(/[^a-z]+/g, "-")}`;

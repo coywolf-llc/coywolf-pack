@@ -5,15 +5,18 @@
  */
 import { Badge, Banner, Button, Checkbox, Dialog, Input, Loader, Select, Switch, Tabs } from "@cloudflare/kumo";
 import { ImageSquare, MagnifyingGlass, PencilSimple, Plus, Trash, TreeStructure } from "@phosphor-icons/react";
-import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiGet, apiPost, errorText } from "./api.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { FEATURES_CHANGED, PartSwitches } from "./feature-switches.js";
 import { type CustomSite, CustomTab, MarkupEditor, WarningList, useMarkupCheck } from "./schema-custom.js";
 import { type CustomMarkup, type LintWarning, entryContributionId } from "../schema/custom.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/schema";
+
+const post = apiPost(API);
+const get = apiGet(API);
 
 type RowValue = string | Record<string, string>;
 interface Row {
@@ -83,20 +86,6 @@ interface EntryHit {
 	slug: string | null;
 	status: string;
 	title: string;
-}
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
-async function get<T>(path: string): Promise<T> {
-	return parseApiResponse<T>(await apiFetch(`${API}/${path}`), "The request failed");
-}
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
 }
 
 const INPUT_TYPES: Record<string, string> = { url: "url", image: "url", email: "email", tel: "tel", date: "date", number: "number" };

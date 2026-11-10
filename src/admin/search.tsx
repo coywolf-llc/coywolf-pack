@@ -10,6 +10,7 @@ import { ArrowsClockwise, MagnifyingGlass } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { errorText, postJson } from "./api.js";
 import { SaveBar } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
 
@@ -61,15 +62,8 @@ function draftDirty(c: CollectionConfig, d: Draft | undefined): boolean {
 	return d.tokenize !== c.tokenize || searchableFields(c).some((f) => parsed[f.slug] !== (c.weights[f.slug] ?? 1));
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
 async function post<T>(path: string, body: unknown, fallback: string): Promise<T> {
-	const response = await apiFetch(`${SEARCH_API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	const result = await parseApiResponse<T>(response, fallback);
+	const result = await postJson<T>(`${SEARCH_API}/${path}`, body, { fallback });
 	// Cached live results and title indexes were built with the old settings: start fresh (best effort).
 	await apiFetch(`${PACK_API}/touch`, { method: "POST" }).catch(() => undefined);
 	return result;

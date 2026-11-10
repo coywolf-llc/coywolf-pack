@@ -9,9 +9,9 @@ import { ArrowsClockwise } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { errorText } from "./api.js";
 import { FREE, PAID } from "../pageCache/usage-core.js";
 import type { UsageResult } from "../pageCache/usage.js";
-import { errorText } from "./settings-ui.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/cache/usage";
 const ADMIN = "/_emdash/admin";

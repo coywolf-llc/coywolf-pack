@@ -7,9 +7,9 @@
  */
 import { Badge, Banner, Button, Dialog, Input, InputArea, Select, Switch } from "@cloudflare/kumo";
 import { PencilSimple, Plus, Trash } from "@phosphor-icons/react";
-import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import {
 	type CustomMarkup,
 	type LintWarning,
@@ -26,16 +26,7 @@ import { MARKUP_TEMPLATES, templateText } from "../schema/custom-templates.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/schema";
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
+const post = apiPost(API);
 
 /** What the Schema page's config says about custom markup. */
 export interface CustomSite {

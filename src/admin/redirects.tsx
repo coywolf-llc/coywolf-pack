@@ -6,6 +6,7 @@ import { ArrowRight, ArrowsSplit, DotsThree, DownloadSimple, FileArrowUp, Pencil
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import { parseRedirectsImport, redirectsToCsv, redirectsToJson } from "../redirects/transfer.js";
 import type { RedirectRule } from "../redirects/rules.js";
 import { saveFile, siteSlug, today } from "./download.js";
@@ -13,6 +14,8 @@ import { RemovedContentPanel } from "./redirects-removed.js";
 import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/redirects";
+
+const post = apiPost(API);
 
 interface Rule {
 	id: string;
@@ -37,17 +40,7 @@ const TYPE_LABELS: Record<number, string> = {
 	410: "410 Gone",
 };
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
 
 /** Download every rule (not just the filtered ones) in a format Import reads back. */
 async function exportRules(format: "csv" | "json"): Promise<number> {

@@ -8,6 +8,7 @@ import { FloppyDisk } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { errorText } from "./api.js";
 import { PreviewSection } from "./preview.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import {
@@ -48,8 +49,6 @@ const HEADING_ITEMS: Array<{ value: PodcastHeadingTag; label: string }> = [
 const SAMPLE_PODCAST_LINKS = Object.fromEntries(PODCAST_SERVICES.map(([id]) => [id, "https://example.com/"])) as Record<PodcastService, string>;
 
 const API = "/_emdash/api/plugins/coywolf-pack/customBlocks";
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 
 const same = (a: DisclosureSettings, b: DisclosureSettings) =>
 	a.affiliateText === b.affiliateText && a.amazonText === b.amazonText && a.linkUrl === b.linkUrl && a.linkText === b.linkText;

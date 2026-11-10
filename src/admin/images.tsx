@@ -9,12 +9,15 @@ import { ArrowsClockwise, CheckCircle, Info, MagnifyingGlass, Wrench, XCircle } 
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import { type LibrarySummary, monthlyWithoutMax, oneTimeCost, paybackMonths, storageCost, trafficEstimate } from "../images/variants-estimate.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
-import { SecretField, SettingsSection, errorText } from "./settings-ui.js";
+import { SecretField, SettingsSection } from "./settings-ui.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/images";
+
+const post = apiPost(API);
 
 interface Settings {
 	host: string;
@@ -63,15 +66,6 @@ interface Draft {
 }
 
 const toDraft = (s: Settings): Draft => ({ host: s.host, accountId: s.accountId, bucket: s.bucket, token: "" });
-
-async function post<T>(path: string, body: unknown, fallback: string): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, fallback);
-}
 
 function StatusIcon({ ok }: { ok: boolean }) {
 	return ok ? (

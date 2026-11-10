@@ -7,11 +7,14 @@ import { ArrowClockwise, ArrowSquareOut } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import { FEATURES_CHANGED, PartSwitch, useParts } from "./feature-switches.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/discovery";
+
+const post = apiPost(API);
 
 interface Settings {
 	news: { collections: string[]; publicationName: string; language: string };
@@ -37,17 +40,7 @@ interface CrawlerHints {
 	checkedAt: string;
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateTime = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
 
 /** A part of Discovery (News sitemap, RSS feed, llms.txt), with its on/off switch next to the title. */
 function Section(props: { title: string; part: string; parts: ReturnType<typeof useParts>; description: string; children: React.ReactNode; actions?: React.ReactNode }) {

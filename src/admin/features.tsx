@@ -6,8 +6,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { errorText } from "./api.js";
 import { resetUpdateStatus } from "./update-notice.js";
-
 
 const API = "/_emdash/api/plugins/coywolf-pack/features";
 
@@ -23,8 +23,6 @@ interface ModuleState {
 	label: string;
 	features: Feature[];
 }
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 
 /** The EmDash admin's query client, so the sidebar can be refreshed (null if unavailable). */
 function useAdminQueryClient() {
@@ -92,7 +90,6 @@ export function FeaturesPage() {
 			</header>
 
 			{error && <Banner variant="error" role="alert" description={error} />}
-
 
 			{!modules && !error && (
 				<div className="flex justify-center py-12">

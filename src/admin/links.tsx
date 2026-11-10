@@ -20,11 +20,14 @@ import {
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import { linksToCsv } from "../links/export.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/links";
+
+const post = apiPost(API);
 const ADMIN = "/_emdash/admin";
 
 export type LinkStatus = "unchecked" | "ok" | "redirect" | "broken" | "blocked" | "error";
@@ -129,18 +132,8 @@ const RULE_TYPES = [
 	{ value: "regex", label: "Regular expression" },
 ];
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
 
 /** Run a batched edit route until every affected entry is done. */
 async function runEdit(path: "replace" | "unlink", body: Record<string, unknown>, onProgress: (done: number) => void): Promise<EditResult> {

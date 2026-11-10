@@ -8,6 +8,7 @@ import { ArrowsClockwise, CloudArrowUp, DotsThree, DownloadSimple, FileArrowDown
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import { FILE_CSS, SAMPLE_FILE, renderFileCardHtml } from "../files/card.js";
 import { filesToCsv } from "../files/export.js";
 import { formatSize, iconFor } from "../files/format.js";
@@ -19,6 +20,8 @@ import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
 import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/files";
+
+const post = apiPost(API);
 const CONCURRENCY = 4;
 
 interface Usage {
@@ -64,19 +67,8 @@ interface FilesSettings {
 
 type Filter = "all" | "used" | "unused";
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
 const formatDate = (iso: string | null) => (iso ? dateFormat.format(new Date(iso)) : "");
-
-async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-		signal,
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
 
 function TypeBadge({ ext }: { ext: string }) {
 	const icon = iconFor(ext);
@@ -136,7 +128,7 @@ function sendPart(id: string, partNumber: number, body: Blob, onProgress: (loade
 }
 
 async function uploadLarge(file: File, onProgress: (p: UploadProgress) => void, signal: AbortSignal): Promise<{ id: string; url: string }> {
-	const start = await post<{ id: string; partSize: number; partCount: number }>("upload-start", { name: file.name, size: file.size, type: file.type }, signal);
+	const start = await post<{ id: string; partSize: number; partCount: number }>("upload-start", { name: file.name, size: file.size, type: file.type }, { signal });
 	const { id, partSize, partCount } = start;
 	try {
 		const loaded = new Array<number>(partCount + 1).fill(0);
@@ -173,7 +165,7 @@ async function uploadLarge(file: File, onProgress: (p: UploadProgress) => void, 
 			}
 		}
 		await Promise.all(Array.from({ length: Math.min(CONCURRENCY, partCount) }, worker));
-		return await post<{ id: string; url: string }>("upload-complete", { id, parts: etags }, signal);
+		return await post<{ id: string; url: string }>("upload-complete", { id, parts: etags }, { signal });
 	} catch (error) {
 		await post("upload-abort", { id }).catch(() => undefined);
 		throw error;

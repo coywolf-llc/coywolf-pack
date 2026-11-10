@@ -5,9 +5,9 @@
  */
 import { Badge, Banner, Button, Checkbox, Input, InputArea, Loader, Select, Tabs } from "@cloudflare/kumo";
 import { ArrowClockwise, Check, DownloadSimple, Play, Sparkle, Stop, X } from "@phosphor-icons/react";
-import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiGet, apiPost, errorText } from "./api.js";
 import { entitiesToCsv } from "../ai/export.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { CredentialGuide } from "./guides.js";
@@ -15,6 +15,9 @@ import { SaveBar, isDirty } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/ai";
+
+const post = apiPost(API, { body: {} });
+const get = apiGet(API);
 
 type ProviderId = "workers-ai" | "anthropic" | "openai" | "gemini";
 
@@ -102,21 +105,7 @@ interface UsageRow {
 	ref?: string;
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateTime = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
-
-async function post<T>(path: string, body: unknown = {}): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
-
-async function get<T>(path: string): Promise<T> {
-	return parseApiResponse<T>(await apiFetch(`${API}/${path}`), "The request failed");
-}
 
 function Section(props: { title: string; description?: React.ReactNode; children: React.ReactNode; actions?: React.ReactNode }) {
 	return (

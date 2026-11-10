@@ -18,6 +18,7 @@ import {
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import type { VideoDisplay } from "../videos/render.js";
 import { CredentialGuide } from "./guides.js";
 import { DisplaySettings, fromDisplayDraft, toDisplayDraft } from "./videos-display.js";
@@ -26,6 +27,8 @@ import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
 import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/videos";
+
+const post = apiPost(API, { body: {} });
 
 interface Usage {
 	title: string | null;
@@ -108,7 +111,6 @@ interface Caption {
 	status?: string;
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
 const numberFormat = new Intl.NumberFormat("en-US");
 
@@ -119,15 +121,6 @@ function clock(seconds: number): string {
 	const m = Math.floor((total % 3600) / 60);
 	const s = String(total % 60).padStart(2, "0");
 	return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
-}
-
-async function post<T>(path: string, body: unknown = {}): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
 }
 
 // ── Edit ─────────────────────────────────────────────────────────

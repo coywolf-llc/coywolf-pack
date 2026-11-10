@@ -8,10 +8,13 @@ import { FloppyDisk } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import { SaveBar } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack";
+
+const post = apiPost(API);
 
 interface ThemeOption {
 	id: string;
@@ -20,18 +23,6 @@ interface ThemeOption {
 }
 
 type Switches = Record<string, boolean>;
-
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
-async function post<T>(path: string, body: unknown, fallback: string): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, fallback);
-}
 
 export function CodeBlocksPage() {
 	const [themes, setThemes] = React.useState<ThemeOption[] | null>(null);

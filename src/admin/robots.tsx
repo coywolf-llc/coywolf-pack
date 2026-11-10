@@ -9,6 +9,7 @@ import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea
 import { CheckCircle, Copy, DotsThree, DownloadSimple, FileArrowUp, Info, PencilSimple, Plus, Robot, Sparkle, Trash, Warning, X, XCircle } from "@phosphor-icons/react";
 import * as React from "react";
 
+import { errorText } from "./api.js";
 import type { BotEntry } from "../robots/bots.js";
 import { describeRule, summarize } from "../robots/explain.js";
 import { evaluate } from "../robots/rep.js";
@@ -16,7 +17,7 @@ import { EMDASH_AI_TRAINING_CRAWLERS, type RobotsConfig, type RobotsRule, TEMPLA
 import { exportRobotsRules, readRobotsImport } from "../robots/transfer.js";
 import { type Finding, analyzeConfigChange, checkConfig } from "../robots/validate.js";
 import { BotsTab } from "./robots-bots.js";
-import { dateTimeFormat, errorText, get, newId, post, tokenIndex, useCopy } from "./robots-shared.js";
+import { dateTimeFormat, get, newId, post, tokenIndex, useCopy } from "./robots-shared.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { RuleWizard } from "./robots-wizard.js";
 import { SaveBar, isDirty } from "./save-bar.js";

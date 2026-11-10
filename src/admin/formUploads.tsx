@@ -13,12 +13,15 @@ import { ArrowClockwise, DownloadSimple, Trash } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import { formatBytes, totalFromContentRange, type FormUploadsConfig, type UploadEntry } from "../formUploads/lib.js";
 import { saveFile } from "./download.js";
 import { SaveBar, isDirty } from "./save-bar.js";
-import { SettingsSection, SetupCard, errorText, wholeNumber } from "./settings-ui.js";
+import { SettingsSection, SetupCard, wholeNumber } from "./settings-ui.js";
 
 const API = "/_emdash/api/plugins/emdash-forms/coywolf-private-uploads";
+
+const post = apiPost(API);
 
 interface FormInfo {
 	id: string;
@@ -45,15 +48,6 @@ const SCOPE_ITEMS = [
 	{ value: "all", label: "All forms" },
 	{ value: "selected", label: "Only the forms checked below" },
 ];
-
-async function post<T>(path: string, body: unknown, fallback: string): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, fallback);
-}
 
 async function errorFrom(response: Response, fallback: string): Promise<Error> {
 	try {

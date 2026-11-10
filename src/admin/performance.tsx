@@ -11,10 +11,12 @@ import { ArrowsClockwise, Fire, Lightning } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
-import { errorText } from "./settings-ui.js";
+import { apiPost, errorText } from "./api.js";
 import { UsageCard } from "./usage.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/cache";
+
+const post = apiPost(API, { fallback: "Something went wrong" });
 
 interface Lifetimes {
 	maxAgeDays: number;
@@ -75,14 +77,6 @@ function warmText(state: NonNullable<WarmStatus["state"]>): string {
 function dailyText(state: NonNullable<WarmStatus["state"]>): string | null {
 	if (state.phase !== "done" || state.rewarmAfter || !state.nextDailyAt) return null;
 	return `Next daily refresh: about ${new Date(state.nextDailyAt).toLocaleString()}.`;
-}
-
-async function post<T>(path: string, body?: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
-	});
-	return parseApiResponse<T>(response, "Something went wrong");
 }
 
 const days = (seconds?: number) => (seconds ? Math.round(seconds / 86400) : 0);

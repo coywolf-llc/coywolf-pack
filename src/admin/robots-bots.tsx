@@ -7,10 +7,11 @@ import { Badge, Banner, Button, Dialog, DropdownMenu, Input, InputArea, Select }
 import { ArrowsClockwise, CaretDown, CaretRight, DotsThree, MagnifyingGlass, Plus, XCircle } from "@phosphor-icons/react";
 import * as React from "react";
 
+import { errorText } from "./api.js";
 import { type BotEntry, type BotPurpose, CATEGORY_LABELS, PURPOSE_LABELS, categoryLabel } from "../robots/bots.js";
 import type { RobotsRule } from "../robots/rules.js";
 import { isValidToken } from "../robots/rules.js";
-import { EVIDENCE_LABELS, StatusBadge, TriCheckbox, UnverifiedIcon, dateFormat, errorText, post, tokenIndex } from "./robots-shared.js";
+import { EVIDENCE_LABELS, StatusBadge, TriCheckbox, UnverifiedIcon, dateFormat, post, tokenIndex } from "./robots-shared.js";
 import { CredentialGuide } from "./guides.js";
 import { SecretField, SetupCard } from "./settings-ui.js";
 

@@ -13,14 +13,16 @@ import {
 	ImagesSquare,
 	Plus,
 } from "@phosphor-icons/react";
-import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import { type Backup, type ListResponse, type UndoPoint, ago, isStale, sourceLabel, useBackups } from "./backups-widget.js";
 import { SaveBar } from "./save-bar.js";
 import { SettingsSection } from "./settings-ui.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/backups";
+
+const post = apiPost(API);
 
 interface NewDatabaseResult {
 	databaseId: string;
@@ -30,7 +32,6 @@ interface NewDatabaseResult {
 	mismatches: Record<string, [number, number | null]>;
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
 const formatDate = (iso: string) => dateFormat.format(new Date(iso));
 
@@ -38,14 +39,6 @@ function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
 	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-async function post<T>(path: string, body?: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
-	});
-	return parseApiResponse<T>(response, "The request failed");
 }
 
 /**

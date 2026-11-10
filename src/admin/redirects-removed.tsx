@@ -9,6 +9,7 @@ import { ArrowBendUpRight, Prohibit, X } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { errorText } from "./api.js";
 import type { Pending } from "./trash-prompt-core.js";
 
 export type { Pending };
@@ -16,7 +17,6 @@ export type { Pending };
 export const REMOVED_API = "/_emdash/api/plugins/coywolf-pack/redirects/removed";
 const API = REMOVED_API;
 
-export const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
 const domId = (item: Pending) => `cw-removed-${item.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 

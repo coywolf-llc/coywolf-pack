@@ -8,34 +8,25 @@ import { ArrowCounterClockwise, FloppyDisk } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
 import { SaveBar } from "./save-bar.js";
 import { DEFAULT_ACCENT, MAX_CUSTOM_CSS, SAMPLE_REVIEW, isAccent, pageCss, renderReviewHtml, sanitizeCustomCss } from "../reviews/lib.js";
 import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack";
 
+const post = apiPost(API);
+
 interface Style {
 	accent: string;
 	css: string;
 }
-
 
 const EXAMPLE_CSS = `/* Target .cw-review … so rules only reach review boxes. */
 .cw-review {
   --cw-review-accent: #b22d47;
   --cw-review-column-min: 100%; /* one column */
 }`;
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
-async function post<T>(path: string, body: unknown, fallback: string): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, fallback);
-}
 
 /** The sample review in an isolated frame, so custom CSS can't restyle this admin page. */
 function Preview({ style, width }: { style: Style; width: "wide" | "phone" }) {

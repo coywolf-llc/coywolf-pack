@@ -21,6 +21,7 @@ import {
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText, getJson as getJsonFrom } from "./api.js";
 import { type GuestAuthor, type GuestByline, type PostCredit, groupGuests, postCredits, sameName, wxrGuestAuthors } from "../wpImport/guests.js";
 import { type ParentPlan, type SiteTerm, type WxrCategory, type WxrPage, optionSnippet, parentsMap, planCategoryParents, wxrCategories, wxrPages } from "../wpImport/parents.js";
 import { type PrepareWxrResult, prepareWxr, wxrAttachments } from "../wpImport/prepare.js";
@@ -39,22 +40,10 @@ import { type MediaFile, type SiteInfo, type SiteUrlPlan, parseHosts, planSiteUr
 import { saveFile } from "./download.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/wpImport";
+
+const post = apiPost(API);
+const getJson = <T,>(url: string, fallback: string) => getJsonFrom<T>(url, { fallback });
 const EMDASH = "/_emdash/api";
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
-async function post<T>(path: string, body: unknown, fallback: string): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, fallback);
-}
-
-async function getJson<T>(url: string, fallback: string): Promise<T> {
-	return parseApiResponse<T>(await apiFetch(url), fallback);
-}
 
 async function send<T>(url: string, method: "POST" | "PUT", body: unknown, fallback: string): Promise<T> {
 	const response = await apiFetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

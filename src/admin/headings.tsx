@@ -7,6 +7,7 @@ import { Banner, Checkbox, Input, Loader, Select } from "@cloudflare/kumo";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { errorText } from "./api.js";
 import { SAMPLE_TOC_HEADINGS, TOC_CSS, renderTocHtml } from "../headings/render.js";
 import { buildTocTree, countToc } from "../headings/toc.js";
 import { PreviewSection } from "./preview.js";
@@ -30,8 +31,6 @@ interface Settings {
 		showTitle: boolean;
 	};
 }
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 
 /** The TOC block with these defaults, on a sample article's headings. */
 function TocPreview({ toc }: { toc: Settings["toc"] }) {
