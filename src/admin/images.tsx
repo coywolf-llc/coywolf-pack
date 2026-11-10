@@ -15,6 +15,7 @@ import { type LibrarySummary, monthlyWithoutMax, oneTimeCost, paybackMonths, sto
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { SecretField, SettingsSection } from "./settings-ui.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/images";
 
@@ -481,7 +482,7 @@ export function ImagesPage() {
 	const [saved, setSaved] = React.useState<Settings | null>(null);
 	const [draft, setDraft] = React.useState<Draft>({ host: "", accountId: "", bucket: "", token: "" });
 	const [error, setError] = React.useState<string | null>(null);
-	const [notice, setNotice] = React.useState("");
+	const result = useSaveResult();
 	const [pending, setPending] = React.useState<"save" | "clear" | "check" | "plan" | "apply" | undefined>();
 	const [check, setCheck] = React.useState<CheckResult | null>(null);
 	const [plan, setPlan] = React.useState<Plan | null>(null);
@@ -517,14 +518,14 @@ export function ImagesPage() {
 
 	const save = async (clearToken = false) => {
 		setPending(clearToken ? "clear" : "save");
-		setError(null);
-		setNotice("");
+		result.clear();
 		try {
 			const { token, ...rest } = draft;
 			apply(await post<Settings>("settings/save", { ...rest, ...(clearToken ? { clearToken: true } : token.trim() ? { token: token.trim() } : {}) }, "Couldn't save"));
-			setNotice(clearToken ? "API token removed." : "Saved. The site picks up a new media host within a minute.");
+			if (clearToken) result.saved("API token removed");
+			else result.saved("Settings saved", "The site picks up a new media host within a minute.");
 		} catch (cause) {
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setPending(undefined);
 		}
@@ -627,10 +628,6 @@ export function ImagesPage() {
 			/>
 
 			{error && <Banner variant="error" role="alert" description={error} />}
-			<p className="sr-only" role="status" aria-live="polite">
-				{notice}
-			</p>
-			{notice && !busy && <p className="text-sm text-kumo-subtle">{notice}</p>}
 
 			{!saved && !error && (
 				<Loading />
@@ -811,7 +808,7 @@ export function ImagesPage() {
 
 			{saved && <StoredSizes />}
 
-			{saved && <SaveBar form="cw-images-form" dirty={dirty} saving={pending === "save"} canSave={!busy} onDiscard={() => apply(saved)} />}
+			{saved && <SaveBar error={result.error} form="cw-images-form" dirty={dirty} saving={pending === "save"} canSave={!busy} onDiscard={() => apply(saved)} />}
 		</div>
 	);
 }

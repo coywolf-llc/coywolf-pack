@@ -19,6 +19,7 @@ import { PreviewSection } from "./preview.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/files";
 
@@ -246,7 +247,8 @@ function DeleteDialog(props: { file: FileItem | null; onClose: () => void; onDel
 
 type SettingsDraft = Omit<FilesSettings, "filesMaxUploadGb" | "r2SecretSet"> & { filesMaxUploadGb: string; filesR2SecretAccessKey: string };
 
-function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message: string) => void }) {
+function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => void }) {
+	const saveResult = useSaveResult();
 	const [saved, setSaved] = React.useState<FilesSettings>();
 	const [draft, setDraft] = React.useState<SettingsDraft>();
 	const [error, setError] = React.useState<string>();
@@ -271,7 +273,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 	const save = async (clearR2Secret = false) => {
 		if (!draft) return;
 		setPending(clearR2Secret ? "clear" : "save");
-		setError(undefined);
+		saveResult.clear();
 		try {
 			const { filesR2SecretAccessKey, filesMaxUploadGb, ...rest } = draft;
 			const result = await post<FilesSettings>("settings/save", {
@@ -280,9 +282,10 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 				...(clearR2Secret ? { clearR2Secret: true } : filesR2SecretAccessKey.trim() ? { filesR2SecretAccessKey: filesR2SecretAccessKey.trim() } : {}),
 			});
 			apply(result);
-			props.onSaved(clearR2Secret ? "R2 secret access key removed." : "File Downloads settings saved.");
+			saveResult.saved(clearR2Secret ? "R2 secret access key removed" : "File Downloads settings saved");
+			props.onSaved();
 		} catch (cause) {
-			setError(errorText(cause, "Could not save the settings"));
+			saveResult.failed(errorText(cause, "Could not save the settings"));
 		} finally {
 			setPending(undefined);
 		}
@@ -388,6 +391,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 				{error && <Banner variant="error" role="alert" description={error} />}
 			</form>
 			<SaveBar
+				error={saveResult.error}
 				form="cw-files-settings-form"
 				dirty={dirty}
 				saving={pending === "save"}
@@ -600,9 +604,8 @@ export function FilesPage() {
 			{tab === "settings" ? (
 				<SettingsPanel
 					largeUploadsEnabled={data?.largeUploadsEnabled ?? false}
-					onSaved={(message) => {
+					onSaved={() => {
 						setError(undefined);
-						setNotice(message);
 						void load();
 					}}
 				/>

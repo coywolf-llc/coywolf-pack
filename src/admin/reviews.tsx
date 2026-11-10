@@ -13,6 +13,7 @@ import { PageHeader, Loading } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { DEFAULT_ACCENT, MAX_CUSTOM_CSS, SAMPLE_REVIEW, isAccent, pageCss, renderReviewHtml, sanitizeCustomCss } from "../reviews/lib.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack";
 
@@ -60,7 +61,7 @@ export function ReviewsPage() {
 	const [style, setStyle] = React.useState<Style>({ accent: DEFAULT_ACCENT, css: "" });
 	const [width, setWidth] = React.useState<"wide" | "phone">("wide");
 	const [error, setError] = React.useState<string | null>(null);
-	const [status, setStatus] = React.useState("");
+	const result = useSaveResult();
 	const [saving, setSaving] = React.useState(false);
 
 	React.useEffect(() => {
@@ -85,16 +86,15 @@ export function ReviewsPage() {
 		if (!saved || !accentValid || tooLong) return;
 		setSaving(true);
 		setError(null);
-		setStatus("Saving…");
+		result.clear();
 		try {
 			let next = style;
 			if (styleDirty) next = await post<Style>("reviews/save", style, "Couldn't save the style");
 			setStyle(next);
 			setSaved({ style: next });
-			setStatus("Saved. The site picks up changes within a minute.");
+			result.saved("Settings saved", "The site picks up changes within a minute.");
 		} catch (cause) {
-			setStatus("");
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setSaving(false);
 		}
@@ -122,10 +122,6 @@ export function ReviewsPage() {
 			<PartSwitches module="reviews" />
 
 			{error && <Banner variant="error" role="alert" description={error} />}
-			<p className="sr-only" role="status" aria-live="polite">
-				{status}
-			</p>
-			{status && !saving && <p className="text-sm text-kumo-subtle">{status}</p>}
 
 			{!saved && !error && (
 				<Loading />
@@ -213,6 +209,7 @@ export function ReviewsPage() {
 			)}
 
 			<SaveBar
+				error={result.error}
 				dirty={dirty}
 				saving={saving}
 				canSave={accentValid && !tooLong}

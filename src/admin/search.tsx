@@ -15,6 +15,7 @@ import { errorText, postJson } from "./api.js";
 import { PageHeader, Loading } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useToast } from "./toast.js";
 
 const PACK_API = "/_emdash/api/plugins/coywolf-pack/search";
 const SEARCH_API = "/_emdash/api/search";
@@ -208,6 +209,8 @@ export function SearchPage() {
 
 	const busy = progress !== null;
 
+	const toast = useToast();
+
 	/** Run one or more index jobs with a progress readout, then refresh. */
 	async function run(jobs: Array<{ label: string; fn: () => Promise<unknown> }>, done: string) {
 		setError(undefined);
@@ -219,9 +222,12 @@ export function SearchPage() {
 				setStatus(`${job.label} (${i + 1} of ${jobs.length})…`);
 				await job.fn();
 			}
-			setStatus(done);
+			setStatus("");
+			toast.success(done);
 		} catch (cause) {
-			setError(errorText(cause, "The search index couldn't be updated"));
+			const message = errorText(cause, "The search index couldn't be updated");
+			setError(message);
+			toast.error("The search index couldn't be updated", message);
 			setStatus("");
 		} finally {
 			setProgress(null);

@@ -23,6 +23,7 @@ import { saveFile, siteSlug, today } from "./download.js";
 import { RuleWizard } from "./robots-wizard.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 interface SyncState {
 	at: string;
@@ -418,14 +419,16 @@ function SettingsTab(props: {
 	const [ack, setAck] = React.useState(false);
 	React.useEffect(() => setAck(false), [draft]);
 	const canSave = !problem && (risks.length === 0 || ack);
+	const result = useSaveResult();
 	const save = async () => {
 		if (!dirty || !canSave) return;
 		setSaving(true);
 		setError(undefined);
 		try {
 			await props.onSave(draft, "Changed settings");
+			result.saved("Settings saved");
 		} catch (cause) {
-			setError(errorText(cause, "Could not save"));
+			result.failed(errorText(cause, "Could not save"));
 		} finally {
 			setSaving(false);
 		}
@@ -583,6 +586,7 @@ function SettingsTab(props: {
 			</section>
 
 			<SaveBar
+				error={result.error}
 				dirty={dirty}
 				saving={saving}
 				canSave={canSave}

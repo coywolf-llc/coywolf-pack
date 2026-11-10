@@ -13,6 +13,7 @@ import { PageHeader, Loading } from "./page.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { FEATURES_CHANGED, PartSwitches } from "./feature-switches.js";
 import { type CustomSite, CustomTab, MarkupEditor, WarningList, useMarkupCheck } from "./schema-custom.js";
+import { useSaveResult } from "./toast.js";
 import { type CustomMarkup, type LintWarning, entryContributionId } from "../schema/custom.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/schema";
@@ -105,14 +106,6 @@ function Section(props: { title: string; description?: React.ReactNode; children
 }
 
 /** The last save's result ("Saved."), hidden again once there are new unsaved changes. */
-function SavedStatus(props: { status?: string; dirty: boolean }) {
-	return (
-		<p className="text-sm text-kumo-subtle" aria-live="polite">
-			{props.dirty ? "" : props.status}
-		</p>
-	);
-}
-
 // ── Media picker ─────────────────────────────────────────────────
 
 interface MediaItem {
@@ -308,7 +301,7 @@ function PropertyEditor(props: {
 function SiteTab(props: { config: Config; bylines: Byline[] | undefined; onSaved: (site: SiteDetails) => void }) {
 	const [site, setSite] = React.useState<SiteDetails>(props.config.site);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<string>();
+	const saveResult = useSaveResult();
 	const [error, setError] = React.useState<string>();
 	const dirty = isDirty(site, props.config.site);
 
@@ -319,9 +312,9 @@ function SiteTab(props: { config: Config; bylines: Byline[] | undefined; onSaved
 			const result = await post<{ site: SiteDetails }>("site/save", site);
 			setSite(result.site);
 			props.onSaved(result.site);
-			setStatus("Saved.");
+			saveResult.saved("Site Details saved");
 		} catch (cause) {
-			setError(errorText(cause, "Could not save Site Details"));
+			saveResult.failed(errorText(cause, "Could not save Site Details"));
 		} finally {
 			setPending(false);
 		}
@@ -379,9 +372,8 @@ function SiteTab(props: { config: Config; bylines: Byline[] | undefined; onSaved
 					Without a name, url or logo, the site title, site URL and site logo from EmDash's settings are used.
 				</p>
 				{error && <Banner variant="error" role="alert" description={error} />}
-				<SavedStatus status={status} dirty={dirty} />
 			</Section>
-			<SaveBar dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setSite(props.config.site)} />
+			<SaveBar error={saveResult.error} dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setSite(props.config.site)} />
 		</div>
 	);
 }
@@ -392,7 +384,7 @@ function TypesTab(props: { config: Config; onSaved: (types: Record<string, TypeC
 	const { config } = props;
 	const [types, setTypes] = React.useState(config.types);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<string>();
+	const saveResult = useSaveResult();
 	const [error, setError] = React.useState<string>();
 	const dirty = isDirty(types, config.types);
 	const pageItems = [{ value: "", label: "Default (Web Page)" }, ...config.catalog.pageTypes.map(([value, label]) => ({ value, label }))];
@@ -414,9 +406,9 @@ function TypesTab(props: { config: Config; onSaved: (types: Record<string, TypeC
 			const result = await post<{ types: Record<string, TypeChoice> }>("types/save", { types });
 			setTypes(result.types);
 			props.onSaved(result.types);
-			setStatus("Saved.");
+			saveResult.saved("Page types saved");
 		} catch (cause) {
-			setError(errorText(cause, "Could not save types"));
+			saveResult.failed(errorText(cause, "Could not save types"));
 		} finally {
 			setPending(false);
 		}
@@ -462,9 +454,8 @@ function TypesTab(props: { config: Config; onSaved: (types: Record<string, TypeC
 					))}
 				</div>
 				{error && <Banner variant="error" role="alert" description={error} />}
-				<SavedStatus status={status} dirty={dirty} />
 			</Section>
-			<SaveBar dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setTypes(config.types)} />
+			<SaveBar error={saveResult.error} dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setTypes(config.types)} />
 		</div>
 	);
 }
@@ -485,7 +476,7 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 	// What the selected byline has saved, to tell when `rows` has unsaved changes.
 	const [baseline, setBaseline] = React.useState<Row[]>([]);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<string>();
+	const saveResult = useSaveResult();
 	const [error, setError] = React.useState<string>();
 	const byline = props.bylines?.find((b) => b.id === selected);
 
@@ -496,8 +487,9 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 		const initial = byline ? (byline.rows ?? defaultRows(byline)) : [];
 		setRows(initial);
 		setBaseline(initial);
-		setStatus(undefined);
+		saveResult.clear();
 		setError(undefined);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [byline]);
 
 	const dirty = !!byline && isDirty(rows, baseline);
@@ -511,10 +503,10 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 			const next = result.rows.length ? result.rows : defaultRows(byline);
 			setRows(next);
 			setBaseline(next);
-			setStatus("Saved.");
+			saveResult.saved("Author saved");
 			props.reload();
 		} catch (cause) {
-			setError(errorText(cause, "Could not save the author"));
+			saveResult.failed(errorText(cause, "Could not save the author"));
 		} finally {
 			setPending(false);
 		}
@@ -566,12 +558,12 @@ function AuthorsTab(props: { config: Config; bylines: Byline[] | undefined; auth
 							<Button variant="ghost" onClick={() => setRows(defaultRows(byline))}>
 								Reset to byline details
 							</Button>
-							<SavedStatus status={status} dirty={dirty} />
 						</div>
 					</>
 				)}
 			</Section>
 			<SaveBar
+				error={saveResult.error}
 				dirty={dirty}
 				saving={pending}
 				canSave={props.authorsOn}
@@ -957,7 +949,7 @@ const limit = (value: unknown): number | string => {
 function SettingsTab(props: { config: Config; onSaved: (settings: Config["settings"]) => void }) {
 	const [values, setValues] = React.useState(props.config.settings);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<string>();
+	const saveResult = useSaveResult();
 	const [error, setError] = React.useState<string>();
 	const dirty = isDirty(values, props.config.settings);
 	const str = (key: string) => String(values[key] ?? "");
@@ -983,9 +975,9 @@ function SettingsTab(props: { config: Config; onSaved: (settings: Config["settin
 			const result = await post<{ settings: Config["settings"] }>("settings/save", body);
 			setValues(result.settings);
 			props.onSaved(result.settings);
-			setStatus("Saved.");
+			saveResult.saved("Settings saved");
 		} catch (cause) {
-			setError(errorText(cause, "Could not save settings"));
+			saveResult.failed(errorText(cause, "Could not save settings"));
 		} finally {
 			setPending(false);
 		}
@@ -1036,8 +1028,7 @@ function SettingsTab(props: { config: Config; onSaved: (settings: Config["settin
 				{text("schemaOgLocale", "og:locale", "en_US", "Leave empty to derive it from the site locale.")}
 			</Section>
 			{error && <Banner variant="error" role="alert" description={error} />}
-			<SavedStatus status={status} dirty={dirty} />
-			<SaveBar dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setValues(props.config.settings)} />
+			<SaveBar error={saveResult.error} dirty={dirty} saving={pending} onSave={() => void save()} onDiscard={() => setValues(props.config.settings)} />
 		</div>
 	);
 }

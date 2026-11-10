@@ -27,6 +27,7 @@ import { DisplaySettings, fromDisplayDraft, toDisplayDraft } from "./videos-disp
 import { SaveBar, isDirty } from "./save-bar.js";
 import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/videos";
 
@@ -652,7 +653,8 @@ function ConnectForm(props: { onConnected: () => void }) {
 	);
 }
 
-function SettingsPanel(props: { onSaved: (message: string) => void }) {
+function SettingsPanel(props: { onSaved: () => void }) {
+	const result = useSaveResult();
 	const [saved, setSaved] = React.useState<VideosSettings>();
 	const toDraft = (s: VideosSettings) => ({
 		accountId: s.accountId,
@@ -690,9 +692,10 @@ function SettingsPanel(props: { onSaved: (message: string) => void }) {
 					...(clearToken ? { clearToken: true } : token.trim() ? { token: token.trim() } : {}),
 				}),
 			);
-			props.onSaved(clearToken ? "Stream API token removed." : "Videos settings saved.");
+			result.saved(clearToken ? "Stream API token removed" : "Videos settings saved");
+			props.onSaved();
 		} catch (cause) {
-			setError(errorText(cause, "Could not save the settings"));
+			result.failed(errorText(cause, "Could not save the settings"));
 		} finally {
 			setPending(undefined);
 		}
@@ -780,6 +783,7 @@ function SettingsPanel(props: { onSaved: (message: string) => void }) {
 				{error && <Banner variant="error" role="alert" description={error} />}
 			</form>
 			<SaveBar
+				error={result.error}
 				form="cw-videos-settings-form"
 				dirty={dirty}
 				saving={pending === "save"}
@@ -991,8 +995,7 @@ export function VideosPage() {
 
 			{tab === "settings" && (
 				<SettingsPanel
-					onSaved={(message) => {
-						setNotice(message);
+					onSaved={() => {
 						void load(true);
 					}}
 				/>

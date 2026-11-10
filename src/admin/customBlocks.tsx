@@ -39,6 +39,7 @@ import {
 } from "../customBlocks/render.js";
 import { safeUrl } from "../customBlocks/rich.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const HEADING_ITEMS: Array<{ value: PodcastHeadingTag; label: string }> = [
 	{ value: "h2", label: "Heading 2" },
@@ -60,7 +61,7 @@ export function CustomBlocksPage() {
 	const [podcastSaved, setPodcastSaved] = React.useState<PodcastSettings | null>(null);
 	const [podcast, setPodcast] = React.useState<PodcastSettings>(DEFAULT_PODCAST);
 	const [error, setError] = React.useState<string | null>(null);
-	const [status, setStatus] = React.useState("");
+	const result = useSaveResult();
 	const [saving, setSaving] = React.useState(false);
 
 	React.useEffect(() => {
@@ -95,7 +96,7 @@ export function CustomBlocksPage() {
 		if (!saved || !podcastSaved || !canSave) return;
 		setSaving(true);
 		setError(null);
-		setStatus("Saving…");
+		result.clear();
 		try {
 			if (disclosureDirty) {
 				const response = await apiFetch(`${API}/settings/save`, {
@@ -117,10 +118,9 @@ export function CustomBlocksPage() {
 				setPodcast(r.podcast);
 				setPodcastSaved(r.podcast);
 			}
-			setStatus("Saved. The site picks up changes within a minute.");
+			result.saved("Settings saved", "The site picks up changes within a minute.");
 		} catch (cause) {
-			setStatus("");
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setSaving(false);
 		}
@@ -171,10 +171,6 @@ export function CustomBlocksPage() {
 			<PartSwitches module="customBlocks" />
 
 			{error && <Banner variant="error" role="alert" description={error} />}
-			<p className="sr-only" role="status" aria-live="polite">
-				{status}
-			</p>
-			{status && !saving && <p className="text-sm text-kumo-subtle">{status}</p>}
 
 			{!saved && !error && (
 				<Loading />
@@ -312,7 +308,7 @@ export function CustomBlocksPage() {
 				</>
 			)}
 
-			<SaveBar dirty={dirty} saving={saving} canSave={canSave} onSave={() => void save()} onDiscard={() => {
+			<SaveBar error={result.error} dirty={dirty} saving={saving} canSave={canSave} onSave={() => void save()} onDiscard={() => {
 					if (saved) setDraft(saved);
 					if (podcastSaved) setPodcast(podcastSaved);
 				}} />

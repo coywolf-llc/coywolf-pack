@@ -11,6 +11,7 @@ import * as React from "react";
 import { errorText } from "./api.js";
 import { PageHeader, Loading } from "./page.js";
 import { SaveBar, isDirty } from "./save-bar.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/breadcrumbs";
 
@@ -297,7 +298,7 @@ export function BreadcrumbsPage() {
 	const [settings, setSettings] = React.useState<Settings | null>(null);
 	const [saved, setSaved] = React.useState<Settings | null>(null);
 	const [error, setError] = React.useState<string | null>(null);
-	const [notice, setNotice] = React.useState<string | null>(null);
+	const result = useSaveResult();
 	const [saving, setSaving] = React.useState(false);
 
 	React.useEffect(() => {
@@ -320,8 +321,7 @@ export function BreadcrumbsPage() {
 	async function save() {
 		if (!settings) return;
 		setSaving(true);
-		setError(null);
-		setNotice(null);
+		result.clear();
 		try {
 			const response = await apiFetch(`${API}/settings/save`, {
 				method: "POST",
@@ -331,9 +331,9 @@ export function BreadcrumbsPage() {
 			const next = (await parseApiResponse<{ settings: Settings }>(response, "Couldn't save")).settings;
 			setSettings(next);
 			setSaved(next);
-			setNotice("Settings saved. Pages pick them up within a minute.");
+			result.saved("Settings saved", "Pages pick them up within a minute.");
 		} catch (cause) {
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setSaving(false);
 		}
@@ -351,7 +351,6 @@ export function BreadcrumbsPage() {
 				}
 			/>
 
-			<div aria-live="polite">{notice && <Banner variant="default" role="status" title={notice} />}</div>
 			{error && <Banner variant="error" role="alert" description={error} />}
 
 			{!settings && !error && (
@@ -536,7 +535,7 @@ export function BreadcrumbsPage() {
 				</ol>
 			</Section>
 
-			<SaveBar form="cw-breadcrumbs-form" dirty={dirty} saving={saving} onDiscard={() => setSettings(saved)} />
+			<SaveBar error={result.error} form="cw-breadcrumbs-form" dirty={dirty} saving={saving} onDiscard={() => setSettings(saved)} />
 		</div>
 	);
 }

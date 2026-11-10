@@ -20,6 +20,7 @@ import { PageHeader, Loading } from "./page.js";
 import { type Backup, type ListResponse, type UndoPoint, ago, isStale, sourceLabel, useBackups } from "./backups-widget.js";
 import { SaveBar } from "./save-bar.js";
 import { SettingsSection } from "./settings-ui.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/backups";
 
@@ -123,7 +124,7 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 	const [draft, setDraft] = React.useState(initial);
 	React.useEffect(() => setDraft(initial()), [initial]);
 	const [pending, setPending] = React.useState(false);
-	const [status, setStatus] = React.useState<{ error: boolean; text: string }>();
+	const result = useSaveResult();
 	const dirty =
 		draft.scheduled !== props.data.scheduled ||
 		draft.retentionDays !== String(props.data.retentionDays) ||
@@ -131,7 +132,7 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 
 	const save = async () => {
 		setPending(true);
-		setStatus(undefined);
+		result.clear();
 		try {
 			await post("settings/save", {
 				scheduled: draft.scheduled,
@@ -139,9 +140,9 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 				staleAfterHours: Number(draft.staleAfterHours),
 			});
 			await props.onSaved();
-			setStatus({ error: false, text: "Backup settings saved." });
+			result.saved("Backup settings saved");
 		} catch (cause) {
-			setStatus({ error: true, text: errorText(cause, "Could not save the backup settings") });
+			result.failed(errorText(cause, "Could not save the backup settings"));
 		} finally {
 			setPending(false);
 		}
@@ -188,11 +189,10 @@ function ScheduleSettings(props: { data: ListResponse; onSaved: () => Promise<vo
 						/>
 					</div>
 					<div aria-live="polite">
-						{status && (status.error ? <Banner variant="error" role="alert" description={status.text} /> : <p className="text-sm text-kumo-subtle">{status.text}</p>)}
 					</div>
 				</SettingsSection>
 			</form>
-			<SaveBar form="cw-backups-settings-form" dirty={dirty} saving={pending} onDiscard={() => setDraft(initial())} />
+			<SaveBar error={result.error} form="cw-backups-settings-form" dirty={dirty} saving={pending} onDiscard={() => setDraft(initial())} />
 		</>
 	);
 }

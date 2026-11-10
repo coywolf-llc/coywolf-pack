@@ -12,6 +12,7 @@ import { apiPost, errorText } from "./api.js";
 import { PageHeader, Loading } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack";
 
@@ -32,7 +33,7 @@ export function CodeBlocksPage() {
 	const [switches, setSwitches] = React.useState<Switches>({});
 	const [preview, setPreview] = React.useState<{ css: string; html: string } | null>(null);
 	const [error, setError] = React.useState<string | null>(null);
-	const [status, setStatus] = React.useState("");
+	const result = useSaveResult();
 	const [saving, setSaving] = React.useState(false);
 
 	React.useEffect(() => {
@@ -91,14 +92,13 @@ export function CodeBlocksPage() {
 		if (!saved) return;
 		setSaving(true);
 		setError(null);
-		setStatus("Saving…");
+		result.clear();
 		try {
 			if (theme !== saved.theme) await post("codeBlocks/save", { theme }, "Couldn't save the theme");
 			setSaved({ theme, switches });
-			setStatus("Saved. The site picks up changes within a minute.");
+			result.saved("Settings saved", "The site picks up changes within a minute.");
 		} catch (cause) {
-			setStatus("");
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setSaving(false);
 		}
@@ -129,10 +129,6 @@ export function CodeBlocksPage() {
 			<PartSwitches module="codeBlocks" />
 
 			{error && <Banner variant="error" role="alert" description={error} />}
-			<p className="sr-only" role="status" aria-live="polite">
-				{status}
-			</p>
-			{status && !saving && <p className="text-sm text-kumo-subtle">{status}</p>}
 
 			{!themes && !error && (
 				<Loading />
@@ -188,7 +184,7 @@ export function CodeBlocksPage() {
 				</div>
 			)}
 
-			<SaveBar dirty={dirty} saving={saving} onSave={() => void save()} onDiscard={() => saved && setTheme(saved.theme)} />
+			<SaveBar error={result.error} dirty={dirty} saving={saving} onSave={() => void save()} onDiscard={() => saved && setTheme(saved.theme)} />
 		</div>
 	);
 }

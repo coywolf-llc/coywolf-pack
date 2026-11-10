@@ -19,6 +19,7 @@ import { formatBytes, totalFromContentRange, type FormUploadsConfig, type Upload
 import { saveFile } from "./download.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { SettingsSection, SetupCard, wholeNumber } from "./settings-ui.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/emdash-forms/coywolf-private-uploads";
 
@@ -269,6 +270,7 @@ export function FormUploadsPage() {
 	const [saving, setSaving] = React.useState(false);
 	const [error, setError] = React.useState<string | null>(null);
 	const [message, setMessage] = React.useState("");
+	const result = useSaveResult();
 	const [deleting, setDeleting] = React.useState<Item | null>(null);
 
 	const load = React.useCallback(async () => {
@@ -300,14 +302,14 @@ export function FormUploadsPage() {
 		event?.preventDefault();
 		if (!draft) return;
 		setSaving(true);
-		setError(null);
+		result.clear();
 		try {
 			const config = await post<FormUploadsConfig>("settings", draft, "Couldn't save");
 			setDraft(config);
 			setStatus((cur) => (cur ? { ...cur, config } : cur));
-			setMessage("Saved.");
+			result.saved("Settings saved");
 		} catch (cause) {
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setSaving(false);
 		}
@@ -434,7 +436,7 @@ export function FormUploadsPage() {
 				}}
 			/>
 
-			{status && draft && <SaveBar form="cw-form-uploads-form" dirty={dirty} saving={saving} onDiscard={() => setDraft(status.config)} />}
+			{status && draft && <SaveBar error={result.error} form="cw-form-uploads-form" dirty={dirty} saving={saving} onDiscard={() => setDraft(status.config)} />}
 		</div>
 	);
 }

@@ -14,6 +14,7 @@ import { saveFile, siteSlug, today } from "./download.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/ai";
 
@@ -330,17 +331,19 @@ function SettingsPanel(props: { status: Status; reload: () => Promise<void>; set
 	};
 	const [test, setTest] = React.useState<string>();
 
+	const result = useSaveResult();
 	const save = async () => {
 		setPending(true);
+		result.clear();
 		try {
 			const { aiApiKey, ...rest } = draft;
 			await post("settings", aiApiKey.trim() ? { ...rest, aiApiKey } : rest);
 			set({ aiApiKey: "" });
-			props.setNotice("AI settings saved.");
+			result.saved("AI settings saved");
 			justSaved.current = true;
 			await props.reload();
 		} catch (cause) {
-			props.setError(errorText(cause, "Could not save settings"));
+			result.failed(errorText(cause, "Could not save settings"));
 		} finally {
 			setPending(false);
 		}
@@ -478,7 +481,7 @@ function SettingsPanel(props: { status: Status; reload: () => Promise<void>; set
 					)}
 				</Section>
 			</form>
-			<SaveBar form="cw-ai-settings-form" dirty={dirty} saving={pending} onDiscard={() => setDraft(savedDraft)} />
+			<SaveBar error={result.error} form="cw-ai-settings-form" dirty={dirty} saving={pending} onDiscard={() => setDraft(savedDraft)} />
 		</>
 	);
 }
