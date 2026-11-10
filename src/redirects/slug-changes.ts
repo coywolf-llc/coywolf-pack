@@ -18,7 +18,7 @@ import type { PluginContext } from "emdash";
 import { COLLECTION_SLUG, entryUrl, hostDefaultLocale, readCollections } from "../core/content-url.js";
 import { REDIRECTS_TAG, purgePageCache } from "../pageCache/lib.js";
 import { workerEnv } from "../shared.js";
-import { invalidateRedirectCache } from "./middleware.js";
+import { noteRedirectsChanged } from "./middleware.js";
 import { type EntrySnapshot, snapshotFromContent, snapshotFromRow } from "./removed-core.js";
 import { deleteRule, ensureTable, normalizePath, saveRule } from "./rules.js";
 import { type PlanRule, SLUG_NOTE_PREFIX, planSlugChange } from "./slug-core.js";
@@ -95,7 +95,7 @@ export function slugChangesModule(options: { database?: string }) {
 		// EmDash collapses its own chains too, so its rows from those earlier URLs now point at the new one.
 		const retargetedSources = rules.filter((r) => plan.retargetIds.includes(r.id)).map((r) => r.source);
 		const replaced = await dropEmDashAuto(d1, collection, from, entry.slug, retargetedSources);
-		invalidateRedirectCache();
+		await noteRedirectsChanged(d1);
 		await purgePageCache({ tags: [REDIRECTS_TAG] });
 		ctx.log.info("Slug change redirect", { collection, from, to, deleted: plan.deleteIds.length, retargeted: plan.retargetIds.length, emdashAutoRemoved: replaced });
 	}
@@ -141,7 +141,7 @@ export function slugChangesModule(options: { database?: string }) {
 			.all<{ id: string }>();
 		if (!results.length) return;
 		for (const row of results) await deleteRule(d1, row.id);
-		invalidateRedirectCache();
+		await noteRedirectsChanged(d1);
 		await purgePageCache({ tags: [REDIRECTS_TAG] });
 		ctx.log.info("Slug change redirect removed: the URL is live again", { url, rules: results.length });
 	}

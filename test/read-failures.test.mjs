@@ -29,7 +29,8 @@ registerHooks({
 const { readFailures } = await import("../src/core/read-failures.ts");
 const features = await import("../src/core/features.ts");
 const { coywolfPack } = await import("../src/middleware.ts");
-const { serveRedirect, invalidateRedirectCache } = await import("../src/redirects/middleware.ts");
+const { serveRedirect, invalidateRedirectCache, setRedirectHitDelay } = await import("../src/redirects/middleware.ts");
+setRedirectHitDelay(0);
 const { serveRobots } = await import("../src/robots/middleware.ts");
 const { composeHooks } = await import("../src/core/compose.ts");
 const { LIFETIME_DEFAULTS } = await import("../src/pageCache/pack.ts");

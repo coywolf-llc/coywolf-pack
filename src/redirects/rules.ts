@@ -96,6 +96,63 @@ export function normalizePath(path: string): string {
 
 export class RedirectValidationError extends Error {}
 
+/** Longest request path tried against pattern rules; longer paths match exact rules only (bounds a slow pattern's cost per request). */
+export const MAX_PATTERN_PATH = 1024;
+
+/**
+ * A pattern that repeats a group which itself repeats, such as `(a+)+` or
+ * `(\w+\s?)*`: on a path that almost matches, the regex engine tries every
+ * way of splitting it between the two repeats, which takes exponential time,
+ * and every request whose path has no exact rule runs every pattern. Found by
+ * reading the pattern (escapes and character classes skipped). It also
+ * refuses some nested repeats that happen to be fast, such as `(/[a-z]+)+`;
+ * those can be written without one (`/[a-z/]+`). Returns the reason, or null
+ * when the pattern is fine.
+ */
+export function nestedRepeat(source: string): string | null {
+	/** For each open group, whether what's before it in its parent repeats; `inner`: whether the current group contains a repeat. */
+	const stack: boolean[] = [];
+	let inner = false;
+	/** `*`, `+`, `{n,}` or `{n,m}` with m > 1 at i: its length, else 0 (`?`, `{1}` and `{0,1}` don't repeat). */
+	const repeatAt = (i: number): number => {
+		const c = source[i];
+		if (c === "*" || c === "+") return 1;
+		if (c !== "{") return 0;
+		const m = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(i));
+		if (!m) return 0;
+		if (m[2] === undefined) return Number(m[1]) > 1 ? m[0].length : 0;
+		return m[3] === "" || Number(m[3]) > 1 ? m[0].length : 0;
+	};
+	for (let i = 0; i < source.length; i++) {
+		const c = source[i];
+		if (c === "\\") {
+			i++; // An escaped character (\d, \., \( …): one atom.
+		} else if (c === "[") {
+			// A character class is one atom (in JavaScript `[]` is empty, so the first `]` ends it).
+			let j = i + 1;
+			for (; j < source.length && source[j] !== "]"; j++) if (source[j] === "\\") j++;
+			i = j;
+		} else if (c === "(") {
+			stack.push(inner);
+			inner = false;
+		} else if (c === ")") {
+			const groupRepeats = inner;
+			inner = stack.pop() ?? false;
+			const len = repeatAt(i + 1);
+			if (len && groupRepeats) return "it repeats a group that itself repeats (such as (a+)+)";
+			if (len || groupRepeats) inner = true;
+			i += len;
+		} else {
+			const len = repeatAt(i);
+			if (len) {
+				inner = true;
+				i += len - 1;
+			}
+		}
+	}
+	return null;
+}
+
 /** Validate and normalize a rule; throws RedirectValidationError with a readable message. */
 export function validate(input: RedirectInput): Omit<RedirectInput, "type"> & { type: RedirectType; target: string } {
 	const source = (input.source ?? "").trim();
@@ -111,6 +168,8 @@ export function validate(input: RedirectInput): Omit<RedirectInput, "type"> & { 
 		} catch (error) {
 			throw new RedirectValidationError(`Invalid pattern: ${(error as Error).message}`);
 		}
+		const slow = nestedRepeat(source);
+		if (slow) throw new RedirectValidationError(`This pattern could make some requests very slow: ${slow}. Write it without the nested repeat, for example ^/blog/[a-z0-9/-]+$ instead of ^/blog(/[a-z0-9-]+)+$.`);
 	} else if (!source.startsWith("/") || source.startsWith("//")) {
 		throw new RedirectValidationError("The source must be a path starting with /.");
 	}
@@ -205,6 +264,20 @@ export async function findExactRule(db: D1Database, pathname: string): Promise<R
 		.prepare(`SELECT ${MATCH_COLUMNS} FROM ${TABLE} WHERE source = ? AND is_regex = 0 AND enabled = 1`)
 		.bind(normalizePath(pathname));
 	return (await readMatchRules(db, statement))[0] ?? null;
+}
+
+/**
+ * The sources of the enabled exact rules, at most `max` + 1 of them (more than `max` tells the caller there
+ * are too many to keep in memory). Read with the pack's other reads of this tick, in one D1 batch.
+ */
+export async function loadExactSources(db: D1Database, max: number): Promise<string[]> {
+	const statement = db.prepare(`SELECT source FROM ${TABLE} WHERE is_regex = 0 AND enabled = 1 LIMIT ?`).bind(max + 1);
+	try {
+		return (await batchedAll<{ source: string }>(db, statement)).map((r) => r.source);
+	} catch (error) {
+		if (isMissingTable(error)) return [];
+		throw error;
+	}
 }
 
 /** The enabled pattern rules, in source order (the order they're tried); read through the patterns index. */
@@ -333,7 +406,7 @@ export interface Match {
 export function match(compiled: CompiledRules, pathname: string, search: string): Match | null {
 	let rule = compiled.exact.get(normalizePath(pathname));
 	let location = rule?.target ?? "";
-	if (!rule) {
+	if (!rule && pathname.length <= MAX_PATTERN_PATH) {
 		for (const candidate of compiled.patterns) {
 			const m = pathname.match(candidate.regex);
 			if (!m) continue;
@@ -366,8 +439,10 @@ export function withQuery(location: string, search: string): string {
 }
 
 export async function recordHit(db: D1Database, id: string): Promise<void> {
-	await db
-		.prepare(`UPDATE ${TABLE} SET hits = hits + 1, last_hit = ? WHERE id = ?`)
-		.bind(new Date().toISOString(), id)
-		.run();
+	await (hitStatement(db, id, 1, new Date().toISOString()) as D1PreparedStatement).run();
+}
+
+/** One statement adding `n` hits to a rule (batched per isolate by the site middleware). */
+export function hitStatement(db: { prepare(sql: string): { bind(...values: unknown[]): unknown } }, id: string, n: number, now: string): unknown {
+	return db.prepare(`UPDATE ${TABLE} SET hits = hits + ?, last_hit = ? WHERE id = ?`).bind(n, now, id);
 }

@@ -28,7 +28,8 @@ const { readEntryDocs, rowData } = await import("../src/core/entry-docs.ts");
 const { videoFacts, publicConfig, invalidatePublicConfig } = await import("../src/videos/store.ts");
 const features = await import("../src/core/features.ts");
 const { claimSettle, recordSettingsChange, mergeScopes, parseGeneration } = await import("../src/core/generation.ts");
-const { serveRedirect, invalidateRedirectCache } = await import("../src/redirects/middleware.ts");
+const { serveRedirect, invalidateRedirectCache, setRedirectHitDelay } = await import("../src/redirects/middleware.ts");
+setRedirectHitDelay(0); // Hits are batched per isolate (a second's wait in production).
 const { saveRule } = await import("../src/redirects/rules.ts");
 
 /** A D1 stand-in over node:sqlite that counts round trips (a batch is one). */
@@ -273,7 +274,7 @@ test("redirects: serving never creates the table; a missing table means no rules
 	invalidateRedirectCache();
 });
 
-test("redirects: one indexed read per request; patterns stay in memory until an edit (the settings epoch)", async () => {
+test("redirects: the rules' index stays in memory until an edit (the settings epoch); only a path that's an exact source reads its rule", async () => {
 	const db = d1();
 	await saveRule(db, { source: "/old", target: "/new" });
 	await saveRule(db, { source: "^/a/(\\d+)$", target: "/b/$1", isRegex: true });
@@ -290,16 +291,22 @@ test("redirects: one indexed read per request; patterns stay in memory until an 
 	const count = (re) => db.stats.sql.filter((s) => re.test(s)).length;
 	const PATTERNS = /FROM coywolf_redirects WHERE is_regex = 1/;
 	const EXACT = /FROM coywolf_redirects WHERE source = \?/;
+	const SOURCES = /SELECT source FROM coywolf_redirects WHERE is_regex = 0 AND enabled = 1/;
 	assert.deepEqual(await go("/old/?x=1"), [301, "https://example.com/new?x=1"]);
 	assert.deepEqual(await go("/a/42"), [301, "https://example.com/b/42"]);
 	assert.equal(await go("/off"), undefined, "disabled rules don't match");
+	assert.equal(await go("/nothing"), undefined);
 	await Promise.all(hits);
-	assert.equal(count(PATTERNS), 1, "one pattern load for three requests");
-	assert.equal(count(EXACT), 3, "one exact lookup per request");
+	assert.equal(count(PATTERNS), 1, "one pattern load for four requests");
+	assert.equal(count(SOURCES), 1, "and one load of the exact sources");
+	assert.equal(count(EXACT), 1, "only the cold request read its exact rule; the others aren't exact sources");
 	assert.ok(!db.stats.sql.some((s) => /FROM coywolf_redirects WHERE enabled/.test(s)), "no full-table load");
+	await go("/old");
+	assert.equal(count(EXACT), 2, "an exact source reads its rule (an edit in another isolate shows at once)");
 	features.invalidateFeatures(); // A save (settings epoch moves).
 	await go("/old");
 	assert.equal(count(PATTERNS), 2);
+	assert.equal(count(SOURCES), 2);
 	invalidateRedirectCache();
 });
 
@@ -352,10 +359,14 @@ test("cold isolate: the redirect lookup and the feature switches are one D1 roun
 	const url = new URL("https://example.com/old");
 	prefetchRedirects(url, { DB: db });
 	await features.siteFeatures();
-	const res = await serveRedirect(url, { DB: db }, () => {});
+	const pending = [];
+	const res = await serveRedirect(url, { DB: db }, (p) => pending.push(p));
 	assert.equal(res.status, 301);
-	// One batch for both reads; the other round trip is the hit count (written after the response).
-	assert.equal(db.stats.roundTrips, 2, db.stats.sql.join("\n"));
+	// One batch for every read: the switches, the request's exact rule and the rules' index.
+	assert.equal(db.stats.roundTrips, 1, db.stats.sql.join("\n"));
+	// The hit is written after the response (batched per isolate).
+	await Promise.all(pending);
+	assert.equal(db.stats.roundTrips, 2);
 	assert.ok(db.stats.sql.at(-1).startsWith("UPDATE coywolf_redirects SET hits"));
 	invalidateRedirectCache();
 	delete globalThis.__testEnv;

@@ -276,7 +276,7 @@ test("redirects: a pattern load that never answers doesn't hang later requests; 
 	const first = go("/a/1");
 	await sleep(5);
 	const warnings = await quietly("warn", async () => assert.deepEqual(await go("/a/2"), [301, "https://example.com/b/2"]));
-	assert.match(warnings[0], /shared read stalled: the redirect patterns/);
+	assert.match(warnings[0], /shared read stalled: the redirect rules/);
 	// The stranded request fails closed by the D1 read deadline (the page renders instead; not edge-cached).
 	const errors = await quietly("error", async () => assert.equal(await first, undefined));
 	assert.match(errors[0], /could not load rules/);
