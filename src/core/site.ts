@@ -28,7 +28,7 @@ export async function siteName(ctx: Pick<PluginContext, "site">): Promise<string
 export async function siteInStaging(): Promise<boolean> {
 	try {
 		const { getSiteSetting } = await import("emdash");
-		// biome-ignore lint/suspicious/noExplicitAny: "staging" isn't in older EmDash versions' setting keys.
+		// any: "staging" isn't in older EmDash versions' setting keys.
 		return (await (getSiteSetting as (key: any) => Promise<unknown>)("staging")) === true;
 	} catch {
 		return false;

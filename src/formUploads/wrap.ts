@@ -545,7 +545,7 @@ function adminRoutes(deps: Deps) {
 
 // ── The wrapper ──────────────────────────────────────────────────
 
-// biome-ignore lint/suspicious/noExplicitAny: EmDash's resolved plugin shape.
+// any: EmDash's resolved plugin shape.
 type Resolved = { routes?: Record<string, any>; hooks?: Record<string, any>; [key: string]: unknown };
 
 function withMedia(ctx: FormsCtx, deps: Deps, state: RequestState): FormsCtx {

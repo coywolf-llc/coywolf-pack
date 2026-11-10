@@ -84,7 +84,7 @@ export function shapeFindings(rule: RobotsRule): Finding[] {
 	const out: Finding[] = [];
 	const raw = [rule.path ?? "", rule.allow ?? "", ...(rule.except ?? []), ...(rule.params ?? []), ...(rule.exts ?? [])];
 	for (const v of raw) {
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters.
+		// Control characters in the pattern: rejecting control characters.
 		if (/[\u0000-\u001f\u007f]/.test(v)) out.push({ code: "bad-chars", severity: "error", message: "Remove the line break or control character; each rule must stay on one line." });
 		else if (v.includes("#")) out.push({ code: "bad-chars", severity: "error", message: "Remove the #. Everything after # is a comment in robots.txt, and the #part of an address never reaches the server." });
 	}

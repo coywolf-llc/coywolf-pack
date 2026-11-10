@@ -162,7 +162,7 @@ export function cleanText(value: unknown, max = 500): string {
 	if (typeof value !== "string" && typeof value !== "number") return "";
 	let s = String(value)
 		.replace(/<[^>]*>/g, " ")
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the point.
+		// Control characters in the pattern: stripping control characters is the point.
 		.replace(/[\u0000-\u001f\u007f]/g, " ")
 		.replace(/\s+/gu, " ")
 		.trim();

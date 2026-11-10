@@ -95,7 +95,7 @@ export function decodeEntities(text: string): string {
 const clean = (value: unknown, max: number): string => {
 	if (typeof value !== "string" && typeof value !== "number") return "";
 	const text = String(value)
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: strip control characters.
+		// Control characters in the pattern: strip control characters.
 		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
 		.replace(/\s+/g, " ")
 		.trim();

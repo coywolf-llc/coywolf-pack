@@ -14,7 +14,7 @@ import { invalidateTheme } from "./settings.js";
 import { DEFAULT_THEME, THEME_SETTING, isTheme, themeCss, themeOptions } from "./themes.js";
 import { readOnlyRoute } from "../core/routes.js";
 
-// biome-ignore lint/suspicious/noEmptyInterface: reserved for future options.
+// An empty interface: reserved for future options.
 export interface CodeBlocksOptions {}
 
 export const FEATURES = [
@@ -67,7 +67,7 @@ export function codeBlocksPack(_options: CodeBlocksOptions): PackModule {
 		routes: {
 			"codeBlocks/settings": {
 				permission: "plugins:manage" as const,
-				// biome-ignore lint/suspicious/noExplicitAny: plugin context.
+				// any: plugin context.
 				handler: async (ctx: any) => {
 					const stored = await ctx.settings.get(THEME_SETTING);
 					return { theme: isTheme(stored) ? stored : DEFAULT_THEME, themes: themeOptions() };

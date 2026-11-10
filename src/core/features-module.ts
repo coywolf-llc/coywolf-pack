@@ -14,7 +14,7 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 	return {
 		"features/list": {
 			permission: "plugins:manage" as const,
-			// biome-ignore lint/suspicious/noExplicitAny: plugin context.
+			// any: plugin context.
 			handler: async (ctx: any) => {
 				await ensureTasks(ctx, tasks);
 				// Sites set up before 0.36.0 keep their defaults (src/core/features.ts); a failure leaves them unrecorded, which reads the same.

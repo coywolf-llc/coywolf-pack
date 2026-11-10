@@ -34,7 +34,7 @@ const FEATURES = [
 ];
 registerFeatures(FEATURES);
 
-// biome-ignore lint/suspicious/noExplicitAny: hook events differ per hook.
+// any: hook events differ per hook.
 type Hook = (event: any, ctx: PluginContext) => Promise<unknown>;
 
 /**

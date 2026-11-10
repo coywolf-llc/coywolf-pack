@@ -100,7 +100,7 @@ function hookFeature(module: PackModule, hook: string): string {
 	return module.hookFeature?.[hook as keyof typeof module.hookFeature] ?? mainFeature(module);
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: events differ per hook.
+// any: events differ per hook.
 type Handler = (event: any, ctx: PluginContext) => Promise<unknown>;
 
 export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] }) {

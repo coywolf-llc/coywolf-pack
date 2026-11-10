@@ -185,7 +185,7 @@ interface EntryOverride extends TypeChoice {
 	updatedAt?: string;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: storage collections are untyped at this layer.
+// any: storage collections are untyped at this layer.
 type Coll = any;
 const docs = (ctx: PluginContext): Coll => (ctx.storage as Record<string, Coll>).schemaDocs;
 const entries = (ctx: PluginContext): Coll => (ctx.storage as Record<string, Coll>).schemaEntries;
@@ -400,7 +400,7 @@ interface SiteFacts {
 }
 
 async function siteFacts(ctx: PluginContext, page: PublicPageContext): Promise<SiteFacts> {
-	// biome-ignore lint/suspicious/noExplicitAny: SiteSettings is request-cached by EmDash; read loosely.
+	// any: SiteSettings is request-cached by EmDash; read loosely.
 	let settings: any = {};
 	try {
 		const { getSiteSettings } = await import("emdash");

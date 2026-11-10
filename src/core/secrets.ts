@@ -79,7 +79,7 @@ export type SecretSettingKey = keyof typeof SECRET_SETTINGS;
  * declares. Non-secret fields are dropped, so they never appear on the
  * generic Settings page.
  */
-// biome-ignore lint/suspicious/noExplicitAny: SettingField shape is EmDash's.
+// any: SettingField shape is EmDash's.
 export function secretSettingsSchema(moduleSchemas: Array<Record<string, any> | undefined> = []): Record<string, SecretSettingField> {
 	const out: Record<string, SecretSettingField> = { ...SECRET_SETTINGS };
 	for (const schema of moduleSchemas) {

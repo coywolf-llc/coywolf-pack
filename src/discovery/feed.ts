@@ -126,7 +126,7 @@ export function escapeXml(text: string): string {
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&apos;")
 		// Characters XML 1.0 forbids outright.
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point.
+		// Control characters in the pattern: stripping them is the point.
 		.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "");
 }
 

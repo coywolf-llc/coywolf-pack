@@ -25,7 +25,7 @@ const MAX_LINE_LEN = 2083 * 8;
 /** One char per UTF-8 byte (chars ≤ 0xFF pass through unchanged when already bytes). */
 export function toBytes(input: string): string {
 	// Already a byte string (e.g. the output of this function)? Leave it.
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: byte range check.
+	// Control characters in the pattern: byte range check.
 	if (!/[^\u0000-\u007f]/.test(input)) return input;
 	const bytes = new TextEncoder().encode(input);
 	let out = "";
@@ -247,7 +247,7 @@ export function extractProductToken(userAgent: string): string {
  * and controls; %xx hex uppercased). Expects a byte string (see toBytes).
  */
 export function normalizePath(bytes: string): string {
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: encoding control bytes.
+	// Control characters in the pattern: encoding control bytes.
 	return escapePattern(bytes).replace(/[\u0000-\u0020\u007f]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
 }
 

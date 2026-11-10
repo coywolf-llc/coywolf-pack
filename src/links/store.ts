@@ -166,7 +166,7 @@ export async function queryAll<T>(
 	let cursor: string | undefined;
 	do {
 		options.ops?.spend();
-		// biome-ignore lint/suspicious/noExplicitAny: WhereClause is EmDash's.
+		// any: WhereClause is EmDash's.
 		const page = await collection.query({ where: where as any, limit: 100, cursor });
 		out.push(...page.items);
 		cursor = page.hasMore ? page.cursor : undefined;

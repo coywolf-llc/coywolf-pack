@@ -215,7 +215,7 @@ function PropertyEditor(props: {
 			{props.rows.map((row, index) => {
 				const meta = props.inputs[row.prop] ?? {};
 				return (
-					// biome-ignore lint/suspicious/noArrayIndexKey: rows are positional and repeatable.
+					// Index keys: rows are positional and repeatable.
 					<div key={index} className="flex items-start gap-2 rounded border border-kumo-line p-2">
 						<div className="w-40 shrink-0 pt-2 font-mono text-xs">{row.prop}</div>
 						<div className="min-w-0 flex-1 space-y-2">

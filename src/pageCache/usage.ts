@@ -177,7 +177,7 @@ async function readUsage(ctx: PluginContext, a: { token: string; doFetch: Fetch 
 	});
 	if (body.errors?.length) throw new UsageError(`Cloudflare analytics: ${body.errors.map((e) => e.message).join("; ")}. The token needs Account → Account Analytics → Read.`);
 	const acc = body.data?.viewer?.accounts?.[0] ?? {};
-	// biome-ignore lint/suspicious/noExplicitAny: GraphQL rows.
+	// any: GraphQL rows.
 	const rows = (key: string) => (acc[key] ?? []) as any[];
 	const site = { databaseId: target.databaseId, worker: target.worker };
 	const periods = {

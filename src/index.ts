@@ -143,7 +143,7 @@ export function createPlugin(options: CoywolfOptions = {}) {
 			settingsSchema: s.settingsSchema,
 			...(s.blocks.length ? { portableTextBlocks: s.blocks } : {}),
 		}),
-		// biome-ignore lint/suspicious/noExplicitAny: composed handlers match EmDash's hook types at runtime.
+		// any: composed handlers match EmDash's hook types at runtime.
 		hooks: hooks as any,
 		routes: routes as Parameters<typeof definePlugin>[0]["routes"],
 	});
