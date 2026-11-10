@@ -82,11 +82,16 @@ export function invalidateRedirectCache(): void {
 export async function noteRedirectsChanged(db: D1Database): Promise<void> {
 	invalidateRedirectCache();
 	const version = JSON.stringify(crypto.randomUUID());
-	await db
-		.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value")
-		.bind(REDIRECTS_VERSION_OPTION, version)
-		.run();
-	rememberSiteOption(REDIRECTS_VERSION_OPTION, version);
+	try {
+		await db
+			.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value")
+			.bind(REDIRECTS_VERSION_OPTION, version)
+			.run();
+		rememberSiteOption(REDIRECTS_VERSION_OPTION, version);
+	} catch (error) {
+		// The change itself is saved; other isolates then see it when their index expires (cacheSeconds).
+		console.error("coywolf-pack: could not record the redirects version", error);
+	}
 }
 
 /** The index this isolate holds, if it's still current (no edit, no new generation or redirects version, not expired). */
