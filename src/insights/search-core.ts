@@ -6,14 +6,16 @@
  * and searches that found nothing), never an IP address, a user agent, a
  * time of day or anything else about the visitor. Queries that look like an
  * email address, a handle, a long number (phone, card, order) or a key are
- * dropped before they're counted, and rows older than 90 days are deleted
- * every day. The report never shows a query seen only once.
+ * dropped before they're counted (names and short IDs can't be told from
+ * ordinary words, so they aren't), and rows older than 90 days are deleted
+ * every day. The report lists a query only once it's been seen MIN_SHOWN
+ * times on MIN_DAYS different days. Counts can't tell visitors apart, so
+ * that keeps one-off searches out, not every search one person made.
  *
- * Live results ask the server as visitors type, so a batch also folds a
- * visitor's keystrokes into the search they ended up with: a live query
- * that's the start of another query in the same batch ("coy", then
- * "coyote") was typing on the way there, and a query answered both live and
- * by the search page (typed, then submitted) counts once.
+ * Live results ask the server as visitors type, so the server never counts
+ * those answers. The live client counts a search once the visitor stops
+ * typing for a moment or opens a result (POST search/seen), and the search
+ * page counts the searches it answers.
  *
  * No imports, so `node --test` can load this file.
  */
@@ -22,8 +24,21 @@ export const SEARCH_COLLECTION = "searchInsights";
 export const RETENTION_DAYS = 90;
 /** Longest query kept (longer ones are cut at a word). */
 export const MAX_QUERY_LENGTH = 80;
-/** Queries seen fewer times than this in the window are never shown. */
-export const MIN_SHOWN = 2;
+/** A query is listed only once it's been searched at least this many times… */
+export const MIN_SHOWN = 3;
+/** …on at least this many different days. */
+export const MIN_DAYS = 2;
+/** Most distinct queries the site records in a day (counted in D1 before each batch); later new queries wait for tomorrow. */
+export const MAX_QUERIES_PER_DAY = 1_000;
+
+/** A settled search from the live client: `{ q, n }` with the query as typed and its number of results. Null when malformed. */
+export function parseSeen(body: unknown): { q: string; n: number } | null {
+	// any: a request body.
+	const b = body as any;
+	if (!b || typeof b !== "object" || typeof b.q !== "string" || b.q.length > 200) return null;
+	const n = typeof b.n === "number" ? b.n : Number.NaN;
+	return Number.isInteger(n) && n >= 0 && n <= 100 ? { q: b.q, n } : null;
+}
 
 /** Email addresses and @handles; long digit runs, separators allowed (phones, cards, order numbers); key-like strings. */
 export function looksPersonal(query: string): boolean {
@@ -64,25 +79,14 @@ export interface Tally {
 	z: number;
 }
 
-/** One batch's searches as counts per query (see the file comment for the folding rules). */
+/** One batch's searches as counts per query. Each event is one search (the live client sends only settled ones). */
 export function collapseBatch(events: SearchEvent[]): Map<string, Tally> {
-	const live = new Map<string, Tally>();
-	const page = new Map<string, Tally>();
+	const out = new Map<string, Tally>();
 	for (const e of events) {
-		const into = e.source === "page" ? page : live;
-		const tally = into.get(e.q) ?? { n: 0, z: 0 };
+		const tally = out.get(e.q) ?? { n: 0, z: 0 };
 		tally.n++;
 		if (e.results === 0) tally.z++;
-		into.set(e.q, tally);
-	}
-	const queries = [...new Set([...live.keys(), ...page.keys()])];
-	const out = new Map<string, Tally>();
-	for (const q of queries) {
-		const l = live.get(q);
-		const p = page.get(q);
-		if (!p && queries.some((other) => other !== q && other.startsWith(q))) continue;
-		const pick = !l ? p : !p ? l : p.n >= l.n ? p : l;
-		if (pick) out.set(q, { n: pick.n, z: pick.z });
+		out.set(e.q, tally);
 	}
 	return out;
 }

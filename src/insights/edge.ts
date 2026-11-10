@@ -83,7 +83,18 @@ export async function edgeReport(ctx: Ctx, refresh = false, bindings?: Record<st
 		if (limits && !limits.enabled) return { setup: `Cloudflare says this zone (${zone.name}) can't query its HTTP request analytics with this token. Check that the token has Zone → Analytics → Read for it.`, missing: ["permission"] };
 		const window = reportWindow(limits, Date.now());
 		const verified = fieldAvailable(limits, "verifiedBotCategory");
-		const { data, errors } = await cfGraphql(a, edgeQuery({ verifiedBotCategory: verified }), { zone: zone.id, start: window.start, end: window.end }, "Zone → Analytics → Read");
+		const variables = { zone: zone.id, start: window.start, end: window.end };
+		const hosts = [a.host, ...(mediaHost ? [mediaHost] : [])];
+		let answer: Awaited<ReturnType<typeof cfGraphql>>;
+		try {
+			answer = await cfGraphql(a, edgeQuery({ verifiedBotCategory: verified, hosts }), variables, "Zone → Analytics → Read");
+		} catch (error) {
+			// A zone that won't filter by host: read the zone's top rows and keep the site's (other hosts can crowd them out).
+			if (!/clientRequestHTTPHost_in/.test(error instanceof Error ? error.message : String(error))) throw error;
+			answer = await cfGraphql(a, edgeQuery({ verifiedBotCategory: verified }), variables, "Zone → Analytics → Read");
+			notes.push("Cloudflare wouldn't filter this zone's analytics by host, so the lists come from the whole zone's busiest rows; a busy other host in the zone can push the site's rows out.");
+		}
+		const { data, errors } = answer;
 		// any: GraphQL answer.
 		const zoneData = ((data as any)?.viewer?.zones?.[0] ?? null) as Record<string, unknown> | null;
 		if (errors.length) notes.push(`Part of the report couldn't be read: ${errors.join("; ")}`);

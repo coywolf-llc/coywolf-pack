@@ -552,7 +552,7 @@ function FathomCard(props: { parts: ReturnType<typeof useParts>; status: Status;
 								<PagesTable caption="Most viewed pages in the last 30 days" pages={r.monthPages} />
 							</div>
 						</div>
-						<p className="text-xs text-kumo-subtle">Days start at midnight UTC; Fathom's own dashboard uses the site's time zone, so the numbers can differ slightly.</p>
+						<p className="text-xs text-kumo-subtle">Days are counted in the site's time zone in Fathom ({r.timeZone}), as on Fathom's dashboard.</p>
 					</>
 				)}
 			</ReportBody>
@@ -759,18 +759,18 @@ function SearchCard(props: { parts: ReturnType<typeof useParts>; status: Status 
 							<div className="grid gap-5 lg:grid-cols-2">
 								<div className="space-y-2">
 									<h3 className="text-sm font-medium">Top searches</h3>
-									{r.top.length ? <QueryTable caption="The most frequent searches" rows={r.top} /> : <p className="text-sm text-kumo-subtle">None seen {r.minShown} times or more yet.</p>}
+									{r.top.length ? <QueryTable caption="The most frequent searches" rows={r.top} /> : <p className="text-sm text-kumo-subtle">None searched {r.minShown} times on {r.minDays} different days yet.</p>}
 								</div>
 								<div className="space-y-2">
 									<h3 className="text-sm font-medium">Searches with no results</h3>
-									{r.zero.length ? <QueryTable caption="Searches that found nothing, most often first" rows={r.zero} /> : <p className="text-sm text-kumo-subtle">None seen {r.minShown} times or more.</p>}
+									{r.zero.length ? <QueryTable caption="Searches that found nothing, most often first" rows={r.zero} /> : <p className="text-sm text-kumo-subtle">None searched {r.minShown} times on {r.minDays} different days.</p>}
 								</div>
 							</div>
 						</>
 					);
 				})()}
 			<p className="text-xs text-kumo-subtle">
-				Counts searches the site answered: the search page, and live results as visitors type (a visitor's keystrokes count as the one search they ended with). Repeats Cloudflare answers from its edge cache never reach the site, so popular searches are undercounted, and clicks on results aren't counted. Only the query text and daily counts are stored, never who searched; queries that look like an email, a phone or card number, or a key are dropped; searches seen fewer than 2 times aren't listed; and counts older than 90 days are deleted every day.
+				Counts searches the site answered: the search page's, and the ones a visitor settled on in live results (they stopped typing for a moment or opened a result; a search typed, left for a moment and then submitted counts twice). Search pages Cloudflare answers from its edge cache never reach the site, and clicks on results aren't counted. Only the query text and daily counts are stored, never who searched. Queries that look like an email, a phone or card number, or a key are dropped, but names and short codes can't be told from ordinary words. A search is listed only once it's been searched 3 times on 2 different days, which keeps out one-off searches (the counts can't tell visitors apart). Counts older than 90 days are deleted every day.
 			</p>
 		</Card>
 	);

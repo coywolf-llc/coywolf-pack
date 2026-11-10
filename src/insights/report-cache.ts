@@ -52,6 +52,19 @@ export interface ReportKv {
 	delete?(key: string): Promise<unknown>;
 }
 
+/**
+ * A setup step found by asking the provider (no zone for the host, no Web Analytics site, no Search Console
+ * property) is kept this long, so an open page doesn't ask again on every load; Refresh asks at once.
+ */
+export const SETUP_TTL_MS = 10 * 60_000;
+
+interface SetupStored {
+	at: string;
+	fingerprint: string;
+	reason: string;
+	missing: string[];
+}
+
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
 
@@ -66,11 +79,16 @@ export async function cachedReport<T>(
 	now: () => number = Date.now,
 ): Promise<ReportState<T>> {
 	const failedKey = `${policy.key}:failed`;
+	const setupKey = `${policy.key}:setup`;
 	const cached = await kv.get<Stored<T>>(policy.key).catch(() => null);
 	const usable = cached && cached.fingerprint === fingerprint && typeof cached.at === "string" ? cached : null;
 	const ready = (s: Stored<T>, extra: string[] = []): ReportState<T> => ({ state: "ready", at: s.at, report: s.report, notes: [...(s.notes ?? []), ...extra] });
 	const age = usable ? now() - Date.parse(usable.at) : Number.POSITIVE_INFINITY;
 	if (usable && age < (refresh ? policy.refreshMinMs : policy.ttlMs)) return ready(usable);
+	if (!refresh) {
+		const setup = await kv.get<SetupStored>(setupKey).catch(() => null);
+		if (setup && setup.fingerprint === fingerprint && now() - Date.parse(setup.at) < SETUP_TTL_MS) return { state: "setup", reason: setup.reason, missing: setup.missing ?? [] };
+	}
 
 	if (!slot.flight) {
 		const failed = await kv.get<Failed>(failedKey).catch(() => null);
@@ -83,10 +101,15 @@ export async function cachedReport<T>(
 	const readNow = async (): Promise<ReportState<T>> => {
 		try {
 			const loaded = await load();
-			if ("setup" in loaded) return { state: "setup", reason: loaded.setup, missing: loaded.missing ?? [] };
+			if ("setup" in loaded) {
+				const setup: SetupStored = { at: new Date(now()).toISOString(), fingerprint, reason: loaded.setup, missing: loaded.missing ?? [] };
+				await kv.set(setupKey, setup).catch(() => undefined);
+				return { state: "setup", reason: setup.reason, missing: setup.missing };
+			}
 			const stored: Stored<T> = { at: new Date(now()).toISOString(), fingerprint, report: loaded.report, notes: loaded.notes ?? [] };
 			await kv.set(policy.key, stored);
 			await kv.delete?.(failedKey)?.catch?.(() => undefined);
+			await kv.delete?.(setupKey)?.catch?.(() => undefined);
 			return ready(stored);
 		} catch (error) {
 			const message = messageOf(error);
@@ -101,6 +124,7 @@ export async function cachedReport<T>(
 export async function forgetReport(kv: ReportKv, key: string): Promise<void> {
 	await kv.delete?.(key)?.catch?.(() => undefined);
 	await kv.delete?.(`${key}:failed`)?.catch?.(() => undefined);
+	await kv.delete?.(`${key}:setup`)?.catch?.(() => undefined);
 }
 
 /** A short, stable fingerprint of a report's settings (never the secret itself: only whether one is saved and a hash of it). */

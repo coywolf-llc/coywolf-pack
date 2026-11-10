@@ -32,6 +32,13 @@ export interface LiveClientConfig {
 	locale: string | null;
 	/** Preselect the first result so Enter opens it (as in Coywolf Search). */
 	enterOpensTop: boolean;
+	/**
+	 * Search insights (insights.search): where to say "the visitor settled on this search" (search/seen),
+	 * or absent/null when the part is off, so nothing is sent.
+	 */
+	seenEndpoint?: string | null;
+	/** Milliseconds without a keystroke before a search counts as settled. Default 1500. */
+	seenDelay?: number;
 }
 
 /**
@@ -277,6 +284,12 @@ const SCRIPT = String.raw`function (config, css, tools) {
 		// Set when the visitor picks a row (arrows, pointer), so a second render keeps it selected.
 		var userMoved = false;
 		var activeUrl = "";
+		// Search insights: a search counts once the visitor stops typing for seenDelay (or opens a result),
+		// once per query per page view; never while they're still typing, and not when they submit the
+		// form (the search page counts that one).
+		var seenTimer = 0;
+		var seenSent = {};
+		var seenPending = null;
 
 		// Nothing is wrapped around the field: themes lay search forms out with flexbox and
 		// direct-child selectors, so the panel and clear button are positioned against the document.
@@ -387,10 +400,45 @@ const SCRIPT = String.raw`function (config, css, tools) {
 			if (controller) controller.abort();
 			clearTimeout(timer);
 			clearTimeout(announceTimer);
+			cancelSeen();
 			close();
 			showClear();
 			status.textContent = "";
 			announced = "";
+		}
+
+		function sendSeen(query, count) {
+			if (!config.seenEndpoint || seenSent[query]) return;
+			seenSent[query] = true;
+			try {
+				fetch(config.seenEndpoint, { method: "POST", keepalive: true, credentials: "same-origin", headers: { "Content-Type": "application/json", "X-EmDash-Request": "1" }, body: JSON.stringify({ q: query, n: count }) }).catch(function () {});
+			} catch (e) {
+				// Counting is best effort: never in the visitor's way.
+			}
+		}
+
+		function cancelSeen() {
+			clearTimeout(seenTimer);
+			seenPending = null;
+		}
+
+		/** The server answered the query with this many results: it counts if the visitor stops typing here. */
+		function settleSeen(query, count) {
+			if (!config.seenEndpoint || seenSent[query]) return;
+			clearTimeout(seenTimer);
+			seenPending = { q: query, n: count };
+			seenTimer = setTimeout(function () {
+				var pending = seenPending;
+				seenPending = null;
+				if (pending && input.value.trim() === pending.q) sendSeen(pending.q, pending.n);
+			}, config.seenDelay || 1500);
+		}
+
+		/** The visitor opened a result before the delay was up: they settled on this search. */
+		function flushSeen() {
+			var pending = seenPending;
+			cancelSeen();
+			if (pending && input.value.trim() === pending.q) sendSeen(pending.q, pending.n);
 		}
 
 		/** The full results page: what submitting the form would load. */
@@ -536,6 +584,7 @@ const SCRIPT = String.raw`function (config, css, tools) {
 			var local = titles.prepared ? tools.localItems(titles.prepared, query, config.limit) : [];
 			var server = (data && data.items) || [];
 			render(query, { items: tools.merge(local, server, config.limit), fallback: !!(data && data.fallback) && !local.length }, false);
+			settleSeen(query, server.length);
 		}
 
 		// The index arrived while the visitor was typing: show its matches unless the server already answered.
@@ -573,6 +622,7 @@ const SCRIPT = String.raw`function (config, css, tools) {
 			var query = input.value.trim();
 			showClear();
 			clearTimeout(timer);
+			cancelSeen();
 			if (query.length < config.minChars) {
 				lastQuery = "";
 				token++;
@@ -630,6 +680,7 @@ const SCRIPT = String.raw`function (config, css, tools) {
 					// Opens what's highlighted; with nothing highlighted the form submits as usual.
 					if (open && active >= 0 && rows[active]) {
 						e.preventDefault();
+						flushSeen();
 						location.assign(rows[active].href);
 					}
 					break;
@@ -697,6 +748,11 @@ const SCRIPT = String.raw`function (config, css, tools) {
 			if (!clear.hidden) showClear();
 		});
 
+		// A result opened with the pointer counts at once; a submitted form is counted by the search page.
+		list.addEventListener("click", function (e) {
+			if (e.target.closest && e.target.closest(".cw-live-option")) flushSeen();
+		});
+		if (form) form.addEventListener("submit", cancelSeen);
 		if (form) form.addEventListener("submit", close);
 		showClear();
 		// Attached on focus (a search form rendered later): that focus has already happened.

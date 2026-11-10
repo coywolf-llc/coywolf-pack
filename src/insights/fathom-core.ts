@@ -22,11 +22,30 @@ export function normalizeSiteId(value: unknown): string | null {
 	return /^[A-Z0-9]{4,16}$/.test(id) ? id : null;
 }
 
-/** Fathom's timestamp format for date_from ("2026-11-03 00:00:00"), at the start of the UTC day `daysAgo` days back (today counts as one). */
-export function fathomFrom(now: number, days: number): string {
-	const start = new Date(now - (days - 1) * DAY_MS);
+/** A time zone the runtime knows (a TZ database name such as America/New_York), or null. */
+export function validTimeZone(value: unknown): string | null {
+	if (typeof value !== "string" || !value.trim()) return null;
+	try {
+		new Intl.DateTimeFormat("en-US", { timeZone: value.trim() });
+		return value.trim();
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Fathom's timestamp format for date_from ("2026-11-03 00:00:00"): midnight at the start of the last `days` days
+ * (today counts as one) in `timeZone`, the site's reporting time zone, which Fathom reads date_from in. UTC when
+ * it isn't known.
+ */
+export function fathomFrom(now: number, days: number, timeZone = "UTC"): string {
+	const today = new Intl.DateTimeFormat("en-CA", { timeZone: validTimeZone(timeZone) ?? "UTC", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(now));
+	const start = new Date(Date.parse(`${today}T00:00:00Z`) - (days - 1) * DAY_MS);
 	return `${start.toISOString().slice(0, 10)} 00:00:00`;
 }
+
+/** GET /sites/{id}: the site, with its reporting time zone. */
+export const siteUrl = (siteId: string) => `${FATHOM_API}/sites/${encodeURIComponent(siteId)}`;
 
 export function aggregationUrl(siteId: string, options: { from: string; aggregates: string[]; grouping?: string; sort?: string; limit?: number }): string {
 	const params = new URLSearchParams({ entity: "pageview", entity_id: siteId, aggregates: options.aggregates.join(","), date_from: options.from });
@@ -73,6 +92,8 @@ export function fathomPages(rows: unknown, limit = 10): FathomPage[] {
 
 export interface FathomReport {
 	siteId: string;
+	/** The site's reporting time zone in Fathom (the days are counted in it). */
+	timeZone: string;
 	week: FathomTotals;
 	month: FathomTotals;
 	weekPages: FathomPage[];

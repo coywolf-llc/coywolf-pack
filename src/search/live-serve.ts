@@ -25,7 +25,8 @@
 import { contentUrlFingerprint } from "../core/content-url.js";
 import { isOn, registerSiteSetting, rememberSiteSetting, siteFeatures, siteSetting } from "../core/features.js";
 import type { PackMiddleware } from "../core/module.js";
-import { liveAnswerCount, noteSearch } from "../insights/search.js";
+import { noteSearch } from "../insights/search.js";
+import { parseSeen } from "../insights/search-core.js";
 import { keepAtEdge, keepOffEdge } from "../pageCache/lib.js";
 import { type QueryStats, countingD1, liveSearchD1, loadSearchMeta } from "./engine.js";
 import { Lru, effectiveVersion, fingerprint, indexCacheKey, liveCacheKey, newContentVersion, normalizeCollections, normalizeLiveQuery, normalizeLocale } from "./live-cache.js";
@@ -35,6 +36,10 @@ import { TITLE_INDEX_MAX, buildTitleIndex } from "./title-index.js";
 
 export const LIVE_ENDPOINT = "/_emdash/api/plugins/coywolf-pack/search/live";
 export const INDEX_ENDPOINT = "/_emdash/api/plugins/coywolf-pack/search/index";
+/** Search insights: the live client says the visitor settled on a search (POST { q, n }); see src/insights/search.ts. */
+export const SEEN_ENDPOINT = "/_emdash/api/plugins/coywolf-pack/search/seen";
+/** Largest body search/seen reads. */
+const SEEN_BODY_MAX = 1024;
 
 /** Plugin setting holding the search content version. */
 export const VERSION_SETTING = "searchVersion";
@@ -174,18 +179,13 @@ async function serveLive(context: Context, env: Record<string, unknown>, waitUnt
 	const browser = { "Cache-Control": `public, max-age=${LIVE_BROWSER_TTL}` };
 	const edge = edgeCaching(context);
 	const hit = edge ? null : await cachedBody(liveMemory, key);
-	if (hit) {
-		// Search insights (when on) count the searches the site answers, from this isolate's or the location's cache too.
-		noteSearch(db, query, () => liveAnswerCount(hit.body), "live", waitUntil);
-		return jsonResponse(hit.body, 200, { ...browser, "Server-Timing": timing(hit.where, started), "X-Coywolf-Cache": "HIT" });
-	}
+	if (hit) return jsonResponse(hit.body, 200, { ...browser, "Server-Timing": timing(hit.where, started), "X-Coywolf-Cache": "HIT" });
 
 	const limited = await rateLimited(context, env);
 	if (limited) return limited;
 
 	const stats: QueryStats = { statements: 0, roundTrips: 0 };
 	const data = await liveSearchD1(countingD1(db, stats), query, { collections, locale, limit, database: config.database, version });
-	noteSearch(db, query, data.items.length, "live", waitUntil);
 	const body = JSON.stringify({ success: true, data });
 	if (edge) {
 		keepAtEdge(context, LIVE_EDGE_TTL, await searchTags(db, version));
@@ -233,6 +233,29 @@ async function serveIndex(context: Context, env: Record<string, unknown>, waitUn
 	}
 	store(indexMemory, key, body, INDEX_EDGE_TTL, waitUntil);
 	return jsonResponse(body, 200, { ...headers, "Server-Timing": timing("miss", started, stats), "X-Coywolf-Cache": "MISS" });
+}
+
+/**
+ * A settled search from the live client (Search insights): counted when the part is on, never cached, never
+ * answered with anything but 204 (or 400 for a malformed body, 429 when Search rate limit says so).
+ */
+async function serveSeen(context: Context, env: Record<string, unknown>, waitUntil: (p: Promise<unknown>) => void, db: D1Database | undefined): Promise<Response> {
+	const limited = await rateLimited(context, env);
+	if (limited) return limited;
+	const length = Number(context.request.headers.get("content-length"));
+	if (length > SEEN_BODY_MAX) return badRequest("Too long.");
+	const text = await context.request.text().catch(() => "");
+	if (text.length > SEEN_BODY_MAX) return badRequest("Too long.");
+	let body: unknown = null;
+	try {
+		body = JSON.parse(text);
+	} catch {
+		body = null;
+	}
+	const seen = parseSeen(body);
+	if (!seen) return badRequest("Expected { q, n }.");
+	noteSearch(db, seen.q, seen.n, "live", waitUntil);
+	return new Response(null, { status: 204, headers: new Headers({ "Cache-Control": "no-store" }) });
 }
 
 /**
@@ -314,6 +337,10 @@ export const searchLiveMiddleware: PackMiddleware = {
 			const asset = liveAssetParts(version);
 			keepAtEdge(context, version === LIVE_ASSET_HASH ? 31536000 : 300);
 			return new Response(context.request.method === "HEAD" ? null : asset.body, { status: asset.status, headers: asset.headers });
+		}
+		if (path === SEEN_ENDPOINT) {
+			keepOffEdge(context);
+			return context.request.method === "POST" ? serveSeen(context, env, waitUntil, env[config.database] as D1Database | undefined) : undefined;
 		}
 		if (path !== LIVE_ENDPOINT && path !== INDEX_ENDPOINT) return undefined;
 		keepOffEdge(context);

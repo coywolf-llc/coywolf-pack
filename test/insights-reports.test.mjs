@@ -51,6 +51,11 @@ test("the query asks for verifiedBotCategory only when the zone can query it, ey
 	assert.equal(q.match(/requestSource: "eyeball"/g)?.length, 6);
 	assert.match(q, /edgeResponseStatus_geq: 404, edgeResponseStatus_lt: 405/);
 	assert.match(q, /edgeResponseStatus_geq: 500, edgeResponseStatus_lt: 600/);
+	assert.doesNotMatch(q, /clientRequestHTTPHost_in/);
+	// The site's and media host's rows only, in every node; anything that isn't a host name is left out of the literal.
+	const filtered = E.edgeQuery({ verifiedBotCategory: false, hosts: ["Example.com", "media.example.com", 'x"] }) {', "xn--bcher-kva.example"] });
+	assert.equal(filtered.match(/clientRequestHTTPHost_in: \["example\.com","media\.example\.com","xn--bcher-kva\.example"\]/g)?.length, 6);
+	assert.doesNotMatch(filtered, /x"\]/);
 });
 
 test("crawler patterns from the bundled directory name real crawlers and never browsers", async () => {
@@ -177,7 +182,7 @@ test("the Web Analytics site: by the saved token, else by host or zone", () => {
 	assert.equal(V.matchSite(sites, { token: null, host: "nope.test", zoneNames: ["nope.test"] }), null);
 });
 
-test("the beacon loader: one beacon per page, as a module, only with a real token", () => {
+test("the beacon loader: Cloudflare's documented snippet, one beacon per page, only with a real token", () => {
 	assert.equal(V.isBeaconToken("0123456789abcdef0123456789ABCDEF"), true);
 	assert.equal(V.isBeaconToken("0123"), false);
 	assert.equal(V.isBeaconToken('"><script>'), false);
@@ -188,14 +193,24 @@ test("the beacon loader: one beacon per page, as a module, only with a real toke
 		const window = new Window({ settings: { disableJavaScriptFileLoading: true, disableJavaScriptEvaluation: true, disableCSSFileLoading: true } });
 		window.document.write(html);
 		new Function("document", code)(window.document);
-		return [...window.document.querySelectorAll('script[src*="cloudflareinsights.com/beacon.min.js"]')];
+		return { document: window.document, scripts: [...window.document.querySelectorAll('script[src*="cloudflareinsights.com/beacon.min.js"]')] };
 	};
-	const added = run("<!doctype html><html><body><p>Hi</p></body></html>");
-	assert.equal(added.length, 1);
-	assert.equal(added[0].getAttribute("type"), "module");
-	assert.equal(added[0].getAttribute("src"), "https://static.cloudflareinsights.com/beacon.min.js?token=0123456789abcdef0123456789abcdef");
+	const { document, scripts } = run("<!doctype html><html><body><p>Hi</p></body></html>");
+	assert.equal(scripts.length, 1);
+	const [added] = scripts;
+	assert.equal(added.getAttribute("src"), "https://static.cloudflareinsights.com/beacon.min.js");
+	assert.equal(added.defer, true);
+	// A classic script, never a module: in a module document.currentScript is null.
+	assert.equal(added.getAttribute("type"), null);
+	// How beacon.min.js finds its settings (static.cloudflareinsights.com, November 2026):
+	// `f = document.currentScript || document.querySelector("script[data-cf-beacon]")`, then the token from
+	// f's data-cf-beacon (or a ?token= in its src). Both paths lead to the element the loader added.
+	const found = document.querySelector("script[data-cf-beacon]");
+	assert.equal(found, added);
+	assert.deepEqual(JSON.parse(found.getAttribute("data-cf-beacon")), { token: "0123456789abcdef0123456789abcdef" });
 	// The theme's beacon, or the one Cloudflare's automatic setup inserts: no second one.
-	assert.equal(run(`<!doctype html><html><body><script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7" data-cf-beacon='{"token":"x"}'></script></body></html>`).length, 1);
+	assert.equal(run(`<!doctype html><html><body><script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7" data-cf-beacon='{"token":"x"}'></script></body></html>`).scripts.length, 1);
+	assert.equal(run(`<!doctype html><html><body><script data-cf-beacon='{"token":"x"}' src="/local-copy.js"></script></body></html>`).scripts.length, 0, "a beacon under another URL counts too");
 });
 
 // ── Fathom ───────────────────────────────────────────────────────
@@ -204,6 +219,12 @@ test("Fathom: site IDs, aggregation URLs, string numbers, and errors in words", 
 	assert.equal(Fa.normalizeSiteId(" jzzosmvg "), "JZZOSMVG");
 	assert.equal(Fa.normalizeSiteId("no spaces please"), null);
 	assert.equal(Fa.fathomFrom(Date.UTC(2026, 10, 10, 15), 7), "2026-11-04 00:00:00");
+	// 02:00 UTC on Nov 10 is still Nov 9 in New York: the 7 days start on Nov 3 there.
+	assert.equal(Fa.fathomFrom(Date.UTC(2026, 10, 10, 2), 7, "America/New_York"), "2026-11-03 00:00:00");
+	assert.equal(Fa.fathomFrom(Date.UTC(2026, 10, 10, 2), 7, "Not/AZone"), "2026-11-04 00:00:00", "unknown zones fall back to UTC");
+	assert.equal(Fa.validTimeZone("Europe/Paris"), "Europe/Paris");
+	assert.equal(Fa.validTimeZone("Mars/Base"), null);
+	assert.equal(Fa.siteUrl("JZZOSMVG"), "https://api.usefathom.com/v1/sites/JZZOSMVG");
 	const url = new URL(Fa.aggregationUrl("JZZOSMVG", { from: "2026-11-04 00:00:00", aggregates: ["pageviews", "uniques"], grouping: "pathname", sort: "pageviews:desc", limit: 10 }));
 	assert.equal(url.origin + url.pathname, "https://api.usefathom.com/v1/aggregations");
 	assert.deepEqual(Object.fromEntries(url.searchParams), { entity: "pageview", entity_id: "JZZOSMVG", aggregates: "pageviews,uniques", date_from: "2026-11-04 00:00:00", field_grouping: "pathname", sort_by: "pageviews:desc", limit: "10" });
@@ -259,6 +280,8 @@ test("properties, the Pacific Time range, rows, and Google's errors with the ste
 	assert.equal(G.normalizeProperty("https://example.com/blog/"), "https://example.com/blog/");
 	assert.equal(G.normalizeProperty("https://example.com/?a=1"), null);
 	assert.equal(G.normalizeProperty("not a site"), null);
+	assert.equal(G.normalizeProperty("sc-domain:xn--bcher-kva.example"), "sc-domain:xn--bcher-kva.example");
+	assert.equal(G.normalizeProperty("example.xn--p1ai"), "sc-domain:example.xn--p1ai");
 	const entries = [
 		{ siteUrl: "https://other.com/", permissionLevel: "siteFullUser" },
 		{ siteUrl: "https://www.example.com/", permissionLevel: "siteRestrictedUser" },
@@ -316,7 +339,18 @@ test("cache: kept for its lifetime, Refresh at most once a minute, failures wait
 	fail = false;
 	assert.equal((await read("fp2")).report.n, before + 1, "new settings read again at once");
 	assert.deepEqual(await read("fp3", false, async () => ({ setup: "Add a key.", missing: ["key"] })), { state: "setup", reason: "Add a key.", missing: ["key"] });
-	assert.equal((await kv.get("cache:test")).fingerprint, "fp2", "setup answers aren't stored");
+	assert.equal((await kv.get("cache:test")).fingerprint, "fp2", "a setup answer doesn't replace the reading");
+	let asked = 0;
+	const blind = async () => (asked++, { setup: "No zone.", missing: ["zone"] });
+	await read("fp4", false, blind);
+	now += 5 * 60_000;
+	assert.equal((await read("fp4", false, blind)).reason, "No zone.");
+	assert.equal(asked, 1, "a setup step found by asking is kept ten minutes");
+	await read("fp4", true, blind);
+	assert.equal(asked, 2, "Refresh asks again");
+	now += 11 * 60_000;
+	await read("fp4", false, blind);
+	assert.equal(asked, 3);
 	await forgetReport(kv, "cache:test");
 	assert.equal(kv.map.size, 0);
 	assert.notEqual(await fingerprintOf(["a", "secret-1"]), await fingerprintOf(["a", "secret-2"]));
@@ -365,6 +399,7 @@ test("edge report end to end: zone, dataset limits, one report query; the token 
 	const sent = JSON.parse(reportCall.body);
 	assert.equal(sent.variables.zone, "z1");
 	assert.doesNotMatch(sent.query, /verifiedBotCategory/, "the zone didn't list it");
+	assert.match(sent.query, /clientRequestHTTPHost_in: \["example\.com"\]/);
 	assert.equal(reportCall.init.headers.Authorization, "Bearer secret-cf-token-123");
 	assert.doesNotMatch(JSON.stringify([...ctx.kv.map.values()]), /secret-cf-token/);
 	// Cached: no new calls within the hour.
@@ -389,6 +424,20 @@ test("edge report: no token, or a token that can't see the zone, is a setup step
 	assert.equal(denied.state, "error");
 	assert.match(denied.message, /Zone → Analytics → Read/);
 	assert.doesNotMatch(denied.message, /tok-abcdefgh/);
+});
+
+test("edge report: a zone that refuses the host filter is read without it, and says so", async () => {
+	const { edgeReport } = await import("../src/insights/edge.ts");
+	const api = fakeFetch([
+		[(u) => u.pathname === "/client/v4/zones", { body: { success: true, result: [{ id: "z1", name: "example.com" }] } }],
+		[(u, init) => u.pathname === "/client/v4/graphql" && /settings/.test(init.body), { body: { data: { viewer: { zones: [{ settings: { httpRequestsAdaptiveGroups: { enabled: true } } }] } }, errors: null } }],
+		[(u, init) => u.pathname === "/client/v4/graphql" && /clientRequestHTTPHost_in/.test(init.body), { body: { data: null, errors: [{ message: 'unknown arg "clientRequestHTTPHost_in"' }] } }],
+		[(u) => u.pathname === "/client/v4/graphql", { body: { data: { viewer: { zones: [zone] } }, errors: null } }],
+	]);
+	const r = await edgeReport(ctxWith({}, api.fetch), false, { USAGE_API_TOKEN: "tok-abcdefgh" });
+	assert.equal(r.state, "ready", JSON.stringify(r));
+	assert.equal(r.report.notFound[0].host, "example.com");
+	assert.match(r.notes.join(" "), /wouldn't filter this zone's analytics by host/);
 });
 
 test("vitals end to end: the site's tag from the account's Web Analytics sites, then one RUM query", async () => {
@@ -419,6 +468,7 @@ test("Fathom end to end: four requests one after another, the key only in the Au
 				most = Math.max(most, inFlight);
 				await new Promise((r) => setTimeout(r, 5));
 				inFlight--;
+				if (u.pathname === "/v1/sites/JZZOSMVG") return { body: { id: "JZZOSMVG", object: "site", timezone: "America/New_York" } };
 				return { body: u.searchParams.get("field_grouping") ? [{ pathname: "/", pageviews: "10", uniques: "8" }] : [{ visits: "7", pageviews: "12" }] };
 			},
 		],
@@ -428,7 +478,10 @@ test("Fathom end to end: four requests one after another, the key only in the Au
 	assert.equal(r.state, "ready", JSON.stringify(r));
 	assert.deepEqual(r.report.week, { visitors: 7, pageviews: 12 });
 	assert.equal(r.report.monthPages[0].path, "/");
-	assert.equal(api.calls.length, 4);
+	assert.equal(r.report.timeZone, "America/New_York");
+	assert.equal(api.calls.length, 5, "the site (its time zone), then four aggregations");
+	assert.equal(api.calls[0].url.pathname, "/v1/sites/JZZOSMVG");
+	assert.match(api.calls[1].url.searchParams.get("date_from"), /^\d{4}-\d{2}-\d{2} 00:00:00$/);
 	assert.equal(most, 1, "never more than one at once");
 	for (const call of api.calls) {
 		assert.equal(call.init.headers.Authorization, "Bearer fathom-secret-key");

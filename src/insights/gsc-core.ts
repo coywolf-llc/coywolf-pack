@@ -94,6 +94,9 @@ export async function signServiceJwt(account: ServiceAccount, options: { scope: 
 /** The form body for the token exchange. */
 export const tokenRequestBody = (assertion: string) => new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }).toString();
 
+/** A domain name, punycode (xn--) labels and TLDs included. */
+const DOMAIN = "(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+)";
+
 /**
  * A Search Console property as the API names it: "sc-domain:example.com" for
  * a domain property, or a URL-prefix property ending in "/". A bare domain
@@ -103,7 +106,7 @@ export function normalizeProperty(input: unknown): string | null {
 	if (typeof input !== "string") return null;
 	const value = input.trim();
 	if (!value) return null;
-	const domain = /^sc-domain:([a-z0-9.-]+\.[a-z]{2,})$/i.exec(value);
+	const domain = new RegExp(`^sc-domain:(${DOMAIN})$`, "i").exec(value);
 	if (domain) return `sc-domain:${domain[1].toLowerCase()}`;
 	if (/^https?:\/\//i.test(value)) {
 		try {
@@ -114,7 +117,7 @@ export function normalizeProperty(input: unknown): string | null {
 			return null;
 		}
 	}
-	return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(value) ? `sc-domain:${value.toLowerCase()}` : null;
+	return new RegExp(`^${DOMAIN}$`, "i").test(value) ? `sc-domain:${value.toLowerCase()}` : null;
 }
 
 /** The property for this site among those the service account can read: its domain property first, then a URL prefix of its origin. */

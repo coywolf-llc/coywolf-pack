@@ -10,6 +10,8 @@ import type { Props as SearchBoxProps } from "./SearchBox.astro";
 export type Props = Omit<SearchBoxProps, "database"> & {
 	/** Live results ("search.live"). Without them it's a plain search form. */
 	live?: boolean;
+	/** Search insights ("insights.search"): report the suggestions a visitor settled on (src/search/seen-signal.ts). */
+	seen?: boolean;
 };
 
 const {
@@ -30,6 +32,7 @@ const {
 	class: className,
 	id = "cw-search",
 	live = true,
+	seen = false,
 } = Astro.props;
 
 const inputId = `${id}-input`;
@@ -43,6 +46,7 @@ const inputId = `${id}-input`;
 	data-cw-search
 	data-live={live ? "1" : undefined}
 	data-endpoint="/_emdash/api/plugins/coywolf-pack/search/live"
+	data-seen={seen ? "/_emdash/api/plugins/coywolf-pack/search/seen" : undefined}
 	data-min-chars={minChars}
 	data-debounce={debounce}
 	data-limit={limit}
@@ -264,6 +268,8 @@ const inputId = `${id}-input`;
 </style>
 
 <script>
+	import { createSeenSignal } from "../../search/seen-signal.js";
+
 	const MARK = /<(?!\/?mark>)/g;
 
 	interface Item {
@@ -318,6 +324,8 @@ const inputId = `${id}-input`;
 		let controller: AbortController | undefined;
 		let options: HTMLElement[] = [];
 		let active = -1;
+		// Search insights: a suggestion search counts once the visitor stops typing (or opens one); off without data-seen.
+		const seen = createSeenSignal({ endpoint: d.seen, current: () => input.value.trim() });
 
 		// Without live results ("search.live" off) only the clear button is wired up.
 		const live = d.live === "1";
@@ -421,7 +429,10 @@ const inputId = `${id}-input`;
 
 		async function suggest(query: string) {
 			const cached = cache.get(query);
-			if (cached) return render(query, cached.items, cached.fallback);
+			if (cached) {
+				seen.settle(query, cached.items.length);
+				return render(query, cached.items, cached.fallback);
+			}
 			controller?.abort();
 			controller = new AbortController();
 			const params = new URLSearchParams({ q: query, limit: d.limit || "8" });
@@ -433,7 +444,10 @@ const inputId = `${id}-input`;
 				const body = await response.json();
 				const data = (body.data ?? body) as { items: Item[]; fallback: boolean };
 				cache.set(query, data);
-				if (input.value.trim() === query) render(query, data.items, data.fallback);
+				if (input.value.trim() === query) {
+					render(query, data.items, data.fallback);
+					seen.settle(query, data.items.length);
+				}
 			} catch (error) {
 				if ((error as Error).name !== "AbortError") close();
 			}
@@ -443,6 +457,7 @@ const inputId = `${id}-input`;
 			const query = input.value.trim();
 			clear.hidden = input.value === "";
 			clearTimeout(timer);
+			seen.cancel();
 			if (!live) return;
 			if (query.length < minChars) {
 				controller?.abort();
@@ -480,7 +495,10 @@ const inputId = `${id}-input`;
 			} else if (e.key === "Enter" && active >= 0) {
 				e.preventDefault();
 				const url = options[active]?.dataset.url;
-				if (url) window.location.assign(url);
+				if (url) {
+					seen.flush();
+					window.location.assign(url);
+				}
 			} else if (e.key === "Tab") {
 				close();
 			}
@@ -493,6 +511,12 @@ const inputId = `${id}-input`;
 		input.addEventListener("focus", () => {
 			if (options.length && input.value.trim().length >= minChars) open();
 		});
+
+		// A suggestion opened with the pointer counts at once; a submitted form is counted by the search page.
+		list.addEventListener("click", (e) => {
+			if ((e.target as Element | null)?.closest?.("a")) seen.flush();
+		});
+		form.addEventListener("submit", () => seen.cancel());
 
 		clear.hidden = input.value === "";
 		clear.addEventListener("click", () => {

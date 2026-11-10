@@ -280,14 +280,16 @@ export function insightsPack(options: InsightsOptions = {}): PackModule {
 					return status(ctx);
 				},
 			}),
-			/** Delete every search count now (the counts change nothing a page shows). */
+			/**
+			 * Delete every search count now (the counts change nothing a page shows). Works whatever the switches say:
+			 * deleting data is never something a switch should stand in the way of.
+			 */
 			"insights/searches/clear": readOnlyRoute(
 				definePluginRoute({
 					permission: "plugins:manage",
 					methods: ["POST"],
 					request: { body: "none" },
 					handler: async (ctx) => {
-						await requireFeature(ctx, F.main);
 						const db = await siteDb(database);
 						const deleted = db ? await clearSearches(db as never) : 0;
 						ctx.log.info("Insights: search counts deleted", { rows: deleted });
@@ -308,7 +310,9 @@ export function insightsPack(options: InsightsOptions = {}): PackModule {
 			{
 				name: INSIGHTS_PRUNE_TASK,
 				schedule: "@daily",
-				// Always: counts older than 90 days are deleted even after the part (or Insights) is turned off.
+				// Always, so counts older than 90 days are deleted even after the part (or Insights) is turned off. It's one
+				// indexed DELETE a day, which on a site that never counted anything touches no rows: as cheap as the check
+				// that would skip it.
 				feature: "",
 				handler: async (ctx) => {
 					const db = await siteDb(database);

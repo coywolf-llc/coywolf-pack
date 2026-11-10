@@ -13,7 +13,7 @@ import type { PluginContext } from "emdash";
 
 import { contextFetch } from "../core/cloudflare-api.js";
 import { sharedSlot } from "../core/single-flight.js";
-import { type FathomReport, aggregationUrl, fathomError, fathomFrom, fathomPages, fathomTotals, normalizeSiteId } from "./fathom-core.js";
+import { type FathomReport, aggregationUrl, fathomError, fathomFrom, fathomPages, fathomTotals, normalizeSiteId, siteUrl, validTimeZone } from "./fathom-core.js";
 import { fetchJson } from "./http.js";
 import { INSIGHTS_DEADLINES, INSIGHTS_SETTINGS } from "./keys.js";
 import { type ReportState, cachedReport, fingerprintOf } from "./report-cache.js";
@@ -21,6 +21,9 @@ import { type ReportState, cachedReport, fingerprintOf } from "./report-cache.js
 export const FATHOM_POLICY = { key: "cache:insights:fathom", ttlMs: 60 * 60_000, refreshMinMs: 60_000, retryAfterMs: 10 * 60_000, label: "the Fathom reading" };
 
 const slot = sharedSlot<ReportState<FathomReport>>();
+/** The site's reporting time zone, read once a day (it changes only when someone changes it in Fathom). */
+const SITE_KEY = "state:insights:fathomSite";
+const SITE_TTL_MS = 24 * 60 * 60_000;
 
 type Ctx = Pick<PluginContext, "settings" | "kv" | "log"> & { http?: PluginContext["http"] };
 
@@ -49,13 +52,23 @@ export async function fathomReport(ctx: Ctx, refresh = false): Promise<ReportSta
 			return answer.body;
 		};
 		const now = Date.now();
+		// Fathom reads date_from in the site's reporting time zone: get it (once a day) so "the last 7 days" match its dashboard.
+		const known = await ctx.kv.get<{ siteId: string; timeZone: string; at: string }>(SITE_KEY).catch(() => null);
+		let timeZone = known?.siteId === siteId && now - Date.parse(known.at) < SITE_TTL_MS ? known.timeZone : null;
+		if (!timeZone) {
+			// any: Fathom's site object.
+			const site = (await get(siteUrl(siteId))) as any;
+			timeZone = validTimeZone(site?.timezone) ?? "UTC";
+			await ctx.kv.set(SITE_KEY, { siteId, timeZone, at: new Date(now).toISOString() }).catch(() => undefined);
+		}
+		const from = (days: number) => fathomFrom(now, days, timeZone);
 		// One after another: Fathom allows 5 requests at once per account, and other tools may be using some.
-		const week = fathomTotals(await get(aggregationUrl(siteId, { from: fathomFrom(now, 7), aggregates: ["visits", "pageviews"] })));
-		const month = fathomTotals(await get(aggregationUrl(siteId, { from: fathomFrom(now, 30), aggregates: ["visits", "pageviews"] })));
-		const pages = (days: number) => aggregationUrl(siteId, { from: fathomFrom(now, days), aggregates: ["pageviews", "uniques"], grouping: "pathname", sort: "pageviews:desc", limit: 10 });
+		const week = fathomTotals(await get(aggregationUrl(siteId, { from: from(7), aggregates: ["visits", "pageviews"] })));
+		const month = fathomTotals(await get(aggregationUrl(siteId, { from: from(30), aggregates: ["visits", "pageviews"] })));
+		const pages = (days: number) => aggregationUrl(siteId, { from: from(days), aggregates: ["pageviews", "uniques"], grouping: "pathname", sort: "pageviews:desc", limit: 10 });
 		const weekPages = fathomPages(await get(pages(7)));
 		const monthPages = fathomPages(await get(pages(30)));
 		ctx.log.info("Insights: Fathom read", { siteId });
-		return { report: { siteId, week, month, weekPages, monthPages } };
+		return { report: { siteId, timeZone, week, month, weekPages, monthPages } };
 	});
 }

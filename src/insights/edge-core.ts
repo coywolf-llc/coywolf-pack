@@ -67,11 +67,18 @@ export function reportWindow(limits: DatasetLimits | null, now: number, maxDays 
 	return { start: new Date(now - seconds * 1000).toISOString(), end: new Date(now).toISOString(), days };
 }
 
-/** Eyeball requests only (visitors and crawlers, not Workers' own subrequests), in the window. */
-const BASE = `datetime_geq: $start, datetime_leq: $end, requestSource: "eyeball"`;
+/** A host name as it can appear in a filter literal (letters, digits, dots and hyphens; punycode included). */
+const HOST = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 
-/** The report: requests per host, error statuses, 404/410 and 5xx paths, and user agents. One request, six nodes. */
-export function edgeQuery(options: { verifiedBotCategory: boolean; agentLimit?: number }): string {
+/**
+ * The report: requests per host, error statuses, 404/410 and 5xx paths, and user agents. One request, six nodes.
+ * Eyeball requests only (visitors and crawlers, not Workers' own subrequests), in the window, and with `hosts`
+ * only the site's and media host's (clientRequestHTTPHost_in: Cloudflare's `in` operator, which every scalar
+ * field takes), so a busier host in the same zone can't crowd them out of each node's top rows.
+ */
+export function edgeQuery(options: { verifiedBotCategory: boolean; hosts?: string[]; agentLimit?: number }): string {
+	const hosts = (options.hosts ?? []).map((h) => h.toLowerCase()).filter((h) => HOST.test(h));
+	const BASE = `datetime_geq: $start, datetime_leq: $end, requestSource: "eyeball"${hosts.length ? `, clientRequestHTTPHost_in: ${JSON.stringify(hosts)}` : ""}`;
 	const agentDims = `clientRequestHTTPHost userAgent${options.verifiedBotCategory ? " verifiedBotCategory" : ""}`;
 	return `query PackInsightsEdge($zone: String!, $start: Time!, $end: Time!) {
 	viewer { zones(filter: { zoneTag: $zone }) {

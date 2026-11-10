@@ -32,17 +32,21 @@ export function rate(metric: Metric, value: number | null): Rating | null {
 export const isBeaconToken = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{32}$/i.test(value.trim());
 
 /**
- * The script the beacon part adds at the end of every public page. It loads
- * Cloudflare's beacon once the page has been parsed, unless the page already
- * has one (from the theme, or Cloudflare's automatic setup, which inserts its
- * own before </body>), so a page never reports twice. The beacon loads as a
- * module, so it never blocks rendering, and old browsers that can't run it
- * skip it, as Cloudflare recommends.
+ * The script the beacon part adds at the end of every public page. Once the
+ * page has been parsed, it adds Cloudflare's documented snippet, a classic
+ * deferred script with `data-cf-beacon='{"token":"…"}'`, unless the page
+ * already has a beacon (from the theme, or Cloudflare's automatic setup,
+ * which inserts its own before </body>), so a page never reports twice. An
+ * inserted script never blocks rendering.
+ *
+ * Classic, not a module: the beacon finds its settings with
+ * `document.currentScript || document.querySelector("script[data-cf-beacon]")`,
+ * and currentScript is null in a module, so the attribute must be there.
  */
 export function beaconLoader(token: string): string {
 	if (!isBeaconToken(token)) throw new Error("Not a Web Analytics token");
-	const src = `${BEACON_SRC}?token=${token.trim().toLowerCase()}`;
-	return `(()=>{const add=()=>{if(document.querySelector('script[src*="cloudflareinsights.com/beacon.min.js"]'))return;const s=document.createElement("script");s.type="module";s.src=${JSON.stringify(src)};document.body.appendChild(s)};document.readyState==="loading"?document.addEventListener("DOMContentLoaded",add,{once:true}):add()})();`;
+	const settings = JSON.stringify({ token: token.trim().toLowerCase() });
+	return `(()=>{const add=()=>{if(document.querySelector('script[src*="cloudflareinsights.com/beacon.min.js"],script[data-cf-beacon]'))return;const s=document.createElement("script");s.defer=true;s.src=${JSON.stringify(BEACON_SRC)};s.setAttribute("data-cf-beacon",${JSON.stringify(settings)});document.body.appendChild(s)};document.readyState==="loading"?document.addEventListener("DOMContentLoaded",add,{once:true}):add()})();`;
 }
 
 // ── The Web Analytics site ───────────────────────────────────────
