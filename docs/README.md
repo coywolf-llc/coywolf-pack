@@ -12,19 +12,21 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 
 ## Site-wide
 
-- [Performance](performance.md): Workers Cache, clearing after deploys and edits, cache warming, Cloudflare usage
+- [Performance](performance.md): Workers Cache, clearing after deploys and edits, cache warming, Cloudflare usage, Speculation Rules
+- [Cloudflare Checkup](cloudflare-checkup.md): the zone settings that matter for a Workers-served site, one-click fixes, and serving links with tracking parameters from the cache
 - [Content URLs](content-urls.md): telling the pack how your theme routes entries (category paths, nested pages)
 - [Internals](internals.md): how the pack keeps D1 reads to about one round trip per uncached page, and the deadlines on reads requests share
 
 ## Modules
 
+- [Insights](insights.md): edge errors and crawlers, Core Web Vitals, Fathom traffic, Google Search Console, search insights
 - [Clean Image URLs](images.md)
 - [Backups](backups.md)
 - [Alerts & Digest](alerts.md): email alerts and a weekly digest
 - [Redirect Manager](redirects.md)
 - [Schema & Social](schema.md)
 - [Social Images](social-images.md): generated Open Graph images
-- [Discovery](discovery.md): RSS feed, news sitemap, llms.txt, Crawler Hints status
+- [Discovery](discovery.md): RSS feed, news sitemap, llms.txt, security.txt, Crawler Hints status
 - [Robots.txt](robots.md)
 - [Search](search.md)
 - [Link Manager](links.md): with inbound link counts and orphans

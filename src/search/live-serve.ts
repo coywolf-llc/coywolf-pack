@@ -25,15 +25,21 @@
 import { contentUrlFingerprint } from "../core/content-url.js";
 import { isOn, registerSiteSetting, rememberSiteSetting, siteFeatures, siteSetting } from "../core/features.js";
 import type { PackMiddleware } from "../core/module.js";
+import { noteSearch } from "../insights/search.js";
+import { parseSeen, seenFromSite } from "../insights/search-core.js";
 import { keepAtEdge, keepOffEdge } from "../pageCache/lib.js";
 import { type QueryStats, countingD1, liveSearchD1, loadSearchMeta } from "./engine.js";
 import { Lru, effectiveVersion, fingerprint, indexCacheKey, liveCacheKey, newContentVersion, normalizeCollections, normalizeLiveQuery, normalizeLocale } from "./live-cache.js";
 import { LIVE_ASSET, LIVE_ASSET_HASH, type LiveClientConfig, liveScript, liveScriptConfig } from "./live-client.js";
-import { rateLimitResponse } from "./ratelimit.js";
+import { rateLimitResponse, seenRateLimitResponse } from "./ratelimit.js";
 import { TITLE_INDEX_MAX, buildTitleIndex } from "./title-index.js";
 
 export const LIVE_ENDPOINT = "/_emdash/api/plugins/coywolf-pack/search/live";
 export const INDEX_ENDPOINT = "/_emdash/api/plugins/coywolf-pack/search/index";
+/** Search insights: the live client says the visitor settled on a search (POST { q, n }); see src/insights/search.ts. */
+export const SEEN_ENDPOINT = "/_emdash/api/plugins/coywolf-pack/search/seen";
+/** Largest body search/seen reads. */
+const SEEN_BODY_MAX = 1024;
 
 /** Plugin setting holding the search content version. */
 export const VERSION_SETTING = "searchVersion";
@@ -230,6 +236,31 @@ async function serveIndex(context: Context, env: Record<string, unknown>, waitUn
 }
 
 /**
+ * A settled search from the live client (Search insights): counted when the part is on, never cached. 204, or
+ * 403 for a post that didn't come from the site's own pages (checked first: headers only), 429 over the limit
+ * (always on for this route, whatever search.rateLimit says), 400 for a malformed body.
+ */
+async function serveSeen(context: Context, env: Record<string, unknown>, waitUntil: (p: Promise<unknown>) => void, db: D1Database | undefined): Promise<Response> {
+	if (!seenFromSite((name) => context.request.headers.get(name), context.url.origin)) return new Response(null, { status: 403, headers: new Headers({ "Cache-Control": "no-store" }) });
+	const limited = await seenRateLimitResponse(context, env);
+	if (limited) return limited;
+	const length = Number(context.request.headers.get("content-length"));
+	if (length > SEEN_BODY_MAX) return badRequest("Too long.");
+	const text = await context.request.text().catch(() => "");
+	if (text.length > SEEN_BODY_MAX) return badRequest("Too long.");
+	let body: unknown = null;
+	try {
+		body = JSON.parse(text);
+	} catch {
+		body = null;
+	}
+	const seen = parseSeen(body);
+	if (!seen) return badRequest("Expected { q, n }.");
+	noteSearch(db, seen.q, seen.n, "live", waitUntil);
+	return new Response(null, { status: 204, headers: new Headers({ "Cache-Control": "no-store" }) });
+}
+
+/**
  * The live results client as a file. Only the pack middleware serves it: EmDash's
  * raw plugin routes can't answer with a JavaScript content type or set
  * Cache-Control, so sites without the middleware get the script inline instead
@@ -308,6 +339,10 @@ export const searchLiveMiddleware: PackMiddleware = {
 			const asset = liveAssetParts(version);
 			keepAtEdge(context, version === LIVE_ASSET_HASH ? 31536000 : 300);
 			return new Response(context.request.method === "HEAD" ? null : asset.body, { status: asset.status, headers: asset.headers });
+		}
+		if (path === SEEN_ENDPOINT) {
+			keepOffEdge(context);
+			return context.request.method === "POST" ? serveSeen(context, env, waitUntil, env[config.database] as D1Database | undefined) : undefined;
 		}
 		if (path !== LIVE_ENDPOINT && path !== INDEX_ENDPOINT) return undefined;
 		keepOffEdge(context);

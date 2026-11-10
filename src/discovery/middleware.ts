@@ -5,6 +5,7 @@
  * - `/feed/`, `<term archive>/feed/`  RSS feeds
  * - `/llms.txt`                        llms.txt
  * - `<entry-url>/index.html.md`        Markdown source of an entry
+ * - `/.well-known/security.txt`        security.txt (and a redirect from `/security.txt`)
  *
  * The work happens in the module's public plugin routes (so it runs in the
  * plugin context, with EmDash's URL resolution and the plugin's KV cache);
@@ -17,7 +18,7 @@
  */
 import type { MiddlewareHandler } from "astro";
 
-import { PLUGIN_ID } from "../core/features.js";
+import { PLUGIN_ID, readSiteSetting, registerSiteOption, siteOption } from "../core/features.js";
 import { noteReadFailure, routeFailed } from "../core/read-failures.js";
 import type { PackMiddleware } from "../core/module.js";
 import { keepAtEdge } from "../pageCache/lib.js";
@@ -26,6 +27,8 @@ import { FEED_EDGE_MAX_AGE, parseFeedPath } from "./feed.js";
 import { pagePathFromMarkdownPath } from "./markdown.js";
 import { MemoryCache } from "./memory-cache.js";
 import { FEATURE } from "./module.js";
+import { LEGACY_SECURITY_TXT_PATH, SECURITY_TXT_MAX_AGE, SECURITY_TXT_PATH, SECURITY_TXT_TAG, buildSecurityTxt } from "./security-txt.js";
+import { SETTINGS_KEY, settingsSchema } from "./settings.js";
 
 type Context = Parameters<MiddlewareHandler>[0];
 
@@ -182,4 +185,53 @@ export const llmsMiddleware: PackMiddleware = {
 	},
 };
 
-export const discoveryMiddleware: PackMiddleware[] = [newsSitemapMiddleware, feedMiddleware, llmsMiddleware];
+// ── security.txt ─────────────────────────────────────────────────
+
+/** EmDash's Site URL setting (an option row), read with the feature switches. */
+const SITE_URL_OPTION = "site:url";
+registerSiteOption(SITE_URL_OPTION);
+
+/** The origin of a stored Site URL (a JSON string), or null when there's none or it isn't a URL. */
+export function siteUrlOrigin(raw: string | null | undefined): string | null {
+	if (!raw) return null;
+	try {
+		const value = JSON.parse(raw) as unknown;
+		return typeof value === "string" && /^https?:\/\//i.test(value.trim()) ? new URL(value.trim()).origin : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * /.well-known/security.txt from the Discovery settings (read with the feature switches: no query of its
+ * own), built per request so its Expires date is always about a year ahead, and kept at the edge for a day
+ * (tagged, cleared when the settings are saved). /security.txt, the legacy location, redirects to it.
+ * Without a contact there's no file: the request goes on to the site (a 404).
+ */
+export const securityTxtMiddleware: PackMiddleware = {
+	module: "discovery",
+	feature: FEATURE.securityTxt,
+	ownsCache: true,
+	handle: async (context) => {
+		if (!isRead(context)) return undefined;
+		const { pathname } = context.url;
+		if (pathname !== SECURITY_TXT_PATH && pathname !== LEGACY_SECURITY_TXT_PATH) return undefined;
+		const read = await readSiteSetting(SETTINGS_KEY);
+		if (!read) return undefined; // D1 unreadable (a noted read failure): the site answers.
+		const parsed = settingsSchema.safeParse(read.value ?? {});
+		// Canonical: EmDash's Site URL (read in the same query), else the address it was asked for.
+		const body = parsed.success ? buildSecurityTxt(parsed.data.securityTxt, siteUrlOrigin(siteOption(SITE_URL_OPTION)) ?? context.url.origin) : null;
+		if (!body) return undefined;
+		keepAtEdge(context, SECURITY_TXT_MAX_AGE, [SECURITY_TXT_TAG]);
+		if (pathname === LEGACY_SECURITY_TXT_PATH) {
+			return new Response(null, { status: 301, headers: { Location: SECURITY_TXT_PATH, "Cache-Control": `public, max-age=${SECURITY_TXT_MAX_AGE}` } });
+		}
+		return respond(context, body, {
+			"Content-Type": "text/plain; charset=utf-8",
+			"Cache-Control": `public, max-age=${SECURITY_TXT_MAX_AGE}`,
+			"X-Content-Type-Options": "nosniff",
+		});
+	},
+};
+
+export const discoveryMiddleware: PackMiddleware[] = [newsSitemapMiddleware, feedMiddleware, llmsMiddleware, securityTxtMiddleware];

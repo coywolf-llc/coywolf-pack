@@ -3,8 +3,8 @@
  * long Cloudflare's edge keeps pages (Workers Cache), the media host's Cache
  * Rule, and a button that clears every cached page plus the media host's
  * images. Cloudflare's zone "Purge Everything" doesn't reach the pages (the
- * cache belongs to the Worker, not the zone). Below them, Cloudflare usage
- * (./usage.tsx).
+ * cache belongs to the Worker, not the zone). Below them, Speculation Rules
+ * (./speculation.tsx) and Cloudflare usage (./usage.tsx).
  */
 import { Banner, Button, Checkbox, Input, Switch } from "@cloudflare/kumo";
 import { ArrowsClockwise, Fire, Lightning } from "@phosphor-icons/react";
@@ -13,6 +13,7 @@ import * as React from "react";
 
 import { apiPost, errorText } from "./api.js";
 import { DocsLink, PageHeader } from "./page.js";
+import { SpeculationCard } from "./speculation.js";
 import { UsageCard } from "./usage.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/cache";
@@ -320,6 +321,8 @@ export function PerformancePage() {
 				</div>
 			</div>
 			</section>
+
+			<SpeculationCard />
 
 			<UsageCard />
 		</div>

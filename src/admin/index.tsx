@@ -23,6 +23,8 @@ mountTrashPrompt();
 const PAGES: Record<string, ReturnType<typeof packPage>> = {
 	"/features": packPage("Features", () => import("./features.js").then((m) => m.FeaturesPage)),
 	"/performance": packPage("Performance", () => import("./performance.js").then((m) => m.PerformancePage)),
+	"/cloudflare": packPage("Cloudflare Checkup", () => import("./cloudflare.js").then((m) => m.CloudflareCheckupPage)),
+	"/insights": packPage("Insights", () => import("./insights.js").then((m) => m.InsightsPage)),
 	"/backups": packPage("Backups", () => import("./backups.js").then((m) => m.BackupsPage)),
 	"/redirects": packPage("Redirect Manager", () => import("./redirects.js").then((m) => m.RedirectsPage)),
 	"/headings": packPage("Headings & TOC", () => import("./headings.js").then((m) => m.HeadingsPage)),

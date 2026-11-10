@@ -62,7 +62,13 @@ export const SECRET_SETTINGS = {
 		type: "secret",
 		label: "Cloudflare usage — read-only API token",
 		description:
-			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Account Analytics → Read, Workers → Metadata Read-Only (finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. The Performance page has a pre-filled form. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account). With Zone → Read added too, in a policy scoped to All Domains or this site's domain, the Discovery page shows whether Cloudflare's Crawler Hints is on.",
+			"Optional. Shows this site's D1 and Workers usage, the account's against its plan, and the estimated bill on the Performance page and the dashboard. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Account Analytics → Read, Workers → Metadata Read-Only (finds this site's Worker and database and reads Workers Logs for the cache-warming estimate) and Account Settings → Read (to detect the plan); (3) create it, copy the token (shown once), paste it here and save. The Performance page has a pre-filled form. Or set the USAGE_API_TOKEN Worker secret (one token works for every site in the account). With Zone → Read added too, in a policy scoped to All Domains or this site's domain, the Discovery page shows whether Cloudflare's Crawler Hints is on; with Zone Settings → Read, Bot Management → Read and DNS → Read as well, the Cloudflare Checkup page reads the zone's settings.",
+	},
+	cloudflareSetupToken: {
+		type: "secret",
+		label: "Cloudflare Checkup — setup token",
+		description:
+			"Optional. Only for the one-click fixes on the Cloudflare Checkup page (Speed Brain off, Always Use HTTPS on, minimum TLS 1.2); reading the checkup uses the read-only Cloudflare usage token. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Specified Domains → this site's domain, add Zone → Read and Zone Settings → Edit; (3) create it, copy the token (shown once), paste it here and save. The Cloudflare Checkup page has a pre-filled form.",
 	},
 	socialImagesApiToken: {
 		type: "secret",
@@ -75,6 +81,18 @@ export const SECRET_SETTINGS = {
 		label: "Robots.txt — Cloudflare Radar API token",
 		description:
 			"Optional. Keeps the crawler list current from Cloudflare Radar each week. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Radar → Read; (3) create it and copy the token (shown once); (4) paste it here and save. Or set the RADAR_API_TOKEN Worker secret. The full step-by-step guide is on the Robots.txt page → Bots.",
+	},
+	insightsFathomApiKey: {
+		type: "secret",
+		label: "Insights — Fathom API key",
+		description:
+			"Optional. For the Fathom traffic card on the Insights page. To get one: (1) sign in to Fathom and open app.usefathom.com/api; (2) select Create new, name it after this site, and choose Read only (all sites), or this site's read access; (3) save and copy the key (shown once); (4) paste it here and save. The site ID and the full step-by-step guide are on the Insights page.",
+	},
+	insightsGoogleServiceAccount: {
+		type: "secret",
+		label: "Insights — Google service account key (JSON)",
+		description:
+			"Optional. For the Google Search Console card on the Insights page. To get one: (1) in Google Cloud, create a service account and turn on the Google Search Console API for its project; (2) create a JSON key for it; (3) in Search Console, add the service account's email as a user on the site's property; (4) paste the whole JSON key file on the Insights page and save. The Insights page has the full step-by-step guide.",
 	},
 } as const satisfies Record<string, SecretSettingField>;
 

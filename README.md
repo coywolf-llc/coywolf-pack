@@ -16,14 +16,16 @@ Every module starts off on a new site. Turn on only the ones you want on the **F
 
 | Module | What it does |
 | --- | --- |
-| [Performance](docs/performance.md) | Always on: keeps Cloudflare's edge page cache correct (cleared after deploys and edits), optional cache warming, and a Cloudflare usage card with the estimated bill |
+| [Performance](docs/performance.md) | Always on: keeps Cloudflare's edge page cache correct (cleared after deploys and edits), optional cache warming, a Cloudflare usage card with the estimated bill, and optional Speculation Rules (the next page prefetched on hover) |
+| [Cloudflare Checkup](docs/cloudflare-checkup.md) | The zone settings that matter for a Workers-served site (Speed Brain, HTTPS, HSTS, Early Hints, features that rewrite pages, bot settings), each with what to do, and one-click fixes for the clear-cut ones |
+| [Insights](docs/insights.md) | 404s (files and the media host too), server errors and crawlers from Cloudflare's analytics, real visitors' Core Web Vitals, Fathom traffic, Google Search Console, and what visitors search for |
 | [Clean Image URLs](docs/images.md) | Images from a `media.` subdomain on R2, resized to the sizes the theme uses, cached for a year |
 | [Backups](docs/backups.md) | Backups of the D1 database and R2 media, rewind with undo, restore to a new database |
 | [Alerts & Digest](docs/alerts.md) | Emails when a backup fails, links break, the Cloudflare bill estimate passes a threshold, an update is out or the content audit gets worse, plus a weekly digest |
 | [Redirect Manager](docs/redirects.md) | External, file-path and regex redirects, bulk import and export, and automatic redirects for slug changes and removed content (alongside EmDash's own Redirects page) |
 | [Schema & Social](docs/schema.md) | One Schema.org graph per page (publisher, articles, authors), breadcrumbs, robots directives, Open Graph, custom JSON-LD |
 | [Social Images](docs/social-images.md) | A generated Open Graph image (title, site name, logo, your colors) for entries without one, made with Cloudflare Browser Run |
-| [Discovery](docs/discovery.md) | An RSS feed, a Google News sitemap, llms.txt with Markdown versions of entries, and whether Cloudflare's Crawler Hints is on |
+| [Discovery](docs/discovery.md) | An RSS feed, a Google News sitemap, llms.txt with Markdown versions of entries, a self-renewing security.txt, and whether Cloudflare's Crawler Hints is on |
 | [Robots.txt](docs/robots.md) | Plain-English robots.txt rules with a guided editor, a verified crawler directory, history and a URL tester |
 | [Search](docs/search.md) | Fast as-you-type results on EmDash's full-text search, a search box, and rate limiting |
 | [Link Manager](docs/links.md) | Every link in your content with its status, bulk replace, unlink and ignore, and inbound link counts with orphans |
@@ -138,7 +140,7 @@ Deploy the site the way you usually do (for example `npx wrangler deploy`, or yo
 
 1. Sign in to the site's admin (`https://coywolf.com/_emdash/admin`).
 2. Open **Coywolf Pack → Features** in the sidebar.
-3. Turn on the modules you want, and any of their parts. Each module that's on adds its page to one of the pack's sidebar folders: **Coywolf Pack** (Features, Performance, Backups, WordPress Migration), **SEO** (Schema & Social, Discovery, Robots.txt, Redirect Manager, Link Manager, Breadcrumb Nav), **Content Tools** (Headings & TOC, Code Blocks, Custom Blocks, Reviews, AI Enrichment, Search) and **Media Tools** (Clean Image URLs, Videos, File Downloads, Private Form Uploads).
+3. Turn on the modules you want, and any of their parts. Each module that's on adds its page to one of the pack's sidebar folders: **Coywolf Pack** (Features, Performance, Cloudflare Checkup, Backups, WordPress Migration), **SEO** (Schema & Social, Discovery, Robots.txt, Redirect Manager, Link Manager, Breadcrumb Nav), **Content Tools** (Headings & TOC, Code Blocks, Custom Blocks, Reviews, AI Enrichment, Search) and **Media Tools** (Clean Image URLs, Videos, File Downloads, Private Form Uploads).
 4. Open each module's page for its settings and step-by-step guides. A part can also be turned on or off there.
 
 A good first set for most sites:
