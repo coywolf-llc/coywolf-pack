@@ -144,7 +144,7 @@ A good first set for most sites:
 | --- | --- | --- |
 | **Update check** | A card on the EmDash dashboard when a new version of Coywolf Pack is out, with the command to install it | Nothing: it checks npm once a day (see [Updating](#updating)) |
 | **Performance** (always on) | Page cache lifetimes, clearing after deploys, cache warming | Turn on **Cache warming** on the Performance page (needs `SELF`) |
-| **Clean Image URLs** | Images from a `media.` subdomain, resized and cached | Run **Set up media host** on its page (see [Setting up a media host](docs/images.md#setting-up-a-media-host)) |
+| **Clean Image URLs** | Images from a `media.` subdomain, resized and cached | Run **Set up media host** on its page, then make it EmDash's own media host with `r2({ publicUrl })` (see [Setting up a media host](docs/images.md#setting-up-a-media-host)) |
 | **Schema & Social** | Schema.org markup and Open Graph tags | Review the publisher on the Schema page |
 | **Redirect Manager** | Redirects EmDash's own can't handle, plus slug-change and removed-content redirects | Import old redirects on the Redirect Manager page |
 | **Discovery** | An RSS feed, a news sitemap, llms.txt; Crawler Hints status | Turn on the parts you want on the Discovery page |

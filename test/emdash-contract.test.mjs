@@ -713,6 +713,41 @@ test("definePlugin keeps admin.pages and admin.widgets as getters, and the manif
 	assert.match(runtime, /dashboardWidgets: plugin\.admin\?\.widgets \?\? \[\]/);
 });
 
+// ── Storage publicUrl (the media host) ────────────────────────
+
+test("EmDash's storage publicUrl reaches the pack through virtual:emdash/config, and EmDash's media URLs are <publicUrl>/<key> (src/images/settings.ts, src/images/lib.ts)", async () => {
+	// The build-time config module is the serializable config as JSON, with storage as the site configured it.
+	const astro = [...emdashDist.values()].find((src) => src.includes("function buildSerializableConfig("));
+	assert.ok(astro, `EmDash ${emdashVersion} no longer builds a serializable config`);
+	assert.match(functionSource(astro, "buildSerializableConfig"), /storage: resolvedConfig\.storage,/);
+	const virtual = [...emdashDist.values()].find((src) => src.includes("function generateConfigModule("));
+	assert.ok(virtual, "no generateConfigModule");
+	assert.match(functionSource(virtual, "generateConfigModule"), /return `export default \$\{JSON\.stringify\(serializableConfig\)\};`/);
+	assert.match(virtual, /const VIRTUAL_CONFIG_ID = "virtual:emdash\/config";/);
+	// A storage adapter's config keeps publicUrl (EmDash's S3 adapter; @emdash-cms/cloudflare's r2() passes it the same way), and a
+	// stored key's public URL is publicUrl, trailing slashes removed, then /<key>.
+	const s3 = [...emdashDist.entries()].find(([file]) => file.endsWith(join("storage", "s3.mjs")))?.[1];
+	assert.ok(s3, "no storage/s3.mjs");
+	assert.match(s3, /getPublicUrl\(key\) \{\s*if \(this\.publicUrl\) return `\$\{this\.publicUrl\.replace\(TRAILING_SLASH_PATTERN, ""\)\}\/\$\{key\}`;/);
+	// What EmDash's components call (Astro.locals.emdash.getPublicMediaUrl): the storage adapter's getPublicUrl.
+	const resolver = await distFunction("createPublicMediaUrlResolver");
+	const resolveUrl = (storage, key) => resolver(storage)(key);
+	assert.equal(resolveUrl({ getPublicUrl: (key) => `https://media.example.com/${key}` }, "01ABC.jpg"), "https://media.example.com/01ABC.jpg");
+	assert.equal(resolveUrl(undefined, "01ABC.jpg"), "/_emdash/api/media/file/01ABC.jpg");
+	// The pack reads that config and recognizes both forms.
+	const { loadStoragePublicUrl, resetStoragePublicUrl } = await import("../src/images/settings.ts");
+	const { imageCdn, mediaFile } = await import("../src/images/lib.ts");
+	resetStoragePublicUrl();
+	await loadStoragePublicUrl(async () => JSON.parse(JSON.stringify({ storage: { entrypoint: "@emdash-cms/cloudflare/storage/r2", config: { binding: "MEDIA", publicUrl: "https://media.example.com/" } } })));
+	try {
+		assert.equal(imageCdn(), "https://media.example.com");
+		assert.deepEqual(mediaFile("https://media.example.com/01ABC.jpg"), { id: "01ABC", ext: "jpg" });
+		assert.deepEqual(mediaFile(resolveUrl(undefined, "01ABC.jpg")), { id: "01ABC", ext: "jpg" });
+	} finally {
+		resetStoragePublicUrl();
+	}
+});
+
 // ── page:metadata ──────────────────────────────────────────────
 
 test("page:metadata: EmDash accepts the pack's contributions, and the pack's primary graph and robots replace core's", async () => {

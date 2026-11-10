@@ -4,9 +4,9 @@
 
 Resized copies of media-library images at short, cacheable addresses instead of Astro's `/_image?href=…&w=…&h=…` endpoint. Off until you turn on **Clean Image URLs** on the **Features** page (**Coywolf Pack → Features** in the sidebar); the **Clean Image URLs** admin page appears once it's on.
 
-## Two modes
+## The media host
 
-**Media host (recommended).** A subdomain of the site, such as `media.coywolf.com`, serves the media bucket directly from Cloudflare, which resizes on the fly and picks AVIF or WebP for browsers that accept them. Images never touch the site's Worker.
+A subdomain of the site, such as `media.coywolf.com`, serves the media bucket directly from Cloudflare, which resizes on the fly and picks AVIF or WebP for browsers that accept them. Images never touch the site's Worker.
 
 ```
 https://media.coywolf.com/<file>               the original file
@@ -14,16 +14,45 @@ https://media.coywolf.com/s/<w>x<h>/<file>     cropped to fill (fit: cover)
 https://media.coywolf.com/s/<w>/<file>         width only, keeps the ratio
 ```
 
-`<file>` is the media item's stored file name (`<id>.<ext>`, as in `/_emdash/api/media/file/<id>.<ext>`). Sizes go up to 2560px.
+`<file>` is the media item's stored file name (`<id>.<ext>`, as in `/_emdash/api/media/file/<id>.<ext>`). Sizes go up to 2560px. Without a media host, `cleanImageUrl()` returns `null` and themes use their usual image code (EmDash's own `/_image` endpoint resizes through the Worker).
 
-**Worker route (no setup).** Without a media host, the pack's middleware serves
+**Where the host comes from**, first match wins:
 
-```
-/media/<file id>-<width>x<height>.<webp|avif|jpg|png>   cropped to fill (fit: cover)
-/media/<file id>-<width>w.<format>                      width only, keeps the ratio
-```
+1. **EmDash's own media setting**: `storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" })` in `astro.config.mjs` (EmDash 1.4+). It has to be a plain `https://` address with no path. With it, EmDash's own components (Image, Gallery, Video) print media at the same host, and newer EmDash releases give the site settings' logo, favicon and default social image there too, so one setting covers EmDash and the pack. The Clean Image URLs page shows the host as coming from EmDash's setting, and it's changed in `astro.config.mjs` only.
+2. **The host saved on the Clean Image URLs page** (takes effect within a minute, no deploy).
+3. **The pack's option**, `coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })`: the fallback, from before EmDash had `publicUrl`.
 
-reading the original from the media bucket (`MEDIA`), resizing it with the Cloudflare Images binding (`IMAGES`, which the Astro Cloudflare adapter already binds) and caching the result at the edge for a year (keyed by the path alone, so a query string never forces a new resize). Widths and heights on this route are multiples of 10px: `cleanImageUrl()` rounds other sizes up (640×336 becomes 640×340), and a request for an off-grid size gets a 301 to the rounded one, so nobody can make the Worker run (and bill) a new resize for every pixel. SVGs aren't resized. Other binding names: `coywolfPlugin({ images: { bucket: "MYMEDIA", images: "MYIMAGES" } })`. Once a media host is set, these addresses redirect (301) to the same size on the media host, so old links keep working.
+**Media URLs in every form.** Wherever the pack takes an image (`cleanImageUrl()`, `originalImageUrl()`, `imageInfo()`, `responsiveImage()`, `croppedImage()`, the og:image and JSON-LD images, the default social image from **Settings → SEO**), it accepts EmDash's `/_emdash/api/media/file/<file>`, the original under EmDash's `publicUrl` (`https://media.coywolf.com/<file>`, the form EmDash prints when it's set, also when `publicUrl` has a path and can't be the media host), and the original on the media host. Stored content keeps EmDash's `/_emdash/api/media/file/<file>` addresses, and those keep working.
+
+**Old Worker-route addresses.** Earlier releases resized images in the Worker for sites without a media host, at `/media/<file id>-<w>x<h>.<format>` (or `-<w>w.<format>`). That duplicated EmDash's own `/_image` endpoint, and none of the sites used it (they all have a media host), so it's gone. Those addresses still answer a 301 to the same size on the media host, so old links keep working; without a media host they're a 404. The `format` option of `cleanImageUrl()` only applied to that route and is ignored now.
+
+## Moving a site to EmDash's publicUrl
+
+A site that sets `images.cdn` (all eight Coywolf sites today) can move the host to EmDash's own setting. Using coywolf.com as the example:
+
+1. **Update the pack first** to a release with this change (it reads `publicUrl` and accepts `https://media.coywolf.com/<file>` URLs from EmDash). An older pack doesn't recognize EmDash's media-host URLs, so images EmDash hands it in that form would lose their clean sizes. Updating in the same commit as step 2 is fine.
+2. **In `astro.config.mjs`**, add `publicUrl` to the storage adapter, with the same host the pack uses now:
+
+   ```js
+   emdash({
+     storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" }),
+     plugins: [
+       coywolfPlugin({
+         // images.cdn can go: EmDash's publicUrl is the media host now.
+         images: { crops: [[400, 210], [600, 315], [900, 473], [50, 50], [100, 100], [120, 120], [240, 240], [64, 64], [128, 128]] },
+       }),
+     ],
+   });
+   ```
+
+   Removing `cdn` is optional: with the same host it changes nothing, and it's only used when `publicUrl` isn't set. A host saved on the Clean Image URLs page is ignored while `publicUrl` is set (it stays saved).
+3. **Deploy.** A deploy starts with an empty page cache (Workers Cache is per Worker version), so pages pick up the change at once.
+4. **Check.** Open **Clean Image URLs**: it says the host comes from EmDash's media setting, and **Check** passes. On a page, images EmDash renders itself (its `Image` component, for example) now load from `https://media.coywolf.com/<file>` instead of `/_emdash/api/media/file/<file>`; the theme's images were already on the media host.
+
+Nothing else has to change at the same time: the media host's Cloudflare setup (custom domain, rewrite rules, Image Transformations, Smart Tiered Cache) stays as it is, themes that build `/_emdash/api/media/file/<key>` addresses keep working (coywolf.com's `src/lib/site.ts` does), and stored content isn't rewritten. Two things to know:
+
+- **The bucket is public through the host.** This was already true with `images.cdn`: everything in the media bucket can be fetched at `https://media.coywolf.com/<key>`, including large uploads stored there (`files/<id>/<name>`, unless they have their own `FILES` bucket) and EmDash's own JSON backups under `backups/` if they're ever turned on (**Settings → Backups**; the pack's Backups use their own private bucket). Keep private files out of the media bucket.
+- **To move back**, remove `publicUrl` (and put `images.cdn` back) and deploy.
 
 ## Setting up a media host
 
@@ -55,13 +84,19 @@ The token can be typed just for the setup, saved (encrypted) on the page or the 
 
 **Check** (on the page) fetches a recent image from the media host, and a 64×64 copy of it twice, and reports whether the host is reachable, the original is served, resizing works (`cf-resized` header or an image type) and the copy is cached.
 
-Then turn the media host on, either on the Clean Image URLs page (takes effect within a minute, no deploy) or in `astro.config.mjs`:
+Then turn the media host on: best with EmDash's own setting in `astro.config.mjs` (see [Moving a site to EmDash's publicUrl](#moving-a-site-to-emdashs-publicurl)),
+
+```js
+storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" })
+```
+
+or on the Clean Image URLs page (takes effect within a minute, no deploy), or with the pack's option:
 
 ```js
 coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })
 ```
 
-A host saved on the page wins over the option; clear it there to fall back to the option. The host must be an `https://` origin with no path.
+EmDash's `publicUrl` wins over both; a host saved on the page wins over the option, and clearing it there falls back to the option. The host must be an `https://` origin with no path.
 
 **Quota.** Cloudflare's Free plan includes 5,000 unique image transformations a month (each new size of each image counts once a month; repeat views come from the cache). Beyond that, transformations need a paid Cloudflare Images plan.
 
@@ -69,7 +104,7 @@ A host saved on the page wins over the option; clear it there to fall back to th
 
 With Schema & Social's Open Graph extras on:
 
-- Pages without their own image use the site's default OG image (Settings → SEO) at a clean 1200×630 URL with its width, height, type and alt. On the media host that's `https://media.coywolf.com/s/1200x630/<file>` (crawlers that don't ask for WebP get the original format, so the type is the original's); on the Worker route PNG stays PNG and anything else becomes JPEG.
+- Pages without their own image use the site's default OG image (Settings → SEO) at a clean 1200×630 URL with its width, height, type and alt: `https://media.coywolf.com/s/1200x630/<file>` (crawlers that don't ask for WebP get the original format, so the type is the original's). The default image can be EmDash's `/_emdash/api/media/file/<file>` or, with `publicUrl`, `https://media.coywolf.com/<file>`. Without a media host, EmDash's own og:image stays.
 - With a media host, a page's own image (featured image or SEO image from the media library) is output as its original on the media host, with its width, height, type and alt. The JSON-LD `primaryImageOfPage` uses the same URL.
 - These og:image and twitter:image tags replace EmDash's own (never a second og:image), and clean URLs anywhere in og:image resolve back to their media item.
 
@@ -86,11 +121,13 @@ const full = await originalImageUrl(src);
 <a href={full}>Full size</a>
 ```
 
-- `cleanImageUrl(src, { width, height?, format? })`: the resized URL (on the media host when set, else `/media/…`; `format` applies to the Worker route only, as the media host picks it). `null` when the feature is off, `src` isn't a media-library file, or it's an AVIF original on a media host (Cloudflare's resizer can't read AVIF), so fall back to your usual image code.
+- `cleanImageUrl(src, { width, height? })`: the resized URL on the media host (it picks the format; a `format` option is ignored). `null` when the feature is off, there's no media host, `src` isn't a media-library file, or it's an AVIF original (Cloudflare's resizer can't read AVIF), so fall back to your usual image code. `src` can be EmDash's `/_emdash/api/media/file/<file>` or the original on the media host or under EmDash's `publicUrl`.
 - `originalImageUrl(src)` (also exported as `mediaUrl`): the original file on the media host; returns `src` unchanged when the feature is off, no media host is set, or `src` isn't a media-library file.
 - `imageDimensions(srcs)`: a `Map` of `src` → `{ width, height }` from the media library, for images whose Portable Text block has no size (WordPress imports don't record one). One query for a whole page, remembered per isolate; works whether or not the feature is on. Use it to build `srcset` and set `width`/`height` on content images.
 
 ## Stored image sizes
+
+Stored sizes are made with the media bucket (`MEDIA`) and the Cloudflare Images binding (`IMAGES`, which the Astro Cloudflare adapter already binds). Other binding names: `coywolfPlugin({ images: { bucket: "MYMEDIA", images: "MYIMAGES" } })`.
 
 With a media host, each image is also stored, once, in a few sizes as AVIF and WebP, next to the original in the media bucket, and pages use those files instead of resizing on each visit:
 

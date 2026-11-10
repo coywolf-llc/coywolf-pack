@@ -64,9 +64,9 @@ export { reviewFromAttrs } from "../reviews/lib.js";
 
 /**
  * Clean Image URLs module: cleanImageUrl builds resized-image URLs for theme
- * images (on the media host when one is set, else /media/<id>-<w>x<h>.<format>;
- * null when off); originalImageUrl (alias mediaUrl) gives the original file
- * on the media host (falls back to the source).
+ * images on the media host (null when the feature is off or there's no media
+ * host); originalImageUrl (alias mediaUrl) gives the original file on the
+ * media host (falls back to the source).
  */
 export { cleanImageUrl, imageDimensions, mediaUrl, originalImageUrl } from "../images/pack.js";
 export type { ImageDimensions } from "../images/pack.js";

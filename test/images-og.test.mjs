@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 import "./ts-resolve.mjs";
 
-const { setImageCdn, setSavedImageCdn } = await import("../src/images/lib.ts");
+const { setImageCdn, setSavedImageCdn, setStoragePublicUrl } = await import("../src/images/lib.ts");
 const { cleanDefaultOgImage, ownImageOnMediaHost, mediaHostImageInfo, packOwnsOgImage, ogImageTags } = await import("../src/schema/og-image.ts");
 
 const ORIGIN = "https://example.com";
@@ -22,13 +22,28 @@ function withHost(host, fn) {
 
 const tag = (tags, key) => tags.filter((t) => t.property === key || t.name === key).map((t) => t.content);
 
-test("default OG image on the Worker route: PNG stays PNG, the rest becomes JPEG", () => {
+test("without a media host the default OG image is left to EmDash", () => {
 	withHost(null, () => {
-		assert.deepEqual(cleanDefaultOgImage(def, ORIGIN), { url: `${ORIGIN}/media/DEF-1200x630.jpg`, width: 1200, height: 630, alt: "Default", mimeType: "image/jpeg" });
-		assert.equal(cleanDefaultOgImage({ ...def, url: "/_emdash/api/media/file/P.png" }, ORIGIN).url, `${ORIGIN}/media/P-1200x630.png`);
+		assert.equal(cleanDefaultOgImage(def, ORIGIN), null);
 		assert.equal(cleanDefaultOgImage({ url: "/theme/og.png" }, ORIGIN), null);
 		assert.equal(cleanDefaultOgImage(null, ORIGIN), null);
 	});
+});
+
+test("the default OG image from EmDash's site settings on publicUrl gets the clean 1200x630 size", () => {
+	setStoragePublicUrl("https://media.example.com");
+	try {
+		assert.deepEqual(cleanDefaultOgImage({ url: "https://media.example.com/DEF.png", alt: "Default" }, ORIGIN), {
+			url: "https://media.example.com/s/1200x630/DEF.png",
+			width: 1200,
+			height: 630,
+			alt: "Default",
+			mimeType: "image/png",
+		});
+		assert.equal(packOwnsOgImage("https://media.example.com/s/1200x630/DEF.png", ORIGIN, false), true);
+	} finally {
+		setStoragePublicUrl(null);
+	}
 });
 
 test("default OG image on the media host keeps the original type", () => {
@@ -64,8 +79,8 @@ test("og:image is output by the pack only for URLs it made (never twice)", () =>
 	withHost("https://media.example.com", () => {
 		assert.equal(packOwnsOgImage("https://media.example.com/ABC.webp", ORIGIN, true), true);
 		assert.equal(packOwnsOgImage("https://media.example.com/s/1200x630/DEF.jpg", ORIGIN, false), true);
-		assert.equal(packOwnsOgImage(`${ORIGIN}/media/DEF-1200x630.jpg`, ORIGIN, false), true);
-		assert.equal(packOwnsOgImage(`${ORIGIN}/media/DEF-1200x630.jpg`, ORIGIN, true), false);
+		// Old Worker-route URLs aren't the pack's to output any more (they only redirect).
+		assert.equal(packOwnsOgImage(`${ORIGIN}/media/DEF-1200x630.jpg`, ORIGIN, false), false);
 		assert.equal(packOwnsOgImage(`${ORIGIN}/_emdash/api/media/file/ABC.webp`, ORIGIN, true), false);
 
 		const image = { url: "https://media.example.com/ABC.webp", width: 1600, height: 900, alt: "A fox", mimeType: "image/webp" };
