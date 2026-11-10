@@ -5,7 +5,7 @@
  * EmDash's permission checks apply. The pack route only reads the current
  * configuration, which EmDash has no endpoint for.
  */
-import { Badge, Banner, Button, Input, Meter, Select, Switch } from "@cloudflare/kumo";
+import { Banner, Button, Input, Meter, Select, Switch } from "@cloudflare/kumo";
 import { ArrowsClockwise, MagnifyingGlass } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";

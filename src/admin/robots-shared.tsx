@@ -3,7 +3,7 @@ import { Badge } from "@cloudflare/kumo";
 import { CheckCircle, WarningCircle } from "@phosphor-icons/react";
 import * as React from "react";
 
-import { apiGet, apiPost, errorText } from "./api.js";
+import { apiGet, apiPost } from "./api.js";
 import type { BotEntry } from "../robots/bots.js";
 
 export const API = "/_emdash/api/plugins/coywolf-pack/robots";

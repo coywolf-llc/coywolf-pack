@@ -49,12 +49,6 @@ export class StreamError extends Error {
 	}
 }
 
-interface Envelope<T> {
-	success?: boolean;
-	errors?: Array<{ message?: string }>;
-	result?: T;
-}
-
 export function streamClient(creds: StreamCredentials) {
 	const base = `${API}/accounts/${encodeURIComponent(creds.accountId)}/stream`;
 	const auth = { Authorization: `Bearer ${creds.token}` };
