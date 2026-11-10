@@ -837,7 +837,15 @@ function OverrideDialog(props: { config: Config; bylines: Byline[] | undefined; 
 	);
 }
 
-function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) {
+/** "?entry=<collection>:<id>" (the entry editor's Schema & Social panel links here): the override to open. */
+export function entryFromSearch(search: string): { collection: string; entryId: string } | null {
+	const value = new URLSearchParams(search).get("entry") ?? "";
+	const at = value.indexOf(":");
+	if (at < 1 || at === value.length - 1) return null;
+	return { collection: value.slice(0, at), entryId: value.slice(at + 1) };
+}
+
+function OverridesTab(props: { config: Config; bylines: Byline[] | undefined; openEntry?: { collection: string; entryId: string } | null }) {
 	const [confirm, confirmDialog] = useConfirm();
 	const [items, setItems] = React.useState<Override[]>();
 	const [error, setError] = React.useState<string>();
@@ -860,6 +868,23 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined }) 
 	React.useEffect(() => {
 		void load();
 	}, [load]);
+
+	// Opened from the entry editor: its override (or a new one for it), once the list has loaded.
+	const opened = React.useRef(false);
+	React.useEffect(() => {
+		const want = props.openEntry;
+		if (!want || !items || opened.current) return;
+		opened.current = true;
+		const existing = items.find((i) => i.collection === want.collection && i.entryId === want.entryId);
+		if (existing) {
+			setEditing(existing);
+			return;
+		}
+		void post<{ items: EntryHit[] }>("entries/find", { collection: want.collection })
+			.then((found) => found.items.find((i) => i.id === want.entryId)?.title)
+			.catch(() => undefined)
+			.then((title) => setEditing({ collection: want.collection, entryId: want.entryId, ...(title ? { title } : {}), ...(props.config.types[want.collection] ?? {}) }));
+	}, [items, props.openEntry, props.config.types]);
 
 	const remove = async (item: Override) => {
 		if (!(await confirm({ title: `Remove the override for ${item.title ?? item.entryId}?`, confirmLabel: "Remove" }))) return;
@@ -1186,7 +1211,9 @@ export function SchemaPage() {
 	const [bylines, setBylines] = React.useState<Byline[]>();
 	const [authorsOn, setAuthorsOn] = React.useState(false);
 	const [error, setError] = React.useState<string>();
-	const [tab, setTab] = React.useState("site");
+	// The entry editor's Schema & Social panel links to an entry's override: open that tab.
+	const [openEntry] = React.useState(() => (typeof window === "undefined" ? null : entryFromSearch(window.location.search)));
+	const [tab, setTab] = React.useState(openEntry ? "overrides" : "site");
 
 	const loadAuthors = React.useCallback(async () => {
 		try {
@@ -1256,7 +1283,7 @@ export function SchemaPage() {
 						{tab === "site" && <SiteTab config={config} bylines={bylines} onSaved={(site) => setConfig({ ...config, site })} />}
 						{tab === "types" && <TypesTab config={config} onSaved={(types) => setConfig({ ...config, types })} />}
 						{tab === "authors" && <AuthorsTab config={config} bylines={bylines} authorsOn={authorsOn} reload={() => void loadAuthors()} />}
-						{tab === "overrides" && <OverridesTab config={config} bylines={bylines} />}
+						{tab === "overrides" && <OverridesTab config={config} bylines={bylines} openEntry={openEntry} />}
 						{tab === "custom" && (
 							<CustomTab
 								site={config.custom}

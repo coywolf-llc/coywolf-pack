@@ -9,13 +9,14 @@ An inventory of every link in your content, ported from Coywolf SEO's Link Manag
 - **Bulk actions**: **Replace** a URL across every entry that uses it (link text and other formatting are kept), **Unlink** (the text stays; linked images and buttons lose their link; embeds are left alone), **Ignore** a URL or domain, and **Recheck**. Ignore rules can also be domains, exact URLs, wildcards (`https://coywolf.com/visit/*`) or regular expressions. Ignored links aren't checked or counted.
 - **Export CSV**: every link matching the current filters (all pages), with its status, HTTP code, final URL, the entries that use it, and their anchor text. Filter by **Broken** first for a list to hand to whoever fixes links. Cells that look like spreadsheet formulas are prefixed with an apostrophe.
 - **Dashboard widget** with the number of broken links.
+- **In the entry editor and content lists** (EmDash 1.4+, admins only, while Link Manager is on): a saved entry's sidebar has a **Link status** section with its links, worst first, each with its status and HTTP code, and a link to Link Manager. Content lists get a **Links** column: "2 broken", "1 blocked", or "5 OK" per entry. The column reads a whole page of entries in one request (one D1 read per 90 entries, over the references' `entryKey` index), not one per row. Both only read; the inventory is updated when entries are saved.
 - **Entries view** (sub-feature, off by default): inbound internal link counts per published entry and orphans. See [Inbound links and orphans](#inbound-links-and-orphans).
 
 Feature switches: **Link Manager** (`links`), **Scheduled link checking** (`links.check`) and **Inbound links and orphans** (`links.inbound`), all off by default.
 
 ## Setup
 
-No bindings or secrets, but EmDash needs to know the site URL (**Settings → General**, or `site` in `astro.config`) to tell internal links from external ones; nothing is indexed until it's set. Settings (**Link Manager → Settings**): how often scheduled runs start (daily, weekly or monthly; default weekly), subrequests per check run (default 40), whether to check links to your own site (default on), and a User-Agent override. The checker presents a current desktop Chrome by default, which avoids most false "Blocked" results.
+No bindings or secrets, but EmDash needs to know the site URL (**Settings → General**, or `site` in `astro.config`) to tell internal links from external ones; nothing is indexed until it's set. Settings (**Link Manager → Settings**): how often scheduled runs start (daily, weekly or monthly; default weekly), subrequests per check run (default 40), whether to check links to your own site (default on), and a User-Agent override (see [How links are checked](#how-links-are-checked)).
 
 ## Notes
 
@@ -24,6 +25,18 @@ No bindings or secrets, but EmDash needs to know the site URL (**Settings → Ge
 - Workers limit subrequests per invocation (50 on Free, 1,000 on Paid), and database calls count. A checked link takes 1–2 requests plus 1 per redirect, and 1 database write; keep **subrequests per check run** under your plan's limit, leaving room for other scheduled jobs. Scheduled runs work in hourly steps (scan steps of about 200 database statements or 60 seconds, then one check run of **subrequests per check run** each hour), so on a big site a run can take several hours or more; raise subrequests per check run on the Paid plan to finish sooner. While Scheduled link checking is off, the hourly tasks read only the feature switches; between runs, they also read one small state row and the frequency. A scan started from the page runs faster while the page is open; admin actions stop at about 150 statements or 25 seconds and continue on the next call.
 - Links are stored in plugin storage (`links_urls`, `links_refs`) in the site's D1 database, so backups include them. The list pages through indexed queries; search matches the start of a URL (when it starts with `http` or `/`) or of a domain. Indexing an entry looks up its references with one D1 query on the `entryKey` expression index, with no sort (storage queries always sort by creation time, and for that SQLite picked the generic list index and read every reference row of the site, once per entry scanned). A scan writes only references that are new or changed (an unchanged entry costs that one read and no writes), drops links removed from an entry as it indexes it, and then removes the references of entries it can't visit (deleted, trashed, or in a collection without link fields now): one query lists the entries that have references, and one per 90 of them checks they still exist. Status counts are cached for up to a minute (10 minutes in the dashboard widget).
 - Regular-expression ignore rules are limited to 200 characters, and patterns that can take exponential time (repeated groups containing a quantifier or alternation, backreferences) are refused.
+## How links are checked
+
+- **From Cloudflare's network.** External links are fetched by the site's Worker, so the requests come from Cloudflare's shared Worker IP addresses, not from your site's address or a browser. Many other Workers share those addresses, and some sites rate-limit or block them as a group: the same reason Bing throttled the pack's IndexNow pings. A link that answers that way shows as **Blocked**, not **Broken**.
+- **As itself.** The checker sends an honest user agent that names it, its version, where to read about it, and the site whose links it's checking:
+
+  ```text
+  Mozilla/5.0 (compatible; CoywolfPack-LinkChecker/<version>; +https://github.com/coywolf-llc/coywolf-pack/blob/main/docs/links.md#how-links-are-checked) checking links on https://coywolf.com
+  ```
+
+  and only `Accept` and `Accept-Language` besides (no browser-only headers such as `Sec-Fetch-*`). Earlier releases presented it as desktop Chrome; a browser's name from a data center is what bot rules look for, and it hid who was asking. A site owner who sees the checker in their logs can tell whose links it's checking. **User-Agent override** (Link Manager → Settings) replaces it, for example with a name a partner site allows.
+- **Blocked.** HTTP 403, 429, LinkedIn's 999, or a bot challenge (Cloudflare's `cf-mitigated: challenge`, AWS WAF, DataDome, PerimeterX): the link probably works for people, but a server can't confirm it. Blocked links aren't counted as broken, in the report or the dashboard widget. A HEAD request that's refused is tried again with GET, so a page that's really gone (404) still shows as Broken. If many links to one site are Blocked, **Ignore** its domain, or check a few by hand.
+
 ## Checking internal links
 
 A Worker can't fetch its own custom domain over HTTP (Cloudflare answers 522), so internal links are checked through a service binding to the site's own Worker. Add it to `wrangler.jsonc` (use your Worker's `name`):

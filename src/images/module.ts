@@ -16,7 +16,7 @@ import { afterResponse, parseInput, secret, workerEnv } from "../shared.js";
 import { CloudflareApiError, type CloudflareConfig, applySetup, checkMediaHost, planSetup, purgeHost } from "./cloudflare.js";
 import { imageCdn, imageCdnSource, normalizeMediaHost } from "./lib.js";
 import { rememberSiteSetting } from "../core/features.js";
-import { IMAGES_SETTINGS, invalidateMediaHost, refreshMediaHost } from "./settings.js";
+import { IMAGES_SETTINGS, invalidateMediaHost, loadStoragePublicUrl, refreshMediaHost } from "./settings.js";
 import { type BackfillDeps, type VariantsState, estimateRows, publicState, publishedCount, readVariantsState, startVariantsRun, variantCounts } from "./variants-store.js";
 import { summarizeLibrary } from "./variants-estimate.js";
 import { imageCrops } from "./variants.js";
@@ -89,11 +89,18 @@ async function adminSettings(ctx: PluginContext) {
 	]);
 	const e = await env();
 	invalidateMediaHost(host ?? null);
+	await loadStoragePublicUrl();
 	const source = imageCdnSource();
 	return {
 		host: host ?? "",
 		optionHost: source.option ?? "",
 		activeHost: source.host ?? "",
+		/** Where the active host comes from: EmDash's r2({ publicUrl }), this page, or images.cdn. */
+		hostSource: source.from ?? "",
+		/** EmDash's publicUrl as written, when it's set (also when it can't be the media host: a path, or http). */
+		storageUrl: source.storageUrl ?? "",
+		/** EmDash's publicUrl as a host, when it differs from the one in use (the pack's own wins until they match). */
+		storageConflict: source.conflict ? (source.storage ?? "") : "",
 		accountId: accountId ?? "",
 		bucket: bucket ?? "",
 		tokenSet: Boolean(token?.trim()),

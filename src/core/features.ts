@@ -159,7 +159,8 @@ let freshInstall = false;
  * the deployed version the page cache middleware records on the first request
  * (src/pageCache/lib.ts VERSION_OPTION) and its warming progress
  * (src/pageCache/warm.ts WARM_STATE_OPTION); Discovery's IndexNow clean-up
- * marker (src/discovery/module.ts RETIRED_MARKER, set in plugin:activate).
+ * marker (src/discovery/module.ts RETIRED_MARKER, set in plugin:activate; remove it here in 0.38.0,
+ * with retireIndexNow).
  */
 export const HOUSEKEEPING_KEYS: ReadonlySet<string> = new Set([FRESH_INSTALL_KEY, "pageCache:version", "pageCache:warmState", "state:discovery:indexnowRetired"]);
 

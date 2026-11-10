@@ -70,6 +70,12 @@ export const SECRET_SETTINGS = {
 		description:
 			"Optional. Only for the one-click fixes on the Cloudflare Checkup page (Speed Brain off, Always Use HTTPS on, minimum TLS 1.2); reading the checkup uses the read-only Cloudflare usage token. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Specified Domains → this site's domain, add Zone → Read and Zone Settings → Edit; (3) create it, copy the token (shown once), paste it here and save. The Cloudflare Checkup page has a pre-filled form.",
 	},
+	backupsCloudflareToken: {
+		type: "secret",
+		label: "Backups — Cloudflare API token for retention",
+		description:
+			"Optional. Only for Retention on Cloudflare on the Backups page, which sets the backup bucket's lifecycle rule (and an optional lock) to match the retention days. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Workers R2 Storage → Edit (and D1 → Edit to use the same token for restores); (3) create it, copy the token (shown once), paste it here and save. The Backups page has a pre-filled form. Or add Workers R2 Storage → Edit to the BACKUPS_API_TOKEN Worker secret's token.",
+	},
 	socialImagesApiToken: {
 		type: "secret",
 		label: "Social Images — Cloudflare Browser Run API token",

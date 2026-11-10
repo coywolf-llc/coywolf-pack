@@ -60,3 +60,10 @@ export const widgets: PluginAdminExports["widgets"] = {
 	// Listed by the server only while a Coywolf Pack update is waiting.
 	update: UpdateWidget,
 };
+
+/**
+ * EmDash 1.4+: the pack's sections in the entry editor sidebar (Schema & Social, AI suggestions,
+ * Link status) and its Links column in content lists, each only while its module is on
+ * (src/admin/editor-panels.tsx, src/admin/extensions.ts).
+ */
+export { contentEditorPanels, contentListColumns } from "./editor-panels.js";

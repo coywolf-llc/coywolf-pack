@@ -4,72 +4,152 @@ import { test } from "node:test";
 
 import "./ts-resolve.mjs";
 
-const { cleanImagePath, parseImagePath, mediaFile, snappedImagePath, snapDimension } = await import("../src/images/lib.ts");
+const { cleanImagePath, parseImagePath, mediaFile } = await import("../src/images/lib.ts");
+const { setImageCdn, setSavedImageCdn, setStoragePublicUrl, imageCdn, imageCdnSource, cdnOriginalUrl, parseCdnUrl, cdnRedirectUrl, normalizeMediaHost, mimeForExt } = await import("../src/images/lib.ts");
+const { loadStoragePublicUrl, resetStoragePublicUrl } = await import("../src/images/settings.ts");
 
-test("builds clean paths for media-library files", () => {
-	assert.equal(cleanImagePath("/_emdash/api/media/file/01M44MRR9G4JZH2SQTGN4Y4G0D.webp", { width: 600, height: 320 }), "/media/01M44MRR9G4JZH2SQTGN4Y4G0D-600x320.webp");
-	assert.equal(cleanImagePath("https://example.com/_emdash/api/media/file/ABC.jpeg", { width: 400 }), "/media/ABC-400w.webp");
-	assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.png", { width: 800, height: 420, format: "avif" }), "/media/ABC-800x420.avif");
-	// EmDash 1.1 upload keys carry an attempt ULID: <stem>.<attempt>.<ext>.
-	assert.equal(cleanImagePath("/_emdash/api/media/file/01M4526PHAXT6EAJARYNFEQXF4.01M4526PN8A8K4RASN2MDPCEBP.png", { width: 400 }), "/media/01M4526PHAXT6EAJARYNFEQXF4.01M4526PN8A8K4RASN2MDPCEBP-400w.webp");
+function withHost(option, saved, fn, storage = null) {
+	setImageCdn(option);
+	setSavedImageCdn(saved);
+	setStoragePublicUrl(storage);
+	try {
+		fn();
+	} finally {
+		setImageCdn(null);
+		setSavedImageCdn(null);
+		setStoragePublicUrl(null);
+	}
+}
+
+test("builds clean URLs for media-library files on the media host", () => {
+	withHost("https://media.example.com", null, () => {
+		assert.equal(cleanImagePath("/_emdash/api/media/file/01M44MRR9G4JZH2SQTGN4Y4G0D.webp", { width: 600, height: 320 }), "https://media.example.com/s/600x320/01M44MRR9G4JZH2SQTGN4Y4G0D.webp");
+		assert.equal(cleanImagePath("https://example.com/_emdash/api/media/file/ABC.jpeg", { width: 400 }), "https://media.example.com/s/400/ABC.jpeg");
+		// Any size: the media host resizes (no grid).
+		assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.png", { width: 641, height: 337 }), "https://media.example.com/s/641x337/ABC.png");
+		// EmDash 1.1 upload keys carry an attempt ULID: <stem>.<attempt>.<ext>.
+		assert.equal(
+			cleanImagePath("/_emdash/api/media/file/01M4526PHAXT6EAJARYNFEQXF4.01M4526PN8A8K4RASN2MDPCEBP.png", { width: 400 }),
+			"https://media.example.com/s/400/01M4526PHAXT6EAJARYNFEQXF4.01M4526PN8A8K4RASN2MDPCEBP.png",
+		);
+	});
 	assert.deepEqual(mediaFile("/_emdash/api/media/file/A.B.jpeg"), { id: "A.B", ext: "jpeg" });
 	assert.deepEqual(parseImagePath("/media/A.B-400w.webp"), { id: "A.B", width: 400, height: undefined, format: "webp" });
 });
 
+test("without a media host there are no clean URLs (the Worker route is gone): themes use their own image code", () => {
+	withHost(null, null, () => {
+		assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.webp", { width: 600, height: 315 }), null);
+		assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.png", { width: 800, format: "avif" }), null);
+	});
+});
+
 test("refuses anything else", () => {
-	assert.equal(cleanImagePath("/theme/images/logo.png", { width: 100 }), null);
-	assert.equal(cleanImagePath("https://cdn.example.com/x.webp", { width: 100 }), null);
-	assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.webp", { width: 0 }), null);
-	assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.webp", { width: 9000 }), null);
-	assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.webp", { width: 100, format: "svg" }), null);
+	withHost("https://media.example.com", null, () => {
+		assert.equal(cleanImagePath("/theme/images/logo.png", { width: 100 }), null);
+		assert.equal(cleanImagePath("https://cdn.example.com/x.webp", { width: 100 }), null);
+		assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.webp", { width: 0 }), null);
+		assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.webp", { width: 9000 }), null);
+		// Cloudflare's resizer can't read AVIF originals.
+		assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.avif", { width: 100 }), null);
+	});
 	assert.equal(mediaFile("/_emdash/api/media/file/../secret.webp"), null);
 });
 
-test("parses clean paths and round-trips", () => {
+test("parses old Worker-route paths (they redirect to the media host)", () => {
 	assert.deepEqual(parseImagePath("/media/ABC-600x315.webp"), { id: "ABC", width: 600, height: 315, format: "webp" });
 	assert.deepEqual(parseImagePath("/media/ABC-400w.jpg"), { id: "ABC", width: 400, height: undefined, format: "jpg" });
 	assert.equal(parseImagePath("/media/ABC-600x315.svg"), null);
 	assert.equal(parseImagePath("/media/ABC-99999x1.webp"), null);
 	assert.equal(parseImagePath("/media/../x-1x1.webp"), null);
 	assert.equal(parseImagePath("/media/ABC.webp"), null);
-	const p = cleanImagePath("/_emdash/api/media/file/ID_1.webp", { width: 640, height: 340 });
-	assert.deepEqual(parseImagePath(p), { id: "ID_1", width: 640, height: 340, format: "webp" });
 });
 
-test("Worker-route sizes snap up to a 10px grid", () => {
-	const src = "/_emdash/api/media/file/ABC.webp";
-	// Sizes themes use stay exact.
-	for (const [w, h] of [[50, 50], [100, 100], [400, 210], [800, 420], [1200, 630]]) assert.equal(cleanImagePath(src, { width: w, height: h }), `/media/ABC-${w}x${h}.webp`);
-	for (const w of [400, 640, 800]) assert.equal(cleanImagePath(src, { width: w }), `/media/ABC-${w}w.webp`);
-	// Anything else rounds up, never past the maximum.
-	assert.equal(cleanImagePath(src, { width: 640, height: 336 }), "/media/ABC-640x340.webp");
-	assert.equal(cleanImagePath(src, { width: 600, height: 315 }), "/media/ABC-600x320.webp");
-	assert.equal(cleanImagePath(src, { width: 333 }), "/media/ABC-340w.webp");
-	assert.equal(cleanImagePath(src, { width: 1 }), "/media/ABC-10w.webp");
-	assert.equal(cleanImagePath(src, { width: 2559, height: 2555 }), "/media/ABC-2560x2560.webp");
-	// Everything cleanImagePath emits is on the grid.
-	for (let w = 1; w <= 2560; w += 37) assert.equal(snappedImagePath(parseImagePath(cleanImagePath(src, { width: w, height: w + 3 }))), null);
-	// Off-grid requests name the on-grid path to redirect to (format and id kept).
-	assert.equal(snappedImagePath(parseImagePath("/media/ABC-640x336.jpeg")), "/media/ABC-640x340.jpeg");
-	assert.equal(snappedImagePath(parseImagePath("/media/ABC-641w.avif")), "/media/ABC-650w.avif");
-	assert.equal(snappedImagePath(parseImagePath("/media/ABC-640x340.webp")), null);
-	assert.equal(snapDimension(2551), 2560);
+test("EmDash's storage publicUrl is the media host when the pack has none of its own (or the same one); a different one doesn't take over unannounced", () => {
+	withHost(null, null, () => {
+		assert.equal(imageCdn(), "https://cdn.example.com");
+		assert.equal(imageCdnSource().from, "storage");
+		assert.equal(imageCdnSource().storage, "https://cdn.example.com");
+		assert.equal(imageCdnSource().conflict, false);
+		assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.jpg", { width: 400 }), "https://cdn.example.com/s/400/ABC.jpg");
+	}, "https://cdn.example.com/");
+	withHost("https://cdn.example.com", null, () => {
+		assert.equal(imageCdnSource().from, "storage", "the same host as images.cdn");
+		assert.equal(imageCdnSource().conflict, false);
+	}, "https://cdn.example.com");
+	// A publicUrl that differs from the pack's working host: the pack's wins, and the admin is told.
+	withHost("https://media.example.com", "https://img.example.com", () => {
+		assert.equal(imageCdn(), "https://img.example.com");
+		assert.equal(imageCdnSource().from, "saved");
+		assert.equal(imageCdnSource().conflict, true);
+		assert.equal(imageCdnSource().storage, "https://cdn.example.com");
+		// Its URLs are still recognized as media-library files.
+		assert.equal(cdnOriginalUrl("https://cdn.example.com/ABC.jpg"), "https://img.example.com/ABC.jpg");
+	}, "https://cdn.example.com/");
+	withHost("https://media.example.com", "https://img.example.com", () => assert.equal(imageCdnSource().from, "saved"));
+	withHost("https://media.example.com", null, () => assert.equal(imageCdnSource().from, "option"));
+	withHost(null, null, () => assert.equal(imageCdnSource().from, null));
+	// A publicUrl with a path (or on http) can't take the /s/ rules: the fallback stays the media host.
+	withHost("https://media.example.com", null, () => {
+		assert.equal(imageCdn(), "https://media.example.com");
+		assert.equal(imageCdnSource().storage, null);
+		assert.equal(imageCdnSource().storageUrl, "https://bucket.example.com/media");
+	}, "https://bucket.example.com/media/");
 });
 
-// ── Media host ───────────────────────────────────────────────────
+test("media URLs EmDash prints with publicUrl set (<publicUrl>/<file>) are media-library files", () => {
+	withHost(null, null, () => {
+		assert.deepEqual(mediaFile("https://media.example.com/01M44MRR9G4JZH2SQTGN4Y4G0D.jpg"), { id: "01M44MRR9G4JZH2SQTGN4Y4G0D", ext: "jpg" });
+		assert.deepEqual(mediaFile("https://media.example.com/A.B.png?v=2"), { id: "A.B", ext: "png" });
+		// Resized and stored sizes aren't files; nor is anything off the host.
+		assert.equal(mediaFile("https://media.example.com/s/400/ABC.jpg"), null);
+		assert.equal(mediaFile("https://media.example.com/v1/ABC-400.webp"), null);
+		assert.equal(mediaFile("https://media.example.com.evil.com/ABC.jpg"), null);
+		assert.equal(mediaFile("https://other.example.com/ABC.jpg"), null);
+		// Site-settings images (logo, default social image) on publicUrl get clean sizes and originals.
+		assert.equal(cleanImagePath("https://media.example.com/DEF.jpg", { width: 1200, height: 630 }), "https://media.example.com/s/1200x630/DEF.jpg");
+		assert.equal(cdnOriginalUrl("https://media.example.com/DEF.jpg"), "https://media.example.com/DEF.jpg");
+	}, "https://media.example.com");
+	// An r2.dev publicUrl can't resize: recognized, never the media host.
+	withHost("https://media.example.com", null, () => {
+		assert.equal(imageCdn(), "https://media.example.com");
+		assert.deepEqual(mediaFile("https://pub-abc123.r2.dev/ABC.jpg"), { id: "ABC", ext: "jpg" });
+		assert.equal(cleanImagePath("https://pub-abc123.r2.dev/ABC.jpg", { width: 300 }), "https://media.example.com/s/300/ABC.jpg");
+	}, "https://pub-abc123.r2.dev");
+	// With a path in publicUrl, its URLs are still recognized, and the media host (here images.cdn) serves them.
+	withHost("https://img.example.com", null, () => {
+		assert.deepEqual(mediaFile("https://bucket.example.com/media/ABC.jpg"), { id: "ABC", ext: "jpg" });
+		assert.equal(cdnOriginalUrl("https://bucket.example.com/media/ABC.jpg"), "https://img.example.com/ABC.jpg");
+		assert.equal(cleanImagePath("https://bucket.example.com/media/ABC.jpg", { width: 300 }), "https://img.example.com/s/300/ABC.jpg");
+		assert.deepEqual(parseCdnUrl("https://bucket.example.com/media/ABC.jpg"), { id: "ABC", ext: "jpg", width: undefined, height: undefined });
+		assert.equal(mediaFile("https://bucket.example.com/ABC.jpg"), null);
+	}, "https://bucket.example.com/media");
+	// A host saved before keeps being recognized once publicUrl is the same host as images.cdn.
+	withHost("https://media.example.com", null, () => {
+		assert.equal(imageCdn(), "https://media.example.com");
+		assert.equal(cdnOriginalUrl("https://media.example.com/ABC.jpg"), "https://media.example.com/ABC.jpg");
+	}, "https://media.example.com");
+});
 
-const { setImageCdn, setSavedImageCdn, imageCdn, cdnOriginalUrl, parseCdnUrl, cdnRedirectUrl, normalizeMediaHost, mimeForExt } = await import("../src/images/lib.ts");
+test("EmDash's publicUrl is read from its build-time config once per isolate", async () => {
+	resetStoragePublicUrl();
+	let reads = 0;
+	const load = async () => (reads++, { storage: { entrypoint: "@emdash-cms/cloudflare/storage/r2", config: { binding: "MEDIA", publicUrl: "https://media.example.com/" } } });
+	await loadStoragePublicUrl(load);
+	await loadStoragePublicUrl(load);
+	assert.equal(reads, 1);
+	assert.equal(imageCdn(), "https://media.example.com");
+	resetStoragePublicUrl();
+	await loadStoragePublicUrl(async () => ({ storage: { entrypoint: "@emdash-cms/cloudflare/storage/r2", config: { binding: "MEDIA" } } }));
+	assert.equal(imageCdn(), null, "no publicUrl: nothing set");
+	resetStoragePublicUrl();
+	await loadStoragePublicUrl(async () => {
+		throw new Error("no virtual module outside a site build");
+	});
+	assert.equal(imageCdn(), null);
+	resetStoragePublicUrl();
+});
 
-function withHost(option, saved, fn) {
-	setImageCdn(option);
-	setSavedImageCdn(saved);
-	try {
-		fn();
-	} finally {
-		setImageCdn(null);
-		setSavedImageCdn(null);
-	}
-}
 
 test("normalizes media hosts to https origins and refuses anything else", () => {
 	assert.equal(normalizeMediaHost("media.example.com"), "https://media.example.com");
@@ -82,7 +162,7 @@ test("normalizes media hosts to https origins and refuses anything else", () => 
 	assert.equal(normalizeMediaHost("javascript:alert(1)"), null);
 	assert.equal(normalizeMediaHost(""), null);
 	withHost("http://media.example.com", null, () => assert.equal(imageCdn(), null));
-	withHost("not a host", null, () => assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.webp", { width: 100 }), "/media/ABC-100w.webp"));
+	withHost("not a host", null, () => assert.equal(cleanImagePath("/_emdash/api/media/file/ABC.webp", { width: 100 }), null));
 });
 
 test("the saved host wins over the option", () => {
