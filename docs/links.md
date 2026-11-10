@@ -9,8 +9,9 @@ An inventory of every link in your content, ported from Coywolf SEO's Link Manag
 - **Bulk actions**: **Replace** a URL across every entry that uses it (link text and other formatting are kept), **Unlink** (the text stays; linked images and buttons lose their link; embeds are left alone), **Ignore** a URL or domain, and **Recheck**. Ignore rules can also be domains, exact URLs, wildcards (`https://coywolf.com/visit/*`) or regular expressions. Ignored links aren't checked or counted.
 - **Export CSV**: every link matching the current filters (all pages), with its status, HTTP code, final URL, the entries that use it, and their anchor text. Filter by **Broken** first for a list to hand to whoever fixes links. Cells that look like spreadsheet formulas are prefixed with an apostrophe.
 - **Dashboard widget** with the number of broken links.
+- **Entries view** (sub-feature, off by default): inbound internal link counts per published entry and orphans. See [Inbound links and orphans](#inbound-links-and-orphans).
 
-Feature switches: **Link Manager** (`links`) and **Scheduled link checking** (`links.check`), both off by default.
+Feature switches: **Link Manager** (`links`), **Scheduled link checking** (`links.check`) and **Inbound links and orphans** (`links.inbound`), all off by default.
 
 ## Setup
 
@@ -32,3 +33,22 @@ A Worker can't fetch its own custom domain over HTTP (Cloudflare answers 522), s
 ```
 
 Without the binding, internal links are listed but not checked (they're never reported as broken).
+
+## Inbound links and orphans
+
+With **Inbound links and orphans** on, the Link Manager page has two views: **Links** (the inventory above) and **Entries**. Entries lists every published entry with how many of your entries link to it:
+
+- **Orphans** (the default filter): published entries, not set to No index, that no other entry links to. Readers and search engines find them only through menus, lists or search.
+- **Linked entries** and **All entries**, filtered by collection or searched by title or path, sorted by fewest or most inbound links, title, or most recently updated.
+- For each orphan, up to three published entries of the same collection that share the most categories or tags with it (newest first among ties): good places to add a link to it. Each links to its editor.
+- **Export CSV** of the current filter (title, collection, path, inbound links, whether it's an orphan, No index, last update, editor link).
+
+How it counts:
+
+- It reads the links Link Manager already indexed, so scan your content first (**Links → Scan content**); saves keep it current after that. Nothing runs in the background, and nothing new is stored.
+- A link counts for the entry at its path, or at the end of its redirect when Link Manager has checked it. Query strings, fragments, `www.` and a trailing slash don't matter.
+- Each linking entry counts once per target, only when it's published, and never for itself.
+- Only links in content count. Navigation, footers, category and tag pages, and other theme templates aren't in Link Manager's index, so an entry linked only from a menu is still an orphan here.
+- Paths come from each collection's URL pattern (and the pack's `urls` option, see [Content URLs](content-urls.md)). Locale prefixes aren't applied, so on a multilingual site, links to translated pages may not match their entries.
+
+Reads, from the site's D1 database: one statement per routable collection (sent as one batch) for the published entries, the term reads their URL patterns need, one statement for the internal links, and the references in pages of 5,000 rows on the storage table's primary key. Related entries for the orphans on the page are one batch of one statement each.

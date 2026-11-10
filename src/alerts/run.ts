@@ -100,11 +100,12 @@ export interface AlertsState {
 	log: SendRecord[];
 }
 
-const EMPTY_STATE: AlertsState = { sent: {}, active: [], brokenKnown: null, auditSeen: null, digestBroken: null, lastCheckAt: null, lastDigestAt: null, log: [] };
+/** A fresh empty state (its objects are mutated by a check, so never shared). */
+const emptyState = (): AlertsState => ({ sent: {}, active: [], brokenKnown: null, auditSeen: null, digestBroken: null, lastCheckAt: null, lastDigestAt: null, log: [] });
 
 export async function readState(ctx: PluginContext): Promise<AlertsState> {
 	const stored = await ctx.kv.get<AlertsState>(STATE_KEY).catch(() => null);
-	return { ...EMPTY_STATE, ...(stored ?? {}) };
+	return { ...emptyState(), ...(stored ?? {}) };
 }
 
 async function writeState(ctx: PluginContext, state: AlertsState): Promise<void> {

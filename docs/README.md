@@ -20,12 +20,15 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 
 - [Clean Image URLs](images.md)
 - [Backups](backups.md)
+- [Alerts & Digest](alerts.md): email alerts and a weekly digest
 - [Redirect Manager](redirects.md)
 - [Schema & Social](schema.md)
+- [Social Images](social-images.md): generated Open Graph images
 - [Discovery](discovery.md): RSS feed, news sitemap, llms.txt, Crawler Hints status
 - [Robots.txt](robots.md)
 - [Search](search.md)
-- [Link Manager](links.md)
+- [Link Manager](links.md): with inbound link counts and orphans
+- [Content Audit](content-audit.md)
 - [Headings & TOC](headings.md)
 - [Breadcrumb Nav](breadcrumbs.md)
 - [Code Blocks](code-blocks.md)
