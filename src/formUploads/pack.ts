@@ -1,5 +1,5 @@
 /**
- * Private form uploads module: the feature switch and the Form uploads admin
+ * Private Form Uploads module: the feature switch and the Private Form Uploads admin
  * page. The work happens in the Forms plugin itself, wrapped by
  * privateFormUploads() (see ./wrap.ts), so the page talks to routes on the
  * Forms plugin (/_emdash/api/plugins/emdash-forms/coywolf-private-uploads/*).
@@ -15,7 +15,7 @@ export type { PrivateFormUploadsOptions } from "./wrap.js";
 export const FEATURES = [
 	{
 		id: FEATURE,
-		label: "Private form uploads",
+		label: "Private Form Uploads",
 		description:
 			"Files sent through Forms plugin forms go to a private storage bucket that only admins can open, instead of the public media library.",
 		default: false,
@@ -26,9 +26,9 @@ registerFeatures(FEATURES);
 export function formUploadsPack(): PackModule {
 	return {
 		id: "formUploads",
-		label: "Private form uploads",
+		label: "Private Form Uploads",
 		features: FEATURES,
-		adminPages: [{ path: "/form-uploads", label: "Form uploads", icon: "lock" }],
+		adminPages: [{ path: "/form-uploads", label: "Private Form Uploads", icon: "lock" }],
 	};
 }
 

@@ -41,7 +41,7 @@ interface Options {
 	database?: string;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: plugin storage collections are untyped here.
+// any: plugin storage collections are untyped here.
 const store = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[STORE] as {
 	get(id: string): Promise<PendingDecision | null>;
 	put(id: string, data: PendingDecision): Promise<void>;
@@ -49,7 +49,7 @@ const store = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[STORE
 	query(o: { orderBy?: Record<string, "asc" | "desc">; limit?: number }): Promise<{ items: Array<{ id: string; data: PendingDecision }> }>;
 };
 
-// biome-ignore lint/suspicious/noExplicitAny: plugin storage collections are untyped here.
+// any: plugin storage collections are untyped here.
 const applied = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[APPLIED] as {
 	get(id: string): Promise<AppliedRule | null>;
 	put(id: string, data: AppliedRule): Promise<void>;

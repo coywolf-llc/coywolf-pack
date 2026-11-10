@@ -1,13 +1,15 @@
 /**
  * Custom Blocks page: the site's affiliate disclosure wording and podcast
  * links, and live previews of every block (rendered by the same code as the
- * site). Turning blocks on or off happens on the Coywolf Pack page.
+ * site). Each block is turned on or off in Turn parts on or off on this page (or on the Features page).
  */
-import { Banner, Button, Checkbox, Input, InputArea, Loader, Select } from "@cloudflare/kumo";
+import { Banner, Button, Checkbox, Input, InputArea, Select } from "@cloudflare/kumo";
 import { FloppyDisk } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { PreviewSection } from "./preview.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import {
@@ -37,6 +39,7 @@ import {
 } from "../customBlocks/render.js";
 import { safeUrl } from "../customBlocks/rich.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const HEADING_ITEMS: Array<{ value: PodcastHeadingTag; label: string }> = [
 	{ value: "h2", label: "Heading 2" },
@@ -49,8 +52,6 @@ const SAMPLE_PODCAST_LINKS = Object.fromEntries(PODCAST_SERVICES.map(([id]) => [
 
 const API = "/_emdash/api/plugins/coywolf-pack/customBlocks";
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
-
 const same = (a: DisclosureSettings, b: DisclosureSettings) =>
 	a.affiliateText === b.affiliateText && a.amazonText === b.amazonText && a.linkUrl === b.linkUrl && a.linkText === b.linkText;
 
@@ -60,7 +61,7 @@ export function CustomBlocksPage() {
 	const [podcastSaved, setPodcastSaved] = React.useState<PodcastSettings | null>(null);
 	const [podcast, setPodcast] = React.useState<PodcastSettings>(DEFAULT_PODCAST);
 	const [error, setError] = React.useState<string | null>(null);
-	const [status, setStatus] = React.useState("");
+	const result = useSaveResult();
 	const [saving, setSaving] = React.useState(false);
 
 	React.useEffect(() => {
@@ -95,7 +96,7 @@ export function CustomBlocksPage() {
 		if (!saved || !podcastSaved || !canSave) return;
 		setSaving(true);
 		setError(null);
-		setStatus("Saving…");
+		result.clear();
 		try {
 			if (disclosureDirty) {
 				const response = await apiFetch(`${API}/settings/save`, {
@@ -117,10 +118,9 @@ export function CustomBlocksPage() {
 				setPodcast(r.podcast);
 				setPodcastSaved(r.podcast);
 			}
-			setStatus("Saved. The site picks up changes within a minute.");
+			result.saved("Settings saved", "The site picks up changes within a minute.");
 		} catch (cause) {
-			setStatus("");
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setSaving(false);
 		}
@@ -150,34 +150,30 @@ export function CustomBlocksPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Custom Blocks</h1>
-					<div className="flex shrink-0 justify-end">
+			<PageHeader
+				title="Custom Blocks"
+				actions={
+					<>
 						<Button variant="primary" icon={<FloppyDisk />} disabled={!dirty || saving || !canSave} onClick={() => void save()}>
 							Save
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
-						Adds Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks to the editor (turn each one on on the Coywolf Pack page). Their text fields take
+					</>
+				}
+				description={
+					<>
+						Adds Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks to the editor (turn each one on below). Their text fields take
 						plain text: a blank line starts a new paragraph, <code>[link text](https://…)</code> makes a link and <code>**text**</code> is bold. Simple
 						HTML (links, bold, italics, code, lists) works too. The blocks are styled with a little CSS sent only on pages that use them; no script.
-					</p>
-				</div>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="customBlocks" />
 
 			{error && <Banner variant="error" role="alert" description={error} />}
-			<p className="sr-only" role="status" aria-live="polite">
-				{status}
-			</p>
-			{status && !saving && <p className="text-sm text-kumo-subtle">{status}</p>}
 
 			{!saved && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{saved && (
@@ -312,7 +308,7 @@ export function CustomBlocksPage() {
 				</>
 			)}
 
-			<SaveBar dirty={dirty} saving={saving} canSave={canSave} onSave={() => void save()} onDiscard={() => {
+			<SaveBar error={result.error} dirty={dirty} saving={saving} canSave={canSave} onSave={() => void save()} onDiscard={() => {
 					if (saved) setDraft(saved);
 					if (podcastSaved) setPodcast(podcastSaved);
 				}} />

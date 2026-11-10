@@ -3,18 +3,23 @@
  * review of meta-description and image-text suggestions, entities, and the
  * usage log.
  */
-import { Badge, Banner, Button, Checkbox, Input, InputArea, Loader, Select, Tabs } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Input, InputArea, Select, Tabs } from "@cloudflare/kumo";
 import { ArrowClockwise, Check, DownloadSimple, Play, Sparkle, Stop, X } from "@phosphor-icons/react";
-import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiGet, apiPost, errorText } from "./api.js";
+import { DocsLink, FeaturesLink, Loading, PageHeader } from "./page.js";
 import { entitiesToCsv } from "../ai/export.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/ai";
+
+const post = apiPost(API, { body: {} });
+const get = apiGet(API);
 
 type ProviderId = "workers-ai" | "anthropic" | "openai" | "gemini";
 
@@ -102,21 +107,7 @@ interface UsageRow {
 	ref?: string;
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateTime = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
-
-async function post<T>(path: string, body: unknown = {}): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
-
-async function get<T>(path: string): Promise<T> {
-	return parseApiResponse<T>(await apiFetch(`${API}/${path}`), "The request failed");
-}
 
 function Section(props: { title: string; description?: React.ReactNode; children: React.ReactNode; actions?: React.ReactNode }) {
 	return (
@@ -156,7 +147,7 @@ function BulkRow(props: { kind: "entries" | "media"; label: string; enabled: boo
 				<div className="text-sm font-medium">{props.label}</div>
 				<div className="mt-0.5 text-sm text-kumo-subtle">
 					{!props.enabled
-						? "Turn the feature on under Plugins → Coywolf Pack first."
+						? "Turn this part on first (Turn parts on or off, at the top of this page)."
 						: props.bulk
 							? `${props.bulk.finished ? "Scanned" : "Scanning"}: ${props.bulk.queued} queued, ${props.bulk.skipped} already done or not needed${props.bulk.finished ? ` (finished ${dateTime.format(new Date(props.bulk.finished))})` : "…"}`
 							: "No bulk run yet."}
@@ -340,17 +331,19 @@ function SettingsPanel(props: { status: Status; reload: () => Promise<void>; set
 	};
 	const [test, setTest] = React.useState<string>();
 
+	const result = useSaveResult();
 	const save = async () => {
 		setPending(true);
+		result.clear();
 		try {
 			const { aiApiKey, ...rest } = draft;
 			await post("settings", aiApiKey.trim() ? { ...rest, aiApiKey } : rest);
 			set({ aiApiKey: "" });
-			props.setNotice("AI settings saved.");
+			result.saved("AI settings saved");
 			justSaved.current = true;
 			await props.reload();
 		} catch (cause) {
-			props.setError(errorText(cause, "Could not save settings"));
+			result.failed(errorText(cause, "Could not save settings"));
 		} finally {
 			setPending(false);
 		}
@@ -405,7 +398,13 @@ function SettingsPanel(props: { status: Status; reload: () => Promise<void>; set
 							/>
 						) : (
 							<p className="self-end text-sm text-kumo-subtle">
-								{status.settings.bindingAvailable ? "The Workers AI binding is connected." : "Add an \"ai\" binding to wrangler.jsonc (see docs/ai.md in the Coywolf Pack repository) to use Workers AI."}
+								{status.settings.bindingAvailable ? (
+									"The Workers AI binding is connected."
+								) : (
+									<>
+										Add an <code>ai</code> binding to wrangler.jsonc (see <DocsLink doc="ai">the AI Enrichment docs</DocsLink>) to use Workers AI.
+									</>
+								)}
 							</p>
 						)}
 						<div style={{ gridColumn: "1 / -1" }}>
@@ -488,7 +487,7 @@ function SettingsPanel(props: { status: Status; reload: () => Promise<void>; set
 					)}
 				</Section>
 			</form>
-			<SaveBar form="cw-ai-settings-form" dirty={dirty} saving={pending} onDiscard={() => setDraft(savedDraft)} />
+			<SaveBar error={result.error} form="cw-ai-settings-form" dirty={dirty} saving={pending} onDiscard={() => setDraft(savedDraft)} />
 		</>
 	);
 }
@@ -563,7 +562,7 @@ function DescriptionsPanel(props: { setNotice: (s: string) => void; setError: (s
 		<Section title="Meta description suggestions" description="Edit if needed, then apply. Apply only fills an empty description; Replace overwrites one." actions={<Button variant="ghost" shape="square" icon={<ArrowClockwise />} aria-label="Reload" onClick={() => void load()} />}>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!items && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : items?.length ? (
 				<ul className="divide-y divide-kumo-line">
 					{items.map((entry) => (
@@ -667,7 +666,7 @@ function ImagesPanel(props: { setNotice: (s: string) => void; setError: (s: stri
 		>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!items && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : items?.length ? (
 				<ul className="divide-y divide-kumo-line">
 					{items.map((item) => (
@@ -747,7 +746,7 @@ function EntitiesPanel(props: { setNotice: (s: string) => void; setError: (s: st
 		>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!items && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : items?.length ? (
 				<ul className="divide-y divide-kumo-line">
 					{items.map((entry) => (
@@ -798,11 +797,11 @@ function UsagePanel() {
 		<Section title="Usage log" description={`The latest 100 model calls (kept 30 days). Tokens shown: ${totals.input.toLocaleString()} in, ${totals.output.toLocaleString()} out.`}>
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{!rows && !error ? (
-				<Loader />
+				<Loading className="" />
 			) : rows?.length ? (
 				<div className="overflow-x-auto">
 					<table className="w-full text-sm">
-						<thead className="text-left text-kumo-subtle">
+						<thead className="text-start text-kumo-subtle">
 							<tr>
 								<th className="py-1 pe-3 font-medium">Time</th>
 								<th className="py-1 pe-3 font-medium">Feature</th>
@@ -868,12 +867,14 @@ export function AiPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">AI Enrichment</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="AI Enrichment"
+				description={
+					<>
 					Entities for Schema.org verified against Wikidata, meta descriptions, and image alt text. Everything runs in the background after saves and uploads, within your daily call limit.
-				</p>
-			</header>
+					</>
+				}
+			/>
 
 			<PartSwitches module="ai" />
 
@@ -882,12 +883,20 @@ export function AiPage() {
 				{error && <Banner variant="error" role="alert" title="Something went wrong" description={error} />}
 			</div>
 
-			{status && !status.features.ai && <Banner variant="default" title="AI Enrichment is off. Turn it and its features on under Plugins → Coywolf Pack." />}
+			{status && !status.features.ai && (
+				<Banner
+					variant="default"
+					title="AI Enrichment is off."
+					description={
+						<>
+							Turn it on on <FeaturesLink />, then turn on its parts here.
+						</>
+					}
+				/>
+			)}
 
 			{!status && !error ? (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			) : status ? (
 				<>
 					<Tabs

@@ -16,6 +16,13 @@ export interface FeatureDef {
 	/** Default when the site hasn't chosen. Keep new features off so installing changes nothing. */
 	default?: boolean;
 	/**
+	 * The default before 0.36.0, for a feature that was on by default then. A
+	 * site set up earlier keeps it: it applies until the site's stored switches
+	 * record the change, which records this value for sites that already had
+	 * the pack (recordDefaults in src/core/features.ts).
+	 */
+	legacyDefault?: boolean;
+	/**
 	 * Legacy ids this feature took over (e.g. a sub-feature that became its own
 	 * module). When the stored map has no value for `id`, the first legacy id
 	 * found there decides, so existing sites keep their choice.
@@ -27,7 +34,7 @@ export interface AdminPageDef {
 	path: string;
 	label: string;
 	icon?: string;
-	/** Admin sidebar folder (EmDash 1.2.0+). The pack puts every page in the "Coywolf Pack" folder (see sidebar() in src/index.ts). */
+	/** Admin sidebar folder (EmDash 1.2.0+). The pack sets it from SIDEBAR_FOLDERS in src/index.ts. */
 	group?: string;
 }
 
@@ -48,7 +55,7 @@ export interface TaskDef {
 	handler: (ctx: PluginContext) => Promise<void>;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: hook handler signatures vary per hook name.
+// any: hook handler signatures vary per hook name.
 type AnyHandler = (event: any, ctx: PluginContext) => Promise<unknown> | unknown;
 
 export interface PackModule {
@@ -58,7 +65,7 @@ export interface PackModule {
 	/** Feature switches. The first one is the module's main switch; the rest are sub-features. */
 	features: FeatureDef[];
 	/** Plugin routes, served at /_emdash/api/plugins/coywolf-pack/<name>. Prefix names with the module id. */
-	// biome-ignore lint/suspicious/noExplicitAny: route definitions are opaque here.
+	// any: route definitions are opaque here.
 	routes?: Record<string, any>;
 	/**
 	 * Hook handlers. Return values follow EmDash: content:beforeSave may return
@@ -84,13 +91,13 @@ export interface PackModule {
 	 * Non-secret settings aren't declared: edit them on the module's own admin
 	 * page (ctx.settings.get/set) and give every read its default in code.
 	 */
-	// biome-ignore lint/suspicious/noExplicitAny: SettingField shape is EmDash's.
+	// any: SettingField shape is EmDash's.
 	settingsSchema?: Record<string, any>;
 	/** Portable Text block types this module adds to the editor (render components live in src/astro). */
-	// biome-ignore lint/suspicious/noExplicitAny: PortableTextBlockConfig shape is EmDash's.
+	// any: PortableTextBlockConfig shape is EmDash's.
 	portableTextBlocks?: any[];
 	/** Plugin storage collections ({ name: { indexes, uniqueIndexes } }). */
-	// biome-ignore lint/suspicious/noExplicitAny: storage config shape is EmDash's.
+	// any: storage config shape is EmDash's.
 	storage?: Record<string, any>;
 	/** Capabilities this module needs (e.g. "network:request", "email:send"). */
 	capabilities?: string[];

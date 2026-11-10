@@ -7,16 +7,18 @@ import { z } from "zod";
 
 import { parseInput } from "../shared.js";
 import { ensureTasks } from "./compose.js";
-import { FEATURES_SETTING, type FeatureMap, ctxFeatures, featureCatalog, invalidateFeatures } from "./features.js";
+import { FEATURES_SETTING, type FeatureMap, ctxFeatures, featureCatalog, invalidateFeatures, recordDefaults, withRecordedDefaults } from "./features.js";
 import type { PackModule, TaskDef } from "./module.js";
 
 export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 	return {
 		"features/list": {
 			permission: "plugins:manage" as const,
-			// biome-ignore lint/suspicious/noExplicitAny: plugin context.
+			// any: plugin context.
 			handler: async (ctx: any) => {
 				await ensureTasks(ctx, tasks);
+				// Sites set up before 0.36.0 keep their defaults (src/core/features.ts); a failure leaves them unrecorded, which reads the same.
+				await recordDefaults(ctx).catch((error: unknown) => ctx.log.warn("Could not record the feature defaults", { error: String(error) }));
 				const state = await ctxFeatures(ctx);
 				const known = new Set(featureCatalog().map((f) => f.id));
 				return {
@@ -36,7 +38,10 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 			handler: async (ctx) => {
 				const { features } = parseInput(z.object({ features: z.record(z.string(), z.boolean()) }), ctx.input);
 				const known = new Set(featureCatalog().map((f) => f.id));
-				const stored = ((await ctx.settings.get<FeatureMap>(FEATURES_SETTING)) ?? {}) as FeatureMap;
+				// Record the defaults first if they aren't yet (a fresh install's flag still counts); should that fail,
+				// the save records them as an existing site's.
+				await recordDefaults(ctx).catch((error: unknown) => ctx.log.warn("Could not record the feature defaults", { error: String(error) }));
+				const stored = withRecordedDefaults(await ctx.settings.get<FeatureMap>(FEATURES_SETTING), true);
 				for (const [id, on] of Object.entries(features)) if (known.has(id)) stored[id] = on;
 				await ctx.settings.set(FEATURES_SETTING, stored);
 				invalidateFeatures();

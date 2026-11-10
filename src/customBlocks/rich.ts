@@ -96,10 +96,10 @@ function decodeAttr(value: string): string {
 
 /** A link or image URL that's safe to print: http(s), mailto, tel, or relative. Null otherwise. */
 export function safeUrl(value: string): string | null {
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: browsers ignore these inside a scheme.
+	// Control characters in the pattern: browsers ignore these inside a scheme.
 	const url = decodeAttr(value).replace(/[\u0000- \u007f]+/g, (m, i: number) => (i === 0 ? "" : m)).trim();
 	if (!url || url.length > 2000) return null;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: see above.
+	// Control characters in the pattern: see above.
 	const scheme = url.replace(/[\u0000- \u007f]/g, "").match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
 	if (scheme && !["http", "https", "mailto", "tel"].includes(scheme)) return null;
 	return url;
@@ -201,7 +201,7 @@ export function renderRich(input: unknown, opts: RichOptions = {}): string {
 	const source = input
 		.slice(0, 500_000)
 		.replace(/\r\n?/g, "\n")
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: strip control characters (keep tab and newline).
+		// Control characters in the pattern: strip control characters (keep tab and newline).
 		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
 	const inline = Boolean(opts.inline);
 	let out = "";

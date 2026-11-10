@@ -101,7 +101,7 @@ export function sanitizeFilename(name: unknown): string {
 		.normalize("NFC")
 		.split(/[\\/]/)
 		.pop()!
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the point.
+		// Control characters in the pattern: stripping control characters is the point.
 		.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, "")
 		.replace(/[:*?"<>|]/g, "_")
 		.replace(/\s+/g, " ")

@@ -5,23 +5,14 @@
  */
 import { type CustomDomain, type RulesetRule, type SetupPlan, type SetupState, hostnameOf, planMediaHostSetup, zoneCandidates } from "./setup.js";
 
-export const CLOUDFLARE_API_HOST = "api.cloudflare.com";
-const API = `https://${CLOUDFLARE_API_HOST}/client/v4`;
+import { CLOUDFLARE_API_HOST, CloudflareApiError, type Fetch, cloudflareApi } from "../core/cloudflare-api.js";
 
-type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
+export { CLOUDFLARE_API_HOST, CloudflareApiError };
 
 export interface CloudflareConfig {
 	token: string;
 	accountId: string;
 	fetch?: Fetch;
-}
-
-export class CloudflareApiError extends Error {
-	readonly status: number;
-	constructor(message: string, status: number) {
-		super(message);
-		this.status = status;
-	}
 }
 
 /** What each step of the setup needs, for error messages when the token lacks it. */
@@ -35,19 +26,15 @@ const PERMISSION_HINT: Record<string, string> = {
 	tieredCache: "Zone → Zone Settings → Edit",
 };
 
-async function cf<T>(config: CloudflareConfig, path: string, init: RequestInit = {}, step?: string): Promise<{ status: number; result: T | null }> {
-	const doFetch = config.fetch ?? fetch;
-	const res = await doFetch(`${API}${path}`, {
-		...init,
-		headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json", ...(init.headers ?? {}) },
+/** One setup call through the shared client (src/core/cloudflare-api.ts): its deadline, the permission hint for `step`, no token in errors. */
+function cf<T>(config: CloudflareConfig, path: string, init: { method?: string; body?: string } = {}, step?: string): Promise<{ status: number; result: T | null }> {
+	return cloudflareApi<T | null>(path, {
+		token: config.token,
+		fetch: config.fetch,
+		method: init.method ?? "GET",
+		body: init.body,
+		...(step ? { permission: PERMISSION_HINT[step] } : {}),
 	});
-	const body = (await res.json().catch(() => ({}))) as { success?: boolean; result?: T; errors?: Array<{ code?: number; message?: string }> };
-	if (!res.ok || body.success === false) {
-		const detail = body.errors?.map((e) => e.message).filter(Boolean).join("; ") || res.statusText;
-		const hint = (res.status === 401 || res.status === 403) && step ? ` The API token needs ${PERMISSION_HINT[step]}.` : "";
-		throw new CloudflareApiError(`Cloudflare API ${res.status}: ${detail}.${hint}`, res.status);
-	}
-	return { status: res.status, result: body.result ?? null };
 }
 
 /**

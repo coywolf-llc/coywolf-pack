@@ -38,7 +38,7 @@ import {
 } from "./store.js";
 
 /** No build-time options yet; settings live on the Link Manager page. */
-// biome-ignore lint/complexity/noBannedTypes: reserved for future options.
+// An empty type: reserved for future options.
 export type LinksOptions = {};
 
 export const LINKS_SCAN_TASK = "links-scan";
@@ -388,9 +388,9 @@ async function list(ctx: PluginContext, input: z.infer<typeof listInput>) {
 	const sort = input.sort ?? "status";
 	const orderBy: Record<string, "asc" | "desc"> = sort === "url" ? { url: "asc" } : sort === "checked" ? { checkedAt: "desc" } : { rank: "asc" };
 
-	// biome-ignore lint/suspicious/noExplicitAny: WhereClause is EmDash's.
+	// any: WhereClause is EmDash's.
 	const page = await urls(ctx).query({ where: where as any, orderBy, limit: PAGE_SIZE, cursor: input.cursor ?? undefined });
-	// biome-ignore lint/suspicious/noExplicitAny: WhereClause is EmDash's.
+	// any: WhereClause is EmDash's.
 	const total = await urls(ctx).count(where as any);
 	const usage = await queryIn(
 		refs(ctx),

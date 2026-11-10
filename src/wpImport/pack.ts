@@ -41,7 +41,7 @@ export const F = { main: "wpImport" } as const;
 const FEATURES = [
 	{
 		id: F.main,
-		label: "WordPress import",
+		label: "WordPress Migration",
 		description:
 			"Tools to finish a move from WordPress: keep heading ids, reusable blocks and Details blocks, credit co-authors and guest authors, restore category and page parents, point old /wp-content/ URLs at the media library, and bring over redirects. Blocks from Coywolf's WordPress plugins become Coywolf Pack blocks as content is imported or saved.",
 		default: false,
@@ -342,10 +342,10 @@ const UID = /^[0-9a-f]{32}$/;
 export function wpImportPack(): PackModule {
 	return {
 		id: "wpImport",
-		label: "WordPress import",
+		label: "WordPress Migration",
 		features: FEATURES,
 		capabilities: ["content:read", "content:write", "schema:read"],
-		adminPages: [{ path: "/wordpress-import", label: "WordPress import", icon: "upload-simple" }],
+		adminPages: [{ path: "/wordpress-import", label: "WordPress Migration", icon: "upload-simple" }],
 		hooks: { "content:beforeSave": beforeSave },
 		routes: {
 			"wpImport/settings": {

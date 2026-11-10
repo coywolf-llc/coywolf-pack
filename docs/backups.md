@@ -4,12 +4,14 @@
 
 - **Database**: a restorable SQL dump of the site's D1 database: users, passkeys, settings, redirects, menus, plugin data, and content. Search indexes rebuild automatically on restore.
 - **Media**: a mirror of the R2 media bucket. Replaced or deleted files are kept under a dated folder until retention expires.
-- **Private form uploads**: when the site has a `FORM_UPLOADS` binding (**Private form uploads**), a mirror of that bucket too, under `uploads/`. Set `backups.uploads` to another binding name, or `false` to leave uploads out. Keep the backup bucket private: these are files people sent through forms.
+- **Private Form Uploads**: when the site has a `FORM_UPLOADS` binding (**Private Form Uploads**), a mirror of that bucket too, under `uploads/`. Set `backups.uploads` to another binding name, or `false` to leave uploads out. Keep the backup bucket private: these are files people sent through forms.
 - **Large rows**: D1 rejects statements over 100 KB, but posts can be bigger. Rows that don't fit in one INSERT are written with their long values in pieces, and the restore puts them back together exactly. Plugin caches are left out (they rebuild on demand). Rows are read up to 500 at a time, fewer when they're large: each read is sized from the bytes the previous one returned (about 8 MB), and a read D1 refuses as too large (it rejects results over 50 MB from November 4, 2026) is asked again for fewer rows.
 - **Admin**: **Back up now**, **Download** any backup (see below), and a dashboard widget that warns when backups stop. Settings (**Schedule and retention** on the Backups page): daily scheduled backup (default off), retention (default 30 days), staleness warning (default 36 hours).
 - **Restore** (optional, see below): **Rewind to this backup** (D1 Time Travel, with **Undo rewind**), **Restore to a new database** (import plus per-table row-count check), and **Restore missing media** (media first, then private form uploads, a batch of 200 files per request until done).
 
 Theme code isn't included: it lives in your Git repository.
+
+Backups is part of the pack only when the site passes a `backups` option to `coywolfPlugin()`. Its switch is off on new sites (sites set up before 0.36.0, when it was on by default, keep it on); turn it on on the **Features** page (**Coywolf Pack → Features** in the sidebar).
 
 ## Download a backup
 

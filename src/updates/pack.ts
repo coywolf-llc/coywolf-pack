@@ -30,7 +30,7 @@ export function updatesPack(): PackModule {
 			/** The running version and npm's latest (asked at most once a day). */
 			"updates/status": {
 				permission: "plugins:manage" as const,
-				// biome-ignore lint/suspicious/noExplicitAny: plugin context.
+				// any: plugin context.
 				handler: async (ctx: any) => updateStatus(ctx, isOn(await ctxFeatures(ctx), "updates")),
 			},
 			/** Hide the notice for this version, for everyone on the site (a newer version shows again). */

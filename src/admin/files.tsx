@@ -3,11 +3,14 @@
  * with downloads, where each is used, a large-file uploader (through the site to
  * R2), and delete.
  */
-import { Badge, Banner, Button, Dialog, DropdownMenu, Input, Loader, Meter, Select, Tabs } from "@cloudflare/kumo";
+import { Badge, Banner, Button, DropdownMenu, Input, Meter, Select, Tabs } from "@cloudflare/kumo";
 import { ArrowsClockwise, CloudArrowUp, DotsThree, DownloadSimple, FileArrowDown, LinkSimple, Trash, X } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { ConfirmDialog } from "./confirm-dialog.js";
+import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { FILE_CSS, SAMPLE_FILE, renderFileCardHtml } from "../files/card.js";
 import { filesToCsv } from "../files/export.js";
 import { formatSize, iconFor } from "../files/format.js";
@@ -17,8 +20,11 @@ import { PreviewSection } from "./preview.js";
 import { SaveBar, isDirty } from "./save-bar.js";
 import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
 import { PartSwitches } from "./feature-switches.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/files";
+
+const post = apiPost(API);
 const CONCURRENCY = 4;
 
 interface Usage {
@@ -64,19 +70,8 @@ interface FilesSettings {
 
 type Filter = "all" | "used" | "unused";
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
 const formatDate = (iso: string | null) => (iso ? dateFormat.format(new Date(iso)) : "");
-
-async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-		signal,
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
 
 function TypeBadge({ ext }: { ext: string }) {
 	const icon = iconFor(ext);
@@ -136,7 +131,7 @@ function sendPart(id: string, partNumber: number, body: Blob, onProgress: (loade
 }
 
 async function uploadLarge(file: File, onProgress: (p: UploadProgress) => void, signal: AbortSignal): Promise<{ id: string; url: string }> {
-	const start = await post<{ id: string; partSize: number; partCount: number }>("upload-start", { name: file.name, size: file.size, type: file.type }, signal);
+	const start = await post<{ id: string; partSize: number; partCount: number }>("upload-start", { name: file.name, size: file.size, type: file.type }, { signal });
 	const { id, partSize, partCount } = start;
 	try {
 		const loaded = new Array<number>(partCount + 1).fill(0);
@@ -173,7 +168,7 @@ async function uploadLarge(file: File, onProgress: (p: UploadProgress) => void, 
 			}
 		}
 		await Promise.all(Array.from({ length: Math.min(CONCURRENCY, partCount) }, worker));
-		return await post<{ id: string; url: string }>("upload-complete", { id, parts: etags }, signal);
+		return await post<{ id: string; url: string }>("upload-complete", { id, parts: etags }, { signal });
 	} catch (error) {
 		await post("upload-abort", { id }).catch(() => undefined);
 		throw error;
@@ -216,15 +211,19 @@ function DeleteDialog(props: { file: FileItem | null; onClose: () => void; onDel
 		}
 	};
 	return (
-		<Dialog.Root open={file !== null} onOpenChange={(open) => !open && !pending && props.onClose()}>
-			<Dialog className="p-6" size="lg">
-				<Dialog.Title className="text-lg font-semibold">{file?.status === "uploading" ? "Discard incomplete upload?" : `Delete ${file?.name}?`}</Dialog.Title>
-				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
-					The file is removed from the R2 bucket and can't be recovered. Its download link stops working.
-				</Dialog.Description>
+		<ConfirmDialog
+			open={file !== null}
+			onClose={props.onClose}
+			title={file?.status === "uploading" ? "Discard incomplete upload?" : `Delete ${file?.name ?? "this file"}?`}
+			description="The file is removed from the R2 bucket and can't be recovered. Its download link stops working."
+			confirmLabel="Delete file"
+			pendingLabel="Deleting…"
+			isPending={pending}
+			error={error}
+			onConfirm={() => void run()}
+		>
 				{file && file.usedIn.length > 0 && (
 					<Banner
-						className="mt-4"
 						variant="alert"
 						title={`Used in ${file.usedIn.length} ${file.usedIn.length === 1 ? "entry" : "entries"}`}
 						description={
@@ -235,17 +234,7 @@ function DeleteDialog(props: { file: FileItem | null; onClose: () => void; onDel
 						}
 					/>
 				)}
-				{error && <Banner className="mt-3" variant="error" role="alert" description={error} />}
-				<div className="mt-6 flex justify-end gap-2">
-					<Button variant="secondary" disabled={pending} onClick={props.onClose}>
-						Cancel
-					</Button>
-					<Button variant="destructive" disabled={pending} onClick={() => void run()}>
-						{pending ? "Deleting…" : "Delete file"}
-					</Button>
-				</div>
-			</Dialog>
-		</Dialog.Root>
+		</ConfirmDialog>
 	);
 }
 
@@ -253,7 +242,8 @@ function DeleteDialog(props: { file: FileItem | null; onClose: () => void; onDel
 
 type SettingsDraft = Omit<FilesSettings, "filesMaxUploadGb" | "r2SecretSet"> & { filesMaxUploadGb: string; filesR2SecretAccessKey: string };
 
-function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message: string) => void }) {
+function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => void }) {
+	const saveResult = useSaveResult();
 	const [saved, setSaved] = React.useState<FilesSettings>();
 	const [draft, setDraft] = React.useState<SettingsDraft>();
 	const [error, setError] = React.useState<string>();
@@ -279,6 +269,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 		if (!draft) return;
 		setPending(clearR2Secret ? "clear" : "save");
 		setError(undefined);
+		saveResult.clear();
 		try {
 			const { filesR2SecretAccessKey, filesMaxUploadGb, ...rest } = draft;
 			const result = await post<FilesSettings>("settings/save", {
@@ -287,9 +278,13 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 				...(clearR2Secret ? { clearR2Secret: true } : filesR2SecretAccessKey.trim() ? { filesR2SecretAccessKey: filesR2SecretAccessKey.trim() } : {}),
 			});
 			apply(result);
-			props.onSaved(clearR2Secret ? "R2 secret access key removed." : "File Downloads settings saved.");
+			saveResult.saved(clearR2Secret ? "R2 secret access key removed" : "File Downloads settings saved");
+			props.onSaved();
 		} catch (cause) {
-			setError(errorText(cause, "Could not save the settings"));
+			const message = errorText(cause, "Could not save the settings");
+			saveResult.failed(message);
+			// Removing the secret happens with the form clean, when the Save bar (and its message) isn't showing.
+			if (clearR2Secret) setError(message);
 		} finally {
 			setPending(undefined);
 		}
@@ -299,9 +294,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 		return error ? (
 			<Banner variant="error" role="alert" title="Could not load the settings" description={error} />
 		) : (
-			<div className="py-12 text-center">
-				<Loader />
-			</div>
+			<Loading className="py-12 text-center" />
 		);
 
 	const field = (key: "filesBase" | "filesPublicBaseUrl" | "filesAccent" | "filesR2AccountId" | "filesR2AccessKeyId" | "filesR2Bucket") => ({
@@ -363,7 +356,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 						<>
 							Files over 50 MB, or of any type, upload straight from the browser to R2 through its S3 API. Create an R2 API token with Object Read &amp; Write
 							on the bucket. R2 storage and operations are billed to your account.
-							{!props.largeUploadsEnabled && " Turn on Large uploads under Plugins → Coywolf Pack to use them."}
+							{!props.largeUploadsEnabled && " Turn on Large uploads (Turn parts on or off, at the top of this page) to use them."}
 						</>
 					}
 				>
@@ -397,6 +390,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: (message:
 				{error && <Banner variant="error" role="alert" description={error} />}
 			</form>
 			<SaveBar
+				error={saveResult.error}
 				form="cw-files-settings-form"
 				dirty={dirty}
 				saving={pending === "save"}
@@ -506,10 +500,10 @@ export function FilesPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Files</h1>
-					<div className="flex shrink-0 flex-wrap justify-end gap-2">
+			<PageHeader
+				title="File Downloads"
+				actions={
+					<>
 						{tab === "files" && (
 							<Button variant="secondary" icon={<DownloadSimple />} disabled={!data?.items.length} title="Download the list of files, with download counts and where each is used, as a CSV file" onClick={exportCsv}>
 								Export CSV
@@ -539,8 +533,10 @@ export function FilesPage() {
 								/>
 							</>
 						)}
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Files offered for download with the File download block: Media Library files used in blocks, and large uploads.
 						{data ? (
 							<>
@@ -548,9 +544,10 @@ export function FilesPage() {
 								Download links look like <code>/{data.base}/&lt;id&gt;/&lt;file name&gt;</code>.
 							</>
 						) : null}
-						{data && !data.largeUploadsEnabled ? " Turn on Large uploads (Plugins → Coywolf Pack) to upload files over 50 MB or of any type." : ""}
-					</p>
-				</div>
+						{data && !data.largeUploadsEnabled ? " Turn on Large uploads below to upload files over 50 MB or of any type." : ""}
+					</>
+				}
+			>
 				{tab === "files" && (
 				<div className="flex flex-col gap-2 sm:flex-row sm:items-end">
 					<div className="sm:w-72">
@@ -575,7 +572,7 @@ export function FilesPage() {
 					</div>
 				</div>
 				)}
-			</header>
+			</PageHeader>
 
 			<PartSwitches module="files" />
 
@@ -606,9 +603,8 @@ export function FilesPage() {
 			{tab === "settings" ? (
 				<SettingsPanel
 					largeUploadsEnabled={data?.largeUploadsEnabled ?? false}
-					onSaved={(message) => {
+					onSaved={() => {
 						setError(undefined);
-						setNotice(message);
 						void load();
 					}}
 				/>
@@ -627,9 +623,7 @@ export function FilesPage() {
 			)}
 
 			{tab !== "files" ? null : !data && !error ? (
-				<div className="py-12 text-center text-kumo-subtle">
-					<Loader />
-				</div>
+				<Loading className="py-12 text-center text-kumo-subtle" />
 			) : data && data.items.length === 0 ? (
 				<div className="py-10 text-center text-kumo-subtle">
 					<FileArrowDown size={40} className="mx-auto mb-3 opacity-30" aria-hidden="true" />
@@ -732,14 +726,14 @@ export function FilesPage() {
 											<>
 												<DropdownMenu.Item
 													className="py-1 data-highlighted:bg-kumo-fill"
-													icon={<LinkSimple className="me-1.5 size-3.5" aria-hidden="true" />}
+													icon={LinkSimple}
 													onClick={() => void copy(file)}
 												>
 													Copy download link
 												</DropdownMenu.Item>
 												<DropdownMenu.Item
 													className="py-1 data-highlighted:bg-kumo-fill"
-													icon={<FileArrowDown className="me-1.5 size-3.5" aria-hidden="true" />}
+													icon={FileArrowDown}
 													onClick={() => window.open(file.url!, "_blank", "noopener")}
 												>
 													Download
@@ -749,9 +743,9 @@ export function FilesPage() {
 										{file.source === "upload" && (
 											<>
 												{file.url && <DropdownMenu.Separator className="my-0.5" />}
-												<DropdownMenu.Item
-													className="py-1 data-highlighted:bg-kumo-fill"
-													icon={<Trash className="me-1.5 size-3.5" aria-hidden="true" />}
+												<DropdownMenu.Item variant="danger"
+													className="py-1"
+													icon={Trash}
 													onClick={() => setDeleting(file)}
 												>
 													{file.status === "uploading" ? "Discard" : "Delete"}

@@ -11,10 +11,13 @@ import { ArrowsClockwise, Fire, Lightning } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
-import { errorText } from "./settings-ui.js";
+import { apiPost, errorText } from "./api.js";
+import { DocsLink, PageHeader } from "./page.js";
 import { UsageCard } from "./usage.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/cache";
+
+const post = apiPost(API, { fallback: "Something went wrong" });
 
 interface Lifetimes {
 	maxAgeDays: number;
@@ -75,14 +78,6 @@ function warmText(state: NonNullable<WarmStatus["state"]>): string {
 function dailyText(state: NonNullable<WarmStatus["state"]>): string | null {
 	if (state.phase !== "done" || state.rewarmAfter || !state.nextDailyAt) return null;
 	return `Next daily refresh: about ${new Date(state.nextDailyAt).toLocaleString()}.`;
-}
-
-async function post<T>(path: string, body?: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
-	});
-	return parseApiResponse<T>(response, "Something went wrong");
 }
 
 const days = (seconds?: number) => (seconds ? Math.round(seconds / 86400) : 0);
@@ -192,15 +187,17 @@ export function PerformancePage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Performance</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="Performance"
+				description={
+					<>
 					Cloudflare keeps copies of your public pages at its edge (Workers Cache), so visitors get them without waiting for the
 					site to build them. EmDash clears the pages that change when you publish or edit content, menus or settings; Coywolf
 					Pack clears the pages its settings change. Each deploy starts with an empty cache. These settings take effect on sites that
-					turn on Workers Cache (Astro's cacheCloudflare(); see docs/performance.md in the Coywolf Pack repository).
-				</p>
-			</header>
+					turn on Workers Cache (Astro's cacheCloudflare(); see <DocsLink doc="performance">the Performance docs</DocsLink>).
+					</>
+				}
+			/>
 
 			<section className="rounded-lg border border-kumo-line" aria-label="Performance settings">
 			<div className="divide-y divide-kumo-line">

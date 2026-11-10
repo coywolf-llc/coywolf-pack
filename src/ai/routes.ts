@@ -61,7 +61,7 @@ const listInput = z.object({ cursor: z.string().max(2000).optional(), filter: z.
 async function featureForBulk(ctx: PluginContext, kind: BulkState["kind"]) {
 	const features = await ctxFeatures(ctx);
 	const on = kind === "media" ? isOn(features, "ai.imageText") : isOn(features, "ai.entities") || isOn(features, "ai.descriptions");
-	if (!on) throw PluginRouteError.notFound("Turn on the matching AI feature first (Plugins → Coywolf Pack).");
+	if (!on) throw PluginRouteError.notFound("Turn on the matching AI feature first (Coywolf Pack → Features, or the AI Enrichment page).");
 }
 
 export function aiRoutes(options: AiOptions) {

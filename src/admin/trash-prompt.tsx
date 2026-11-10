@@ -11,7 +11,8 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 import { createRoot } from "react-dom/client";
 
-import { REMOVED_API, RedirectDialog, RemovedItemRow, errorText, resolve } from "./redirects-removed.js";
+import { errorText } from "./api.js";
+import { REMOVED_API, RedirectDialog, RemovedItemRow, resolve } from "./redirects-removed.js";
 import { type Pending, collectRemovals, watchContentRemovals } from "./trash-prompt-core.js";
 
 let push: ((items: Pending[]) => void) | null = null;

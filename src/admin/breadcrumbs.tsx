@@ -3,12 +3,15 @@
  * component, with a live preview, plus a step-by-step guide for adding the
  * component to an Astro theme.
  */
-import { Banner, Button, Checkbox, Input, Loader, Select } from "@cloudflare/kumo";
+import { Banner, Button, Checkbox, Input, Select } from "@cloudflare/kumo";
 import { Check, Copy } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { errorText } from "./api.js";
+import { FeaturesLink, Loading, PageHeader } from "./page.js";
 import { SaveBar, isDirty } from "./save-bar.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/breadcrumbs";
 
@@ -36,8 +39,6 @@ const SEPARATOR_ITEMS = [
 	{ value: "arrow", label: "→  Arrow" },
 	{ value: "gt", label: ">  Greater-than" },
 ];
-
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 
 function Section(props: { title: string; description: React.ReactNode; children: React.ReactNode; collapsed?: boolean }) {
 	const id = `cw-breadcrumbs-${props.title.toLowerCase().replace(/[^a-z]+/g, "-")}`;
@@ -122,7 +123,7 @@ function Code({ code, label }: { code: string; label: string }) {
 			<pre className="overflow-x-auto rounded-md border border-kumo-line bg-kumo-tint p-3 pe-24 text-xs leading-5" aria-label={label}>
 				<code>{code}</code>
 			</pre>
-			<div className="absolute right-2 top-2 flex items-center gap-2">
+			<div className="absolute end-2 top-2 flex items-center gap-2">
 				<span className="sr-only" aria-live="polite">
 					{status === "copied" ? `${label} copied` : status === "failed" ? "Couldn't copy. Select the code and copy it instead." : ""}
 				</span>
@@ -138,7 +139,7 @@ function Step(props: { n: number; title: string; children: React.ReactNode }) {
 	return (
 		<li className="space-y-3">
 			<h3 className="text-sm font-semibold">
-				<span className="mr-2 inline-flex size-6 items-center justify-center rounded-full border border-kumo-line text-xs" aria-hidden="true">
+				<span className="me-2 inline-flex size-6 items-center justify-center rounded-full border border-kumo-line text-xs" aria-hidden="true">
 					{props.n}
 				</span>
 				{props.title}
@@ -297,7 +298,7 @@ export function BreadcrumbsPage() {
 	const [settings, setSettings] = React.useState<Settings | null>(null);
 	const [saved, setSaved] = React.useState<Settings | null>(null);
 	const [error, setError] = React.useState<string | null>(null);
-	const [notice, setNotice] = React.useState<string | null>(null);
+	const result = useSaveResult();
 	const [saving, setSaving] = React.useState(false);
 
 	React.useEffect(() => {
@@ -320,8 +321,7 @@ export function BreadcrumbsPage() {
 	async function save() {
 		if (!settings) return;
 		setSaving(true);
-		setError(null);
-		setNotice(null);
+		result.clear();
 		try {
 			const response = await apiFetch(`${API}/settings/save`, {
 				method: "POST",
@@ -331,9 +331,9 @@ export function BreadcrumbsPage() {
 			const next = (await parseApiResponse<{ settings: Settings }>(response, "Couldn't save")).settings;
 			setSettings(next);
 			setSaved(next);
-			setNotice("Settings saved. Pages pick them up within a minute.");
+			result.saved("Settings saved", "Pages pick them up within a minute.");
 		} catch (cause) {
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setSaving(false);
 		}
@@ -341,21 +341,20 @@ export function BreadcrumbsPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Breadcrumb Nav</h1>
-				<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+			<PageHeader
+				title="Breadcrumb Nav"
+				description={
+					<>
 					An accessible breadcrumb trail for your pages, as a component in your theme's layout or as a Breadcrumbs block in content.
 					These defaults apply to both; the component's props and each block can override them.
-				</p>
-			</header>
+					</>
+				}
+			/>
 
-			<div aria-live="polite">{notice && <Banner variant="default" role="status" title={notice} />}</div>
 			{error && <Banner variant="error" role="alert" description={error} />}
 
 			{!settings && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{settings && (
@@ -411,7 +410,12 @@ export function BreadcrumbsPage() {
 			<Section
 				collapsed
 				title="Add the breadcrumb nav to your Astro theme"
-				description="Put the Breadcrumbs component in a layout once and every page that uses the layout gets a trail. Nothing renders while Breadcrumb Nav is turned off under Plugins → Coywolf Pack."
+				description={
+					<>
+						Put the Breadcrumbs component in a layout once and every page that uses the layout gets a trail. Nothing renders while Breadcrumb Nav is turned
+						off on <FeaturesLink />.
+					</>
+				}
 			>
 				<ol className="grid gap-8">
 					<Step n={1} title="Import the component">
@@ -455,19 +459,19 @@ export function BreadcrumbsPage() {
 					<Step n={4} title="Adjust it with props (optional)">
 						<p>Props override the settings above for that one placement.</p>
 						<div className="overflow-x-auto">
-							<table className="w-full text-left text-sm">
+							<table className="w-full text-start text-sm">
 								<thead className="text-kumo-subtle">
 									<tr>
-										<th scope="col" className="py-1 pr-4 font-medium">Prop</th>
-										<th scope="col" className="py-1 pr-4 font-medium">Type</th>
+										<th scope="col" className="py-1 cw-pe-4 font-medium">Prop</th>
+										<th scope="col" className="py-1 cw-pe-4 font-medium">Type</th>
 										<th scope="col" className="py-1 font-medium">What it does</th>
 									</tr>
 								</thead>
 								<tbody className="divide-y divide-kumo-line">
 									{PROPS.map((p) => (
 										<tr key={p.name} className="align-top">
-											<td className="whitespace-nowrap py-2 pr-4"><C>{p.name}</C></td>
-											<td className="whitespace-nowrap py-2 pr-4 text-kumo-subtle">{p.type}</td>
+											<td className="whitespace-nowrap py-2 cw-pe-4"><C>{p.name}</C></td>
+											<td className="whitespace-nowrap py-2 cw-pe-4 text-kumo-subtle">{p.type}</td>
 											<td className="py-2">{p.description}</td>
 										</tr>
 									))}
@@ -488,17 +492,17 @@ export function BreadcrumbsPage() {
 						</p>
 						<Code label="Markup" code={MARKUP_CODE} />
 						<div className="overflow-x-auto">
-							<table className="w-full text-left text-sm">
+							<table className="w-full text-start text-sm">
 								<thead className="text-kumo-subtle">
 									<tr>
-										<th scope="col" className="py-1 pr-4 font-medium">Class or property</th>
+										<th scope="col" className="py-1 cw-pe-4 font-medium">Class or property</th>
 										<th scope="col" className="py-1 font-medium">What it is</th>
 									</tr>
 								</thead>
 								<tbody className="divide-y divide-kumo-line">
 									{CLASSES.map((c) => (
 										<tr key={c.name} className="align-top">
-											<td className="whitespace-nowrap py-2 pr-4"><C>{c.name}</C></td>
+											<td className="whitespace-nowrap py-2 cw-pe-4"><C>{c.name}</C></td>
 											<td className="py-2">{c.description}</td>
 										</tr>
 									))}
@@ -536,7 +540,7 @@ export function BreadcrumbsPage() {
 				</ol>
 			</Section>
 
-			<SaveBar form="cw-breadcrumbs-form" dirty={dirty} saving={saving} onDiscard={() => setSettings(saved)} />
+			<SaveBar error={result.error} form="cw-breadcrumbs-form" dirty={dirty} saving={saving} onDiscard={() => setSettings(saved)} />
 		</div>
 	);
 }

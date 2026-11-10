@@ -8,17 +8,23 @@
  * The routes live on the Forms plugin, which privateFormUploads() wraps
  * (see src/formUploads/wrap.ts).
  */
-import { Badge, Banner, Button, Checkbox, Dialog, Input, Loader, Select } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Input, Select } from "@cloudflare/kumo";
 import { ArrowClockwise, DownloadSimple, Trash } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { ConfirmDialog } from "./confirm-dialog.js";
+import { apiPost, errorText } from "./api.js";
+import { DocsLink, FeaturesLink, Loading, PageHeader } from "./page.js";
 import { formatBytes, totalFromContentRange, type FormUploadsConfig, type UploadEntry } from "../formUploads/lib.js";
 import { saveFile } from "./download.js";
 import { SaveBar, isDirty } from "./save-bar.js";
-import { SettingsSection, SetupCard, errorText, wholeNumber } from "./settings-ui.js";
+import { SettingsSection, SetupCard, wholeNumber } from "./settings-ui.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/emdash-forms/coywolf-private-uploads";
+
+const post = apiPost(API);
 
 interface FormInfo {
 	id: string;
@@ -45,15 +51,6 @@ const SCOPE_ITEMS = [
 	{ value: "all", label: "All forms" },
 	{ value: "selected", label: "Only the forms checked below" },
 ];
-
-async function post<T>(path: string, body: unknown, fallback: string): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, fallback);
-}
 
 async function errorFrom(response: Response, fallback: string): Promise<Error> {
 	try {
@@ -108,23 +105,17 @@ function DeleteDialog(props: { item: Item | null; onClose: () => void; onDeleted
 		}
 	};
 	return (
-		<Dialog.Root open={item !== null} onOpenChange={(open) => !open && !pending && props.onClose()}>
-			<Dialog className="p-6" size="lg">
-				<Dialog.Title className="text-lg font-semibold">Delete {item?.filename}?</Dialog.Title>
-				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
-					The file is removed from the private bucket and can't be recovered. The submission stays, and still shows the file name.
-				</Dialog.Description>
-				{error && <Banner className="mt-3" variant="error" role="alert" description={error} />}
-				<div className="mt-6 flex justify-end gap-2">
-					<Button variant="secondary" disabled={pending} onClick={props.onClose}>
-						Cancel
-					</Button>
-					<Button variant="destructive" disabled={pending} onClick={() => void run()}>
-						{pending ? "Deleting…" : "Delete file"}
-					</Button>
-				</div>
-			</Dialog>
-		</Dialog.Root>
+		<ConfirmDialog
+			open={item !== null}
+			onClose={props.onClose}
+			title={`Delete ${item?.filename ?? "this file"}?`}
+			description="The file is removed from the private bucket and can't be recovered. The submission stays, and still shows the file name."
+			confirmLabel="Delete file"
+			pendingLabel="Deleting…"
+			isPending={pending}
+			error={error}
+			onConfirm={() => void run()}
+		/>
 	);
 }
 
@@ -136,12 +127,12 @@ function UploadsTable(props: { items: Item[]; onDelete: (item: Item) => void }) 
 		<div className="space-y-3">
 			{error && <Banner variant="error" role="alert" description={error} />}
 			<div className="overflow-x-auto">
-				<table className="w-full text-left text-sm">
+				<table className="w-full text-start text-sm">
 					<thead className="text-kumo-subtle">
 						<tr className="border-b border-kumo-line">
-							<th className="py-2 pr-4 font-medium">File</th>
-							<th className="py-2 pr-4 font-medium">Form</th>
-							<th className="py-2 pr-4 font-medium">Submission</th>
+							<th className="py-2 cw-pe-4 font-medium">File</th>
+							<th className="py-2 cw-pe-4 font-medium">Form</th>
+							<th className="py-2 cw-pe-4 font-medium">Submission</th>
 							<th className="py-2 font-medium">
 								<span className="sr-only">Actions</span>
 							</th>
@@ -150,7 +141,7 @@ function UploadsTable(props: { items: Item[]; onDelete: (item: Item) => void }) 
 					<tbody>
 						{props.items.map((item) => (
 							<tr key={item.id} className="border-b border-kumo-line align-top">
-								<td className="py-3 pr-4" style={{ minWidth: 200, maxWidth: 320 }}>
+								<td className="py-3 cw-pe-4" style={{ minWidth: 200, maxWidth: 320 }}>
 									<div className="font-medium" style={{ overflowWrap: "anywhere" }}>
 										{item.filename}
 									</div>
@@ -160,11 +151,11 @@ function UploadsTable(props: { items: Item[]; onDelete: (item: Item) => void }) 
 									<div className="text-kumo-subtle">Uploaded {dateTime(item.uploadedAt)}</div>
 									{item.source === "media-library" && <Badge variant="secondary">Moved from the media library</Badge>}
 								</td>
-								<td className="py-3 pr-4" style={{ minWidth: 140 }}>
+								<td className="py-3 cw-pe-4" style={{ minWidth: 140 }}>
 									<div>{item.formName || item.formSlug || "Unknown form"}</div>
 									{item.fieldLabel && <div className="text-kumo-subtle">{item.fieldLabel}</div>}
 								</td>
-								<td className="py-3 pr-4" style={{ minWidth: 200, maxWidth: 360 }}>
+								<td className="py-3 cw-pe-4" style={{ minWidth: 200, maxWidth: 360 }}>
 									{item.submission ? (
 										<>
 											<div>
@@ -274,6 +265,7 @@ export function FormUploadsPage() {
 	const [saving, setSaving] = React.useState(false);
 	const [error, setError] = React.useState<string | null>(null);
 	const [message, setMessage] = React.useState("");
+	const result = useSaveResult();
 	const [deleting, setDeleting] = React.useState<Item | null>(null);
 
 	const load = React.useCallback(async () => {
@@ -305,34 +297,36 @@ export function FormUploadsPage() {
 		event?.preventDefault();
 		if (!draft) return;
 		setSaving(true);
-		setError(null);
+		result.clear();
 		try {
 			const config = await post<FormUploadsConfig>("settings", draft, "Couldn't save");
 			setDraft(config);
 			setStatus((cur) => (cur ? { ...cur, config } : cur));
-			setMessage("Saved.");
+			result.saved("Settings saved");
 		} catch (cause) {
-			setError(errorText(cause, "Couldn't save"));
+			result.failed(errorText(cause, "Couldn't save"));
 		} finally {
 			setSaving(false);
 		}
 	}
 
 	const header = (
-		<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-			<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-				<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Form uploads</h1>
-				<div className="flex shrink-0 justify-end">
+		<PageHeader
+			title="Private Form Uploads"
+			actions={
+				<>
 					<Button variant="secondary" icon={<ArrowClockwise />} onClick={() => void load()} aria-label="Refresh the list">
 						Refresh
 					</Button>
-				</div>
-				<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+				</>
+			}
+			description={
+				<>
 					Files people send with your forms are kept in a private storage bucket, not the public media library. Only admins can download them,
 					here. Deleting a submission in Forms deletes its files too.
-				</p>
-			</div>
-		</header>
+				</>
+			}
+		/>
 	);
 
 	if (missing) {
@@ -344,7 +338,7 @@ export function FormUploadsPage() {
 					description={
 						<>
 							Wrap the Forms plugin in astro.config.mjs with <code>privateFormUploads(formsPlugin())</code> (imported from @coywolf/emdash), add an R2
-							bucket binding named FORM_UPLOADS in wrangler.jsonc (a bucket with no public access), and deploy. See docs/form-uploads.md in the Coywolf Pack repository.
+							bucket binding named FORM_UPLOADS in wrangler.jsonc (a bucket with no public access), and deploy. See <DocsLink doc="form-uploads">the Private Form Uploads docs</DocsLink>.
 						</>
 					}
 				/>
@@ -361,9 +355,7 @@ export function FormUploadsPage() {
 			</p>
 
 			{!status && !error && (
-				<div className="flex justify-center py-12">
-					<Loader />
-				</div>
+				<Loading />
 			)}
 
 			{status && !status.bucketBound && (
@@ -376,7 +368,11 @@ export function FormUploadsPage() {
 				<Banner
 					variant="alert"
 					title="Private form uploads is off"
-					description="New files go to the public media library. Turn on Private form uploads on the Coywolf Pack page. Files already here stay private."
+					description={
+						<>
+							New files go to the public media library. Turn on Private Form Uploads on <FeaturesLink />. Files already here stay private.
+						</>
+					}
 				/>
 			)}
 
@@ -425,7 +421,7 @@ export function FormUploadsPage() {
 
 			{status && (
 				<SettingsSection id="cw-form-uploads-list" title="Private uploads" description="Newest first. Downloads are saved as files and never open in the browser.">
-					{items === null ? <Loader /> : <UploadsTable items={items} onDelete={setDeleting} />}
+					{items === null ? <Loading className="" /> : <UploadsTable items={items} onDelete={setDeleting} />}
 				</SettingsSection>
 			)}
 
@@ -439,7 +435,7 @@ export function FormUploadsPage() {
 				}}
 			/>
 
-			{status && draft && <SaveBar form="cw-form-uploads-form" dirty={dirty} saving={saving} onDiscard={() => setDraft(status.config)} />}
+			{status && draft && <SaveBar error={result.error} form="cw-form-uploads-form" dirty={dirty} saving={saving} onDiscard={() => setDraft(status.config)} />}
 		</div>
 	);
 }

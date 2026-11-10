@@ -2,7 +2,7 @@
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-The structured data and social tags from Coywolf SEO for WordPress, configured on **Plugins → Schema**. Everything is off until you turn it on under **Plugins → Coywolf Pack → Schema & Social**:
+The structured data and social tags from Coywolf SEO for WordPress, configured on the Schema & Social page (**SEO → Schema & Social**). Everything is off until you turn it on on the **Features** page (**Coywolf Pack → Features** in the sidebar):
 
 | Feature | What it does |
 | --- | --- |

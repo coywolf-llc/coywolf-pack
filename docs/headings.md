@@ -2,7 +2,7 @@
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-Ported from Coywolf SEO. Off until you turn it on under **Plugins → Coywolf Pack**:
+Ported from Coywolf SEO. Off until you turn it on on the **Features** page (**Coywolf Pack → Features** in the sidebar):
 
 | Feature | Default | What it does |
 | --- | --- | --- |

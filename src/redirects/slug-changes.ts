@@ -33,7 +33,7 @@ interface KnownUrl {
 	at: string;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: plugin storage collections are untyped here.
+// any: plugin storage collections are untyped here.
 const urls = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[STORE] as {
 	get(id: string): Promise<KnownUrl | null>;
 	put(id: string, data: KnownUrl): Promise<void>;

@@ -12,7 +12,7 @@
  */
 import type { PluginContext } from "emdash";
 
-import { CLOUDFLARE_API_HOST } from "../images/cloudflare.js";
+import { cloudflareApi, contextFetch } from "../core/cloudflare-api.js";
 import { IMAGES_SETTINGS } from "../images/settings.js";
 import { DEADLINES, sharedRead, sharedSlot } from "../core/single-flight.js";
 import { afterResponse, secret, workerEnv } from "../shared.js";
@@ -30,7 +30,6 @@ import {
 } from "./usage-core.js";
 import { WARMER_AGENT } from "./warm.js";
 
-const API = `https://${CLOUDFLARE_API_HOST}/client/v4`;
 export const USAGE_TOKEN_SETTING = "usageApiToken";
 const CACHE_KEY = "cache:usage";
 const TARGET_KEY = "state:usage:target";
@@ -64,14 +63,14 @@ type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 class UsageError extends Error {}
 
-async function api<T>(doFetch: Fetch, token: string, path: string, init: RequestInit = {}): Promise<T> {
-	const res = await doFetch(`${API}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers ?? {}) } });
-	const body = (await res.json().catch(() => ({}))) as { success?: boolean; result?: T; errors?: Array<{ message?: string }> | null; data?: unknown };
-	if (!res.ok || body.success === false || (Array.isArray(body.errors) && body.errors.length && body.data === undefined)) {
-		const detail = body.errors?.map((e) => e.message).filter(Boolean).join("; ") || res.statusText;
-		throw new UsageError(`Cloudflare API ${res.status}: ${detail}`);
+/** One reading through the shared client (src/core/cloudflare-api.ts); its errors are UsageErrors, as before. */
+async function api<T>(doFetch: Fetch, token: string, path: string, init: { method?: string; body?: string } = {}): Promise<T> {
+	try {
+		return (await cloudflareApi<T>(path, { token, fetch: doFetch, method: init.method ?? "GET", body: init.body, graphql: path === "/graphql" })).result;
+	} catch (error) {
+		// Its messages had no closing period before the shared client.
+		throw new UsageError((error instanceof Error ? error.message : String(error)).replace(/\.$/, ""));
 	}
-	return (path === "/graphql" ? body : body.result) as T;
 }
 
 /**
@@ -98,7 +97,7 @@ async function access(ctx: PluginContext, env: Record<string, unknown>): Promise
 	const token = await cloudflareReadToken(ctx, env);
 	if (!token) return { reason: "Add a read-only Cloudflare API token to see usage: the USAGE_API_TOKEN Worker secret, or Cloudflare usage on the plugin's Settings page. The steps are below." };
 	const accountId = secret(env, "CF_ACCOUNT_ID") || secret(env, "CLOUDFLARE_ACCOUNT_ID") || (await ctx.settings.get<string>(IMAGES_SETTINGS.accountId).catch(() => null))?.trim() || null;
-	const doFetch = (ctx.http ? ctx.http.fetch.bind(ctx.http) : fetch) as Fetch;
+	const doFetch = contextFetch(ctx) as Fetch;
 	return { token, accountId, doFetch };
 }
 
@@ -179,7 +178,7 @@ async function readUsage(ctx: PluginContext, a: { token: string; doFetch: Fetch 
 	});
 	if (body.errors?.length) throw new UsageError(`Cloudflare analytics: ${body.errors.map((e) => e.message).join("; ")}. The token needs Account → Account Analytics → Read.`);
 	const acc = body.data?.viewer?.accounts?.[0] ?? {};
-	// biome-ignore lint/suspicious/noExplicitAny: GraphQL rows.
+	// any: GraphQL rows.
 	const rows = (key: string) => (acc[key] ?? []) as any[];
 	const site = { databaseId: target.databaseId, worker: target.worker };
 	const periods = {

@@ -5,7 +5,7 @@ Coywolf Pack is an [EmDash](https://emdashcms.com) plugin that enhances existing
 - **Absurdly fast for humans and bots:** cached pages answer in 60–90 ms, cache warming keeps pages cached for visitors and crawlers alike, and images come straight from Cloudflare's edge.
 - **Enhances what EmDash already does:** redirects, search, robots.txt, schema, images and RSS feeds go well beyond EmDash's built-in versions and starter templates.
 - **Adds what EmDash doesn't have:** backups and restore, link checking, videos, reviews, AI enrichment and more.
-- **Manage your site like a pro:** turn each feature on or off, see your Cloudflare usage and estimated bill, and finish a move from WordPress. Everything starts off, so installing or updating changes nothing until you're ready.
+- **Manage your site like a pro:** turn each feature on or off, see your Cloudflare usage and estimated bill, and finish a move from WordPress. On a new site everything starts off, so installing changes nothing until you're ready, and updating never turns a feature on.
 - **Free and open source** (MIT).
 
 Start with [Getting started](../README.md#getting-started) to install the pack and turn features on.
@@ -20,17 +20,17 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 
 - [Clean Image URLs](images.md)
 - [Backups](backups.md)
-- [Redirects](redirects.md)
+- [Redirect Manager](redirects.md)
 - [Schema & Social](schema.md)
 - [Discovery](discovery.md): RSS feed, news sitemap, llms.txt, Crawler Hints status
-- [Robots.txt Rules](robots.md)
+- [Robots.txt](robots.md)
 - [Search](search.md)
 - [Link Manager](links.md)
 - [Headings & TOC](headings.md)
 - [Breadcrumb Nav](breadcrumbs.md)
 - [Code Blocks](code-blocks.md)
 - [File Downloads](files.md)
-- [Private form uploads](form-uploads.md)
+- [Private Form Uploads](form-uploads.md)
 - [Videos](videos.md)
 - [Reviews](reviews.md)
 - [Custom Blocks](custom-blocks.md)

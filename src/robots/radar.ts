@@ -12,12 +12,13 @@
  */
 import type { PluginContext } from "emdash";
 
+import { CLOUDFLARE_API_HOST, CloudflareApiError, cloudflareApi, contextFetch, errorDetail } from "../core/cloudflare-api.js";
 import { secret, workerEnv } from "../shared.js";
 import { type BotOverlay, type RadarBot, mergeRadar } from "./bots.js";
 import { baselineBots } from "./directory.js";
 
-export const RADAR_HOST = "api.cloudflare.com";
-const RADAR_URL = `https://${RADAR_HOST}/client/v4/radar/bots`;
+export const RADAR_HOST = CLOUDFLARE_API_HOST;
+const RADAR_PATH = "/radar/bots";
 const PAGE = 1000;
 const MAX_PAGES = 3;
 
@@ -73,24 +74,21 @@ export async function readOverlays(ctx: PluginContext): Promise<BotOverlay[]> {
 }
 
 async function fetchRadar(ctx: PluginContext, token: string): Promise<RadarBot[]> {
-	const doFetch = ctx.http ? ctx.http.fetch.bind(ctx.http) : fetch;
+	const doFetch = contextFetch(ctx);
 	const bots: RadarBot[] = [];
 	for (let page = 0; page < MAX_PAGES; page++) {
-		const url = `${RADAR_URL}?limit=${PAGE}&offset=${page * PAGE}&format=JSON`;
-		const response = await doFetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
-		const body = (await response.json().catch(() => null)) as {
-			success?: boolean;
-			result?: { bots?: RadarBot[] };
-			errors?: Array<{ code?: number; message?: string }>;
-		} | null;
-		if (!response.ok || !body?.success) {
-			const detail = body?.errors?.map((e) => e.message).filter(Boolean).join("; ");
-			if (response.status === 401 || response.status === 403) {
-				throw new Error(`Cloudflare rejected the Radar API token (${response.status}). It needs the Account → Radar → Read permission.`);
+		let result: { bots?: RadarBot[] } | null;
+		try {
+			({ result } = await cloudflareApi<{ bots?: RadarBot[] } | null>(`${RADAR_PATH}?limit=${PAGE}&offset=${page * PAGE}&format=JSON`, { token, fetch: doFetch, headers: { Accept: "application/json" } }));
+		} catch (error) {
+			if (!(error instanceof CloudflareApiError)) throw error;
+			if (error.status === 401 || error.status === 403) {
+				throw new Error(`Cloudflare rejected the Radar API token (${error.status}). It needs the Account → Radar → Read permission.`);
 			}
-			throw new Error(`Radar API error ${response.status}${detail ? `: ${detail}` : ""}`);
+			const detail = errorDetail(error.errors);
+			throw new Error(`Radar API error ${error.status}${detail ? `: ${detail}` : ""}`);
 		}
-		const list = body.result?.bots ?? [];
+		const list = result?.bots ?? [];
 		bots.push(...list);
 		if (list.length < PAGE) break;
 	}

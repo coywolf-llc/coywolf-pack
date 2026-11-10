@@ -13,6 +13,6 @@ export type { GuideId };
 /** A guide in a closed <details>, using the browser's own disclosure triangle. */
 export function CredentialGuide({ id }: { id: GuideId }) {
 	// Static, trusted HTML written in guide-content.ts (no user data).
-	// biome-ignore lint/security/noDangerouslySetInnerHtml: trusted constant markup.
+	// dangerouslySetInnerHTML: trusted constant markup.
 	return <div dangerouslySetInnerHTML={{ __html: guideHtml(GUIDES[id]) }} />;
 }

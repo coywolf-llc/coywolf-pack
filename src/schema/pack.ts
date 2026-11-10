@@ -57,7 +57,7 @@ export function schemaPack(options: SchemaOptions): PackModule {
 		features: FEATURES,
 		routes: schemaModule(options).routes,
 		hooks: { "page:metadata": schemaMetadataHook(options) },
-		adminPages: [{ path: "/schema", label: "Schema", icon: "tree-structure" }],
+		adminPages: [{ path: "/schema", label: "Schema & Social", icon: "tree-structure" }],
 		storage: schemaStorage,
 		capabilities: ["content:read", "schema:read", "bylines:read", "media:read"],
 	};

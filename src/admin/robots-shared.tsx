@@ -1,30 +1,19 @@
 /** Helpers shared by the Robots.txt admin page, its rule dialog and its Bots tab. */
 import { Badge } from "@cloudflare/kumo";
 import { CheckCircle, WarningCircle } from "@phosphor-icons/react";
-import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiGet, apiPost } from "./api.js";
 import type { BotEntry } from "../robots/bots.js";
 
 export const API = "/_emdash/api/plugins/coywolf-pack/robots";
 
-export const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
+export const post = apiPost(API);
+export const get = apiGet(API);
+
 export const newId = () => Math.random().toString(36).slice(2, 10);
 export const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
 export const dateTimeFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
-
-export async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
-
-export async function get<T>(path: string, fallback: string): Promise<T> {
-	return parseApiResponse<T>(await apiFetch(`${API}/${path}`), fallback);
-}
 
 /** Token → entry; when several bots share a token, a verified entry wins. */
 export function tokenIndex(bots: BotEntry[]): Map<string, BotEntry> {

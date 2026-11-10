@@ -1,7 +1,7 @@
 /**
  * Link Manager admin page and dashboard widget.
  */
-import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, Loader, Select, Switch } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, Select, Switch } from "@cloudflare/kumo";
 import {
 	ArrowClockwise,
 	ArrowSquareOut,
@@ -20,14 +20,18 @@ import {
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { linksToCsv } from "../links/export.js";
 import { saveFile, siteSlug, today } from "./download.js";
 import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/links";
+
+const post = apiPost(API);
 const ADMIN = "/_emdash/admin";
 
-type LinkStatus = "unchecked" | "ok" | "redirect" | "broken" | "blocked" | "error";
+export type LinkStatus = "unchecked" | "ok" | "redirect" | "broken" | "blocked" | "error";
 type StatusFilter = "all" | "ignored" | LinkStatus;
 type BadgeVariant = "secondary" | "error" | "warning" | "success" | "info" | "outline";
 
@@ -64,7 +68,7 @@ interface IgnoreRule {
 	value: string;
 }
 
-interface ScanState {
+export interface ScanState {
 	status: "idle" | "running";
 	startedAt: string | null;
 	finishedAt: string | null;
@@ -129,18 +133,8 @@ const RULE_TYPES = [
 	{ value: "regex", label: "Regular expression" },
 ];
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
 
 /** Run a batched edit route until every affected entry is done. */
 async function runEdit(path: "replace" | "unlink", body: Record<string, unknown>, onProgress: (done: number) => void): Promise<EditResult> {
@@ -377,13 +371,11 @@ function SettingsDialog(props: { open: boolean; onClose: () => void; onSaved: (m
 			<Dialog className="p-6" size="lg">
 				<Dialog.Title className="text-lg font-semibold">Link checking settings</Dialog.Title>
 				<Dialog.Description className="mt-1 text-sm text-kumo-subtle">
-					Nothing runs in the background until Scheduled link checking is on under Plugins → Coywolf Pack. Then a scheduled run scans your content
+					Nothing runs in the background until Scheduled link checking is on (Turn parts on or off, at the top of this page). Then a scheduled run scans your content
 					and checks the links that are due (broken links daily, the rest weekly), continuing hourly until it's done.
 				</Dialog.Description>
 				{!draft && !error ? (
-					<div className="py-8 text-center">
-						<Loader />
-					</div>
+					<Loading className="py-8 text-center" />
 				) : draft ? (
 					<form
 						className="mt-4 space-y-4"
@@ -657,10 +649,10 @@ export function LinksPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Link Manager</h1>
-					<div className="flex shrink-0 flex-wrap justify-end gap-2">
+			<PageHeader
+				title="Link Manager"
+				actions={
+					<>
 						<Button variant="secondary" icon={<GearSix />} onClick={() => setSettingsOpen(true)}>
 							Settings
 						</Button>
@@ -683,18 +675,21 @@ export function LinksPage() {
 							variant="primary"
 							icon={<ArrowClockwise />}
 							disabled={!data?.checking || Boolean(busy)}
-							title={data?.checking ? undefined : "Turn on Scheduled link checking under Plugins → Coywolf Pack"}
+							title={data?.checking ? undefined : "Turn on Scheduled link checking first (Turn parts on or off, below)"}
 							onClick={() => void recheck()}
 						>
 							Check now
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
+					</>
+				}
+				description={
+					<>
 						Every link in your content, where it's used, and whether it still works. Blocked means the destination refused a server (a bot wall such
 						as LinkedIn's 999 or Cloudflare's challenge): the link is probably fine.
-						{!data?.checking && " Turn on Scheduled link checking under Plugins → Coywolf Pack to check links (weekly by default; change it in Settings)."}
-					</p>
-				</div>
+						{!data?.checking && " Turn on Scheduled link checking below to check links (weekly by default; change it in Settings)."}
+					</>
+				}
+			>
 				<div className="flex flex-wrap gap-1" role="group" aria-label="Filter by status">
 					{FILTERS.map((f) => (
 						<Button key={f.id} size="sm" variant={status === f.id ? "primary" : "ghost"} aria-pressed={status === f.id} onClick={() => setStatus(f.id)}>
@@ -733,7 +728,7 @@ export function LinksPage() {
 						/>
 					</div>
 				</div>
-			</header>
+			</PageHeader>
 
 			<PartSwitches module="links" />
 
@@ -779,9 +774,7 @@ export function LinksPage() {
 			)}
 
 			{!data && !error ? (
-				<div className="py-12 text-center text-kumo-subtle">
-					<Loader />
-				</div>
+				<Loading className="py-12 text-center text-kumo-subtle" />
 			) : data && data.total === 0 ? (
 				<div className="py-10 text-center text-kumo-subtle">
 					<LinkSimple size={40} className="mx-auto mb-3 opacity-30" aria-hidden="true" />
@@ -859,23 +852,23 @@ export function LinksPage() {
 												render={<Button type="button" variant="ghost" shape="square" icon={<DotsThree aria-hidden="true" />} aria-label={`Actions for ${row.url}`} />}
 											/>
 											<DropdownMenu.Content className="p-1">
-												<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<PencilSimple className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => setReplacing([row])}>
+												<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={PencilSimple} onClick={() => setReplacing([row])}>
 													Change URL…
 												</DropdownMenu.Item>
-												<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<LinkBreak className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => setUnlinking([row])}>
+												<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={LinkBreak} onClick={() => setUnlinking([row])}>
 													Unlink…
 												</DropdownMenu.Item>
 												{data.checking && (
-													<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<ArrowClockwise className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => void recheck([row.id])}>
+													<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={ArrowClockwise} onClick={() => void recheck([row.id])}>
 														Recheck
 													</DropdownMenu.Item>
 												)}
 												<DropdownMenu.Separator className="my-0.5" />
-												<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<EyeSlash className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => void ignore([row], "url")}>
+												<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={EyeSlash} onClick={() => void ignore([row], "url")}>
 													Ignore this URL
 												</DropdownMenu.Item>
 												{row.host && (
-													<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={<Prohibit className="me-1.5 size-3.5" aria-hidden="true" />} onClick={() => void ignore([row], "domain")}>
+													<DropdownMenu.Item className="py-1 data-highlighted:bg-kumo-fill" icon={Prohibit} onClick={() => void ignore([row], "domain")}>
 														Ignore {row.host}
 													</DropdownMenu.Item>
 												)}
@@ -948,33 +941,6 @@ export function LinksPage() {
 					void load();
 				}}
 			/>
-		</div>
-	);
-}
-
-export function LinksWidget() {
-	const [data, setData] = React.useState<{ counts: Record<LinkStatus, number>; scan: ScanState }>();
-	const [error, setError] = React.useState<string>();
-	React.useEffect(() => {
-		apiFetch(`${API}/summary`)
-			.then((r) => parseApiResponse<{ counts: Record<LinkStatus, number>; scan: ScanState }>(r, "Could not load links"))
-			.then(setData)
-			.catch((cause) => setError(errorText(cause, "Could not load links")));
-	}, []);
-	if (error) return <p className="text-sm text-kumo-subtle">{error}</p>;
-	if (!data) return <Loader />;
-	const problems = data.counts.broken + data.counts.error;
-	const total = Object.values(data.counts).reduce((a, b) => a + b, 0);
-	return (
-		<div className="space-y-1 text-sm">
-			<p className={problems ? "font-medium text-kumo-danger" : "font-medium"}>{problems ? `${plural(problems, "broken link")}` : "No broken links"}</p>
-			<p className="text-kumo-subtle">
-				{plural(total, "link")} · {data.counts.blocked.toLocaleString()} blocked · {data.counts.redirect.toLocaleString()} redirected
-				{data.counts.unchecked ? ` · ${data.counts.unchecked.toLocaleString()} not checked` : ""}
-			</p>
-			<a className="text-kumo-link hover:underline" href={`${ADMIN}/plugins/coywolf-pack/links`}>
-				Open Link Manager
-			</a>
 		</div>
 	);
 }

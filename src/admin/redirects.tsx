@@ -1,11 +1,14 @@
 /**
- * Redirects admin page, styled like the EmDash admin's own Redirects page.
+ * Redirect Manager admin page, styled like the EmDash admin's own Redirects page.
  */
-import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea, Loader, Select } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Dialog, DropdownMenu, Input, InputArea, Select } from "@cloudflare/kumo";
 import { ArrowRight, ArrowsSplit, DotsThree, DownloadSimple, FileArrowUp, PencilSimple, Plus, Trash, UploadSimple } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { useConfirm } from "./confirm-dialog.js";
+import { apiPost, errorText } from "./api.js";
+import { AdminLink, Loading, PageHeader } from "./page.js";
 import { parseRedirectsImport, redirectsToCsv, redirectsToJson } from "../redirects/transfer.js";
 import type { RedirectRule } from "../redirects/rules.js";
 import { saveFile, siteSlug, today } from "./download.js";
@@ -13,6 +16,8 @@ import { RemovedContentPanel } from "./redirects-removed.js";
 import { PartSwitches } from "./feature-switches.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/redirects";
+
+const post = apiPost(API);
 
 interface Rule {
 	id: string;
@@ -37,17 +42,7 @@ const TYPE_LABELS: Record<number, string> = {
 	410: "410 Gone",
 };
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
 
 /** Download every rule (not just the filtered ones) in a format Import reads back. */
 async function exportRules(format: "csv" | "json"): Promise<number> {
@@ -218,6 +213,7 @@ function ImportDialog(props: { open: boolean; onClose: () => void; onImported: (
 }
 
 export function RedirectsPage() {
+	const [confirm, confirmDialog] = useConfirm();
 	const [rules, setRules] = React.useState<Rule[]>();
 	const [error, setError] = React.useState<string>();
 	const [query, setQuery] = React.useState("");
@@ -241,7 +237,7 @@ export function RedirectsPage() {
 	}, [load]);
 
 	const remove = async (rule: Rule) => {
-		if (!window.confirm(`Delete the redirect from ${rule.source}?`)) return;
+		if (!(await confirm({ title: "Delete this redirect?", description: `${rule.source} stops redirecting.`, confirmLabel: "Delete" }))) return;
 		try {
 			await post("delete", { id: rule.id });
 			setNotice(`Deleted ${rule.source}.`);
@@ -282,10 +278,11 @@ export function RedirectsPage() {
 
 	return (
 		<div className="space-y-6">
-			<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-				<div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-					<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Redirects</h1>
-					<div className="flex shrink-0 justify-end gap-2">
+			{confirmDialog}
+			<PageHeader
+				title="Redirect Manager"
+				actions={
+					<>
 						<Button variant="secondary" icon={<UploadSimple />} onClick={() => setImporting(true)}>
 							Import
 						</Button>
@@ -309,12 +306,15 @@ export function RedirectsPage() {
 						<Button variant="primary" icon={<Plus />} onClick={() => setEditing({})}>
 							New redirect
 						</Button>
-					</div>
-					<p className="col-span-2 text-sm leading-5 text-pretty text-kumo-subtle">
-						For redirects EmDash's built-in Redirects can't handle: external destinations (affiliate links, moved
+					</>
+				}
+				description={
+					<>
+						For redirects <AdminLink to="/redirects">EmDash's built-in Redirects</AdminLink> can't handle: external destinations (affiliate links, moved
 						articles) and file paths such as old <code>/wp-content/</code> URLs. Changes apply within a minute.
-					</p>
-				</div>
+					</>
+				}
+			>
 				<div className="flex flex-col gap-2 sm:flex-row sm:items-end">
 					<div className="sm:w-72">
 						<Input
@@ -345,7 +345,7 @@ export function RedirectsPage() {
 					</form>
 				</div>
 				{testResult && <p className="text-sm text-kumo-subtle">{testResult}</p>}
-			</header>
+			</PageHeader>
 
 			<PartSwitches module="redirects" />
 
@@ -354,9 +354,7 @@ export function RedirectsPage() {
 			<RemovedContentPanel onRuleCreated={() => void load()} />
 
 			{!rules && !error ? (
-				<div className="py-12 text-center text-kumo-subtle">
-					<Loader />
-				</div>
+				<Loading className="py-12 text-center text-kumo-subtle" />
 			) : rules && rules.length === 0 ? (
 				<div className="py-10 text-center text-kumo-subtle">
 					<ArrowsSplit size={40} className="mx-auto mb-3 opacity-30" aria-hidden="true" />
@@ -419,15 +417,15 @@ export function RedirectsPage() {
 									<DropdownMenu.Content className="p-1">
 										<DropdownMenu.Item
 											className="py-1 data-highlighted:bg-kumo-fill"
-											icon={<PencilSimple className="me-1.5 size-3.5" aria-hidden="true" />}
+											icon={PencilSimple}
 											onClick={() => setEditing(rule)}
 										>
 											Edit
 										</DropdownMenu.Item>
 										<DropdownMenu.Separator className="my-0.5" />
-										<DropdownMenu.Item
-											className="py-1 data-highlighted:bg-kumo-fill"
-											icon={<Trash className="me-1.5 size-3.5" aria-hidden="true" />}
+										<DropdownMenu.Item variant="danger"
+											className="py-1"
+											icon={Trash}
 											onClick={() => void remove(rule)}
 										>
 											Delete

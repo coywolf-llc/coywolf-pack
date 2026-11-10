@@ -14,12 +14,10 @@
  * it, with the read-only token the Performance page uses, and links to the
  * switch in the dashboard.
  */
-import { CLOUDFLARE_API_HOST } from "../images/cloudflare.js";
-import { DEADLINES, withDeadline } from "../core/single-flight.js";
+import { CloudflareApiError, type CloudflareErrorItem, type Fetch, cloudflareApi, scrubToken } from "../core/cloudflare-api.js";
+import { DEADLINES } from "../core/single-flight.js";
 
-const API = `https://${CLOUDFLARE_API_HOST}/client/v4`;
 
-type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 /** The dashboard page with the switch: Caching → Configuration of the site's zone. */
 export function crawlerHintsDashboardUrl(zone?: { name: string; accountId: string | null } | null): string {
@@ -66,51 +64,25 @@ export interface CrawlerHintsStatus {
 	checkedAt: string;
 }
 
-class CloudflareApiError extends Error {
-	readonly status: number;
-	readonly codes: number[];
-	constructor(status: number, codes: number[], message: string) {
-		super(message);
-		this.status = status;
-		this.codes = codes;
-	}
-}
+/** Cloudflare's messages, each with the code at the end of its chain (6003 "Invalid request headers" → 6111 "Invalid format for Authorization header"). */
+const chainDetail = (errors: CloudflareErrorItem[]) =>
+	errors
+		.map((e) => {
+			const last = Array.isArray(e.error_chain) && e.error_chain.length ? e.error_chain[e.error_chain.length - 1] : e;
+			return last.code ? `${last.message ?? "error"} (code ${last.code})` : last.message;
+		})
+		.filter(Boolean)
+		.join("; ");
 
-/** One Cloudflare API call with its own deadline; the token never appears in an error. */
+/** One Cloudflare API read through the shared client (src/core/cloudflare-api.ts), with its own deadline; the token never appears in an error. */
 async function api<T>(doFetch: Fetch, token: string, path: string): Promise<T> {
-	type ApiError = { code?: number; message?: string; error_chain?: ApiError[] | null };
-	type Body = { success?: boolean; result?: T; errors?: ApiError[] | null };
-	// The deadline covers the answer's body too, and a call past it is aborted.
-	const controller = new AbortController();
-	let response: Response;
-	let body: Body;
 	try {
-		({ response, body } = await withDeadline(
-			(async () => {
-				const r = await doFetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
-				return { response: r, body: (await r.json().catch(() => ({}))) as Body };
-			})(),
-			DEADLINES.cloudflareReadMs,
-			"Cloudflare's API",
-		));
+		return (await cloudflareApi<T>(path, { token, fetch: doFetch, deadlineMs: DEADLINES.cloudflareReadMs, label: "Cloudflare's API" })).result;
 	} catch (error) {
-		controller.abort();
-		throw error;
+		if (!(error instanceof CloudflareApiError)) throw error;
+		const detail = chainDetail(error.errors);
+		throw new CloudflareApiError(scrubToken(`HTTP ${error.status}${detail ? `: ${detail}` : ""}`, token), error.status, error.errors);
 	}
-	if (!response.ok || body.success === false) {
-		const errors = Array.isArray(body.errors) ? body.errors : [];
-		// The most specific reason is at the end of an error's chain (6003 "Invalid request headers" → 6111 "Invalid format for Authorization header").
-		const flat = errors.flatMap((e) => [e, ...(Array.isArray(e.error_chain) ? e.error_chain : [])]);
-		const detail = errors
-			.map((e) => {
-				const last = Array.isArray(e.error_chain) && e.error_chain.length ? e.error_chain[e.error_chain.length - 1] : e;
-				return last.code ? `${last.message ?? "error"} (code ${last.code})` : last.message;
-			})
-			.filter(Boolean)
-			.join("; ");
-		throw new CloudflareApiError(response.status, flat.map((e) => Number(e.code)).filter(Number.isFinite), `HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
-	}
-	return body.result as T;
 }
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error)).replaceAll(/Bearer\s+\S+/g, "Bearer …").slice(0, 300);

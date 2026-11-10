@@ -2,7 +2,7 @@
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-The **WordPress import** module (**Plugins → WordPress import**, off until you turn it on under **Plugins → Coywolf Pack**) finishes a move from any WordPress site to EmDash. EmDash's own importer (**Settings → Import**) brings over posts, pages, custom post types, categories, tags, authors and media, but it has no plugin hook, and it drops or misses some things every WordPress site has. The module covers them with three parts:
+The **WordPress Migration** module (**Coywolf Pack → WordPress Migration**, off until you turn it on on the **Features** page (**Coywolf Pack → Features** in the sidebar)) finishes a move from any WordPress site to EmDash. EmDash's own importer (**Settings → Import**) brings over posts, pages, custom post types, categories, tags, authors and media, but it has no plugin hook, and it drops or misses some things every WordPress site has. The module covers them with three parts:
 
 - a **prepare** step that rewrites the export (WXR) before EmDash imports it, so what EmDash would drop survives as marker HTML blocks;
 - a **converter** that runs on every save while the module is on (including each entry the importer creates) and turns those markers into native blocks, plus **Convert imported content** for entries already on the site;
@@ -35,13 +35,13 @@ Set the site up first, so imported content comes over connected:
 
 1. Install EmDash and Coywolf Pack ([Getting started](../README.md#getting-started)) and deploy. Set `EMDASH_ENCRYPTION_KEY` so the site can store API keys.
 2. Add API keys and tokens before importing, under **Plugins → Coywolf Pack → Settings** or on each module's page (for example the Stream API token on Videos, the AI Enrichment key, the Cloudflare API token for Clean Image URLs). Modules that read content as it's saved then work on imported entries right away.
-3. Turn on, under **Plugins → Coywolf Pack**: **WordPress import**; **Headings & TOC** with **Heading anchors**; **Custom Blocks** with the **Details** block; **Redirects** (and add its middleware, see [Redirects](redirects.md)); **Code Blocks** if the site has code. Coywolf plugin users turn on more (see below).
+3. Turn on, on the **Features** page: **WordPress Migration**; **Headings & TOC** with **Heading anchors**; **Custom Blocks** with the **Details** block; **Redirect Manager** (and add its middleware, see [Redirect Manager](redirects.md)); **Code Blocks** if the site has code. Coywolf plugin users turn on more (see below).
 4. Set `urls` in `coywolfPlugin()` to the permalink structure WordPress used (for example `posts: "/{termpath:category|uncategorized}/{slug}/"` for `/%category%/%postname%/`), so links, sitemaps and redirects use the same URLs. See [Content URLs](content-urls.md).
 5. Keep the WordPress site online until you finish: EmDash imports media from it, and step 5 downloads files that weren't in its media library. Back up the EmDash site before converting (see [Backups](backups.md)).
 
 ## Step by step
 
-Every step is on **Plugins → WordPress import**, in this order. Steps that change content have a **Dry run** that changes nothing, and running a step again changes nothing.
+Every step is on the **WordPress Migration** page, in this order. Steps that change content have a **Dry run** that changes nothing, and running a step again changes nothing.
 
 1. **Export** from WordPress: **Tools → Export → All content**.
 2. **Prepare the WordPress export** (step 1): choose the file, check the report, and download the prepared copy. The file is processed in your browser and isn't uploaded. Or, from a checkout of this repository:
@@ -56,13 +56,13 @@ Every step is on **Plugins → WordPress import**, in this order. Steps that cha
 5. **Co-authors and guest authors** (step 3) → **Dry run**, then **Create bylines and credit posts**.
 6. **Category and page parents** (step 4) → **Dry run**, then **Set category parents**. Paste the `pageParents` it shows into `coywolfPlugin()`, and use `{termpath:category}` and `{pagepath}` in `urls`.
 7. **Old-site media URLs** (step 5): **Find old URLs**, then **Import missing files**, then under **Rewrite URLs in content** a **Dry run** and **Rewrite URLs**, then **Add to Redirects** for the old file URLs.
-8. **Redirects from WordPress** (step 6): paste each redirect plugin's rules (commands below), **Build rules**, check the list and what was skipped, then **Add to Redirects** (or **Download JSON** and import it on the Redirects page).
+8. **Redirects from WordPress** (step 6): paste each redirect plugin's rules (commands below), **Build rules**, check the list and what was skipped, then **Add to Redirects** (or **Download JSON** and import it on the Redirect Manager page).
 9. Close the [gaps to close by hand](#gaps-to-close-by-hand), then [verify](#verifying-the-move).
-10. When everything checks out, turn **WordPress import** off (nothing converts on save anymore; converted content stays).
+10. When everything checks out, turn **WordPress Migration** off (nothing converts on save anymore; converted content stays).
 
 ## Prepare and convert
 
-EmDash converts Gutenberg with `@emdash-cms/gutenberg-to-portable-text`, which plugins can't extend: blocks it doesn't know become an HTML block of their saved HTML, and self-closing blocks (which keep everything in their settings) are dropped. Heading ids are dropped too. The prepare step rewrites, inside each entry's content only, what would be lost into HTML blocks holding a marker (`<div data-coywolf-wp="…" data-coywolf-attrs="…">`), which EmDash keeps, and leaves everything else byte for byte. While WordPress import is on, every save turns markers into native blocks; **Convert imported content** does the same for entries already on the site, draft-aware (an entry with unpublished changes is updated in its draft) and never overwriting an entry that changed while it ran.
+EmDash converts Gutenberg with `@emdash-cms/gutenberg-to-portable-text`, which plugins can't extend: blocks it doesn't know become an HTML block of their saved HTML, and self-closing blocks (which keep everything in their settings) are dropped. Heading ids are dropped too. The prepare step rewrites, inside each entry's content only, what would be lost into HTML blocks holding a marker (`<div data-coywolf-wp="…" data-coywolf-attrs="…">`), which EmDash keeps, and leaves everything else byte for byte. While WordPress Migration is on, every save turns markers into native blocks; **Convert imported content** does the same for entries already on the site, draft-aware (an entry with unpublished changes is updated in its draft) and never overwriting an entry that changed while it ran.
 
 | WordPress | Becomes | Notes |
 | --- | --- | --- |
@@ -111,7 +111,7 @@ EmDash's importer imports attachments into the media library and rewrites their 
 2. Each URL is matched to a media library file. Size variants (`photo-1024x683.jpg`), `-scaled` and `-rotated` copies and image-editor copies (`photo-e1589912345678.jpg`) match the file imported from their original attachment, found through the export's attachment URLs (folder and name, so two `logo.png` in different months don't mix). A URL that wasn't an attachment, and theme and plugin files, are **not in the media library**; several media files with the same name are **ambiguous** (fix those in the editor). Attachments not used in content are included too, for redirects.
 3. **Import missing files** downloads those files from the old site into the media library with EmDash's own media importer (`POST /_emdash/api/import/wordpress/media`, which blocks private addresses and reuses a file with the same bytes, so running it again adds nothing). It needs the old site online and permission to import.
 4. **Rewrite URLs in content** → **Dry run**, then **Rewrite URLs** points every matched URL at its media file (`/_emdash/api/media/file/<key>`) in every entry's Portable Text (HTML blocks, links, text, and other blocks' fields) and text fields. Image and file fields are left to EmDash's rewrite. It runs the converter too.
-5. **Add to Redirects** adds a 301 from each old file path to its media file (the Redirects module handles file paths, which EmDash's built-in redirects skip), or **Download JSON** to import on the Redirects page.
+5. **Add to Redirects** adds a 301 from each old file path to its media file (the Redirects module handles file paths, which EmDash's built-in redirects skip), or **Download JSON** to import on the Redirect Manager page.
 
 Without the export loaded, uploads match by file name alone and unused attachments get no redirect. If the old site is already offline, upload the missing files under **Media** and fix the entries the URL table lists by hand.
 
@@ -131,7 +131,7 @@ Without the export loaded, uploads match by file name alone and unused attachmen
 
 Absolute targets on the old site become site paths. Rank Math's exact, starts-with, ends-with, contains and regex sources each become a rule; Rank Math and Yoast patterns (stored without a leading slash) get one. 303 becomes 302, and 404/451 rules become 410 Gone (a 404 rule needs no redirect). Skipped, with the reason listed: disabled rules, rules with conditions (login state, referrer, user agent, …), sources with a query string, and patterns that aren't valid JavaScript regular expressions. A rule from a plugin wins over an old slug with the same source.
 
-Old-slug rules point at the URLs WordPress used. If EmDash serves different URLs, set `urls` first (see [Before you import](#before-you-import)) or fix the targets on the Redirects page. What WordPress also did by itself and isn't carried over: guessing a post for a mistyped URL, `/?p=<id>` links, date-changed URLs (`_wp_old_date`), and archive URLs your theme doesn't serve (`/author/<name>/`, `/<year>/<month>/`, `/feed/`). Add rules for any that still get traffic (the Redirects page has a URL tester).
+Old-slug rules point at the URLs WordPress used. If EmDash serves different URLs, set `urls` first (see [Before you import](#before-you-import)) or fix the targets on the Redirect Manager page. What WordPress also did by itself and isn't carried over: guessing a post for a mistyped URL, `/?p=<id>` links, date-changed URLs (`_wp_old_date`), and archive URLs your theme doesn't serve (`/author/<name>/`, `/<year>/<month>/`, `/feed/`). Add rules for any that still get traffic (the Redirect Manager page has a URL tester).
 
 ## Gaps to close by hand
 
@@ -164,7 +164,7 @@ Old-slug rules point at the URLs WordPress used. If EmDash serves different URLs
 
 ## Coywolf WordPress plugins
 
-For sites that used Coywolf's WordPress plugins. These all run as part of the steps above (their blocks are converted by the same prepare step and converter), plus three extra steps (A–C) at the bottom of the WordPress import page.
+For sites that used Coywolf's WordPress plugins. These all run as part of the steps above (their blocks are converted by the same prepare step and converter), plus three extra steps (A–C) at the bottom of the WordPress Migration page.
 
 **Before importing**, also turn on **Videos** (and Video schema, sitemap, plays and likes as wanted), **Reviews** and **Review schema**, **Custom Blocks** with the Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks, **Headings & TOC** with the **Table of Contents block**, **File Downloads**, and **Code Blocks**. Set your disclosure wording and podcast links on the Custom Blocks page. Connect Stream on the Videos page (same account), or at least set the customer subdomain. Then paste Video Manager's and Coywolf Files' settings into **A. Player and download card defaults** (`wp option get coywolf_cvm_settings --format=json`, `wp option get coywolf_files_settings --format=json`) so converted blocks keep the site-wide choices.
 
@@ -190,7 +190,7 @@ Notes, details, quotes, disclosures, testimonials and podcast links convert only
 **After importing**, besides steps 1–6:
 
 - **Guest authors** (Coywolf Guest Author plugin) are credited in step 3 with the other authors.
-- **Coywolf SEO redirects** go in step 6 (or straight into **Redirects → Import**, see [Redirects](redirects.md)).
+- **Coywolf SEO redirects** go in step 6 (or straight into **Redirect Manager → Import**, see [Redirects](redirects.md)).
 - **B. Coywolf Files downloads**: copy each Coywolf Files object into the bucket bound as `FILES` (or `MEDIA`) under the same key (`coywolf-files/YYYY/MM/<id>-<name>`), paste `wp db query "SELECT file_id, object_key, filename, mime, size, downloads, created FROM wp_coywolf_files"`, and set **Files → Settings → Download URL base** to WordPress's link base (`coywolf-file` by default) so old download links keep working. Download counts carry over.
 - **C. Video Manager library**: paste the output of `wp option get coywolf_cvm_descriptions --format=json` (and the same for `coywolf_cvm_posters` and `coywolf_cvm_downloads`) for per-video descriptions, posters and MP4 links. On the Videos page, **Refresh** the library (with the token) and **Rebuild embed index**.
 - Run the Headings & TOC, Schema and Videos checks on a few entries (Rich Results Test for a review and a video page).

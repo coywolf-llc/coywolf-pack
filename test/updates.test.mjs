@@ -164,6 +164,11 @@ test("the dashboard lists a conditional widget only while it applies, without it
 
 test("every pack page carries the notice and the dashboard has the update card", () => {
 	const admin = readFileSync(new URL("../src/admin/index.tsx", import.meta.url), "utf8");
-	assert.match(admin, /export const pages[^=]*= Object\.fromEntries\(Object\.entries\(PAGES\)\.map\(\(\[path, Page\]\) => \[path, withUpdateNotice\(Page\)\]\)\)/);
+	assert.match(admin, /export const pages: PluginAdminExports\["pages"\] = PAGES;/);
+	const entries = [...admin.matchAll(/^\t"(\/[a-z-]+)": (.*)$/gm)];
+	assert.ok(entries.length >= 20, `found ${entries.length} pages`);
+	for (const [, path, value] of entries) assert.match(value, /^packPage\("/, `${path} isn't wrapped by packPage`);
+	const page = readFileSync(new URL("../src/admin/page.tsx", import.meta.url), "utf8");
+	assert.match(page, /function PackPage\(\) \{[\s\S]*?<UpdateNotice \/>/);
 	assert.match(admin, /update: UpdateWidget/);
 });

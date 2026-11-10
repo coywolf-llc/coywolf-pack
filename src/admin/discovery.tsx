@@ -2,16 +2,21 @@
  * Discovery admin page: Crawler Hints (read from Cloudflare), and the news sitemap, the RSS
  * feed, and llms.txt settings and status.
  */
-import { Badge, Banner, Button, Checkbox, Input, InputArea, Loader } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Checkbox, Input, InputArea } from "@cloudflare/kumo";
 import { ArrowClockwise, ArrowSquareOut } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { apiPost, errorText } from "./api.js";
+import { PageHeader, Loading } from "./page.js";
 import { FEATURES_CHANGED, PartSwitch, useParts } from "./feature-switches.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
+import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/discovery";
+
+const post = apiPost(API);
 
 interface Settings {
 	news: { collections: string[]; publicationName: string; language: string };
@@ -37,17 +42,7 @@ interface CrawlerHints {
 	checkedAt: string;
 }
 
-const errorText = (cause: unknown, fallback: string) => (cause instanceof Error && cause.message ? cause.message : fallback);
 const dateTime = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-	const response = await apiFetch(`${API}/${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-	return parseApiResponse<T>(response, "The request failed");
-}
 
 /** A part of Discovery (News sitemap, RSS feed, llms.txt), with its on/off switch next to the title. */
 function Section(props: { title: string; part: string; parts: ReturnType<typeof useParts>; description: string; children: React.ReactNode; actions?: React.ReactNode }) {
@@ -193,6 +188,7 @@ export function DiscoveryPage() {
 	const [draft, setDraft] = React.useState<Settings>();
 	const [error, setError] = React.useState<string>();
 	const [notice, setNotice] = React.useState<string>();
+	const result = useSaveResult();
 	const [busy, setBusy] = React.useState<string | null>(null);
 	const parts = useParts("discovery");
 
@@ -240,11 +236,19 @@ export function DiscoveryPage() {
 		}
 	}
 
-	const save = () =>
-		run("save", async () => {
+	const save = async () => {
+		setBusy("save");
+		result.clear();
+		try {
 			await post("save", draft);
-			return "Settings saved. llms.txt and the news sitemap rebuild in the background within a few seconds.";
-		});
+			result.saved("Settings saved", "llms.txt and the news sitemap rebuild in the background within a few seconds.");
+			await load();
+		} catch (cause) {
+			result.failed(errorText(cause, "Couldn't save"));
+		} finally {
+			setBusy(null);
+		}
+	};
 	const rebuild = () =>
 		run("rebuild", async () => {
 			const out = await post<{ llms?: number; news?: number }>("rebuild", {});
@@ -258,9 +262,7 @@ export function DiscoveryPage() {
 				{error ? (
 					<Banner variant="error" role="alert" description={error} />
 				) : (
-					<div className="flex justify-center py-12">
-						<Loader />
-					</div>
+					<Loading />
 				)}
 			</div>
 		);
@@ -424,6 +426,7 @@ export function DiscoveryPage() {
 			</form>
 
 			<SaveBar
+				error={result.error}
 				form="cw-discovery-form"
 				dirty={isDirty(draft, status.settings)}
 				saving={busy === "save"}
@@ -436,12 +439,14 @@ export function DiscoveryPage() {
 
 function Header() {
 	return (
-		<header className="grid min-w-0 gap-4 border-b border-kumo-line pb-4">
-			<h1 className="flex min-h-9 min-w-0 items-center text-2xl font-semibold leading-tight">Discovery</h1>
-			<p className="text-sm leading-5 text-pretty text-kumo-subtle">
+		<PageHeader
+			title="Discovery"
+			description={
+				<>
 				Help search engines, feed readers and AI agents find your content: Cloudflare's Crawler Hints, a Google News sitemap, an RSS feed, and llms.txt with Markdown
 				versions of your entries.
-			</p>
-		</header>
+				</>
+			}
+		/>
 	);
 }

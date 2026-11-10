@@ -2,7 +2,7 @@
 
 [Coywolf Pack documentation](README.md) · [Getting started](../README.md#getting-started)
 
-Help search engines, feed readers and AI agents find your content. Ported from Coywolf SEO for WordPress (the RSS feed is new). Everything is off until you turn it on under **Plugins → Coywolf Pack**: the **Discovery** switch, then any of its three parts (here or with the switch next to each part's title on the Discovery page). Settings and status are under **Plugins → Coywolf Pack → Discovery**, which also shows whether Cloudflare's [Crawler Hints](#crawler-hints) is on.
+Help search engines, feed readers and AI agents find your content. Ported from Coywolf SEO for WordPress (the RSS feed is new). Everything is off until you turn it on on the **Features** page (**Coywolf Pack → Features** in the sidebar): the **Discovery** switch, then any of its three parts (here or with the switch next to each part's title on the Discovery page). Settings and status are on the Discovery page (**SEO → Discovery**), which also shows whether Cloudflare's [Crawler Hints](#crawler-hints) is on.
 
 | Feature switch | Default | What it does |
 | --- | --- | --- |
@@ -33,7 +33,7 @@ Until 0.35.17 the pack sent IndexNow pings itself, and changed URLs to Bing's UR
 
 ## Setup
 
-Nothing to configure beyond the feature switches. The module's site URLs are served by the pack middleware (see Redirects → Setup), so add `coywolfPack()` from `@coywolf/emdash/middleware` to `src/middleware.ts` if you haven't. The plugin asks for `content:read`, `schema:read`, `bylines:read` (feed authors), `network:request` (host `api.cloudflare.com`, to read Crawler Hints), and `hooks.page-fragments:register`. A theme that has its own feed route or head link can drop them: the pack's middleware answers `/feed/` first, and the head link would be listed twice.
+Nothing to configure beyond the feature switches. The module's site URLs are served by the pack middleware (see [Redirect Manager → Setup](redirects.md#setup)), so add `coywolfPack()` from `@coywolf/emdash/middleware` to `src/middleware.ts` if you haven't. The plugin asks for `content:read`, `schema:read`, `bylines:read` (feed authors), `network:request` (host `api.cloudflare.com`, to read Crawler Hints), and `hooks.page-fragments:register`. A theme that has its own feed route or head link can drop them: the pack's middleware answers `/feed/` first, and the head link would be listed twice.
 
 ## Caching and limits
 

@@ -10,7 +10,7 @@ import { OVERLAY_COLLECTION, RADAR_HOST, syncRadar } from "./radar.js";
 const FEATURES = [
 	{
 		id: "robots",
-		label: "Robots.txt Rules",
+		label: "Robots.txt",
 		description:
 			"Manage robots.txt with plain-English rules: block AI training crawlers, keep sections private, with live checks and a URL tester. Turning it on takes over EmDash's robots.txt with equivalent rules; turning it off gives it back.",
 		default: false,
@@ -29,7 +29,7 @@ export const ROBOTS_TASK = "robots-refresh-bots";
 export function robotsPack(options: RobotsOptions): PackModule {
 	return {
 		id: "robots",
-		label: "Robots.txt Rules",
+		label: "Robots.txt",
 		features: FEATURES,
 		routes: robotsModule(options).routes,
 		tasks: [
