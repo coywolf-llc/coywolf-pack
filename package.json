@@ -1,7 +1,7 @@
 {
 	"name": "@coywolf/emdash",
 	"version": "0.35.18",
-	"description": "Coywolf Pack for EmDash: one plugin with Coywolf's features for EmDash sites on Cloudflare. Full backups and restore, a redirect manager, and more to come.",
+	"description": "Coywolf Pack for EmDash: one plugin that enhances EmDash sites on Cloudflare. Page cache and warming, clean image URLs, backups and restore, redirects, Schema.org and Open Graph, RSS, news sitemap and llms.txt, robots.txt rules, live search, link checking, headings and table of contents, breadcrumbs, code highlighting, file downloads, Cloudflare Stream videos, reviews, custom blocks, AI enrichment and WordPress import.",
 	"license": "MIT",
 	"author": "Coywolf LLC (https://coywolf.com)",
 	"homepage": "https://github.com/coywolf-llc/coywolf-pack",
@@ -14,12 +14,31 @@
 		"emdash",
 		"emdash-plugin",
 		"coywolf",
+		"cloudflare",
+		"cloudflare-workers",
+		"d1",
+		"r2",
+		"page-cache",
+		"images",
 		"backup",
 		"restore",
 		"redirects",
-		"cloudflare",
-		"d1",
-		"r2"
+		"seo",
+		"schema",
+		"json-ld",
+		"open-graph",
+		"rss",
+		"llms-txt",
+		"robots-txt",
+		"search",
+		"link-checker",
+		"table-of-contents",
+		"breadcrumbs",
+		"syntax-highlighting",
+		"cloudflare-stream",
+		"video",
+		"reviews",
+		"wordpress-import"
 	],
 	"main": "./src/index.ts",
 	"exports": {
@@ -47,7 +66,7 @@
 		"@phosphor-icons/react": "^2.1.0",
 		"@tanstack/react-query": "^5.0.0",
 		"astro": ">=6.0.0",
-		"emdash": ">=1.2.0",
+		"emdash": ">=1.4.0",
 		"highlight.js": "^11.0.0",
 		"lowlight": "^3.0.0",
 		"react": "^18.0.0 || ^19.0.0",
@@ -60,16 +79,22 @@
 		}
 	},
 	"devDependencies": {
-		"@cloudflare/kumo": "*",
-		"@cloudflare/workers-types": "^4.0.0",
+		"@cloudflare/kumo": "2.6.0",
+		"@cloudflare/workers-types": "^5.20261102.1",
 		"@phosphor-icons/react": "^2.1.0",
 		"@tanstack/react-query": "^5.0.0",
 		"@types/react": "^19.0.0",
-		"astro": "^7.3.0",
-		"emdash": "^1.3.0",
-		"react": "^19.0.0",
+		"@types/react-dom": "^19.0.0",
+		"astro": "^7.4.7",
+		"emdash": "^1.4.0",
+		"happy-dom": "^21.0.4",
+		"react": "^19.3.1",
+		"react-dom": "^19.3.1",
 		"typescript": "^5.9.0",
-		"zod": "^4.6.0"
+		"zod": "^4.6.7"
+	},
+	"overrides": {
+		"zod@4.5.4": "4.6.7"
 	},
 	"publishConfig": {
 		"access": "public"
