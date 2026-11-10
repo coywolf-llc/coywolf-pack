@@ -125,6 +125,8 @@ function ruleIndex(db: D1Database, ttl: number): Promise<RuleIndex> {
 
 /** The rules that can match a request (its exact rule and the patterns), read once per request URL. */
 const lookups = new WeakMap<URL, Promise<CompiledRules>>();
+/** Request URLs whose exact rule wasn't read, because this isolate's index has no such source (see serveLateRedirect). */
+const skippedExact = new WeakSet<URL>();
 
 const exactMap = (exact: Awaited<ReturnType<typeof findExactRule>>): CompiledRules["exact"] => new Map(exact ? [[exact.source, exact]] : []);
 
@@ -134,7 +136,9 @@ function rulesFor(url: URL, db: D1Database, ttl: number): Promise<CompiledRules>
 		const held = currentIndex(ttl);
 		if (held) {
 			// Most requests: no exact rule for this path, so no D1 read at all.
-			const lookup = held.exact === null || held.exact.has(normalizePath(url.pathname)) ? findExactRule(db, url.pathname) : Promise.resolve(null);
+			const known = held.exact === null || held.exact.has(normalizePath(url.pathname));
+			if (!known) skippedExact.add(url);
+			const lookup = known ? findExactRule(db, url.pathname) : Promise.resolve(null);
 			found = lookup.then((exact) => ({ exact: exactMap(exact), patterns: held.patterns }));
 		} else {
 			// A cold isolate (or after an edit): the request's own lookup goes in the same D1 batch as the index.
@@ -193,7 +197,12 @@ export async function serveRedirect(
 		return undefined;
 	}
 
-	const found = match(compiled, pathname, search);
+	return redirectFor(url, db, compiled, waitUntil, edge);
+}
+
+/** The response for the rule that matches `url`, if any (its hit counted). */
+function redirectFor(url: URL, db: D1Database, compiled: CompiledRules, waitUntil: (p: Promise<unknown>) => void, edge: boolean): Response | undefined {
+	const found = match(compiled, url.pathname, url.search);
 	if (!found) return undefined;
 
 	hits.count(db as unknown as Parameters<typeof hits.count>[0], found.rule.id, waitUntil);
@@ -241,9 +250,37 @@ export async function serveCachedRedirect(
 	const method = context.request.method;
 	const edge = Boolean(cache?.enabled) && (method === "GET" || method === "HEAD");
 	const response = await serveRedirect(context.url, env, waitUntil, {}, edge);
-	if (response && edge) {
-		cache!.set(false);
-		cache!.set({ maxAge: REDIRECT_EDGE_MAX_AGE, tags: [REDIRECTS_TAG] });
-	}
+	if (response && edge) keepRedirectAtEdge(cache!);
+	return response;
+}
+
+function keepRedirectAtEdge(cache: RouteCache): void {
+	cache.set(false);
+	cache.set({ maxAge: REDIRECT_EDGE_MAX_AGE, tags: [REDIRECTS_TAG] });
+}
+
+/**
+ * For a request that rendered a 404 after its exact-rule lookup was skipped
+ * (this isolate's index had no such source): read the rule after all. A rule
+ * another isolate just added (a slug change, a new redirect) then works at
+ * once instead of within FEATURES_TTL_MS, at no cost for pages that render.
+ * A rule found this way also drops this isolate's index, which is out of date.
+ */
+export async function serveLateRedirect(
+	context: Parameters<MiddlewareHandler>[0],
+	env: Record<string, unknown>,
+	waitUntil: (p: Promise<unknown>) => void,
+): Promise<Response | undefined> {
+	if (!skippedExact.has(context.url)) return undefined;
+	const db = env.DB as D1Database | undefined;
+	if (!db) return undefined;
+	const rule = await findExactRule(db, context.url.pathname).catch(() => null);
+	if (!rule) return undefined;
+	invalidateRedirectCache();
+	const cache = (context as unknown as { cache?: RouteCache }).cache;
+	const method = context.request.method;
+	const edge = Boolean(cache?.enabled) && (method === "GET" || method === "HEAD");
+	const response = redirectFor(context.url, db, { exact: exactMap(rule), patterns: [] }, waitUntil, edge);
+	if (response && edge) keepRedirectAtEdge(cache!);
 	return response;
 }

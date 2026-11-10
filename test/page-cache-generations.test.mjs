@@ -296,3 +296,31 @@ test("a refused settling purge is tried again a minute later, a limited number o
 	}
 	assert.ok(row(other).settle && "tags" in row(other).settle, "the generation settle as usual, not escalated");
 });
+
+// ── Redirects added in another isolate (the in-memory index doesn't have them yet) ──
+
+test("a 404 at a path this isolate's redirect index doesn't know reads the rule after all: a new rule answers at once", async () => {
+	const { saveRule } = await import("../src/redirects/rules.ts");
+	const { redirectsMiddleware } = await import("../src/redirects/pack.ts");
+	const { invalidateRedirectCache, setRedirectHitDelay, REDIRECT_EDGE_MAX_AGE } = await import("../src/redirects/middleware.ts");
+	setRedirectHitDelay(0);
+	const db = d1();
+	db.sqlite.prepare("INSERT INTO options (name, value) VALUES (?, ?)").run("plugin:coywolf-pack:settings:features", JSON.stringify({ redirects: true }));
+	await saveRule(db, { source: "/kept", target: "/k" });
+	freshIsolate(db);
+	invalidateRedirectCache();
+	const notFound = async () => new Response("<html>Not found</html>", { status: 404, headers: { "content-type": "text/html" } });
+	const run = (path, cache, next) => coywolfPack({}, [redirectsMiddleware])(context(path, cache), next);
+	await (await run("/a-page/", cacheable(), html)).text(); // The index is in memory now.
+	await saveRule(db, { source: "/moved", target: "/new-home/" }); // A slug change in another isolate.
+	const cache = cacheable();
+	const res = await run("/moved/", cache, notFound);
+	assert.equal(res.status, 301);
+	assert.equal(res.headers.get("location"), "/new-home/");
+	assert.equal(cache.options.maxAge, REDIRECT_EDGE_MAX_AGE);
+	assert.ok(cache.tags.includes("coywolf-redirects"));
+	// A real 404 stays a 404.
+	assert.equal((await run("/nothing-here/", cacheable(), notFound)).status, 404);
+	await settled();
+	invalidateRedirectCache();
+});
