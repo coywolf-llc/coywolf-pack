@@ -10,7 +10,8 @@ import { z } from "zod";
 import { absoluteUrl, entryUrl } from "../core/content-url.js";
 import { ctxFeatures, invalidateFeatures, isOn, requireCachedFeature, requireFeature, cachedCtxFeatures } from "../core/features.js";
 import { DEADLINES, withDeadline } from "../core/single-flight.js";
-import { type PurgeScope, purgePageCache } from "../pageCache/lib.js";
+import { settleLater } from "../core/generation.js";
+import { type PurgeScope, purgeOutcome } from "../pageCache/lib.js";
 import { DEFAULT_RATE_LIMITER, addressKey, bindingAllows, rateLimitBinding } from "../core/rate-limit.js";
 import { afterResponse, parseInput, workerEnv } from "../shared.js";
 import { ENGAGEMENT_HEADER, ENGAGEMENT_LIMITS, EngagementLimiter, LIKES_BY_PREFIX, hasEngagementHeader, likeAction, likesByKey, staleLikesByKey } from "./engagement.js";
@@ -292,8 +293,13 @@ export async function clearVideoPages(ctx: Ctx, uids: string | string[], overCap
 				max: MAX_WEBHOOK_PAGES,
 			});
 		}
-		if (await withDeadline(purgePageCache(scope), DEADLINES.purgeMs, "clearing the pages that show a video")) {
-			ctx.log.info("Videos: cleared the pages that show the video", { uids: list, pages: "purgeEverything" in scope ? "all" : paths.size });
+		const outcome = await withDeadline(purgeOutcome(scope), DEADLINES.purgeMs, "clearing the pages that show a video").catch(() => "refused" as const);
+		if (outcome === "purged") ctx.log.info("Videos: cleared the pages that show the video", { uids: list, pages: "purgeEverything" in scope ? "all" : paths.size });
+		else if (outcome === "refused") {
+			// The account's purge rate limit (or a timeout): kept for the settling purge, as the middleware does with its own.
+			const db = (await workerEnv().catch(() => ({}) as Record<string, unknown>)).DB as D1Database | undefined;
+			if (db) await settleLater(db, scope);
+			ctx.log.warn("Videos: clearing the pages that show the video was refused; it's kept for the settling purge", { uids: list });
 		}
 	} catch (error) {
 		ctx.log.warn("Videos: couldn't clear the pages that show the video", { uids: list, error: String(error) });

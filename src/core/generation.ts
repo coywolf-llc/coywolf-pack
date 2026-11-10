@@ -176,8 +176,19 @@ export function settleDue(row: GenerationRow | null, now = Date.now()): row is G
 export async function settleLater(db: D1Database, scope: PurgeScope, now = Date.now(), retryAfterMs?: number): Promise<void> {
 	for (let attempt = 0; attempt < 3; attempt++) {
 		const raw = (await db.prepare("SELECT value FROM options WHERE name = ?").bind(GENERATION_OPTION).first<{ value: string }>())?.value ?? null;
+		if (raw === null) {
+			// No save recorded yet (a video purge on a site that never saved pack settings): a row of the site's first
+			// generation (pages carry its tag already) holding just this settle.
+			const first = JSON.stringify({ id: FIRST_GENERATION, at: now, settle: scope } satisfies GenerationRow);
+			const inserted = await db.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO NOTHING RETURNING value").bind(GENERATION_OPTION, first).first<{ value: string }>();
+			if (inserted) {
+				rememberSiteOption(GENERATION_OPTION, first);
+				return;
+			}
+			continue; // Another isolate wrote one meanwhile: merge into it.
+		}
 		const row = parseGeneration(raw);
-		if (!raw || !row) return; // No save recorded (or unreadable): nothing to attach it to.
+		if (!row) return; // Unreadable: nothing to attach it to.
 		const next: GenerationRow = { ...row, settle: mergeScopes(row.settle, scope) ?? scope };
 		if (retryAfterMs !== undefined) {
 			const retries = (row.settleRetries ?? 0) + 1;

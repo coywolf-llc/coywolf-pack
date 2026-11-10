@@ -11,7 +11,7 @@ registerHooks({
 	resolve(specifier, context, next) {
 		if (specifier === "cloudflare:workers") {
 			return {
-				url: `data:text/javascript,export const env = {}; export const waitUntil = () => {}; export const cache = { purge: async (o) => { globalThis.__purges.push(o); return { success: true }; } };`,
+				url: `data:text/javascript,export const env = new Proxy({}, { get: (_, k) => globalThis.__testEnv?.[k] }); export const waitUntil = () => {}; export const cache = { purge: async (o) => { globalThis.__purges.push(o); return { success: globalThis.__purgeOk !== false }; } };`,
 				shortCircuit: true,
 			};
 		}
@@ -156,4 +156,34 @@ test("video changes: one purge call for every video changed together; over 30 pa
 	await clearVideoPages(ctx, C);
 	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }], "an admin's change: once, everything");
 	invalidateEmbeds();
+});
+
+test("a refused video-page purge is kept for the settling purge (a new generation row on a site that has none)", async () => {
+	const { clearVideoPages } = await import("../src/videos/module.ts");
+	const { invalidateEmbeds } = await import("../src/videos/store.ts");
+	const { GENERATION_OPTION } = await import("../src/core/features.ts");
+	const { DatabaseSync } = await import("node:sqlite");
+	const sqlite = new DatabaseSync(":memory:");
+	sqlite.exec("CREATE TABLE options (name TEXT PRIMARY KEY, value TEXT NOT NULL);");
+	const exec = (sql, params) => {
+		const st = sqlite.prepare(sql);
+		return /^\s*(select|with)|\breturning\b/i.test(sql) ? { results: st.all(...params) } : { results: [], meta: { changes: Number(st.run(...params).changes) } };
+	};
+	const statement = (sql, params = []) => ({ bind: (...p) => statement(sql, p), first: async () => exec(sql, params).results[0] ?? null, run: async () => exec(sql, params), all: async () => exec(sql, params) });
+	globalThis.__testEnv = { DB: { prepare: (sql) => statement(sql) } };
+	const A = "d".repeat(32);
+	const items = [{ id: "posts:1", data: { collection: "posts", entryId: "1", status: "published", url: "https://example.com/d/1/", publishedAt: "2026-01-01", uids: [A] } }];
+	const ctx = { storage: { videosEmbeds: { query: async () => ({ items, hasMore: false }) } }, log: { info() {}, warn() {}, error() {} } };
+	invalidateEmbeds();
+	globalThis.__purgeOk = false;
+	try {
+		await clearVideoPages(ctx, A, "skip");
+	} finally {
+		globalThis.__purgeOk = true;
+		delete globalThis.__testEnv;
+		invalidateEmbeds();
+	}
+	const row = JSON.parse(sqlite.prepare("SELECT value FROM options WHERE name = ?").get(GENERATION_OPTION).value);
+	assert.deepEqual(row.settle, { pathPrefixes: ["/d/1"], tags: ["coywolf:video-sitemap"] });
+	assert.equal(row.id, "0", "the site's first generation: no page changes its tag");
 });
