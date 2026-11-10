@@ -31,6 +31,19 @@ export const MIN_DAYS = 2;
 /** Most distinct queries the site records in a day (counted in D1 before each batch); later new queries wait for tomorrow. */
 export const MAX_QUERIES_PER_DAY = 1_000;
 
+/**
+ * Whether a search/seen request came from the site's own pages: the X-EmDash-Request header the clients send
+ * (a cross-site form can't set it, and a cross-site fetch with it needs a CORS preflight the site never
+ * grants), Sec-Fetch-Site "same-origin" when the browser says, and the site's own Origin when it's there.
+ */
+export function seenFromSite(header: (name: string) => string | null, origin: string): boolean {
+	if (!header("x-emdash-request")) return false;
+	const site = header("sec-fetch-site");
+	if (site !== null && site !== "same-origin") return false;
+	const from = header("origin");
+	return from === null || from === origin;
+}
+
 /** A settled search from the live client: `{ q, n }` with the query as typed and its number of results. Null when malformed. */
 export function parseSeen(body: unknown): { q: string; n: number } | null {
 	// any: a request body.

@@ -26,12 +26,12 @@ import { contentUrlFingerprint } from "../core/content-url.js";
 import { isOn, registerSiteSetting, rememberSiteSetting, siteFeatures, siteSetting } from "../core/features.js";
 import type { PackMiddleware } from "../core/module.js";
 import { noteSearch } from "../insights/search.js";
-import { parseSeen } from "../insights/search-core.js";
+import { parseSeen, seenFromSite } from "../insights/search-core.js";
 import { keepAtEdge, keepOffEdge } from "../pageCache/lib.js";
 import { type QueryStats, countingD1, liveSearchD1, loadSearchMeta } from "./engine.js";
 import { Lru, effectiveVersion, fingerprint, indexCacheKey, liveCacheKey, newContentVersion, normalizeCollections, normalizeLiveQuery, normalizeLocale } from "./live-cache.js";
 import { LIVE_ASSET, LIVE_ASSET_HASH, type LiveClientConfig, liveScript, liveScriptConfig } from "./live-client.js";
-import { rateLimitResponse } from "./ratelimit.js";
+import { rateLimitResponse, seenRateLimitResponse } from "./ratelimit.js";
 import { TITLE_INDEX_MAX, buildTitleIndex } from "./title-index.js";
 
 export const LIVE_ENDPOINT = "/_emdash/api/plugins/coywolf-pack/search/live";
@@ -236,11 +236,13 @@ async function serveIndex(context: Context, env: Record<string, unknown>, waitUn
 }
 
 /**
- * A settled search from the live client (Search insights): counted when the part is on, never cached, never
- * answered with anything but 204 (or 400 for a malformed body, 429 when Search rate limit says so).
+ * A settled search from the live client (Search insights): counted when the part is on, never cached. 204, or
+ * 403 for a post that didn't come from the site's own pages (checked first: headers only), 429 over the limit
+ * (always on for this route, whatever search.rateLimit says), 400 for a malformed body.
  */
 async function serveSeen(context: Context, env: Record<string, unknown>, waitUntil: (p: Promise<unknown>) => void, db: D1Database | undefined): Promise<Response> {
-	const limited = await rateLimited(context, env);
+	if (!seenFromSite((name) => context.request.headers.get(name), context.url.origin)) return new Response(null, { status: 403, headers: new Headers({ "Cache-Control": "no-store" }) });
+	const limited = await seenRateLimitResponse(context, env);
 	if (limited) return limited;
 	const length = Number(context.request.headers.get("content-length"));
 	if (length > SEEN_BODY_MAX) return badRequest("Too long.");

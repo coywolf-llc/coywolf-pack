@@ -156,10 +156,65 @@ test("live client: a search counts once the visitor stops typing, never the keys
 
 // ── search/seen, and the config that turns it on ────────────────
 
-function seenContext(body, method = "POST") {
-	const request = new Request(`https://example.test${SEEN_ENDPOINT}`, { method, headers: { "Content-Type": "application/json" }, ...(method === "POST" ? { body } : {}) });
+/** A post to search/seen as the site's own client sends it (`headers` adds or overrides; null removes one). */
+function seenContext(body, method = "POST", headers = {}) {
+	const all = { "Content-Type": "application/json", "X-EmDash-Request": "1", "Sec-Fetch-Site": "same-origin", Origin: "https://example.test", "CF-Connecting-IP": "203.0.113.7", ...headers };
+	for (const [k, v] of Object.entries(all)) if (v === null) delete all[k];
+	const request = new Request(`https://example.test${SEEN_ENDPOINT}`, { method, headers: all, ...(method === "POST" ? { body } : {}) });
 	return { url: new URL(request.url), request, cache: { enabled: true, set() {} } };
 }
+
+test("search/seen accepts posts from the site's own pages only", async () => {
+	const h = (headers) => (name) => headers[name] ?? null;
+	assert.equal(S.seenFromSite(h({ "x-emdash-request": "1", "sec-fetch-site": "same-origin", origin: "https://example.test" }), "https://example.test"), true);
+	assert.equal(S.seenFromSite(h({ "x-emdash-request": "1" }), "https://example.test"), true, "older browsers send neither Sec-Fetch-Site nor, for same-origin, always Origin");
+	assert.equal(S.seenFromSite(h({}), "https://example.test"), false, "no X-EmDash-Request: a cross-site form can't send it");
+	assert.equal(S.seenFromSite(h({ "x-emdash-request": "1", "sec-fetch-site": "cross-site" }), "https://example.test"), false);
+	assert.equal(S.seenFromSite(h({ "x-emdash-request": "1", "sec-fetch-site": "same-site" }), "https://example.test"), false);
+	assert.equal(S.seenFromSite(h({ "x-emdash-request": "1", origin: "https://evil.test" }), "https://example.test"), false);
+	recorder.reset();
+	recorder.setPartOn(async () => false, () => true);
+	for (const headers of [{ "X-EmDash-Request": null }, { "Sec-Fetch-Site": "cross-site" }, { Origin: "https://evil.test" }]) {
+		const response = await searchLiveMiddleware.handle(seenContext(JSON.stringify({ q: "coyote", n: 1 }), "POST", headers), { DB: d1() }, () => assert.fail("nothing counted"));
+		assert.equal(response.status, 403, JSON.stringify(headers));
+	}
+	assert.equal(recorder.pending, 0);
+	recorder.reset();
+});
+
+test("search/seen is always rate limited: the site's binding with seen: keys, else per isolate", async () => {
+	recorder.reset();
+	recorder.setPartOn(async () => false, () => true);
+	const keys = [];
+	const binding = { limit: async ({ key }) => (keys.push(key), { success: false }) };
+	const limited = await searchLiveMiddleware.handle(seenContext(JSON.stringify({ q: "coyote", n: 1 })), { DB: d1(), COYWOLF_RATE_LIMITER: binding }, () => undefined);
+	assert.equal(limited.status, 429);
+	assert.match(keys[0], /^seen:[0-9a-f]{32}$/, "a salted hash of the address, never the address");
+	// Without a binding (and with search.rateLimit off): 30 a minute per visitor in this isolate.
+	const statuses = [];
+	for (let i = 0; i < 31; i++) {
+		const r = await searchLiveMiddleware.handle(seenContext(JSON.stringify({ q: `q${i}`, n: 1 }), "POST", { "CF-Connecting-IP": "198.51.100.9" }), { DB: d1() }, () => undefined);
+		statuses.push(r.status);
+	}
+	assert.deepEqual([statuses.slice(0, 30).every((s) => s === 204), statuses[30]], [true, 429]);
+	recorder.reset();
+});
+
+test("the fallback search/seen route checks both switches and where the post came from", async () => {
+	const pack = searchPack({});
+	const route = pack.routes["search/seen"];
+	const ctx = (features, headers = {}) => ({
+		settings: { get: async (k) => (k === "features" ? features : null) },
+		input: { q: "coyote", n: 1 },
+		request: new Request(`https://example.test${SEEN_ENDPOINT}`, { method: "POST", headers: { "X-EmDash-Request": "1", "CF-Connecting-IP": "192.0.2.5", ...headers } }),
+		log: { info() {}, warn() {}, error() {} },
+	});
+	invalidateFeatures();
+	await assert.rejects(route.handler(ctx({ search: true })), (error) => error.status === 404 || /turned off/.test(error.message), "insights.search off");
+	invalidateFeatures();
+	await assert.rejects(route.handler(ctx({ search: true, insights: true, "insights.search": true }, { "Sec-Fetch-Site": "cross-site" })), (error) => error.status === 403 || /Not from this site/.test(error.message));
+	invalidateFeatures();
+});
 
 test("search/seen: counts a well-formed { q, n } (204, never cached), refuses anything else", async () => {
 	recorder.reset();

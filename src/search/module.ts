@@ -25,13 +25,14 @@ import { z } from "zod";
 import { cachedCtxFeatures, isOn, requireCachedFeature, requireFeature } from "../core/features.js";
 import { INSIGHTS_FEATURES } from "../insights/keys.js";
 import { noteSearch } from "../insights/search.js";
-import { parseSeen } from "../insights/search-core.js";
+import { parseSeen, seenFromSite } from "../insights/search-core.js";
 import { COLLECTION_SLUG, readCollections } from "../core/content-url.js";
 import { afterResponse, parseInput, workerEnv } from "../shared.js";
 import { liveSearchD1, loadSearchMeta } from "./engine.js";
 import { normalizeCollections, normalizeLiveQuery, normalizeLocale } from "./live-cache.js";
 import { INDEX_ENDPOINT, LIVE_ENDPOINT, SEEN_ENDPOINT, bumpSearchVersion, configureSearchLive, liveScriptFragment, searchVersion } from "./live-serve.js";
 import { searchWithFallback } from "./query.js";
+import { seenRateLimitResponse } from "./ratelimit.js";
 import { TITLE_INDEX_MAX, buildTitleIndex } from "./title-index.js";
 
 export { INDEX_ENDPOINT, LIVE_ENDPOINT };
@@ -197,8 +198,9 @@ export function searchModule(options: SearchOptions) {
 
 		/**
 		 * Search insights: the live client says the visitor settled on a search ({ q, n }). The pack middleware
-		 * answers this path first (live-serve.ts); this is the fallback without it. Counted only while
-		 * insights.search is on; always 204-like.
+		 * answers this path first (live-serve.ts); this is the fallback without it, with the same gates: both
+		 * switches, posts from the site's own pages only (403 otherwise), and the always-on rate limit (over it,
+		 * nothing is counted).
 		 */
 		"search/seen": definePluginRoute({
 			public: true,
@@ -206,6 +208,11 @@ export function searchModule(options: SearchOptions) {
 			request: { body: "json" },
 			handler: async (ctx) => {
 				await requireCachedFeature(ctx, "search.live");
+				await requireCachedFeature(ctx, INSIGHTS_FEATURES.search);
+				const request = (ctx as unknown as { request: Request }).request;
+				if (!seenFromSite((name) => request.headers.get(name), new URL(request.url).origin)) throw PluginRouteError.forbidden("Not from this site.");
+				const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
+				if (await seenRateLimitResponse({ request } as never, env)) return { ok: true };
 				const seen = parseSeen(ctx.input);
 				if (!seen) throw PluginRouteError.badRequest("Expected { q, n }.");
 				noteSearch(await db(), seen.q, seen.n, "live", afterResponse);
