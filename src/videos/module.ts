@@ -248,33 +248,55 @@ async function unindexEntry(ctx: Ctx, collection: string, id: string): Promise<v
 }
 
 /**
- * After a Stream webhook call, or an admin change to one video (details,
- * deletion, captions): clear the cached pages that embed the video
- * (videoPagesScope: by path, the home page by its entry's tag, at most
- * MAX_WEBHOOK_PAGES paths), within DEADLINES.purgeMs. Never fails the caller.
- * These aren't settings saves (src/pageCache/lib.ts NO_SETTINGS_CHANGE): the
- * video's details are read from D1 on every render, so one purge is enough.
+ * After a Stream webhook call, or an admin change to videos (details,
+ * deletion, captions): clear the cached pages that embed them, in one purge
+ * call (videoPagesScope: by path, the home page by its entry's tag, at most
+ * MAX_WEBHOOK_PAGES paths per video), with the video sitemap, within
+ * DEADLINES.purgeMs. Never fails the caller. These aren't settings saves
+ * (src/pageCache/lib.ts NO_SETTINGS_CHANGE): the videos' details are read from
+ * D1 on every render, so one purge is enough. Archives and other list pages
+ * don't show a video's player or schema, so they aren't cleared.
+ *
+ * `overCap`: a video on more pages than that. The webhook ("skip") clears the
+ * newest and leaves the rest to their normal lifetime: Stream calls it several
+ * times while a video processes, and clearing every page each time was the
+ * November 9 incident. An admin's change ("everything") clears every page
+ * instead, once.
  */
-async function clearVideoPages(ctx: Ctx, uid: string): Promise<void> {
+export async function clearVideoPages(ctx: Ctx, uids: string | string[], overCap: "skip" | "everything" = "everything"): Promise<void> {
+	const list = Array.isArray(uids) ? uids : [uids];
 	try {
-		const pages = videoPagesScope(await allEmbeds(ctx), uid);
-		if (!pages) return;
-		if (pages.skipped) {
+		const entries = await allEmbeds(ctx);
+		const paths = new Set<string>();
+		const tags = new Set<string>();
+		let found = false;
+		let skipped = 0;
+		for (const uid of list) {
+			const pages = videoPagesScope(entries, uid);
+			if (!pages) continue;
+			found = true;
+			for (const path of pages.pathPrefixes) paths.add(path);
+			for (const tag of pages.tags) tags.add(tag);
+			skipped += pages.skipped;
+		}
+		if (!found) return;
+		tags.add(VIDEO_SITEMAP_TAG); // The video sitemap lists the videos too: its edge copy goes in the same call.
+		let scope: PurgeScope = paths.size ? { pathPrefixes: [...paths], tags: [...tags] } : { tags: [...tags] };
+		// Cloudflare takes 100 tags and paths per purge.
+		if ((skipped && overCap === "everything") || paths.size + tags.size > 100) scope = { purgeEverything: true };
+		else if (skipped) {
 			ctx.log.warn("Videos: the video is on more pages than one webhook call clears; the newest were cleared, the rest refresh at their normal lifetime", {
-				uid,
-				cleared: pages.pathPrefixes.length,
-				skipped: pages.skipped,
+				uids: list,
+				cleared: paths.size,
+				skipped,
 				max: MAX_WEBHOOK_PAGES,
 			});
 		}
-		// The video sitemap lists the video too: its edge copy goes in the same purge call.
-		const tags = [...pages.tags, VIDEO_SITEMAP_TAG];
-		const scope: PurgeScope = pages.pathPrefixes.length ? { pathPrefixes: pages.pathPrefixes, tags } : { tags };
 		if (await withDeadline(purgePageCache(scope), DEADLINES.purgeMs, "clearing the pages that show a video")) {
-			ctx.log.info("Videos: cleared the pages that show the video", { uid, pages: pages.pathPrefixes.length, homePage: pages.tags.length > 0 });
+			ctx.log.info("Videos: cleared the pages that show the video", { uids: list, pages: "purgeEverything" in scope ? "all" : paths.size });
 		}
 	} catch (error) {
-		ctx.log.warn("Videos: couldn't clear the pages that show the video", { uid, error: String(error) });
+		ctx.log.warn("Videos: couldn't clear the pages that show the video", { uids: list, error: String(error) });
 	}
 }
 
@@ -1189,7 +1211,7 @@ export function videosModule(options: VideosOptions) {
 						if (meta?.downloadStatus === "inprogress") await refreshDownload(ctx, uid);
 						// Only the pages that show this video: the webhook isn't an admin save (no full purge,
 						// no settings generation, no re-warm; see src/pageCache/lib.ts purgesAfter).
-						afterResponse(clearVideoPages(ctx, uid));
+						afterResponse(clearVideoPages(ctx, uid, "skip"));
 					} catch (error) {
 						ctx.log.warn("Videos: webhook refresh failed", { uid, error: String(error) });
 					}
@@ -1237,16 +1259,19 @@ export function videosModule(options: VideosOptions) {
 				const pending = await metaStore(ctx).query({ where: { captionsPending: true }, limit: 10 });
 				const api = await client(ctx);
 				if (!api) return;
+				const changed: string[] = [];
 				for (const item of pending.items) {
 					try {
 						const before = JSON.stringify(item.data.captions ?? []);
 						const meta = await refreshCaptions(ctx, item.id, api);
 						// Generated captions arrived (or changed): the pages that show the video list them in their schema.
-						if (meta && JSON.stringify(meta.captions ?? []) !== before) await clearVideoPages(ctx, item.id);
+						if (meta && JSON.stringify(meta.captions ?? []) !== before) changed.push(item.id);
 					} catch (error) {
 						ctx.log.warn("Videos: caption refresh failed", { uid: item.id, error: String(error) });
 					}
 				}
+				// One purge for every video whose captions arrived (the purge API allows 5 a minute for the account).
+				if (changed.length) await clearVideoPages(ctx, changed, "skip");
 			},
 		},
 		{

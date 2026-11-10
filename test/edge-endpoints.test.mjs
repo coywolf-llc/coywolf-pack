@@ -95,28 +95,65 @@ test("the video sitemap: an hour at the edge, tagged with its own tag and its en
 	assert.equal(await (await videosSitemapMiddleware.handle(again)).text(), "<urlset>2</urlset>");
 });
 
-test("a rebuild that changes llms.txt clears its edge copy (the rebuild runs seconds after EmDash's purge); an unchanged one doesn't", async () => {
+test("a scheduled rebuild clears the edge copies of the documents it changed in one purge call; an unchanged one, or Rebuild now, none", async () => {
+	const { scheduleRebuild } = await import("../src/discovery/build.ts");
 	const kv = new Map();
 	const POSTS = { slug: "posts", label: "Posts", routable: true, hidden: false, titleField: "title", urlPattern: "/{slug}/", fields: [] };
 	let title = "First";
+	const recent = new Date(Date.now() - 3_600_000).toISOString();
 	const ctx = {
 		kv: { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v) },
 		settings: { get: async () => null },
 		site: { url: "https://example.com", name: "Example", locale: "en" },
 		schema: { listCollections: async () => [POSTS], getCollection: async () => POSTS },
 		content: {
-			list: async () => ({ items: [{ id: "1", slug: "a", status: "published", publishedAt: "2026-11-01", data: { title } }], hasMore: false }),
+			list: async () => ({ items: [{ id: "1", slug: "a", status: "published", publishedAt: recent, data: { title } }], hasMore: false }),
 			get: async () => null,
 		},
 		log: { info() {}, warn() {}, error() {} },
 	};
+	const rebuild = async () => {
+		scheduleRebuild(ctx, ["llms", "news"], 0);
+		await new Promise((r) => setTimeout(r, 50));
+	};
 	globalThis.__purges = [];
 	const first = await rebuildNow(ctx, "llms");
 	assert.deepEqual(first.collections, ["posts"], "its collections are its edge tags");
-	assert.deepEqual(globalThis.__purges, [], "nothing stored before: nothing at the edge to clear");
-	await rebuildNow(ctx, "llms");
-	assert.deepEqual(globalThis.__purges, [], "unchanged");
+	await rebuildNow(ctx, "news");
 	title = "Renamed";
 	await rebuildNow(ctx, "llms");
-	assert.deepEqual(globalThis.__purges, [{ tags: [LLMS_TAG] }]);
+	assert.deepEqual(globalThis.__purges, [], "Rebuild now purges nothing itself (the admin save clears every page)");
+	await rebuild();
+	assert.deepEqual(globalThis.__purges, [{ tags: [NEWS_TAG] }], "llms.txt was already rebuilt: only the news sitemap changed");
+	globalThis.__purges = [];
+	await rebuild();
+	assert.deepEqual(globalThis.__purges, [], "nothing changed");
+	title = "Renamed again";
+	await rebuild();
+	assert.deepEqual(globalThis.__purges, [{ tags: [LLMS_TAG, NEWS_TAG] }], "both changed: one purge call");
+});
+
+test("video changes: one purge call for every video changed together; over 30 pages, an admin's change clears everything, the webhook only the newest", async () => {
+	const { clearVideoPages } = await import("../src/videos/module.ts");
+	const { invalidateEmbeds } = await import("../src/videos/store.ts");
+	const A = "a".repeat(32);
+	const B = "b".repeat(32);
+	const C = "c".repeat(32);
+	const entry = (uid, i) => ({
+		id: `posts:${uid}${i}`,
+		data: { collection: "posts", entryId: `${uid}${i}`, status: "published", url: `https://example.com/${uid.slice(0, 1)}/${i}/`, publishedAt: `2026-01-${String((i % 28) + 1).padStart(2, "0")}`, uids: [uid] },
+	});
+	const items = [entry(A, 1), entry(B, 1), ...Array.from({ length: 35 }, (_, i) => entry(C, i))];
+	const ctx = { storage: { videosEmbeds: { query: async () => ({ items, hasMore: false }) } }, log: { info() {}, warn() {}, error() {} } };
+	invalidateEmbeds();
+	globalThis.__purges = [];
+	await clearVideoPages(ctx, [A, B], "skip");
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/a/1", "/b/1"], tags: ["coywolf:video-sitemap"] }]);
+	globalThis.__purges = [];
+	await clearVideoPages(ctx, C, "skip");
+	assert.equal(globalThis.__purges[0].pathPrefixes.length, 30, "the webhook: the newest 30, never everything");
+	globalThis.__purges = [];
+	await clearVideoPages(ctx, C);
+	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }], "an admin's change: once, everything");
+	invalidateEmbeds();
 });

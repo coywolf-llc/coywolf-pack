@@ -84,6 +84,17 @@ Every one of them also carries the settings generation's tag (see **After Coywol
 
 Crawlers ask for `/robots.txt` constantly, and each answer used to run the Worker. It's now kept in the edge cache for a day, whether the pack's Robots.txt Rules or EmDash's own file serves it (tag `coywolf-robots`; the pack clears its cache after its admin saves and settings changes, so edits show at once). A `robots.txt` asked for below the root (`/news/robots.txt`, which crawlers try) gets a small plain-text 404, also cached for a day, instead of a rendered 404 page. The live search client (`/_emdash/api/plugins/coywolf-pack/search/live-client?v=<hash>`) is kept at the edge for a year when the URL names the current version (5 minutes otherwise); live results and the title index are kept for minutes to a day (see the table above).
 
+### Purge budget
+
+Workers Cache purges always use Cloudflare's Free-tier limits: 5 purge requests a minute, a burst of 25, for the whole account (every site in it, and EmDash's own content purges, share them). The pack keeps to one purge call per action and puts tags and path prefixes together in it (up to Cloudflare's 100 per call):
+
+- a pack settings save: one now, one settling purge about five minutes later (by generation tags after a full clear);
+- publishing or editing content: EmDash's own purge, plus one if Discovery's llms.txt or news sitemap changed (one call for both, after their debounced rebuild);
+- a video change, a Stream webhook call, or the hourly caption refresh: one (its pages and the video sitemap together);
+- a deploy: none (a rollback, or a gradual deployment's version flip at most every 10 minutes, one).
+
+A refused purge is kept for the settling purge (see **After Coywolf Pack settings change**).
+
 ### Rate limiting
 
 Search (when **Search rate limit** is on), video plays and video likes count each visitor's requests. Without help they count per Worker isolate, and Workers spread one visitor's requests over many short-lived isolates, so a client that's spread out is barely limited. Add a [Workers Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) binding named `COYWOLF_RATE_LIMITER` and the pack uses it for all three, with no other setup: Cloudflare counts across isolates in each location. For coywolf.com:

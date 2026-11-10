@@ -157,19 +157,13 @@ const DOC_TTL: Record<DocKind, number> = { llms: LLMS_TTL_MS, news: NEWS_TTL_MS 
 /** Wait this long after a change for more changes before rebuilding. */
 const REBUILD_DEBOUNCE_MS = 5000;
 
-/**
- * Build a document and store it. When it changed, its copy in the edge cache
- * goes too (one purge, by its tag): EmDash clears the collection tags when
- * content changes, but this rebuild runs seconds later (debounced), so a
- * request in between may have put the previous copy back at the edge.
- */
-async function buildDoc(ctx: PluginContext, kind: DocKind): Promise<CachedDocument> {
+/** Build a document and store it. `changed`: a stored copy existed and this one differs (its edge copy is out of date). */
+async function buildDoc(ctx: PluginContext, kind: DocKind): Promise<{ doc: CachedDocument; changed: boolean }> {
 	const settings = await loadSettings(ctx);
 	const doc = kind === "llms" ? await buildLlms(ctx, settings) : await buildNews(ctx, settings);
 	const previous = await ctx.kv.get<CachedDocument>(DOC_KEY[kind]).catch(() => null);
 	await ctx.kv.set(DOC_KEY[kind], doc);
-	if (previous?.body && previous.body !== doc.body) await purgePageCache({ tags: [DOC_TAG[kind]] });
-	return doc;
+	return { doc, changed: Boolean(previous?.body && previous.body !== doc.body) };
 }
 
 const pendingRebuild = new Set<DocKind>();
@@ -187,7 +181,14 @@ const REBUILD_STALE_MS = 30_000;
  */
 const coldBuilds = new Map<DocKind, SharedSlot<CachedDocument>>();
 
-/** Rebuild these documents in the background, after the response (debounced). */
+/**
+ * Rebuild these documents in the background, after the response (debounced).
+ * The edge copies of the ones that changed go too, in one purge call for the
+ * whole batch (purges share the account's rate limit: 5 a minute for every
+ * site): EmDash clears the collection tags when content changes, but this
+ * rebuild runs seconds later, so a request in between may have put the
+ * previous copy back at the edge.
+ */
 export function scheduleRebuild(ctx: PluginContext, kinds: DocKind[], delayMs = REBUILD_DEBOUNCE_MS): void {
 	for (const kind of kinds) pendingRebuild.add(kind);
 	if ((rebuildDueAt && Date.now() < rebuildDueAt + REBUILD_STALE_MS) || !pendingRebuild.size) return;
@@ -198,13 +199,15 @@ export function scheduleRebuild(ctx: PluginContext, kinds: DocKind[], delayMs = 
 		const kinds = [...pendingRebuild];
 		pendingRebuild.clear();
 		if (rebuildDueAt === due) rebuildDueAt = 0;
+		const changed: string[] = [];
 		for (const kind of kinds) {
 			try {
-				await buildDoc(ctx, kind);
+				if ((await buildDoc(ctx, kind)).changed) changed.push(DOC_TAG[kind]);
 			} catch (error) {
 				ctx.log.error(`Discovery: rebuilding ${kind} failed`, { error: String(error) });
 			}
 		}
+		if (changed.length) await purgePageCache({ tags: changed });
 	});
 }
 
@@ -220,12 +223,15 @@ export async function readDoc(ctx: PluginContext, kind: DocKind): Promise<Cached
 		slot = sharedSlot<CachedDocument>();
 		coldBuilds.set(kind, slot);
 	}
-	return sharedRead(slot, () => buildDoc(ctx, kind), { waitMs: DEADLINES.coldBuildWaitMs, anchor: (promise) => after(async () => void (await promise)), label: `building ${kind}` });
+	return sharedRead(slot, () => buildDoc(ctx, kind).then((built) => built.doc), { waitMs: DEADLINES.coldBuildWaitMs, anchor: (promise) => after(async () => void (await promise)), label: `building ${kind}` });
 }
 
-/** Rebuild now (admin "Rebuild now"). */
+/**
+ * Rebuild now (admin "Rebuild now"). No purge of its own: the route is a pack admin save, so the
+ * middleware clears every cached page after it answers.
+ */
 export async function rebuildNow(ctx: PluginContext, kind: DocKind): Promise<CachedDocument> {
-	return buildDoc(ctx, kind);
+	return (await buildDoc(ctx, kind)).doc;
 }
 
 // ── Per-entry Markdown ───────────────────────────────────────────
