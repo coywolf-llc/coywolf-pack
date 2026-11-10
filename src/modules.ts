@@ -11,6 +11,7 @@ import { customBlocksPack } from "./customBlocks/pack.js";
 import type { PackMiddleware, PackModule } from "./core/module.js";
 import { headingsPack } from "./headings/pack.js";
 import { imagesMiddleware, imagesPack } from "./images/pack.js";
+import { insightsPack } from "./insights/pack.js";
 import { pageCacheMiddleware, strayRobotsMiddleware, pageCachePack } from "./pageCache/pack.js";
 import { breadcrumbsPack } from "./breadcrumbs/pack.js";
 import { filesMiddleware, filesPack } from "./files/pack.js";
@@ -55,6 +56,8 @@ export const MODULES: Factory[] = [
 	(o) => (o.pageCache === false ? null : pageCachePack(o.pageCache ?? {})),
 	(o) => (o.speculation === false ? null : speculationPack()),
 	(o) => (o.cloudflare === false ? null : cloudflarePack()),
+	// Reports only: its one hook (page:fragments, the Web Analytics beacon) doesn't depend on the others.
+	(o) => (o.insights === false ? null : insightsPack(o.insights ?? {})),
 ];
 
 export const MIDDLEWARE: PackMiddleware[] = [pageCacheMiddleware, strayRobotsMiddleware, imagesMiddleware, backupsDownloadMiddleware, redirectsMiddleware, robotsMiddleware, filesMiddleware, searchLiveMiddleware, searchRateLimitMiddleware, ...discoveryMiddleware, videosSitemapMiddleware, videosCaptionsMiddleware];

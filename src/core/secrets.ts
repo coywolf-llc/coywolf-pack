@@ -76,6 +76,18 @@ export const SECRET_SETTINGS = {
 		description:
 			"Optional. Keeps the crawler list current from Cloudflare Radar each week. To get one: (1) Cloudflare dashboard → Manage Account → Account API Tokens → Create Token → Create Custom Token; (2) under Permission policies, in a policy scoped to Entire Account, add Radar → Read; (3) create it and copy the token (shown once); (4) paste it here and save. Or set the RADAR_API_TOKEN Worker secret. The full step-by-step guide is on the Robots.txt page → Bots.",
 	},
+	insightsFathomApiKey: {
+		type: "secret",
+		label: "Insights — Fathom API key",
+		description:
+			"Optional. For the Fathom traffic card on the Insights page. To get one: (1) sign in to Fathom and open app.usefathom.com/api; (2) select Create new, name it after this site, and choose Read only (all sites), or this site's read access; (3) save and copy the key (shown once); (4) paste it here and save. The site ID and the full step-by-step guide are on the Insights page.",
+	},
+	insightsGoogleServiceAccount: {
+		type: "secret",
+		label: "Insights — Google service account key (JSON)",
+		description:
+			"Optional. For the Google Search Console card on the Insights page. To get one: (1) in Google Cloud, create a service account and turn on the Google Search Console API for its project; (2) create a JSON key for it; (3) in Search Console, add the service account's email as a user on the site's property; (4) paste the whole JSON key file on the Insights page and save. The Insights page has the full step-by-step guide.",
+	},
 } as const satisfies Record<string, SecretSettingField>;
 
 export type SecretSettingKey = keyof typeof SECRET_SETTINGS;
