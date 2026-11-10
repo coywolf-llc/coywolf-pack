@@ -75,6 +75,24 @@ export async function rateLimitResponse(context: Parameters<PackMiddleware["hand
 	return result.allowed ? undefined : tooMany(result.retryAfter);
 }
 
+/** search/seen (Search insights' settled searches): its own fallback limit and counter, keys "seen:<client>". */
+const SEEN_RPM = 30;
+const seenMemory = new MemoryWindowCounter();
+
+/**
+ * The 429 for search/seen, whatever the search.rateLimit switch says: it's a public write, so it's always
+ * limited, through the same binding when the site has one (keys of its own) and per isolate otherwise.
+ */
+export async function seenRateLimitResponse(context: Parameters<PackMiddleware["handle"]>[0], env: Record<string, unknown>): Promise<Response | undefined> {
+	const binding = rateLimitBinding(env, config.rateLimiter ?? DEFAULT_RATE_LIMITER);
+	const ip = clientIp(context.request, () => context.clientAddress);
+	if (!ip) return undefined;
+	const secret = env[SALT_SECRET];
+	const client = await hashClient(addressKey(ip), typeof secret === "string" && secret ? secret : DEFAULT_SALT);
+	const result = await limitClient(`seen:${client}`, { limit: SEEN_RPM, now: Date.now(), memory: seenMemory, binding });
+	return result.allowed ? undefined : tooMany(result.retryAfter);
+}
+
 export const searchRateLimitMiddleware: PackMiddleware = {
 	module: "search",
 	feature: "search.rateLimit",

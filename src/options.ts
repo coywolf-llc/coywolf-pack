@@ -46,6 +46,8 @@ export interface CoywolfOptions {
 	speculation?: Record<string, never> | false;
 	/** Cloudflare Checkup: the zone settings that matter, with one-click fixes (no options here). `false` leaves the module out. */
 	cloudflare?: Record<string, never> | false;
+	/** Insights reports (edge errors, Core Web Vitals, Fathom, Search Console, search insights). `false` leaves the module out. */
+	insights?: import("./insights/pack.js").InsightsOptions | false;
 	/** The daily check for a newer Coywolf Pack on npm (off until turned on on the Features page). `false` leaves the module out. */
 	updates?: Record<string, never> | false;
 	/** @deprecated Until 0.12.0 the Custom Blocks module was called Content Blocks; `contentBlocks: false` still leaves it out. */

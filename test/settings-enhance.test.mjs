@@ -10,7 +10,7 @@ const { SECRET_SETTINGS } = await import("../src/core/secrets.ts");
 
 test("guides for each credential, keyed by the Settings page label", () => {
 	const html = settingsGuideHtml();
-	assert.deepEqual(Object.keys(html).sort(), [SECRET_SETTINGS.aiApiKey.label, SECRET_SETTINGS.backupsCloudflareToken.label, SECRET_SETTINGS.cloudflareSetupToken.label, SECRET_SETTINGS.filesR2SecretAccessKey.label, SECRET_SETTINGS.imagesApiToken.label, SECRET_SETTINGS.robotsRadarToken.label, SECRET_SETTINGS.videosApiToken.label].sort());
+	assert.deepEqual(Object.keys(html).sort(), [SECRET_SETTINGS.aiApiKey.label, SECRET_SETTINGS.backupsCloudflareToken.label, SECRET_SETTINGS.cloudflareSetupToken.label, SECRET_SETTINGS.filesR2SecretAccessKey.label, SECRET_SETTINGS.imagesApiToken.label, SECRET_SETTINGS.insightsFathomApiKey.label, SECRET_SETTINGS.insightsGoogleServiceAccount.label, SECRET_SETTINGS.robotsRadarToken.label, SECRET_SETTINGS.videosApiToken.label].sort());
 	assert.equal((html[SECRET_SETTINGS.aiApiKey.label].match(/<details/g) ?? []).length, 3);
 	assert.match(html[SECRET_SETTINGS.videosApiToken.label], /<ol[^>]*>.*Account → Stream → Edit/);
 	assert.match(html[SECRET_SETTINGS.imagesApiToken.label], /<ol[^>]*>.*Zone → Transform Rules → Edit/);

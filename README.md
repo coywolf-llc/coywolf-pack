@@ -18,6 +18,7 @@ Every module starts off on a new site. Turn on only the ones you want on the **F
 | --- | --- |
 | [Performance](docs/performance.md) | Always on: keeps Cloudflare's edge page cache correct (cleared after deploys and edits), optional cache warming, a Cloudflare usage card with the estimated bill, and optional Speculation Rules (the next page prefetched on hover) |
 | [Cloudflare Checkup](docs/cloudflare-checkup.md) | The zone settings that matter for a Workers-served site (Speed Brain, HTTPS, HSTS, Early Hints, features that rewrite pages, bot settings), each with what to do, and one-click fixes for the clear-cut ones |
+| [Insights](docs/insights.md) | 404s (files and the media host too), server errors and crawlers from Cloudflare's analytics, real visitors' Core Web Vitals, Fathom traffic, Google Search Console, and what visitors search for |
 | [Clean Image URLs](docs/images.md) | Images from a `media.` subdomain on R2, resized to the sizes the theme uses, cached for a year |
 | [Backups](docs/backups.md) | Backups of the D1 database and R2 media, rewind with undo, restore to a new database |
 | [Redirect Manager](docs/redirects.md) | External, file-path and regex redirects, bulk import and export, and automatic redirects for slug changes and removed content (alongside EmDash's own Redirects page) |

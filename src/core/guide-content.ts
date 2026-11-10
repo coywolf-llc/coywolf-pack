@@ -24,7 +24,11 @@ export type GuideId =
 	| "checkup-setup-token"
 	| "tracking-params"
 	| "backups-token"
-	| "backups-retention";
+	| "backups-retention"
+	| "insights-token"
+	| "web-analytics"
+	| "fathom"
+	| "search-console";
 
 export interface Guide {
 	summary: string;
@@ -202,6 +206,66 @@ export const GUIDES: Record<GuideId, Guide> = {
 		],
 		note: "Only links with tracking parameters run the Worker (once, without rendering); every other request is served from the cache as before. Analytics in the browser still see the parameters. Each such request is billed twice: the request and the call through the cache.",
 	},
+	"insights-token": {
+		summary: "How to let the pack read Cloudflare analytics for Insights",
+		steps: [
+			`If the Performance page already shows Cloudflare usage, edit that token instead of making a new one: ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}), then ${b("⋯ → Edit")} next to it. Under Permission policies, select ${b("+ Add policy")}, set its scope to ${b("All Domains")} (or ${b("Specified Domains")} → this site's domain), and add ${b("Zone → Read")} and ${b("Analytics → Read")} (search for ${code("analytics")}: it's the zone permission, not Account Analytics). Save it. The token itself doesn't change, so there's nothing to paste again.`,
+			"No token yet? Create one with the steps below. It only reads.",
+			...cloudflareTokenSteps({
+				permissions: `${b("Account → Account Analytics → Read")} and ${b("Account → Account Settings → Read")} (Core Web Vitals, and the Performance page's usage card), and ${b("Zone → Zone → Read")} and ${b("Zone → Analytics → Read")} (edge errors and crawlers)`,
+				prefill: {
+					name: "Coywolf Pack read-only",
+					keys: [
+						{ key: "account_analytics", type: "read" },
+						{ key: "account_settings", type: "read" },
+						{ key: "zone", type: "read" },
+						{ key: "analytics", type: "read" },
+					],
+					shows: `${b("Account Analytics → Read")} and ${b("Account Settings → Read")} in a policy scoped to ${b("Entire Account")}, and ${b("Zone → Read")} and ${b("Analytics → Read")} in a policy scoped to domains`,
+				},
+				add: `For the Performance page's usage card too, add ${b("Workers → Metadata Read-Only")} in the Entire Account policy (search for ${code("workers")}).`,
+				zone: true,
+			}),
+			`Set it as the ${code("USAGE_API_TOKEN")} Worker secret (${code("npx wrangler secret put USAGE_API_TOKEN")}; one token works for every site in the account), or paste it in ${b("Cloudflare usage")} on the plugin's Settings page. It's stored encrypted.`,
+			`Come back to this page and select ${b("Refresh")}.`,
+		],
+		note: "Cloudflare's HTTP analytics are sampled, so counts are estimates. Every plan keeps at least 31 days, and a Free zone can read 30 days at a time.",
+	},
+	"web-analytics": {
+		summary: "How to add the site to Cloudflare Web Analytics",
+		steps: [
+			`Open ${link("https://dash.cloudflare.com/?to=/:account/web-analytics", "Cloudflare dashboard → Web Analytics")} and select ${b("Add a site")}. Enter the site's domain (for example ${code("example.com")}) and finish.`,
+			`Open the site's ${b("Manage site")} page and find the JavaScript snippet. Copy the token from it: the 32 letters and digits after ${code("&quot;token&quot;:")} in ${code("data-cf-beacon")}.`,
+			`Paste the token into ${b("Web Analytics token")} on this page and save, then turn on ${b("Web Analytics beacon")}. The pack adds the beacon to every public page and clears the cached pages, so it's on them at once.`,
+			"If Cloudflare's own automatic setup is on for the site, pages may get the beacon from Cloudflare instead. Cloudflare doesn't document whether it reaches pages a Worker serves, so the pack's beacon is the dependable way. The two never double up: the pack's script does nothing on a page that already has the beacon.",
+			"The card reads the numbers with the read-only Cloudflare token (Account Analytics → Read, and Account Settings → Read to find the site). They show after the first visits; a low-traffic site needs a few days.",
+		],
+		note: "Web Analytics sets no cookies, uses no localStorage, doesn't fingerprint visitors by IP address or user agent, and doesn't log query strings. The beacon loads from static.cloudflareinsights.com and reports to cloudflareinsights.com. CLS is measured in Chromium browsers only.",
+	},
+	fathom: {
+		summary: "How to get a Fathom site ID and API key",
+		steps: [
+			`Find the site ID: in ${link("https://app.usefathom.com/", "Fathom")}, open the site's settings; the site ID is the code of letters shown there. It's also the ${code("data-site")} value in the site's Fathom embed code. Enter it as ${b("Fathom site ID")}.`,
+			`Open ${link("https://app.usefathom.com/api", "Fathom → API")} and select ${b("Create new")}. Name the key after this site.`,
+			`Under permissions, choose ${b("Site-specific")} with read access to this site only, or ${b("Read only (all sites)")}. The card only reads, so never choose Admin.`,
+			`Select ${b("Save changes")} and copy the key right away. Fathom shows it only once.`,
+			`Paste it into ${b("Fathom API key")} on this page and save. It's stored encrypted, and the page never shows it again.`,
+		],
+		note: "Each API request counts toward your Fathom plan's monthly pageviews. The card makes four requests when it reads, at most once an hour and only while someone has this page open.",
+	},
+	"search-console": {
+		summary: "How to connect Google Search Console with a service account",
+		steps: [
+			`In the ${link("https://console.cloud.google.com/projectselector2/home/dashboard", "Google Cloud console")}, pick a project or create one (named after the site, for example).`,
+			`Turn on the API: open ${link("https://console.cloud.google.com/apis/library/searchconsole.googleapis.com", "Google Search Console API")} for that project and select ${b("Enable")}.`,
+			`Create a service account: ${link("https://console.cloud.google.com/iam-admin/serviceaccounts/create", "IAM &amp; Admin → Service Accounts → Create service account")}. Name it, for example ${code("coywolf-pack-search-console")}. Skip the optional roles (Search Console access comes from step 5) and select ${b("Done")}.`,
+			`Open the new service account, go to ${b("Keys → Add key → Create new key")}, choose ${b("JSON")} and select ${b("Create")}. A .json file downloads. If Google says key creation is turned off by an organization policy (iam.disableServiceAccountKeyCreation), an organization admin has to allow it for this project.`,
+			`Copy the service account's email (it ends in ${code(".iam.gserviceaccount.com")}). In ${link("https://search.google.com/search-console", "Search Console")}, pick the site's property, then ${b("Settings → Users and permissions → Add user")}. Paste the email, choose ${b("Restricted")} permission (enough to read performance data) and select ${b("Add")}. This works the same for a domain property (sc-domain:example.com) and a URL-prefix property.`,
+			`On this page, paste the whole contents of the .json file into ${b("Service account key")} and save. It's stored encrypted, and only the email is shown afterward. Leave ${b("Property")} empty to use the property the service account can see for this site, or enter it: ${code("sc-domain:example.com")} or ${code("https://example.com/")}.`,
+			"Delete the downloaded .json file from your computer once it's saved.",
+		],
+		note: "The pack asks only for read access (the webmasters.readonly scope). Search Console's numbers lag by a day or two, and the newest day may still change. Each reading is three small queries, kept for six hours.",
+	},
 	"media-host": {
 		summary: "How to set up a media host by hand in the Cloudflare dashboard",
 		steps: [
@@ -305,6 +369,14 @@ export const SETTINGS_PAGE_GUIDES: Record<string, { intro: string; guides: Guide
 	cloudflareSetupToken: {
 		intro: "Optional. Only for the one-click fixes on the Cloudflare Checkup page; reading the checkup uses the Cloudflare usage token.",
 		guides: ["checkup-setup-token"],
+	},
+	insightsFathomApiKey: {
+		intro: "Optional. For the Fathom traffic card on the Insights page, where the site ID goes.",
+		guides: ["fathom"],
+	},
+	insightsGoogleServiceAccount: {
+		intro: "Optional. For the Google Search Console card on the Insights page. Paste the whole JSON key file.",
+		guides: ["search-console"],
 	},
 };
 
