@@ -11,7 +11,8 @@
 // The checklist, and what can't be checked here, is in docs/internals.md
 // ("EmDash internals the pack relies on"). Not checked: how EmDash's admin
 // behaves in a browser beyond the markup rendered below, Astro's route cache
-// object (watchInvalidation), and D1 itself (SQLite stands in for it).
+// object (watchInvalidation), raw writes and revisions, and D1 itself (SQLite
+// stands in for it).
 import "./ts-resolve.mjs";
 
 import assert from "node:assert/strict";
@@ -192,7 +193,7 @@ async function columns(table) {
 // ── The pack's raw SQL, read from src ─────────────────────────
 
 /** String and template literals of a TypeScript file: { line, endLine, text, parts } (template expressions as ${n}, their source in parts). */
-export function literals(src) {
+function literals(src) {
 	const out = [];
 	walk(src, 0, false, out);
 	return out;
