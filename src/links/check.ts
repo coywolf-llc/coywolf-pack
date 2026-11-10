@@ -4,25 +4,36 @@
  * Every request counts against a per-run budget, since Workers cap
  * subrequests per invocation.
  */
+import { VERSION } from "../version.js";
 import { type CheckOutcome, type Hop, classify, isBotWall, isPublicTarget } from "./classify.js";
 
 const TIMEOUT_MS = 10_000;
 const MAX_HOPS = 5;
 
-// A current desktop Chrome with matching headers: many sites answer bots with 403/429/999.
-export const BROWSER_UA =
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
-const BROWSER_HEADERS: Record<string, string> = {
-	Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+/** Where the user agent points people who see the checker in their logs. */
+export const CHECKER_INFO_URL = "https://github.com/coywolf-llc/coywolf-pack/blob/main/docs/links.md#how-links-are-checked";
+
+/**
+ * The checker's own user agent: it says what it is (the pack's link checker and its version), where to
+ * read about it, and which site's links it's checking, so a site owner who sees it in their logs knows
+ * who to ask. Requests come from Cloudflare's shared Worker addresses, so posing as a browser from a
+ * data center is what bot rules look for; an honest name lets sites that allow checkers let it in, and
+ * the ones that don't answer 403 or a challenge, which the report shows as Blocked (not Broken).
+ */
+export function checkerUserAgent(version: string, siteUrl: string | null | undefined): string {
+	let site = "";
+	try {
+		site = siteUrl ? new URL(siteUrl).origin : "";
+	} catch {
+		site = "";
+	}
+	return `Mozilla/5.0 (compatible; CoywolfPack-LinkChecker/${version}; +${CHECKER_INFO_URL})${site ? ` checking links on ${site}` : ""}`;
+}
+
+/** Headers any client sends; none of a browser's own (Sec-Fetch-*, client hints), which would contradict the user agent. */
+const CHECKER_HEADERS: Record<string, string> = {
+	Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 	"Accept-Language": "en-US,en;q=0.9",
-	"Sec-CH-UA": '"Chromium";v="140", "Google Chrome";v="140", "Not?A_Brand";v="99"',
-	"Sec-CH-UA-Mobile": "?0",
-	"Sec-CH-UA-Platform": '"Windows"',
-	"Sec-Fetch-Dest": "document",
-	"Sec-Fetch-Mode": "navigate",
-	"Sec-Fetch-Site": "none",
-	"Sec-Fetch-User": "?1",
-	"Upgrade-Insecure-Requests": "1",
 };
 
 /** Requests left in this run. */
@@ -52,7 +63,7 @@ async function follow(
 			response = await fetcher(url.href, {
 				method,
 				redirect: "manual",
-				headers: { ...BROWSER_HEADERS, "User-Agent": userAgent },
+				headers: { ...CHECKER_HEADERS, "User-Agent": userAgent },
 				signal: AbortSignal.timeout(TIMEOUT_MS),
 			});
 		} catch (error) {
@@ -85,9 +96,13 @@ function describe(error: unknown): string {
 	return message.slice(0, 200) || "Request failed";
 }
 
-/** Check a URL. Throws BudgetExhausted when the run is out of requests before an answer. */
-export async function checkUrl(url: URL, budget: Budget, options: { userAgent?: string; fetcher?: Fetcher } = {}): Promise<CheckOutcome> {
-	const userAgent = options.userAgent?.replace(/[\r\n\t\0]+/g, " ").trim() || BROWSER_UA;
+/**
+ * Check a URL. Throws BudgetExhausted when the run is out of requests before an answer.
+ * `userAgent` is the site's override (Link Manager → Settings); without one the checker's own
+ * (checkerUserAgent, naming `siteUrl`).
+ */
+export async function checkUrl(url: URL, budget: Budget, options: { userAgent?: string; siteUrl?: string | null; fetcher?: Fetcher } = {}): Promise<CheckOutcome> {
+	const userAgent = options.userAgent?.replace(/[\r\n\t\0]+/g, " ").trim() || checkerUserAgent(VERSION, options.siteUrl);
 	const fetcher: Fetcher = options.fetcher ?? ((u, init) => fetch(u, init));
 	const head = await follow(url, "HEAD", budget, userAgent, fetcher);
 	const headLast = head.chain[head.chain.length - 1];

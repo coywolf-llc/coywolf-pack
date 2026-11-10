@@ -210,7 +210,7 @@ export async function runChecks(ctx: PluginContext, options: { ids?: string[]; b
 				continue;
 			}
 			try {
-				const outcome = await checkUrl(new URL(data.resolved), budget, { userAgent, fetcher });
+				const outcome = await checkUrl(new URL(data.resolved), budget, { userAgent, siteUrl: ctx.site.url, fetcher });
 				await urls(ctx).put(id, {
 					...data,
 					status: outcome.status,
