@@ -75,6 +75,8 @@ const SETTINGS_PAGE = "/_emdash/admin/plugins-manager/coywolf-pack/settings";
  */
 export interface CloudflarePermission {
 	name: string;
+	/** How to find its row in the editor's search, where the name alone doesn't settle it (HTML). */
+	find?: string;
 	scope: "account" | "zone";
 	form?: TokenPermission;
 	for: string;
@@ -88,7 +90,11 @@ export interface CloudflarePermission {
  * Added by hand although Cloudflare may have a key for them: Workers →
  * Metadata Read-Only (Cloudflare doesn't document which permission the
  * `workers_scripts` key selects, and the Workers Logs query needs this one)
- * and Cache Purge (the `cache` key's "purge" type has no documented example).
+ * and Cache → Purge (the `cache` key's "purge" type has no documented example).
+ *
+ * The zone rule and cache names are the editor's own rows (checked 2026-11): Zone Transform Rules under "Rules &
+ * Configuration"; Cache ("Grants access to purge cache") and Cache Settings ("Grants write access to cache settings
+ * phase") under "Cache & Performance". Bot Management's editor name isn't confirmed yet.
  */
 export const CLOUDFLARE_PERMISSIONS = {
 	accountAnalytics: { name: "Account Analytics → Read", scope: "account", form: { key: "account_analytics", type: "read" }, for: "Cloudflare usage and Insights" },
@@ -103,9 +109,19 @@ export const CLOUDFLARE_PERMISSIONS = {
 	zoneSettings: { name: "Zone Settings → Edit", scope: "zone", form: { key: "zone_settings", type: "edit" }, for: "Cloudflare Checkup and Set up media host" },
 	dns: { name: "DNS → Edit", scope: "zone", form: { key: "dns", type: "edit" }, for: "Set up media host and Cloudflare Checkup" },
 	analytics: { name: "Analytics → Read", scope: "zone", form: { key: "analytics", type: "read" }, for: "Insights (edge errors and crawlers)" },
-	transformRules: { name: "Transform Rules → Edit", scope: "zone", for: "Set up media host" },
-	cacheRules: { name: "Cache Rules → Edit", scope: "zone", for: "the media host's cache rule (Performance page)" },
-	cachePurge: { name: "Cache Purge → Purge", scope: "zone", for: "clearing the media host's images" },
+	transformRules: { name: "Zone Transform Rules → Edit", scope: "zone", find: "search for “transform”; it's under Rules &amp; Configuration", for: "Set up media host" },
+	cacheRules: {
+		name: "Cache Settings → Edit",
+		scope: "zone",
+		find: `search for “cache”, which lists two rows under Cache &amp; Performance: pick the one named ${b("Cache Settings")} (“Grants write access to cache settings phase”), not the one named just Cache, and set it to Edit`,
+		for: "the media host's cache rule (Performance page)",
+	},
+	cachePurge: {
+		name: "Cache → Purge",
+		scope: "zone",
+		find: `search for “cache”, which lists two rows under Cache &amp; Performance: pick the one named just ${b("Cache")} (“Grants access to purge cache”), not Cache Settings, and set it to Purge`,
+		for: "clearing the media host's images",
+	},
 	botManagement: { name: "Bot Management → Read", scope: "zone", for: "Cloudflare Checkup's bot rows" },
 } as const satisfies Record<string, CloudflarePermission>;
 
@@ -115,6 +131,8 @@ const PERMISSION_LIST: CloudflarePermission[] = Object.values(CLOUDFLARE_PERMISS
 /** "A, B and C" */
 const andList = (items: string[]) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`);
 const named = (list: CloudflarePermission[]) => andList(list.map((p) => b(p.name)));
+/** The same list for adding by hand: each name with how to find its row, where it has a hint. */
+const namedToFind = (list: CloudflarePermission[]) => (list.some((p) => p.find) ? list.map((p) => `${b(p.name)}${p.find ? ` (${p.find})` : ""}`).join("; ") : named(list));
 const pick = (scope: "account" | "zone", prefilled: boolean) => PERMISSION_LIST.filter((p) => p.scope === scope && Boolean(p.form) === prefilled);
 
 /** The Cloudflare API token's pre-filled form: its name, the permissions it pre-selects, what it should show, and what's added by hand. */
@@ -122,7 +140,7 @@ export const CLOUDFLARE_TOKEN_FORM = {
 	name: "Coywolf Pack",
 	keys: PERMISSION_LIST.flatMap((p) => (p.form ? [p.form] : [])),
 	shows: `two policies: one scoped to ${b("Entire Account")} with ${named(pick("account", true))}, and one scoped to domains with ${named(pick("zone", true))}`,
-	add: `Add the rest by hand (search for each name): in the ${b("Entire Account")} policy, ${named(pick("account", false))}; in the domains policy, ${named(pick("zone", false))}. You can skip any whose feature you don't use (the note below says which is which).`,
+	add: `Add the rest by hand (search for each name): in the ${b("Entire Account")} policy, ${namedToFind(pick("account", false))}. In the domains policy, ${namedToFind(pick("zone", false))}. You can skip any whose feature you don't use (the note below says which is which).`,
 };
 
 /** The steps that create the Cloudflare API token with the pre-filled form. */
@@ -142,13 +160,14 @@ const createTokenSteps = [
 function featureGuide(o: { summary: string; needs: CloudflarePermissionId[]; before?: string[]; note?: string }): Guide {
 	const needs = o.needs.map((id) => CLOUDFLARE_PERMISSIONS[id] as CloudflarePermission);
 	const policies = [...new Set(needs.map((p) => (p.scope === "account" ? `${b("Entire Account")} policy` : "domains policy")))];
+	const finds = needs.filter((p) => p.find).map((p) => ` For ${b(p.name)}, ${p.find}.`);
 	return {
 		summary: o.summary,
 		steps: [
 			...(o.before ?? []),
 			`This uses the Cloudflare API token from the plugin's ${link(SETTINGS_PAGE, "Settings page")} (or the ${code("CLOUDFLARE_API_TOKEN")} Worker secret). Here it needs ${named(needs)}.`,
 			`No token yet? Create it with the steps under ${b("Cloudflare API token")} on the ${link(SETTINGS_PAGE, "Settings page")}: one token covers every feature, so you make it once.`,
-			`Token missing a permission? Open ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}, wherever you created it) and select ${b("⋯ → Edit")} next to the token. Under ${b("Permission policies")}, add it to the ${andList(policies)} (search for its name) and save. The token itself doesn't change, so there's nothing to paste again.`,
+			`Token missing a permission? Open ${link("https://dash.cloudflare.com/?to=/:account/api-tokens", "Cloudflare dashboard → Manage Account → Account API Tokens")} (or ${link("https://dash.cloudflare.com/profile/api-tokens", "My Profile → API Tokens")}, wherever you created it) and select ${b("⋯ → Edit")} next to the token. Under ${b("Permission policies")}, add it to the ${andList(policies)} (search for its name) and save.${finds.join("")} The token itself doesn't change, so there's nothing to paste again.`,
 		],
 		...(o.note ? { note: o.note } : {}),
 	};
@@ -342,7 +361,7 @@ export const GUIDES: Record<GuideId, Guide> = {
 	"images-token": featureGuide({
 		summary: "How Set up media host uses the Cloudflare API token",
 		needs: ["zone", "zoneSettings", "transformRules", "dns", "r2", "rulesets"],
-		note: `Clearing the media host's images needs ${b("Cache Purge → Purge")} too, and its cache rule (Performance page) ${b("Cache Rules → Edit")}. The token is only sent to api.cloudflare.com. The older Clean Image URLs token and ${code("IMAGES_API_TOKEN")} Worker secret keep working until the Cloudflare API token is saved.`,
+		note: `Clearing the media host's images needs ${b(CLOUDFLARE_PERMISSIONS.cachePurge.name)} too, and its cache rule (Performance page) ${b(CLOUDFLARE_PERMISSIONS.cacheRules.name)}. In Cloudflare's token editor, search for “cache”: both rows are under Cache &amp; Performance, one named just Cache and one named Cache Settings. The token is only sent to api.cloudflare.com. The older Clean Image URLs token and ${code("IMAGES_API_TOKEN")} Worker secret keep working until the Cloudflare API token is saved.`,
 	}),
 	"browser-run-token": featureGuide({
 		summary: "How Social Images uses the Cloudflare API token",

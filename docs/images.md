@@ -79,10 +79,10 @@ The Cloudflare API token needs these permissions here:
 
 - Zone → Read (to find the zone)
 - Zone Settings → Edit (Image Transformations and Smart Tiered Cache)
-- Transform Rules → Edit, and Account Rulesets → Read (the URL rewrite rules)
+- Zone Transform Rules → Edit, and Account Rulesets → Read (the URL rewrite rules)
 - Workers R2 Storage → Edit, and DNS → Edit (the custom domain and its DNS record)
 
-Clearing the media host's images also needs **Cache Purge → Purge**, and its cache rule on the Performance page **Cache Rules → Edit**. The token is only sent to `api.cloudflare.com`. If it sees more than one account, enter the account ID under **Advanced**, or set `CF_ACCOUNT_ID`. Before the Cloudflare API token is saved, the page keeps its own fields: a token typed just for the setup, the older saved token, or the `IMAGES_API_TOKEN` Worker secret, and the account ID.
+Clearing the media host's images also needs **Cache → Purge**, and its cache rule on the Performance page **Cache Settings → Edit**. (In Cloudflare's token editor both rows are under Cache & Performance: one is named just Cache, the other Cache Settings.) The token is only sent to `api.cloudflare.com`. If it sees more than one account, enter the account ID under **Advanced**, or set `CF_ACCOUNT_ID`. Before the Cloudflare API token is saved, the page keeps its own fields: a token typed just for the setup, the older saved token, or the `IMAGES_API_TOKEN` Worker secret, and the account ID.
 
 **Check** (on the page) fetches a recent image from the media host, and a 64×64 copy of it twice, and reports whether the host is reachable, the original is served, resizing works (`cf-resized` header or an image type) and the copy is cached.
 

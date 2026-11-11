@@ -15,6 +15,7 @@ import { z } from "zod";
 import { contextFetch } from "../core/cloudflare-api.js";
 import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, sharedTokenState, tokenName } from "../core/cloudflare-token.js";
 import { requireFeature } from "../core/features.js";
+import { CLOUDFLARE_PERMISSIONS } from "../core/guide-content.js";
 import { afterResponse, parseInput, secret, workerEnv } from "../shared.js";
 import { CloudflareApiError, type CloudflareConfig, applySetup, checkMediaHost, planSetup, purgeHost } from "./cloudflare.js";
 import { imageCdn, imageCdnSource, normalizeMediaHost } from "./lib.js";
@@ -173,7 +174,7 @@ export async function mediaApiAccess(
 export async function purgeMediaHost(ctx: PluginContext): Promise<{ purged: boolean; host: string | null; message?: string }> {
 	const access = await mediaApiAccess(ctx);
 	if (!("config" in access)) {
-		return { purged: false, host: access.hostname, message: access.hostname ? `Images on ${access.hostname} weren't cleared. ${access.reason} It needs Cache Purge → Purge.` : access.reason };
+		return { purged: false, host: access.hostname, message: access.hostname ? `Images on ${access.hostname} weren't cleared. ${access.reason} It needs Zone → ${CLOUDFLARE_PERMISSIONS.cachePurge.name}.` : access.reason };
 	}
 	try {
 		await purgeHost(access.config, access.hostname);

@@ -11,6 +11,7 @@ import { ArrowsClockwise, Fire, Lightning } from "@phosphor-icons/react";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { CLOUDFLARE_PERMISSIONS } from "../core/guide-content.js";
 import { apiPost, errorText } from "./api.js";
 import { DocsLink, PageHeader } from "./page.js";
 import { SpeculationCard } from "./speculation.js";
@@ -293,7 +294,7 @@ export function PerformancePage() {
 									: media.rule
 										? `${media.host} is cached at Cloudflare's edge for ${days(media.rule.edgeTtl)} days and in browsers for ${days(media.rule.browserTtl)} days${media.rule.enabled ? "" : " (the rule is turned off)"}.`
 										: media.reason
-											? `Couldn't check ${media.host}: ${media.reason} It needs Cache Rules → Edit.`
+											? `Couldn't check ${media.host}: ${media.reason} It needs Zone → ${CLOUDFLARE_PERMISSIONS.cacheRules.name}.`
 											: `${media.host} isn't cached at Cloudflare's edge yet, so every image is fetched from storage. Media file names never change, so a year is safe.`}
 							</p>
 						</div>
@@ -311,8 +312,8 @@ export function PerformancePage() {
 						<p className="text-sm leading-5 text-pretty text-kumo-subtle">
 							Removes every cached page and the images on your media host, for example after replacing an image or changing
 							theme files outside a deploy. Cloudflare's “Purge Everything” for the zone doesn't clear these pages; use this
-							button instead. Clearing images uses the Cloudflare API token from Clean Image URLs (it needs Zone → Cache Purge →
-							Purge).
+							button instead. Clearing images uses the Cloudflare API token from Clean Image URLs (it needs Zone →{" "}
+							{CLOUDFLARE_PERMISSIONS.cachePurge.name}).
 						</p>
 					</div>
 					<Button variant="secondary" icon={<ArrowsClockwise />} disabled={busy !== null} onClick={() => void clear()}>

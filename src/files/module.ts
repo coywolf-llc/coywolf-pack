@@ -13,7 +13,7 @@ import { parseInput, workerEnv } from "../shared.js";
 import { downloadPath, extensionOf, formatSize, isUploadId, newUploadId, safeFilename } from "./format.js";
 import { MAX_THROUGH_SITE, type R2Config, S3Error, partSizeFor, r2Client } from "./s3.js";
 import { contextFetch } from "../core/cloudflare-api.js";
-import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, r2S3Credentials, sharedTokenState } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, r2S3Credentials, savedR2KeyPair, sharedTokenState } from "../core/cloudflare-token.js";
 import { uploadsBindingName } from "./serve.js";
 import { COLLECTIONS, type UploadDoc, invalidateSiteCache, settingsFrom } from "./site.js";
 import { entryTitle, fileIdsIn } from "./walker.js";
@@ -86,33 +86,18 @@ const filesSettingsInput = z.object({
 
 const filled = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
 
-/** The saved R2 secret access key, or whether it's stored but can't be decrypted. */
-async function savedR2Secret(ctx: PluginContext): Promise<{ value: string | null; unreadable: boolean }> {
-	try {
-		const value = await ctx.settings.get<string>("filesR2SecretAccessKey");
-		return { value: filled(value) ? value : null, unreadable: false };
-	} catch {
-		return { value: null, unreadable: true };
-	}
-}
-
 /**
  * Whether large uploads have what they need (not whether it works): the bucket name, and all four saved R2
  * credentials or the Cloudflare API token. `problem`: a saved secret that can't be decrypted stands in the way.
  * Asks Cloudflare nothing. `bindings` replaces the Worker's env (tests).
  */
 export async function r2Readiness(ctx: PluginContext, bindings?: Record<string, unknown>): Promise<{ configured: boolean; problem: string | null }> {
-	const [accountId, accessKeyId, secret, bucket] = await Promise.all([
-		ctx.settings.get<string>("filesR2AccountId").catch(() => null),
-		ctx.settings.get<string>("filesR2AccessKeyId").catch(() => null),
-		savedR2Secret(ctx),
-		ctx.settings.get<string>("filesR2Bucket").catch(() => null),
-	]);
-	if (filled(accountId) && filled(accessKeyId) && secret.value && filled(bucket)) return { configured: true, problem: null };
+	const [pair, bucket] = await Promise.all([savedR2KeyPair(ctx).catch(() => null), ctx.settings.get<string>("filesR2Bucket").catch(() => null)]);
+	if (pair?.complete && filled(bucket)) return { configured: true, problem: null };
 	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
 	const resolved = await cloudflareToken(ctx, env, "files");
 	if (resolved.token) return { configured: filled(bucket), problem: null };
-	return { configured: false, problem: resolved.unreadable || secret.unreadable ? UNREADABLE_TOKEN_MESSAGE : null };
+	return { configured: false, problem: resolved.unreadable || pair?.secretUnreadable ? UNREADABLE_TOKEN_MESSAGE : null };
 }
 
 interface UsageDoc {
@@ -158,19 +143,13 @@ async function queryAll<T>(c: StorageCollection<T>, where?: Record<string, strin
  * is always needed. `bindings` replaces the Worker's env (tests).
  */
 export async function r2Config(ctx: PluginContext, bindings?: Record<string, unknown>): Promise<R2Config> {
-	const [accountId, accessKeyId, secretAccessKey, bucket, secretUnreadable] = await Promise.all([
-		ctx.settings.get<string>("filesR2AccountId"),
-		ctx.settings.get<string>("filesR2AccessKeyId"),
-		// A saved secret that can't be decrypted counts as missing: the token can still stand in.
-		savedR2Secret(ctx),
-		ctx.settings.get<string>("filesR2Bucket"),
-	]).then(([a, k, s, b]) => [a, k, s.value, b, s.unreadable] as const);
-	if (filled(accountId) && !/^[a-f0-9]{32}$/i.test(accountId.trim())) throw PluginRouteError.badRequest("The R2 account ID should be 32 hexadecimal characters.");
+	// A saved secret that can't be decrypted counts as missing: the token can still stand in (savedR2KeyPair).
+	const [pair, bucket] = await Promise.all([savedR2KeyPair(ctx), ctx.settings.get<string>("filesR2Bucket")]);
+	const { accountId, secretUnreadable } = pair;
+	if (accountId && !/^[a-f0-9]{32}$/i.test(accountId)) throw PluginRouteError.badRequest("The R2 account ID should be 32 hexadecimal characters.");
 	if (!filled(bucket)) throw PluginRouteError.badRequest("Large uploads aren't set up: enter the R2 bucket name on the Files page → Settings.");
 	if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket.trim())) throw PluginRouteError.badRequest("The R2 bucket name isn't valid.");
-	if (filled(accountId) && filled(accessKeyId) && filled(secretAccessKey)) {
-		return { accountId: accountId.trim(), accessKeyId: accessKeyId.trim(), secretAccessKey: secretAccessKey.trim(), bucket: bucket.trim() };
-	}
+	if (pair.complete) return { accountId, accessKeyId: pair.accessKeyId, secretAccessKey: pair.secretAccessKey, bucket: bucket.trim() };
 	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
 	const { token, unreadable } = await cloudflareToken(ctx, env, "files");
 	if (!token && (unreadable || secretUnreadable)) throw PluginRouteError.badRequest(UNREADABLE_TOKEN_MESSAGE);
