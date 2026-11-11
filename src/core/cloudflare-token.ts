@@ -126,6 +126,21 @@ async function savedValue(ctx: SettingsReader, key: string): Promise<{ value: st
 }
 
 /**
+ * The File Downloads R2 key pair as saved (Files page → Settings → Advanced). `complete`: the account ID, the access
+ * key ID and a readable secret are all filled, which is the only case large uploads use it (r2Config in
+ * src/files/module.ts); otherwise their keys are made from the Cloudflare API token and whatever is saved of the
+ * pair is left over. A secret that can't be decrypted counts as missing (`secretUnreadable`).
+ */
+export async function savedR2KeyPair(ctx: SettingsReader): Promise<{ accountId: string; accessKeyId: string; secretAccessKey: string; secretUnreadable: boolean; complete: boolean }> {
+	const plain = async (key: string) => {
+		const value = await ctx.settings.get<string>(key);
+		return typeof value === "string" ? value.trim() : "";
+	};
+	const [accountId, accessKeyId, secret] = await Promise.all([plain("filesR2AccountId"), plain("filesR2AccessKeyId"), savedValue(ctx, "filesR2SecretAccessKey")]);
+	return { accountId, accessKeyId, secretAccessKey: secret.value, secretUnreadable: secret.unreadable, complete: Boolean(accountId && accessKeyId && secret.value) };
+}
+
+/**
  * The token `feature` uses, and where it came from (the order is at the top of
  * this file). `typed`: a token typed on the page for this one action.
  * `olderEnv`: the older Worker secrets to read in place of the feature's own

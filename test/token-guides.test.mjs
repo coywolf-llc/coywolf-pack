@@ -64,6 +64,65 @@ test("the guide says exactly what the form shows, and lists everything else to a
 	assert.match(plain, /CLOUDFLARE_API_TOKEN/);
 });
 
+test("the zone rule and cache permissions carry the names Cloudflare's token editor shows", () => {
+	const P = CLOUDFLARE_PERMISSIONS;
+	assert.deepEqual([P.transformRules.name, P.cacheRules.name, P.cachePurge.name], ["Zone Transform Rules → Edit", "Cache Settings → Edit", "Cache → Purge"]);
+	assert.equal(P.botManagement.name, "Bot Management → Read");
+	for (const id of ["transformRules", "cacheRules", "cachePurge"]) assert.deepEqual([P[id].scope, P[id].form], ["zone", undefined], `${id}: a zone permission added by hand`);
+});
+
+test("each search hint finds its row, and tells apart the rows one search lists together", () => {
+	const all = Object.values(CLOUDFLARE_PERMISSIONS);
+	const row = (p) => p.name.split(" → ")[0];
+	const level = (p) => p.name.split(" → ")[1];
+	const term = (p) => text(p.find).match(/search for “([^”]+)”/)?.[1];
+	const hinted = all.filter((p) => p.find);
+	assert.deepEqual(hinted.map((p) => p.name), ["Zone Transform Rules → Edit", "Cache Settings → Edit", "Cache → Purge"]);
+	for (const p of hinted) {
+		const word = term(p);
+		assert.ok(word, `${p.name}: the hint says what to search for`);
+		assert.ok(row(p).toLowerCase().includes(word.toLowerCase()), `searching "${word}" doesn't find ${row(p)}`);
+		// A search word that lists another of the token's rows too: the hint names the exact row, its description and its level.
+		const alsoListed = all.filter((o) => o.scope === p.scope && row(o) !== row(p) && row(o).toLowerCase().includes(word.toLowerCase()));
+		if (!alsoListed.length) continue;
+		assert.ok(p.find.includes(`>${row(p)}</strong>`), `${p.name}: the hint names the exact row`);
+		assert.match(text(p.find), new RegExp(`set it to ${level(p)}$`), `${p.name}: the hint names the level`);
+		assert.match(text(p.find), /“Grants [^”]+”/, `${p.name}: the hint quotes the row's description`);
+	}
+	assert.equal(term(CLOUDFLARE_PERMISSIONS.transformRules), "transform");
+	assert.match(text(CLOUDFLARE_PERMISSIONS.cacheRules.find), /named Cache Settings \(“Grants write access to cache settings phase”\), not the one named just Cache/);
+	assert.match(text(CLOUDFLARE_PERMISSIONS.cachePurge.find), /named just Cache \(“Grants access to purge cache”\), not Cache Settings/);
+
+	// The hints reach the reader: in the token's own guide, and in each module guide that needs the permission.
+	const tokenGuide = GUIDES["cloudflare-token"].steps.join(" ");
+	for (const p of all) if (p.find) assert.ok(tokenGuide.includes(`>${p.name}</strong> (${p.find})`), `${p.name}: hint in the Cloudflare API token guide`);
+	const images = GUIDES["images-token"];
+	assert.ok(images.steps.join(" ").includes(CLOUDFLARE_PERMISSIONS.transformRules.find));
+	assert.match(text(images.note), /needs Cache → Purge too, and its cache rule \(Performance page\) Cache Settings → Edit\..*one named just Cache and one named Cache Settings/);
+});
+
+test("nothing names the permissions the way older editors did", () => {
+	const root = new URL("../", import.meta.url).pathname;
+	const files = (dir) => readdirSync(dir).flatMap((name) => (statSync(join(dir, name)).isDirectory() ? files(join(dir, name)) : /\.(tsx?|md|astro)$/.test(name) ? [join(dir, name)] : []));
+	const old = /(?<!Zone )Transform Rules\s*→|Cache Rules\s*→|Cache Purge\s*→/;
+	for (const file of [...files(join(root, "src")), ...files(join(root, "docs")), join(root, "README.md")]) {
+		assert.doesNotMatch(readFileSync(file, "utf8"), old, file);
+	}
+});
+
+test("a refused call names the permission as the editor shows it", async () => {
+	const { purgeHost, readMediaCacheRule, applyMediaCacheRule } = await import("../src/images/cloudflare.ts");
+	// The zone lookup works; everything else is refused, as with a token missing the permission.
+	const fetch = async (url) =>
+		String(url).includes("/zones?name=")
+			? new Response(JSON.stringify({ success: true, result: [{ id: "z1", name: new URL(url).searchParams.get("name") }] }), { status: 200 })
+			: new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: "Authentication error" }] }), { status: 403 });
+	const config = { token: "tok", accountId: "a".repeat(32), fetch };
+	await assert.rejects(purgeHost(config, "media.coywolf.com"), /The Cloudflare API token needs Zone → Cache → Purge\.$/);
+	await assert.rejects(readMediaCacheRule(config, "media.coywolf.com"), /The Cloudflare API token needs Zone → Cache Settings → Edit\.$/);
+	await assert.rejects(applyMediaCacheRule(config, "media.coywolf.com"), /The Cloudflare API token needs Zone → Cache Settings → Edit\.$/);
+});
+
 test("module guides say what the Cloudflare API token needs there, using only permissions the token's guide covers", () => {
 	const names = Object.values(CLOUDFLARE_PERMISSIONS).map((p) => p.name);
 	for (const id of FEATURE_GUIDES) {

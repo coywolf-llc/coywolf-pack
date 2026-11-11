@@ -20,7 +20,10 @@ interface TokenStatus {
 	env: boolean;
 	accountId: string | null;
 	older: Array<{ key: string; label: string; page: string }>;
+	/** A complete R2 key pair: large uploads use it ahead of the token. */
 	r2KeyPair: boolean;
+	/** Part of an R2 key pair, which nothing uses. */
+	r2Leftovers: boolean;
 	r2Page: string;
 	olderSecrets: string[];
 }
@@ -49,9 +52,11 @@ export function CloudflareTokenCard() {
 	if (!status) return null;
 
 	// Only the token saved on Settings replaces older tokens: the Worker secret ranks below them.
-	const removable = status.saved && (status.older.length > 0 || status.r2KeyPair);
+	const anyR2 = status.r2KeyPair || status.r2Leftovers;
+	const removable = status.saved && (status.older.length > 0 || anyR2);
 	const ask = () => {
-		setR2(status.older.length === 0);
+		// A complete pair is in use, so removing it with the tokens is a choice to make; leftovers aren't used by anything.
+		setR2(status.older.length === 0 || status.r2Leftovers);
 		setRemoveError(null);
 		setAsking(true);
 	};
@@ -64,12 +69,33 @@ export function CloudflareTokenCard() {
 			setAsking(false);
 			toast.success(`Removed ${plural(result.removed, "older value", "older values")}`, "Every Cloudflare feature now uses the Cloudflare API token.");
 		} catch (cause) {
-			setRemoveError(errorText(cause, "Couldn't remove the older tokens"));
+			setRemoveError(errorText(cause, tokens ? "Couldn't remove the older tokens" : "Couldn't remove the R2 key pair values"));
 		} finally {
 			setPending(false);
 		}
 	};
-	const removing = [...status.older, ...(r2 && status.r2KeyPair ? [{ key: "r2", label: "File Downloads R2 key pair", page: status.r2Page }] : [])];
+	const r2Item = status.r2KeyPair
+		? { key: "r2", label: "File Downloads R2 key pair", note: `used by ${status.r2Page}` }
+		: { key: "r2", label: "Leftover File Downloads R2 key pair values", note: "not used by anything" };
+	const removing = [...status.older.map((o) => ({ key: o.key, label: o.label, note: `used by ${o.page}` })), ...(r2 && anyR2 ? [r2Item] : [])];
+	const tokens = status.older.length > 0;
+	const dialog = tokens
+		? {
+				title: "Remove the older tokens?",
+				description:
+					"First open each page below and check it works with the Cloudflare API token. The pack then checks the token with Cloudflare before it removes anything. This can't be undone here: to go back, paste the older tokens again. The tokens themselves stay in Cloudflare until you delete them there.",
+			}
+		: status.r2KeyPair
+			? {
+					title: "Remove the R2 key pair?",
+					description:
+						"Large uploads then make their R2 keys from the Cloudflare API token, which needs Workers R2 Storage → Edit. The pack checks the token with Cloudflare before it removes anything. This can't be undone here: to go back, enter the key pair again on the Files page → Settings → Advanced. The key pair itself stays in Cloudflare until you delete it there.",
+				}
+			: {
+					title: "Remove the leftover R2 key pair values?",
+					description:
+						"Part of an older R2 key pair is still saved (an access key ID or a secret without the rest). It isn't used, so nothing changes: large uploads already use the Cloudflare API token. The pack checks the token with Cloudflare before it removes anything. The R2 account ID and bucket name are kept.",
+				};
 
 	return (
 		<section className="space-y-3 rounded-lg border border-kumo-line p-4" aria-labelledby="cw-cloudflare-token">
@@ -113,9 +139,15 @@ export function CloudflareTokenCard() {
 				</p>
 			)}
 			{status.r2KeyPair && <p className="text-sm text-kumo-subtle">File Downloads has an R2 key pair saved. It wins over the token for large uploads.</p>}
+			{status.r2Leftovers && (
+				<p className="text-sm text-kumo-subtle">
+					Part of an older File Downloads R2 key pair is still saved. It isn't used
+					{status.saved || status.env ? ": large uploads use the Cloudflare API token." : ": large uploads need a complete key pair or the Cloudflare API token."}
+				</p>
+			)}
 			{removable && (
 				<Button variant="secondary" disabled={pending} onClick={ask}>
-					{status.older.length ? `Remove ${plural(status.older.length, "older token", "older tokens")}` : "Remove the R2 key pair"}
+					{tokens ? `Remove ${plural(status.older.length, "older token", "older tokens")}` : status.r2KeyPair ? "Remove the R2 key pair" : "Remove the leftover R2 key pair values"}
 				</Button>
 			)}
 			{status.olderSecrets.length > 0 && (
@@ -128,8 +160,8 @@ export function CloudflareTokenCard() {
 			<ConfirmDialog
 				open={asking}
 				onClose={() => !pending && setAsking(false)}
-				title="Remove the older tokens?"
-				description="First open each page below and check it works with the Cloudflare API token. The pack then checks the token with Cloudflare before it removes anything. This can't be undone here: to go back, paste the older tokens again. The tokens themselves stay in Cloudflare until you delete them there."
+				title={dialog.title}
+				description={dialog.description}
 				confirmLabel="Remove"
 				pendingLabel="Checking and removing…"
 				isPending={pending}
@@ -141,14 +173,18 @@ export function CloudflareTokenCard() {
 					<ul className="space-y-1 text-sm" role="list">
 						{removing.map((o) => (
 							<li key={o.key}>
-								<strong className="font-medium">{o.label}</strong>, used by {o.page}
+								<strong className="font-medium">{o.label}</strong>, {o.note}
 							</li>
 						))}
 					</ul>
 				)}
-				{status.r2KeyPair && (
+				{anyR2 && tokens && (
 					<Checkbox
-						label="Also remove the File Downloads R2 key pair (large uploads then use the Cloudflare API token)"
+						label={
+							status.r2KeyPair
+								? "Also remove the File Downloads R2 key pair (large uploads then use the Cloudflare API token)"
+								: "Also remove the leftover File Downloads R2 key pair values (they aren't used: large uploads already use the Cloudflare API token)"
+						}
 						checked={r2}
 						disabled={pending}
 						onCheckedChange={(checked: boolean) => setR2(checked)}

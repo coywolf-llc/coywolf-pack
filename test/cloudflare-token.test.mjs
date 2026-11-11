@@ -242,12 +242,52 @@ test("status: the token, its remembered account, the older tokens still saved (w
 	assert.equal(status.accountId, ACCOUNT);
 	assert.deepEqual(status.older.map((o) => o.key).sort(), ["imagesApiToken", "robotsRadarToken", "videosApiToken"], "an unreadable one is still there to remove");
 	assert.ok(status.older.every((o) => !o.label.startsWith("Older:") && o.page), "each with the pages it served");
-	assert.equal(status.r2KeyPair, true);
+	// An access key ID with no secret isn't a key pair: large uploads make their keys from the token.
+	assert.deepEqual([status.r2KeyPair, status.r2Leftovers], [false, true]);
 	assert.deepEqual(status.olderSecrets, ["CF_STREAM_TOKEN"], "the restore token isn't an older token");
 	assert.equal(ctx.http, undefined);
 
 	const unreadable = await cloudflareTokenStatus(fakeCtx({}, { unreadable: ["cloudflareApiToken"] }), {});
 	assert.deepEqual([unreadable.saved, unreadable.unreadable], [false, true]);
+});
+
+test("status: an R2 key pair counts only when large uploads would use it; anything less is reported as left over", async () => {
+	const { r2Config } = await import("../src/files/module.ts");
+	const cf = cloudflare({ "GET /user/tokens/verify": { id: "tid", status: "active" } });
+	const base = { cloudflareApiToken: "tok", filesR2Bucket: "coywolf-media" };
+	const r2 = async (settings, options = {}) => {
+		const status = await cloudflareTokenStatus(fakeCtx({ ...base, ...settings }, options), {});
+		// What large uploads really sign with: the saved access key ID, or the token's ID.
+		const used = (await r2Config(fakeCtx({ ...base, ...settings }, { ...options, fetch: cf.fetch }), { CF_ACCOUNT_ID: ACCOUNT })).accessKeyId;
+		return { pair: status.r2KeyPair, leftovers: status.r2Leftovers, used };
+	};
+
+	// coywolf.com after 0.37.0: the secret cleared, the account ID and access key ID still saved.
+	assert.deepEqual(await r2({ filesR2AccountId: ACCOUNT, filesR2AccessKeyId: "AKID" }), { pair: false, leftovers: true, used: "tid" });
+	assert.deepEqual(await r2({ filesR2AccessKeyId: "AKID" }), { pair: false, leftovers: true, used: "tid" }, "an access key ID alone");
+	assert.deepEqual(await r2({ filesR2SecretAccessKey: "SECRET" }), { pair: false, leftovers: true, used: "tid" }, "a secret alone");
+	assert.deepEqual(await r2({ filesR2AccessKeyId: "AKID", filesR2SecretAccessKey: "SECRET" }), { pair: false, leftovers: true, used: "tid" }, "no account ID");
+	assert.deepEqual(await r2({ filesR2AccountId: ACCOUNT, filesR2AccessKeyId: "AKID", filesR2SecretAccessKey: "  " }), { pair: false, leftovers: true, used: "tid" }, "a blank secret");
+	// A secret that can't be decrypted is still there to remove, and isn't used.
+	assert.deepEqual(await r2({ filesR2AccountId: ACCOUNT, filesR2AccessKeyId: "AKID" }, { unreadable: ["filesR2SecretAccessKey"] }), { pair: false, leftovers: true, used: "tid" });
+
+	assert.deepEqual(await r2({ filesR2AccountId: ACCOUNT, filesR2AccessKeyId: "AKID", filesR2SecretAccessKey: "SECRET" }), { pair: true, leftovers: false, used: "AKID" }, "a complete pair wins over the token");
+
+	// The account ID and bucket alone aren't part of a key pair: the token uses them.
+	assert.deepEqual(await r2({ filesR2AccountId: ACCOUNT }), { pair: false, leftovers: false, used: "tid" });
+	assert.deepEqual(await r2({}), { pair: false, leftovers: false, used: "tid" });
+});
+
+test("clear-older removes a leftover R2 access key ID when asked, and counts only what was there", async () => {
+	const { "cloudflare-token/clear-older": route } = cloudflareTokenRoutes();
+	const ctx = fakeCtx({ cloudflareApiToken: "tok", filesR2AccountId: ACCOUNT, filesR2AccessKeyId: "AKID", filesR2Bucket: "b" }, { fetch: checked().fetch });
+	assert.equal((await route.handler({ ...ctx, input: {} })).removed, 0, "not unless asked");
+	assert.equal(ctx.stored.get("filesR2AccessKeyId"), "AKID");
+	const result = await route.handler({ ...ctx, input: { r2: true } });
+	assert.equal(result.removed, 1);
+	assert.ok(!ctx.stored.has("filesR2AccessKeyId"));
+	assert.deepEqual([result.status.r2KeyPair, result.status.r2Leftovers], [false, false]);
+	assert.deepEqual([ctx.stored.get("filesR2AccountId"), ctx.stored.get("filesR2Bucket")], [ACCOUNT, "b"], "the account ID and bucket name stay");
 });
 
 /** Cloudflare answering for a token: its accounts and its verify status. */

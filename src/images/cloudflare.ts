@@ -6,6 +6,7 @@
 import { type CustomDomain, type RulesetRule, type SetupPlan, type SetupState, hostnameOf, planMediaHostSetup, zoneCandidates } from "./setup.js";
 
 import { CLOUDFLARE_API_HOST, CloudflareApiError, type Fetch, cloudflareApi } from "../core/cloudflare-api.js";
+import { CLOUDFLARE_PERMISSIONS } from "../core/guide-content.js";
 
 export { CLOUDFLARE_API_HOST, CloudflareApiError };
 
@@ -22,9 +23,9 @@ const PERMISSION_HINT: Record<string, string> = {
 	zone: "Zone → Zone → Read",
 	transformations: "Zone → Zone Settings → Edit",
 	domain: "Account → Workers R2 Storage → Edit and Zone → DNS → Edit",
-	rules: "Zone → Transform Rules → Edit (and Account → Account Rulesets → Read)",
-	purge: "Zone → Cache Purge → Purge",
-	cacheRules: "Zone → Cache Rules → Edit",
+	rules: `Zone → ${CLOUDFLARE_PERMISSIONS.transformRules.name} (and Account → Account Rulesets → Read)`,
+	purge: `Zone → ${CLOUDFLARE_PERMISSIONS.cachePurge.name}`,
+	cacheRules: `Zone → ${CLOUDFLARE_PERMISSIONS.cacheRules.name}`,
 	tieredCache: "Zone → Zone Settings → Edit",
 };
 

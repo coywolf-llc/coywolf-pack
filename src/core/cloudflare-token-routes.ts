@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { parseInput, secret, workerEnv } from "../shared.js";
 import { contextFetch } from "./cloudflare-api.js";
-import { CLOUDFLARE_TOKEN_SECRET, CLOUDFLARE_TOKEN_SETTING, OLDER_TOKENS, OLDER_TOKEN_SECRETS, checkCloudflareToken, cloudflareAccountId } from "./cloudflare-token.js";
+import { CLOUDFLARE_TOKEN_SECRET, CLOUDFLARE_TOKEN_SETTING, OLDER_TOKENS, OLDER_TOKEN_SECRETS, checkCloudflareToken, cloudflareAccountId, savedR2KeyPair } from "./cloudflare-token.js";
 import { readOnlyRoute } from "./routes.js";
 import { SECRET_SETTINGS } from "./secrets.js";
 
@@ -69,7 +69,9 @@ export async function cloudflareTokenStatus(ctx: Ctx, bindings?: Record<string, 
 	const older = (await Promise.all(OLDER_TOKEN_SETTINGS.map(async (key) => ((await stored(ctx, key)) ? { key, label: labelOf(key), page: OLDER_TOKEN_PAGES[key] ?? "" } : null)))).filter(
 		(o): o is { key: string; label: string; page: string } => o !== null,
 	);
-	const r2 = (await Promise.all(R2_KEY_PAIR.map((key) => stored(ctx, key)))).some(Boolean);
+	// The same rule large uploads use (savedR2KeyPair): only a complete, readable pair is used. Anything less is left over.
+	const [pair, r2Stored] = await Promise.all([savedR2KeyPair(ctx).catch(() => null), Promise.all(R2_KEY_PAIR.map((key) => stored(ctx, key)))]);
+	const r2 = pair?.complete ?? false;
 	return {
 		/** Saved on the plugin's Settings page. */
 		saved: Boolean(saved),
@@ -81,8 +83,10 @@ export async function cloudflareTokenStatus(ctx: Ctx, bindings?: Record<string, 
 		accountId: token ? await cloudflareAccountId(ctx, env, { token }, null, { lookup: false }) : null,
 		/** The older tokens still saved, with their Settings page names and the pages they served. */
 		older,
-		/** The File Downloads R2 key pair is saved (it wins over the token for large uploads). */
+		/** A complete File Downloads R2 key pair is saved (account ID, access key ID and a readable secret): it wins over the token for large uploads. */
 		r2KeyPair: r2,
+		/** Part of an R2 key pair is saved, but not a complete one: it isn't used (large uploads make their keys from the token). */
+		r2Leftovers: !r2 && r2Stored.some(Boolean),
 		r2Page: OLDER_TOKEN_PAGES.filesR2SecretAccessKey,
 		/** Older Worker secrets that are set; deleting them is `npx wrangler secret delete <name>`. */
 		olderSecrets: OLDER_TOKEN_SECRETS.filter((name) => envSet(env, name)),
@@ -102,7 +106,7 @@ export function cloudflareTokenRoutes() {
 		 * Remove the older tokens. Only with the Cloudflare API token saved on Settings (never on the Worker secret
 		 * alone: older tokens outrank it, so removing them would switch features to a token nobody chose for them),
 		 * and only once Cloudflare says that token is active and sees exactly one account. `r2: true` removes the
-		 * File Downloads R2 key pair too (large uploads then use the token).
+		 * File Downloads R2 key pair too, complete (large uploads then use the token) or left over (nothing changes).
 		 *
 		 * readOnlyRoute: it deletes settings, but none that any page renders, so the page cache and the settings
 		 * generation are left alone (an unmarked POST would clear every cached page for nothing). Every feature
@@ -127,7 +131,9 @@ export function cloudflareTokenRoutes() {
 					const check = await checkCloudflareToken({ token, fetch: contextFetch(ctx) });
 					if (!check.ok) throw PluginRouteError.badRequest(`Nothing was removed. ${check.reason}`);
 					const before = await cloudflareTokenStatus(ctx);
-					const keys = [...before.older.map((o) => o.key), ...(r2 ? R2_KEY_PAIR : [])];
+					// Only what's stored, so the count is what was removed (leftovers are often one value of the pair).
+					const r2Keys = r2 ? (await Promise.all(R2_KEY_PAIR.map(async (key) => ((await stored(ctx, key)) ? key : null)))).filter((key) => key !== null) : [];
+					const keys = [...before.older.map((o) => o.key), ...r2Keys];
 					for (const key of keys) await ctx.settings.delete(key);
 					ctx.log.info("Older Cloudflare tokens removed", { keys });
 					return { removed: keys.length, status: await cloudflareTokenStatus(ctx) };

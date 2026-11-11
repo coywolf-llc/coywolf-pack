@@ -59,14 +59,16 @@ One token covers every Cloudflare feature. It's saved as **Cloudflare API token*
 | Zone Settings → Edit | This site's domain | Yes | Cloudflare Checkup, Set up media host |
 | DNS → Edit | This site's domain | Yes | Set up media host, Cloudflare Checkup |
 | Analytics → Read | This site's domain | Yes | Insights (edge errors and crawlers) |
-| Transform Rules → Edit | This site's domain | By hand | Set up media host |
-| Cache Rules → Edit | This site's domain | By hand | The media host's cache rule |
-| Cache Purge → Purge | This site's domain | By hand | Clearing the media host's images |
+| Zone Transform Rules → Edit | This site's domain | By hand | Set up media host |
+| Cache Settings → Edit | This site's domain | By hand | The media host's cache rule |
+| Cache → Purge | This site's domain | By hand | Clearing the media host's images |
 | Bot Management → Read | This site's domain | By hand | Cloudflare Checkup's bot rows |
+
+The names are the ones Cloudflare's token editor shows. Searching the editor for "transform" finds **Zone Transform Rules** (under Rules & Configuration). Searching for "cache" lists two rows under Cache & Performance: the one named just **Cache** ("Grants access to purge cache") takes **Purge**, and **Cache Settings** ("Grants write access to cache settings phase") takes **Edit**.
 
 Skip any whose feature you don't use: a page whose token lacks a permission says which one to add. For the domains policy, **Specified Domains → this site's domain** is recommended (the token can then change only this site); **All Domains** lets one token work on every site in the account. The account comes from `CF_ACCOUNT_ID`, the Clean Image URLs account ID, or the token's only account (remembered); a page that needs it asks for the account ID under **Advanced** when the token sees more than one. Large uploads make R2's S3 keys from the token (its ID and its SHA-256). D1 → Edit is never part of it: restores keep the `BACKUPS_API_TOKEN` Worker secret.
 
-Older per-feature tokens keep working until the Cloudflare API token is saved on Settings. The `CLOUDFLARE_API_TOKEN` Worker secret ranks below them, but serves every feature that has none: on a site that already has that secret, it now also reaches Cloudflare usage, Insights, Crawler Hints, Cloudflare Checkup, Videos, Social Images, the Radar sync and large uploads. [Internals](internals.md#which-cloudflare-token-a-feature-uses) has the order. **Features → Cloudflare API token** shows which older tokens are still saved and the pages they served, and removes them once the token saved on Settings checks out with Cloudflare (the File Downloads R2 key pair only when you tick it).
+Older per-feature tokens keep working until the Cloudflare API token is saved on Settings. The `CLOUDFLARE_API_TOKEN` Worker secret ranks below them, but serves every feature that has none: on a site that already has that secret, it now also reaches Cloudflare usage, Insights, Crawler Hints, Cloudflare Checkup, Videos, Social Images, the Radar sync and large uploads. [Internals](internals.md#which-cloudflare-token-a-feature-uses) has the order. **Features → Cloudflare API token** shows which older tokens are still saved and the pages they served, and removes them once the token saved on Settings checks out with Cloudflare (the File Downloads R2 key pair only when you tick it). The card tells a complete R2 key pair, which large uploads use ahead of the token, from part of one left behind (a saved access key ID without its secret, say), which isn't used and can be removed the same way.
 
 ## Moving to EmDash
 
