@@ -1,6 +1,6 @@
 {
 	"name": "@coywolf/emdash",
-	"version": "0.37.0",
+	"version": "0.37.1",
 	"description": "Coywolf Pack for EmDash: one plugin that enhances EmDash sites on Cloudflare. Page cache and warming, clean image URLs, backups and restore, redirects, Schema.org and Open Graph, RSS, news sitemap and llms.txt, robots.txt rules, live search, link checking, headings and table of contents, breadcrumbs, code highlighting, file downloads, Cloudflare Stream videos, reviews, custom blocks, AI enrichment and WordPress import.",
 	"license": "MIT",
 	"author": "Coywolf LLC (https://coywolf.com)",
