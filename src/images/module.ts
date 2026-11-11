@@ -16,6 +16,7 @@ import { contextFetch } from "../core/cloudflare-api.js";
 import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, sharedTokenState, tokenName } from "../core/cloudflare-token.js";
 import { requireFeature } from "../core/features.js";
 import { CLOUDFLARE_PERMISSIONS } from "../core/guide-content.js";
+import { type BucketLookup, boundBucket, bucketMissText, findBoundBucket, jurisdictionMessage } from "../core/worker-bindings.js";
 import { afterResponse, parseInput, secret, workerEnv } from "../shared.js";
 import { CloudflareApiError, type CloudflareConfig, applySetup, checkMediaHost, planSetup, purgeHost } from "./cloudflare.js";
 import { imageCdn, imageCdnSource, normalizeMediaHost } from "./lib.js";
@@ -84,7 +85,11 @@ async function env(): Promise<Record<string, unknown>> {
 	}
 }
 
-async function adminSettings(ctx: PluginContext) {
+/** What Set up media host says about a bucket in a jurisdiction (it doesn't send R2's jurisdiction header). */
+const imagesJurisdictionMessage = (lookup: BucketLookup) =>
+	jurisdictionMessage(lookup, "Set up media host", "Connect the media host to it by hand instead (How to set up a media host by hand, on this page).");
+
+async function adminSettings(ctx: PluginContext, mediaBinding: string) {
 	const e = await env();
 	const [host, accountId, bucket, token, resolved] = await Promise.all([
 		ctx.settings.get<string>(IMAGES_SETTINGS.host),
@@ -93,6 +98,8 @@ async function adminSettings(ctx: PluginContext) {
 		ctx.settings.get<string>(IMAGES_SETTINGS.token).catch(() => null),
 		cloudflareToken(ctx, e, "images"),
 	]);
+	// The media bucket, found with the token from the Worker's binding (shown even when a saved name overrides it).
+	const detectedBucket = await findBoundBucket(ctx, e, mediaBinding, { resolved, fetch: contextFetch(ctx), account: accountId?.trim() || null });
 	invalidateMediaHost(host ?? null);
 	await loadStoragePublicUrl();
 	const source = imageCdnSource();
@@ -108,6 +115,7 @@ async function adminSettings(ctx: PluginContext) {
 		storageConflict: source.conflict ? (source.storage ?? "") : "",
 		accountId: accountId ?? "",
 		bucket: bucket ?? "",
+		detectedBucket,
 		tokenSet: Boolean(token?.trim()),
 		envToken: Boolean(secret(e, "IMAGES_API_TOKEN") || secret(e, "CLOUDFLARE_API_TOKEN")),
 		envAccountId: Boolean(secret(e, "CF_ACCOUNT_ID") || secret(e, "CLOUDFLARE_ACCOUNT_ID")),
@@ -132,17 +140,31 @@ async function accountFor(ctx: PluginContext, e: Record<string, unknown>, token:
 	return cloudflareAccountId(ctx, e, { token, fetch: contextFetch(ctx) }, saved);
 }
 
-/** Credentials for the setup: the request's, then the saved ones, then Worker variables. */
-async function credentials(ctx: PluginContext, input: z.infer<typeof setupInput>): Promise<CloudflareConfig & { bucket: string; host: string }> {
+/**
+ * Credentials for the setup: the request's, then the saved ones, then Worker variables. The bucket: the one typed,
+ * else the one saved on this page, else the one bound as the media binding (found with the token,
+ * src/core/worker-bindings.ts).
+ */
+async function credentials(ctx: PluginContext, input: z.infer<typeof setupInput>, mediaBinding: string): Promise<CloudflareConfig & { bucket: string; host: string }> {
 	const e = await env();
 	const resolved = await cloudflareToken(ctx, e, "images", { typed: input.token });
 	const { token, unreadable } = resolved;
-	const bucket = input.bucket || (await ctx.settings.get<string>(IMAGES_SETTINGS.bucket))?.trim() || "";
+	// An empty bucket sent on purpose skips the saved one (its field was cleared): the bound bucket is used.
+	let bucket = input.bucket !== undefined ? input.bucket : (await ctx.settings.get<string>(IMAGES_SETTINGS.bucket))?.trim() || "";
 	const host = input.host || imageCdn() || "";
 	if (!token && unreadable) throw PluginRouteError.badRequest(UNREADABLE_TOKEN_MESSAGE);
+	let accountId: string | null = null;
+	let lookup: BucketLookup | null = null;
+	if (!bucket && token) {
+		accountId = await accountFor(ctx, e, token, input.accountId);
+		if (!accountId) throw PluginRouteError.badRequest(noAccountMessage("Advanced"));
+		lookup = await boundBucket(ctx, e, mediaBinding, { token, fetch: contextFetch(ctx), accountId, tokenName: tokenName(resolved) });
+		if (lookup.bucket && lookup.jurisdiction) throw PluginRouteError.badRequest(imagesJurisdictionMessage(lookup));
+		bucket = lookup.bucket ?? "";
+	}
 	const missing = [!host && "media host", !bucket && "R2 bucket name", !token && "Cloudflare API token (on the plugin's Settings page)"].filter(Boolean);
-	if (missing.length) throw PluginRouteError.badRequest(`Enter the ${missing.join(", ")} first.`);
-	const accountId = await accountFor(ctx, e, token as string, input.accountId);
+	if (missing.length) throw PluginRouteError.badRequest(`Enter the ${missing.join(", ")} first.${lookup && !lookup.bucket ? ` ${bucketMissText(lookup)}` : ""}`);
+	accountId ??= await accountFor(ctx, e, token as string, input.accountId);
 	if (!accountId) throw PluginRouteError.badRequest(noAccountMessage("Advanced"));
 	const doFetch = ctx.http ? (ctx.http.fetch.bind(ctx.http) as CloudflareConfig["fetch"]) : undefined;
 	return { token: token as string, accountId, bucket, host, fetch: doFetch, tokenName: tokenName(resolved) };
@@ -246,8 +268,10 @@ const requestOrigin = (ctx: { request: Request }) => new URL(ctx.request.url).or
 
 const bulkSetting = async (ctx: PluginContext) => (await ctx.settings.get<boolean>(IMAGES_SETTINGS.bulk)) === true;
 
-export function imagesModule(options: { database?: string; variants: VariantsHooks }) {
+export function imagesModule(options: { database?: string; media?: string; variants: VariantsHooks }) {
 	const database = options.database ?? "DB";
+	/** The media bucket's R2 binding (images.bucket in astro.config, default MEDIA). */
+	const media = options.media ?? "MEDIA";
 	const variants = options.variants;
 	return {
 		routes: {
@@ -255,7 +279,7 @@ export function imagesModule(options: { database?: string; variants: VariantsHoo
 				permission: "plugins:manage" as const,
 				handler: async (ctx: PluginContext) => {
 					await requireFeature(ctx, F);
-					return adminSettings(ctx);
+					return adminSettings(ctx, media);
 				},
 			},
 
@@ -272,7 +296,7 @@ export function imagesModule(options: { database?: string; variants: VariantsHoo
 					if (input.clearToken) await ctx.settings.delete(IMAGES_SETTINGS.token);
 					else if (input.token) await ctx.settings.set(IMAGES_SETTINGS.token, input.token);
 					ctx.log.info("Clean image URLs settings saved", { tokenChanged: Boolean(input.clearToken || input.token) });
-					return adminSettings(ctx);
+					return adminSettings(ctx, media);
 				},
 			}),
 
@@ -359,7 +383,7 @@ export function imagesModule(options: { database?: string; variants: VariantsHoo
 				request: { body: "json" },
 				handler: async (ctx) => {
 					await requireFeature(ctx, F);
-					const config = await credentials(ctx, parseInput(setupInput, ctx.input ?? {}));
+					const config = await credentials(ctx, parseInput(setupInput, ctx.input ?? {}), media);
 					try {
 						const { zone, plan } = await planSetup(config, { host: config.host, bucket: config.bucket });
 						return { zone: zone.name, plan: { host: plan.host, steps: plan.steps, done: plan.done }, quotaNote: QUOTA_NOTE };
@@ -375,7 +399,7 @@ export function imagesModule(options: { database?: string; variants: VariantsHoo
 				request: { body: "json" },
 				handler: async (ctx) => {
 					await requireFeature(ctx, F);
-					const config = await credentials(ctx, parseInput(setupInput, ctx.input ?? {}));
+					const config = await credentials(ctx, parseInput(setupInput, ctx.input ?? {}), media);
 					let applied: Awaited<ReturnType<typeof applySetup>>;
 					try {
 						applied = await applySetup(config, { host: config.host, bucket: config.bucket });

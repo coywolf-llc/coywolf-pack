@@ -12,7 +12,7 @@ import { apiGet, apiPost, errorText } from "./api.js";
 import { ConfirmDialog } from "./confirm-dialog.js";
 import { CredentialGuide } from "./guides.js";
 import { DocsLink } from "./page.js";
-import { SecretField, SettingsSection, SharedTokenNote } from "./settings-ui.js";
+import { Advanced, BucketFound, type DetectedBucket, SecretField, SettingsSection, SharedTokenNote, bucketFound, bucketOverridden } from "./settings-ui.js";
 import { AGING_PREFIXES, backupsStoppedWarning, days, lifecycleSummary } from "./backups-retention-core.js";
 import { useToast } from "./toast.js";
 
@@ -45,6 +45,8 @@ export interface RetentionState {
 interface RetentionInfo {
 	accountId: string;
 	bucket: string;
+	/** The bucket bound as BACKUPS, found with the token: the bucket field becomes an override under Advanced. */
+	detectedBucket?: DetectedBucket | null;
 	suggestedBucket: string;
 	tokenSaved: boolean;
 	envToken: boolean;
@@ -73,11 +75,16 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 	const [confirm, setConfirm] = React.useState<"lock" | "remove">();
 	const [typed, setTyped] = React.useState("");
 
+	// The fields start from what's saved once; later loads (a changed Keep backups for) leave what was typed, or cleared.
+	const draftFilled = React.useRef(false);
 	const load = React.useCallback(async () => {
 		try {
 			const next = await get<RetentionInfo>("cloudflare", "Couldn't read the retention settings");
 			setInfo(next);
-			setDraft((d) => ({ ...d, accountId: d.accountId || next.accountId, bucket: d.bucket || next.bucket }));
+			if (!draftFilled.current) {
+				draftFilled.current = true;
+				setDraft((d) => ({ ...d, accountId: d.accountId || next.accountId, bucket: d.bucket || next.bucket }));
+			}
 			setLock(next.state?.status.lockDays != null);
 			setLoadError(undefined);
 		} catch (cause) {
@@ -90,7 +97,8 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 
 	const credentials = () => ({
 		...(draft.accountId.trim() ? { accountId: draft.accountId.trim() } : {}),
-		...(draft.bucket.trim() ? { bucket: draft.bucket.trim() } : {}),
+		// Always sent: an empty field clears a saved override, so the bucket found from the binding is used.
+		bucket: draft.bucket.trim(),
 		...(draft.token.trim() ? { token: draft.token.trim() } : {}),
 	});
 
@@ -99,7 +107,9 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 		setError(undefined);
 		try {
 			const state = await post<RetentionState>(kind === "check" ? "cloudflare/check" : kind === "apply" ? "cloudflare/apply" : "cloudflare/remove", { ...credentials(), ...body });
-			setInfo((current) => (current ? { ...current, state, bucket: state.bucket, tokenSaved: current.tokenSaved || Boolean(body.saveToken && draft.token.trim()) } : current));
+			// Check and apply save the bucket entered, or remove the saved one when the field was cleared; remove changes neither.
+			const savedBucket = (current: RetentionInfo) => (kind === "remove" ? current.bucket : draft.bucket.trim() ? state.bucket : "");
+			setInfo((current) => (current ? { ...current, state, bucket: savedBucket(current), tokenSaved: current.tokenSaved || Boolean(body.saveToken && draft.token.trim()) } : current));
 			setDraft((d) => ({ ...d, token: "" }));
 			setConfirm(undefined);
 			setTyped("");
@@ -129,9 +139,27 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 	// The Cloudflare API token from Settings, or its Worker secret: either way the account comes from the token.
 	const shared = Boolean(info.sharedToken || info.sharedTokenEnv);
 	const hasToken = Boolean(shared || draft.token.trim() || info.tokenSaved || info.envToken);
-	// With the Cloudflare API token, the account is found from the token (the check says so when it can't be).
-	const ready = Boolean((shared || draft.accountId.trim() || info.envAccountId) && (draft.bucket.trim() || info.bucket) && hasToken);
 	const busy = pending !== undefined;
+	// With the Cloudflare API token, the account is found from the token (the check says so when it can't be).
+	// The bucket bound as BACKUPS, found with the token: the name field is then an override, under Advanced.
+	const detected = info.detectedBucket;
+	const found = bucketFound(detected);
+	const overridden = bucketOverridden(detected, info.bucket);
+	const ready = Boolean((shared || draft.accountId.trim() || info.envAccountId) && (draft.bucket.trim() || found) && hasToken);
+	const bucketField = (
+		<Input
+			label={found ? "Backup bucket name (override)" : "Backup bucket name"}
+			description={
+				found
+					? `Leave empty to use ${detected.bucket}, found from the ${detected.binding} binding. A name here wins over it. The check makes sure it's this site's.`
+					: "The bucket_name of the BACKUPS binding in wrangler.jsonc. The check makes sure it's this site's."
+			}
+			placeholder={found ? detected.bucket : info.suggestedBucket}
+			value={draft.bucket}
+			disabled={busy}
+			onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft((d) => ({ ...d, bucket: e.target.value }))}
+		/>
+	);
 	const applyLabel = status?.ours ? (inSync ? "Apply again" : `Update the rule to ${days(props.retentionDays)}`) : "Set the retention rule";
 
 	// Setting, shortening or removing the lock takes LOCK typed (the server refuses the last two without it).
@@ -219,17 +247,10 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 
 			{showForm && shared && (
 				<div className="space-y-4">
-					<div className="sm:max-w-md">
-						<Input
-							label="Backup bucket name"
-							description="The bucket_name of the BACKUPS binding in wrangler.jsonc. The check makes sure it's this site's."
-							placeholder={info.suggestedBucket}
-							value={draft.bucket}
-							disabled={busy}
-							onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft((d) => ({ ...d, bucket: e.target.value }))}
-						/>
-					</div>
-					<SharedTokenNote env={info.sharedTokenEnv}>
+					{!found && <div className="sm:max-w-md">{bucketField}</div>}
+					<BucketFound detected={detected} saved={info.bucket} feature="Retention on Cloudflare" />
+					<SharedTokenNote env={info.sharedTokenEnv} open={overridden}>
+						{found && <div className="sm:max-w-md">{bucketField}</div>}
 						<div className="sm:max-w-md">
 							<Input
 								label="Cloudflare account ID"
@@ -275,15 +296,14 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 							disabled={busy}
 							onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft((d) => ({ ...d, accountId: e.target.value }))}
 						/>
-						<Input
-							label="Backup bucket name"
-							description="The bucket_name of the BACKUPS binding in wrangler.jsonc. The check makes sure it's this site's."
-							placeholder={info.suggestedBucket}
-							value={draft.bucket}
-							disabled={busy}
-							onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft((d) => ({ ...d, bucket: e.target.value }))}
-						/>
+						{!found && bucketField}
 					</div>
+					<BucketFound detected={detected} saved={info.bucket} feature="Retention on Cloudflare" />
+					{found && (
+						<Advanced open={overridden}>
+							<div className="sm:max-w-md">{bucketField}</div>
+						</Advanced>
+					)}
 					<SecretField
 						label="Cloudflare API token"
 						saved={info.tokenSaved}
@@ -348,7 +368,7 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 			{!ready && (
 				<p className="text-xs text-kumo-subtle">
 					{shared
-						? "Enter the backup bucket name first."
+						? `Enter the backup bucket name first (it wasn't found from the ${detected?.binding ?? "BACKUPS"} binding).`
 						: `Enter the account ID, the backup bucket name and a token (or add the Cloudflare API token on the plugin's Settings page) first.`}
 				</p>
 			)}

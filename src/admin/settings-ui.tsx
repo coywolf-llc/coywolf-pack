@@ -72,7 +72,7 @@ export const SETTINGS_PAGE_PATH = "/plugins-manager/coywolf-pack/settings";
  * Worker secret, which a token saved on the page outranks, so pages put their
  * own token field among the children then.
  */
-export function SharedTokenNote(props: { env?: boolean; children?: React.ReactNode }) {
+export function SharedTokenNote(props: { env?: boolean; children?: React.ReactNode; open?: boolean }) {
 	return (
 		<div className="space-y-3">
 			<p className="text-sm text-kumo-subtle">
@@ -90,15 +90,73 @@ export function SharedTokenNote(props: { env?: boolean; children?: React.ReactNo
 					</>
 				)}
 			</p>
-			{props.children && (
-				<details className="rounded-md border border-kumo-line text-sm">
-					<summary className="cursor-pointer px-3 py-2 font-medium" style={{ display: "list-item" }}>
-						Advanced
-					</summary>
-					<div className="space-y-4 border-t border-kumo-line px-3 py-3">{props.children}</div>
-				</details>
-			)}
+			{props.children && <Advanced open={props.open}>{props.children}</Advanced>}
 		</div>
+	);
+}
+
+/** A native Advanced disclosure (the browser's own triangle and keyboard support), closed unless `open`. */
+export function Advanced(props: { children: React.ReactNode; open?: boolean }) {
+	return (
+		<details className="rounded-md border border-kumo-line text-sm" open={props.open || undefined}>
+			<summary className="cursor-pointer px-3 py-2 font-medium" style={{ display: "list-item" }}>
+				Advanced
+			</summary>
+			<div className="space-y-4 border-t border-kumo-line px-3 py-3">{props.children}</div>
+		</details>
+	);
+}
+
+/**
+ * The bucket a settings route found from the site Worker's R2 binding (src/core/worker-bindings.ts BucketLookup):
+ * its name, or why it wasn't found (`message`).
+ */
+export interface DetectedBucket {
+	binding: string;
+	bucket: string | null;
+	jurisdiction: string | null;
+	worker: string | null;
+	miss: string | null;
+	message: string | null;
+}
+
+/**
+ * Whether the bucket was found and can be used: the page then moves its bucket field under Advanced, as an override.
+ * A bucket in a jurisdiction doesn't count (the feature can't use it), so the field stays where the owner sees it.
+ */
+export const bucketFound = (detected?: DetectedBucket | null): detected is DetectedBucket & { bucket: string } => Boolean(detected?.bucket && !detected.jurisdiction);
+
+/** A saved bucket name that differs from the one found: it wins, so the page opens Advanced to show it. */
+export const bucketOverridden = (detected: DetectedBucket | null | undefined, saved: string | undefined) => Boolean(bucketFound(detected) && saved?.trim() && saved.trim() !== detected.bucket);
+
+/**
+ * One line about the bucket: "Found: <name>, from the MEDIA binding." (and when a saved name wins over it), or why
+ * it couldn't be found, so the field next to it is needed. Nothing when a saved name is in use and nothing was found
+ * (the saved name is all that matters then). `feature`: what can't use a bucket in a jurisdiction.
+ */
+export function BucketFound(props: { detected?: DetectedBucket | null; saved?: string; feature: string }) {
+	const d = props.detected;
+	const saved = props.saved?.trim();
+	if (!d || (saved && !bucketFound(d))) return null;
+	if (d.bucket && d.jurisdiction) {
+		return (
+			<p className="text-sm">
+				Found <span className="font-medium">{d.bucket}</span> from the <code>{d.binding}</code> binding, but it's in the {d.jurisdiction} jurisdiction, which {props.feature} can't use yet.
+			</p>
+		);
+	}
+	if (!bucketFound(d)) {
+		return (
+			<p className="text-xs text-kumo-subtle">
+				Not found from the <code>{d.binding}</code> binding, so enter the bucket name. {d.message}
+			</p>
+		);
+	}
+	return (
+		<p className="text-sm">
+			Found: <span className="font-medium">{d.bucket}</span>, from the <code>{d.binding}</code> binding.
+			{saved && saved !== d.bucket ? ` The bucket name saved under Advanced (${saved}) is used instead; clear it to use this one.` : ""}
+		</p>
 	);
 }
 

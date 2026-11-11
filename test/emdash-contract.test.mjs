@@ -1060,6 +1060,17 @@ test("Settings page guides: the pack's script finds Kumo's secret fields by labe
 		for (const input of inputs.filter((i) => i.getAttribute("data-cw-guide"))) {
 			assert.ok(window.document.getElementById(input.getAttribute("aria-describedby"))?.hasAttribute("data-cw-intro"), "the input is described by the guide's intro");
 		}
+		// The token guide's child lists arrive as lists: each permission its own item, under a numbered step and in the note.
+		const { CLOUDFLARE_PERMISSIONS } = await import("../src/core/guide-content.ts");
+		const tokenGuide = [...container.querySelectorAll("[data-cw-guides]")].find((g) => g.textContent.includes("Which feature needs which"));
+		assert.ok(tokenGuide, "the Cloudflare API token's guide is on the page");
+		const stepItems = [...tokenGuide.querySelectorAll("ol > li > ul > li")].map((li) => li.textContent);
+		const noteItems = [...tokenGuide.querySelectorAll("details > div > div > ul > li")].map((li) => li.textContent);
+		for (const p of Object.values(CLOUDFLARE_PERMISSIONS)) {
+			assert.equal(stepItems.filter((t) => t.startsWith(p.name)).length, 1, `${p.name}: one item in the steps`);
+			assert.equal(noteItems.filter((t) => t.startsWith(`${p.name}: `)).length, 1, `${p.name}: one item in the note`);
+		}
+		for (const ul of tokenGuide.querySelectorAll("ul")) assert.match(ul.getAttribute("style") ?? "", /list-style:\s*disc/);
 		await act(async () => reactRoot.unmount());
 	} finally {
 		await window.happyDOM.close();

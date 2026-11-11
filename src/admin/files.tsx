@@ -18,7 +18,7 @@ import { saveFile, siteSlug, today } from "./download.js";
 import { CredentialGuide } from "./guides.js";
 import { PreviewSection } from "./preview.js";
 import { SaveBar, isDirty } from "./save-bar.js";
-import { SecretField, SettingsSection, SetupCard, SharedTokenNote } from "./settings-ui.js";
+import { Advanced, BucketFound, type DetectedBucket, SecretField, SettingsSection, SetupCard, SharedTokenNote, bucketFound, bucketOverridden } from "./settings-ui.js";
 import { PartSwitches } from "./feature-switches.js";
 import { useSaveResult } from "./toast.js";
 
@@ -54,8 +54,10 @@ interface ListResponse {
 	countsEnabled: boolean;
 	largeUploadsEnabled: boolean;
 	r2Configured: boolean;
-	/** What stands in the way (a saved token or key that can't be decrypted). */
+	/** What stands in the way (a saved token or key that can't be decrypted, a bucket large uploads can't use). */
 	r2Problem?: string | null;
+	/** Why the bucket wasn't found from the uploads binding (no saved bucket name). */
+	r2BucketReason?: string | null;
 }
 
 interface FilesSettings {
@@ -71,6 +73,8 @@ interface FilesSettings {
 	/** The Cloudflare API token is there (saved on Settings, or `sharedTokenEnv`: the Worker secret): the key pair goes under Advanced. */
 	sharedToken?: boolean;
 	sharedTokenEnv?: boolean;
+	/** The bucket bound for large uploads, found with the token: the bucket name field becomes an override under Advanced. */
+	detectedBucket?: DetectedBucket | null;
 }
 
 type Filter = "all" | "used" | "unused";
@@ -245,7 +249,7 @@ function DeleteDialog(props: { file: FileItem | null; onClose: () => void; onDel
 
 // ── Settings ─────────────────────────────────────────────────────
 
-type SettingsDraft = Omit<FilesSettings, "filesMaxUploadGb" | "r2SecretSet" | "sharedToken" | "sharedTokenEnv"> & { filesMaxUploadGb: string; filesR2SecretAccessKey: string };
+type SettingsDraft = Omit<FilesSettings, "filesMaxUploadGb" | "r2SecretSet" | "sharedToken" | "sharedTokenEnv" | "detectedBucket"> & { filesMaxUploadGb: string; filesR2SecretAccessKey: string };
 
 function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => void }) {
 	const saveResult = useSaveResult();
@@ -255,7 +259,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 	const [pending, setPending] = React.useState<"save" | "clear">();
 
 	const toDraft = (s: FilesSettings): SettingsDraft => {
-		const { r2SecretSet: _set, sharedToken: _shared, sharedTokenEnv: _sharedEnv, filesMaxUploadGb, ...rest } = s;
+		const { r2SecretSet: _set, sharedToken: _shared, sharedTokenEnv: _sharedEnv, detectedBucket: _detected, filesMaxUploadGb, ...rest } = s;
 		return { ...rest, filesMaxUploadGb: String(filesMaxUploadGb), filesR2SecretAccessKey: "" };
 	};
 	const apply = (s: FilesSettings) => {
@@ -327,6 +331,23 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 
 	const dirty = isDirty(draft, toDraft(saved));
 
+	// The bucket found from the uploads binding: the name field is then an override, under Advanced.
+	const detected = saved.detectedBucket;
+	const found = bucketFound(detected);
+	const overridden = bucketOverridden(detected, saved.filesR2Bucket);
+	const bucketField = found ? (
+		<div className="sm:max-w-md">
+			<Input
+				label="R2 bucket name (override)"
+				placeholder={detected.bucket}
+				description={`Leave empty to use ${detected.bucket}, found from the ${detected.binding} binding. A name here wins over it.`}
+				{...field("filesR2Bucket")}
+			/>
+		</div>
+	) : (
+		<Input label="R2 bucket name" placeholder="mysite-media" description="The bucket bound as MEDIA, unless you set a separate uploads binding." {...field("filesR2Bucket")} />
+	);
+
 	return (
 		<>
 			<form
@@ -387,7 +408,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 					}
 				>
 					<div className="grid gap-4 sm:grid-cols-2">
-						<Input label="R2 bucket name" placeholder="mysite-media" description="The bucket bound as MEDIA, unless you set a separate uploads binding." {...field("filesR2Bucket")} />
+						{!found && bucketField}
 						<Input
 							type="number"
 							min={1}
@@ -398,14 +419,17 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 							onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ filesMaxUploadGb: e.target.value })}
 						/>
 					</div>
+					<BucketFound detected={detected} saved={saved.filesR2Bucket} feature="large uploads" />
 					{saved.sharedToken || saved.sharedTokenEnv ? (
-						<SharedTokenNote env={saved.sharedTokenEnv}>
+						<SharedTokenNote env={saved.sharedTokenEnv} open={overridden}>
+							{found && bucketField}
 							<p className="text-sm text-kumo-subtle">A key pair for one bucket wins over the token: fill in all three to use it.</p>
 							{r2KeyFields()}
 							<CredentialGuide id="r2" />
 						</SharedTokenNote>
 					) : (
 						<>
+							{found && <Advanced open={overridden}>{bucketField}</Advanced>}
 							{r2KeyFields()}
 							<CredentialGuide id="files-token" />
 							<CredentialGuide id="r2" />
@@ -639,9 +663,10 @@ export function FilesPage() {
 			{tab === "files" && data?.largeUploadsEnabled && !data.r2Configured && (
 				<SetupCard
 					title="Set up large uploads"
-					description="Large uploads go straight from the browser to your R2 bucket. They need the bucket name (Settings tab), and the Cloudflare API token from the plugin's Settings page or an R2 key pair."
+					description="Large uploads go straight from the browser to your R2 bucket. They need the Cloudflare API token from the plugin's Settings page (the pack then finds the bucket from the site's R2 binding), or an R2 key pair and the bucket name (Settings tab)."
 				>
 					{data.r2Problem && <Banner variant="error" description={data.r2Problem} />}
+					{data.r2BucketReason && <p className="text-sm text-kumo-subtle">The bucket wasn't found from the site's binding. {data.r2BucketReason}</p>}
 					<CredentialGuide id="files-token" />
 					<Button variant="secondary" onClick={() => setTab("settings")}>
 						Open Settings

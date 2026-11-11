@@ -10,7 +10,7 @@ import { test } from "node:test";
 
 import "./ts-resolve.mjs";
 
-const { GUIDES, CLOUDFLARE_PERMISSIONS, CLOUDFLARE_TOKEN_FORM, tokenFormUrl } = await import("../src/core/guide-content.ts");
+const { GUIDES, CLOUDFLARE_PERMISSIONS, CLOUDFLARE_TOKEN_FORM, tokenFormUrl, guideHtml } = await import("../src/core/guide-content.ts");
 
 // developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/ (permission reference).
 const DOCUMENTED = new Set(["account_analytics", "account_api_tokens", "account_settings", "billing", "workers_scripts", "workers_kv_storage", "workers_routes", "workers_r2", "d1", "queues", "page", "stream", "images", "account_logs", "dns", "zone", "zone_settings", "analytics", "firewall_services", "page_rules", "cache", "ssl_and_certificates", "logs"]);
@@ -49,7 +49,7 @@ test("one pre-filled form in all the guides: documented keys only, never D1, eac
 test("the guide says exactly what the form shows, and lists everything else to add by hand", () => {
 	const guide = GUIDES["cloudflare-token"].steps.join(" ");
 	const plain = text(guide);
-	const shows = guide.slice(guide.indexOf("The form should show"), guide.indexOf(". Add the rest by hand"));
+	const shows = guide.slice(guide.indexOf("The form should show"), guide.indexOf("Add the rest by hand"));
 	const byHand = guide.slice(guide.indexOf("Add the rest by hand"), guide.indexOf("You can skip"));
 	assert.match(text(shows), new RegExp(`the name ${CLOUDFLARE_TOKEN_FORM.name} and two policies`));
 	const named = (html, name) => html.includes(`>${name}</strong>`);
@@ -62,6 +62,46 @@ test("the guide says exactly what the form shows, and lists everything else to a
 	assert.match(plain, /Specified Domains and pick this site's domain \(recommended/);
 	assert.match(plain, /choose All Domains instead/);
 	assert.match(plain, /CLOUDFLARE_API_TOKEN/);
+});
+
+/** The items of each <ul> in `html`, in order (a child list's items: no nesting deeper than one level here). */
+const childLists = (html) => [...html.matchAll(/<ul\b[^>]*>(.*?)<\/ul>/g)].map((m) => [...m[1].matchAll(/<li>(.*?)<\/li>/g)].map((li) => li[1]));
+const strongName = (item) => item.match(/^<strong class="font-medium">([^<]+)<\/strong>/)?.[1];
+
+test("the token guide lists each permission as its own item: a child list per policy, both for the form and by hand, and in the note", () => {
+	const steps = GUIDES["cloudflare-token"].steps;
+	const form = steps.find((s) => s.includes("The form should show"));
+	const byHand = steps.find((s) => s.includes("Add the rest by hand"));
+	const names = (list) => list.map((p) => p.name);
+	const all = Object.values(CLOUDFLARE_PERMISSIONS);
+	const of = (scope, prefilled) => all.filter((p) => p.scope === scope && Boolean(p.form) === prefilled);
+	// Never one inline run: each policy is a child list, one permission per <li>, in the editor's order.
+	assert.deepEqual(childLists(form).map((items) => items.map(strongName)), [names(of("account", true)), names(of("zone", true))]);
+	assert.deepEqual(childLists(byHand).map((items) => items.map(strongName)), [names(of("account", false)), names(of("zone", false))]);
+	for (const p of all) if (p.find) assert.ok(byHand.includes(`<li><strong class="font-medium">${p.name}</strong> (${p.find})</li>`), `${p.name}: its own item, with its search hint`);
+	assert.doesNotMatch(text(form + byHand), /→ (Read|Edit|Purge|Read-Only), [A-Z]/, "no comma-separated run of permissions");
+	// "Which feature needs which": one permission per item, with what it's for.
+	const note = childLists(GUIDES["cloudflare-token"].note);
+	assert.equal(note.length, 1);
+	assert.deepEqual(note[0].map(strongName), names(all));
+	for (const [i, p] of all.entries()) assert.equal(text(note[0][i]), `${p.name}: ${p.for}`);
+});
+
+test("guides use a list for three or more permissions, inline for one or two; the rendered lists keep their bullets", () => {
+	for (const id of FEATURE_GUIDES) {
+		const step = GUIDES[id].steps.find((s) => s.includes("Here it needs"));
+		const lists = childLists(step);
+		const count = lists.length ? lists[0].length : [...step.slice(step.indexOf("Here it needs")).matchAll(/<strong class="font-medium">/g)].length;
+		assert.equal(lists.length > 0, count >= 3, `${id}: ${count} permissions ${lists.length ? "as a list" : "inline"}`);
+	}
+	// Tailwind's preflight removes list styles in EmDash's admin: the child lists carry their own, like the steps' <ol>.
+	const html = guideHtml(GUIDES["cloudflare-token"]);
+	const uls = html.match(/<ul\b[^>]*>/g) ?? [];
+	assert.ok(uls.length >= 5, "the form's two policies, the two by hand, and the note");
+	for (const ul of uls) assert.match(ul, /style="list-style:disc;padding-inline-start:1\.25rem"/);
+	assert.match(html, /<ol class="space-y-1\.5" style="list-style:decimal;padding-inline-start:1\.25rem">/);
+	// A note with a list is a <div>: a <ul> can't sit inside a <p>.
+	assert.doesNotMatch(html, /<p[^>]*>(?:(?!<\/p>).)*<ul/);
 });
 
 test("the zone rule and cache permissions carry the names Cloudflare's token editor shows", () => {
@@ -127,9 +167,13 @@ test("module guides say what the Cloudflare API token needs there, using only pe
 	const names = Object.values(CLOUDFLARE_PERMISSIONS).map((p) => p.name);
 	for (const id of FEATURE_GUIDES) {
 		const plain = text(GUIDES[id].steps.join(" "));
-		const needs = plain.match(/Here it needs (.+?)\./)?.[1];
-		assert.ok(needs, `${id} says what it needs`);
-		for (const permission of needs.split(/, | and /)) assert.ok(names.includes(permission), `${id} needs "${permission}", which the Cloudflare API token's guide doesn't cover`);
+		const step = GUIDES[id].steps.find((s) => s.includes("Here it needs"));
+		assert.ok(step, `${id} says what it needs`);
+		// A child list (three or more), or "A" / "A and B" inline.
+		const lists = childLists(step);
+		const needs = lists.length ? lists[0].map(strongName) : text(step).match(/Here it needs (.+?)\./)[1].split(/, | and /);
+		assert.ok(needs.length > 0, id);
+		for (const permission of needs) assert.ok(names.includes(permission), `${id} needs "${permission}", which the Cloudflare API token's guide doesn't cover`);
 		assert.match(plain, /Cloudflare API token from the plugin's Settings page/, id);
 		assert.match(plain, /Permission policies/, id);
 		assert.doesNotMatch(plain, /Under Account Resources|Under Zone Resources/, id);

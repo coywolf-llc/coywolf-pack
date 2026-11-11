@@ -61,7 +61,9 @@ Nothing else has to change at the same time: the media host's Cloudflare setup (
 The media host needs three things on Cloudflare, in the zone of the site's domain, and works best with a fourth:
 
 1. **Image Transformations** turned on for the zone (Images → Transformations → Enable for zone; same-zone sources only, so leave "Resize images from any origin" off).
-2. **An R2 custom domain** on the media bucket (the bucket bound as `MEDIA`): R2 → the bucket → Settings → Custom Domains → Add `media.coywolf.com`, minimum TLS 1.2. Cloudflare adds the DNS record and certificate.
+2. **An R2 custom domain** on the media bucket (the bucket bound as `MEDIA`), at R2 → the bucket → Settings → Custom Domains → Add. Cloudflare adds the DNS record and certificate.
+   - Domain: `media.coywolf.com`
+   - Minimum TLS: 1.2
 3. **Two URL rewrite rules** (Rules → URL Rewrite, phase `http_request_transform`), named exactly so the setup button recognizes them:
 
 | Name | Filter expression | Path rewrite (dynamic) |
@@ -71,7 +73,15 @@ The media host needs three things on Cloudflare, in the zone of the site's domai
 
 4. **Smart Tiered Cache** turned on for the zone (Caching → Tiered Cache → Smart Tiered Caching; free on every plan). Each Cloudflare data center has its own cache, so an image nobody has loaded there yet goes back to R2. With Smart Tiered Cache, that data center asks a nearby upper-tier Cloudflare cache first (placed near the R2 bucket), so after one visit anywhere, first loads elsewhere come from Cloudflare's cache. Pages don't need it: Workers Cache is always tiered. The setup only ever turns it on, never off.
 
-Do it by hand with the step-by-step guide on the Clean Image URLs page, or let **Set up media host** on that page do it through the Cloudflare API: enter the media host and the media bucket's name (with the [Cloudflare API token](README.md#the-cloudflare-api-token) saved; the account comes from the token), select **Review setup** to see the plan ("Turn on Image Transformations for coywolf.com, connect media.coywolf.com to the R2 bucket example-media, add 2 URL rewrite rules, turn on Smart Tiered Cache"), then **Apply**. Anything already done is skipped (a token without permission for Smart Tiered Cache still gets the other steps, and that step names the missing permission), the zone's other URL rewrite rules are kept as they are, and only the pack's own two rules (matched by name) are replaced. It finishes with a check. The page checks the media host each time it opens: when it works, Set up media host shows as done with **Run setup again**, and the host field opens with **Change host**.
+Do it by hand with the step-by-step guide on the Clean Image URLs page, or let **Set up media host** on that page do it through the Cloudflare API (with the [Cloudflare API token](README.md#the-cloudflare-api-token) saved; the account comes from the token):
+
+1. Enter the media host.
+2. Select **Review setup** to see the plan ("Turn on Image Transformations for coywolf.com, connect media.coywolf.com to the R2 bucket coywolf-staging-media, add 2 URL rewrite rules, turn on Smart Tiered Cache").
+3. Select **Apply**.
+
+Anything already done is skipped (a token without permission for Smart Tiered Cache still gets the other steps, and that step names the missing permission), the zone's other URL rewrite rules are kept as they are, and only the pack's own two rules (matched by name) are replaced. It finishes with a check. The page checks the media host each time it opens: when it works, Set up media host shows as done with **Run setup again**, and the host field opens with **Change host**.
+
+The media bucket's name is found for you: with the token, the pack reads this site's Worker settings from Cloudflare and takes the `bucket_name` of the `MEDIA` binding (or `images.bucket`). For coywolf.com the setup shows "Found: coywolf-staging-media, from the MEDIA binding", and **R2 bucket name** moves under **Advanced** as an override: a name saved or typed there always wins (sites that saved one keep it). When the pack can't look it up, the field stays visible with one line saying why: no token, a token without **Workers → Metadata Read-Only** (the permission the usage card uses too), or the site's Worker not found (it's found by the version it runs, so the Worker needs the `CF_VERSION_METADATA` binding). The answer is remembered per deploy, by Worker version and token. A bucket in a [jurisdiction](https://developers.cloudflare.com/r2/reference/data-location/#jurisdictional-restrictions) (EU, FedRAMP) isn't supported by the setup yet; it says so, and the guide's steps by hand still work.
 
 With a media host set, every page the site serves carries `Link: <https://media.coywolf.com>; rel=preconnect`, so browsers open the connection to the media host (DNS, TCP and TLS) while the page is still arriving, not when they reach the first image.
 

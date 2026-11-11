@@ -104,6 +104,13 @@ export const DEADLINES = {
 	 */
 	cloudflareReadMs: 8_000,
 	/**
+	 * All of one bucket lookup (src/core/worker-bindings.ts): the account's Workers, their deployments one after
+	 * another, then the site Worker's settings, each a cloudflareReadMs read. Usually two or three calls well under a
+	 * second; without a cap, a scan of 50 Workers could take minutes. It runs in admin routes (the Files list, the
+	 * Backups card), uploads and the daily task, so they never wait longer than this for it.
+	 */
+	workerLookupMs: 15_000,
+	/**
 	 * Any other Cloudflare API call (src/core/cloudflare-api.ts): media host
 	 * setup steps, usage readings, Stream and D1 restore calls. Each answers in
 	 * well under a few seconds; 30 s ends a stalled call long before the

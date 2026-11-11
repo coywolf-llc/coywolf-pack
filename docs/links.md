@@ -16,7 +16,12 @@ Feature switches: **Link Manager** (`links`), **Scheduled link checking** (`link
 
 ## Setup
 
-No bindings or secrets, but EmDash needs to know the site URL (**Settings → General**, or `site` in `astro.config`) to tell internal links from external ones; nothing is indexed until it's set. Settings (**Link Manager → Settings**): how often scheduled runs start (daily, weekly or monthly; default weekly), subrequests per check run (default 40), whether to check links to your own site (default on), and a User-Agent override (see [How links are checked](#how-links-are-checked)).
+No bindings or secrets, but EmDash needs to know the site URL (**Settings → General**, or `site` in `astro.config`) to tell internal links from external ones; nothing is indexed until it's set. Settings (**Link Manager → Settings**):
+
+- how often scheduled runs start (daily, weekly or monthly; default weekly)
+- subrequests per check run (default 40)
+- whether to check links to your own site (default on)
+- a User-Agent override (see [How links are checked](#how-links-are-checked))
 
 ## Notes
 

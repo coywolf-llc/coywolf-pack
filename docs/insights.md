@@ -33,7 +33,12 @@ How it reads: the zone is found once with **Zone → Zone → Read** and remembe
 
 ### The token
 
-The Cloudflare API token's form pre-fills everything Insights needs: **Zone → Read** and **Analytics → Read** (the zone one, not Account Analytics) in the policy for the site's domain, and **Account Analytics → Read** and **Account Settings → Read** for the whole account. An older read-only token needs the two zone permissions added; the guide on the card has the steps. Errors name the missing permission.
+The Cloudflare API token's form pre-fills everything Insights needs:
+
+- In the policy for the site's domain: **Zone → Read** and **Analytics → Read** (the zone one, not Account Analytics).
+- For the whole account: **Account Analytics → Read** and **Account Settings → Read**.
+
+An older read-only token needs the two zone permissions added; the guide on the card has the steps. Errors name the missing permission.
 
 ## Core Web Vitals
 
@@ -67,7 +72,13 @@ Clicks, impressions, click-through rate and average position for the last 28 ful
 How it signs in, in the Worker, with no library: a JWT with `alg: "RS256"` and the key's `kid`, claims `iss` (the service account's email), `scope: https://www.googleapis.com/auth/webmasters.readonly`, `aud: https://oauth2.googleapis.com/token`, `iat` and `exp` (an hour), signed with WebCrypto (`RSASSA-PKCS1-v1_5`, SHA-256) and exchanged at `https://oauth2.googleapis.com/token` (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`) for an access token, as [Google's server-to-server guide](https://developers.google.com/identity/protocols/oauth2/service-account) describes. The access token stays in the isolate's memory until five minutes before it expires; neither it nor the key is ever stored elsewhere, logged or put in an error message. Of the pasted JSON key, the pack keeps only `client_email`, `private_key`, `private_key_id` and `project_id`.
 
 - **Property:** empty uses the property the service account can see for the site (its domain property `sc-domain:…` first, then a URL-prefix property for the site's origin). Or enter `sc-domain:example.com` or `https://example.com/`.
-- **Setup:** create a service account in Google Cloud, turn on the **Google Search Console API** for its project, create a JSON key, and add the service account's email as a user on the property in Search Console (**Settings → Users and permissions → Add user**, Restricted is enough). Both domain and URL-prefix properties work. The guide on the card has each step with links. Some Google Cloud organizations block key creation by policy (`iam.disableServiceAccountKeyCreation`); an organization admin has to allow it.
+- **Setup** (both domain and URL-prefix properties work):
+  1. Create a service account in Google Cloud.
+  2. Turn on the **Google Search Console API** for its project.
+  3. Create a JSON key.
+  4. Add the service account's email as a user on the property in Search Console (**Settings → Users and permissions → Add user**, Restricted is enough).
+
+  The guide on the card has each step with links. Some Google Cloud organizations block key creation by policy (`iam.disableServiceAccountKeyCreation`); an organization admin has to allow it.
 - **Limits:** Search Analytics allows 1,200 queries a minute per site and per user, with extra load limits on queries grouped by page or query ([Google's limits](https://developers.google.com/webmaster-tools/limits)). A reading is three small queries (four when the property is found automatically), kept six hours.
 - **From Workers:** Google's quotas are per project, site and user, not per IP address, and nothing in Google's docs restricts Workers' addresses.
 

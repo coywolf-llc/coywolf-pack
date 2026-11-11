@@ -404,7 +404,7 @@ export function imagesPack(options: ImagesOptions = {}): PackModule {
 		id: "images",
 		label: "Clean Image URLs",
 		features: FEATURES,
-		routes: imagesModule({ database: options.database, variants: { start: (origin, force) => startBackfillChain(origin, { force }), deps: variantDeps } }).routes,
+		routes: imagesModule({ database: options.database, media: config.bucket, variants: { start: (origin, force) => startBackfillChain(origin, { force }), deps: variantDeps } }).routes,
 		adminPages: [{ path: "/images", label: "Clean Image URLs", icon: "image" }],
 		storage: { [VARIANTS_COLLECTION]: { indexes: [] } },
 		hooks: {

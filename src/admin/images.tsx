@@ -14,7 +14,7 @@ import { PageHeader, Loading } from "./page.js";
 import { type LibrarySummary, monthlyWithoutMax, oneTimeCost, paybackMonths, storageCost, trafficEstimate } from "../images/variants-estimate.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
-import { SecretField, SettingsSection, SharedTokenNote } from "./settings-ui.js";
+import { Advanced, BucketFound, type DetectedBucket, SecretField, SettingsSection, SharedTokenNote, bucketFound, bucketOverridden } from "./settings-ui.js";
 import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/images";
@@ -33,6 +33,8 @@ interface Settings {
 	storageConflict?: string;
 	accountId: string;
 	bucket: string;
+	/** The media bucket found from the site Worker's binding, with the token: the bucket field becomes an override under Advanced. */
+	detectedBucket?: DetectedBucket | null;
 	tokenSet: boolean;
 	envToken: boolean;
 	envAccountId: boolean;
@@ -573,7 +575,8 @@ export function ImagesPage() {
 	const setupBody = () => ({
 		host: setupHost,
 		...(draft.accountId.trim() ? { accountId: draft.accountId.trim() } : {}),
-		...(draft.bucket.trim() ? { bucket: draft.bucket.trim() } : {}),
+		// Always sent: an empty field (a cleared override) uses the bucket found from the binding.
+		bucket: draft.bucket.trim(),
 		...(draft.token.trim() ? { token: draft.token.trim() } : {}),
 	});
 
@@ -628,6 +631,23 @@ export function ImagesPage() {
 	const busy = Boolean(pending);
 	const checking = pending === "check" || autoChecking;
 	const changes = plan?.plan.steps.filter((s) => s.action !== "none").length ?? 0;
+	// The media bucket found from the MEDIA binding: the name field is then an override, under Advanced.
+	const found = bucketFound(saved?.detectedBucket);
+	const overridden = bucketOverridden(saved?.detectedBucket, saved?.bucket);
+	const bucketField = (
+		<Input
+			label={found ? "R2 bucket name (override)" : "R2 bucket name"}
+			placeholder={found ? (saved?.detectedBucket?.bucket ?? undefined) : undefined}
+			description={
+				found
+					? `Leave empty to use ${saved?.detectedBucket?.bucket}, found from the ${saved?.detectedBucket?.binding} binding. A name here wins over it.`
+					: "The bucket bound as MEDIA in wrangler.jsonc (its bucket_name)."
+			}
+			value={draft.bucket}
+			disabled={busy}
+			onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ bucket: e.target.value })}
+		/>
+	);
 
 	return (
 		<div className="space-y-6">
@@ -758,16 +778,10 @@ export function ImagesPage() {
 						>
 							{saved.sharedToken || saved.sharedTokenEnv ? (
 								<>
-									<div className="grid gap-4 sm:grid-cols-2">
-										<Input
-											label="R2 bucket name"
-											description="The bucket bound as MEDIA in wrangler.jsonc (its bucket_name)."
-											value={draft.bucket}
-											disabled={busy}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ bucket: e.target.value })}
-										/>
-									</div>
-									<SharedTokenNote env={saved.sharedTokenEnv}>
+									{!found && <div className="grid gap-4 sm:grid-cols-2">{bucketField}</div>}
+									<BucketFound detected={saved.detectedBucket} saved={saved.bucket} feature="Set up media host" />
+									<SharedTokenNote env={saved.sharedTokenEnv} open={overridden}>
+										{found && <div className="sm:max-w-md">{bucketField}</div>}
 										<div className="grid gap-4 sm:grid-cols-2">
 											<Input
 												label="Cloudflare account ID"
@@ -792,6 +806,7 @@ export function ImagesPage() {
 									</SharedTokenNote>
 								</>
 							) : (
+							<>
 							<div className="grid gap-4 sm:grid-cols-2">
 								<Input
 									label="Cloudflare account ID"
@@ -800,13 +815,7 @@ export function ImagesPage() {
 									disabled={busy}
 									onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ accountId: e.target.value })}
 								/>
-								<Input
-									label="R2 bucket name"
-									description="The bucket bound as MEDIA in wrangler.jsonc (its bucket_name)."
-									value={draft.bucket}
-									disabled={busy}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ bucket: e.target.value })}
-								/>
+								{!found && bucketField}
 								<SecretField
 									label="Cloudflare API token"
 									saved={saved.tokenSet}
@@ -822,6 +831,13 @@ export function ImagesPage() {
 									disabled={busy}
 								/>
 							</div>
+							<BucketFound detected={saved.detectedBucket} saved={saved.bucket} feature="Set up media host" />
+							{found && (
+								<Advanced open={overridden}>
+									<div className="sm:max-w-md">{bucketField}</div>
+								</Advanced>
+							)}
+							</>
 							)}
 							<CredentialGuide id="images-token" />
 
