@@ -33,6 +33,20 @@ const post = apiPost(`${PACK_API}/cloudflare-token`);
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
+/**
+ * What large uploads use while only part of an R2 key pair is saved (r2Config in src/files/module.ts): the saved
+ * token; when it can't be read, the CLOUDFLARE_API_TOKEN Worker secret if it's set, else nothing until it's saved again.
+ */
+function leftoverUploads(status: Pick<TokenStatus, "saved" | "unreadable" | "env">): string {
+	if (status.saved) return "large uploads use the Cloudflare API token.";
+	if (status.unreadable) {
+		return status.env
+			? "large uploads use the CLOUDFLARE_API_TOKEN Worker secret, since the saved token can't be read."
+			: "large uploads need the Cloudflare API token saved again (the saved one can't be read), or a complete key pair.";
+	}
+	return status.env ? "large uploads use the Cloudflare API token." : "large uploads need a complete key pair or the Cloudflare API token.";
+}
+
 export function CloudflareTokenCard() {
 	const toast = useToast();
 	const [status, setStatus] = React.useState<TokenStatus>();
@@ -140,10 +154,7 @@ export function CloudflareTokenCard() {
 			)}
 			{status.r2KeyPair && <p className="text-sm text-kumo-subtle">File Downloads has an R2 key pair saved. It wins over the token for large uploads.</p>}
 			{status.r2Leftovers && (
-				<p className="text-sm text-kumo-subtle">
-					Part of an older File Downloads R2 key pair is still saved. It isn't used
-					{status.saved || status.env ? ": large uploads use the Cloudflare API token." : ": large uploads need a complete key pair or the Cloudflare API token."}
-				</p>
+				<p className="text-sm text-kumo-subtle">Part of an older File Downloads R2 key pair is still saved. It isn't used: {leftoverUploads(status)}</p>
 			)}
 			{removable && (
 				<Button variant="secondary" disabled={pending} onClick={ask}>

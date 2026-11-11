@@ -1105,6 +1105,11 @@ test("refreshing the manifest keeps a plugin page mounted and scrolled (src/admi
 	const layout = functionSource(admin, "RootComponent");
 	assert.match(layout, /const \{ data: manifest, isLoading, error \} = useQuery\(\{\s*queryKey: \["manifest"\],/);
 	assert.match(layout, /if \(isLoading\) return \/\* @__PURE__ \*\/ jsx\(ConfigurationLoadingScreen, \{\}\);/);
+	// A refetch that fails (after the admin's one retry) swaps the page for the error screen: the only case a refresh unmounts it.
+	assert.match(layout, /if \(error \|\| !manifest\) return \/\* @__PURE__ \*\/ jsx\(ErrorScreen, \{ error:/);
+	assert.match(admin, /new QueryClient\(\{ defaultOptions: \{ queries: \{\s*staleTime: [^,]+,\s*retry: 1\s*\} \} \}\)/);
+	// Nothing else in the layout returns early or keys the shell: those would remount the page on a refetch.
+	assert.equal(layout.match(/\breturn\b/g)?.length, 3, `the layout has another early return:\n${layout}`);
 	assert.doesNotMatch(layout, /isFetching|isRefetching|key: /, "the layout now reacts to a refetch: the page may remount");
 	assert.match(layout, /jsx\(Shell, \{\s*manifest,\s*children: \/\* @__PURE__ \*\/ jsx\(Outlet, \{\}\)/);
 	// The page scrolls inside the shell's <main>, which stays across manifest changes; plugin pages come from a fixed registry, not the manifest.

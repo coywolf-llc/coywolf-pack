@@ -1,24 +1,38 @@
 // Run: node --test test/features-page.test.mjs
 //
-// The Features page's switches (src/admin/features.tsx with its draft, src/admin/features-draft.ts): a click
-// changes the draft only, Save sends one request with only the switches that changed, Discard reverts, and the
-// admin manifest (the sidebar) is refreshed only when a module's main switch changed, through the admin's own
-// React Query client (src/admin/extensions.ts refreshAdminManifest). Rendered with React and the installed
-// Kumo Switch in happy-dom, against a fake features/list and features/save.
+// The real Features page (src/admin/features.tsx, compiled by test/tsx-loader.mjs) in happy-dom, with the
+// installed Kumo, the shared Save bar and a fake features/list and features/save: a click changes the draft
+// only, Save sends one request with only the switches that changed, Discard reverts, the sidebar (the admin
+// manifest, through the admin's own React Query client on the router's context) is refreshed only when a
+// module's main switch changed, and a failed save that was really stored leaves the page as it's stored.
+// The draft hook's own rules (a save in flight, the reload fallback) are in test/features-draft.test.mjs.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { after, afterEach, before, test } from "node:test";
 
-import "./ts-resolve.mjs";
+import "./tsx-loader.mjs";
+
+const API = "/_emdash/api/plugins/coywolf-pack";
 
 let window;
+let React;
+let h;
+let act;
+let createRoot;
+let Toasty;
+let FeaturesPage;
 before(async () => {
 	const { Window } = await import("happy-dom");
 	window = new Window({ url: "https://example.com/_emdash/admin/plugins/coywolf-pack/features" });
-	for (const key of ["window", "document", "navigator", "HTMLElement", "Node", "Element", "MutationObserver", "requestAnimationFrame", "cancelAnimationFrame", "getComputedStyle", "sessionStorage"]) {
+	for (const key of ["window", "document", "navigator", "HTMLElement", "Node", "Element", "MutationObserver", "requestAnimationFrame", "cancelAnimationFrame", "getComputedStyle", "sessionStorage", "KeyboardEvent", "Event", "CustomEvent"]) {
 		Object.defineProperty(globalThis, key, { value: key === "window" ? window : window[key], configurable: true, writable: true });
 	}
 	globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+	React = await import("react");
+	h = React.createElement;
+	act = React.act;
+	({ createRoot } = await import("react-dom/client"));
+	({ Toasty } = await import("@cloudflare/kumo"));
+	({ FeaturesPage } = await import("../src/admin/features.tsx"));
 });
 after(async () => {
 	await window?.happyDOM.close();
@@ -27,16 +41,29 @@ after(async () => {
 const realFetch = globalThis.fetch;
 afterEach(() => {
 	globalThis.fetch = realFetch;
-	window.sessionStorage.clear();
+	delete globalThis.__TSR_ROUTER__;
 });
 
-const { useFeatureDraft, changedSwitches, switchesOf } = await import("../src/admin/features-draft.ts");
-const { refreshAdminManifest } = await import("../src/admin/extensions.ts");
+/** EmDash's admin router, with its own React Query client on its context (createAdminRouter); counts manifest refreshes. */
+function adminRouter() {
+	const refreshes = [];
+	globalThis.__TSR_ROUTER__ = {
+		navigate() {},
+		history: { block: () => () => {} },
+		options: { basepath: "/_emdash/admin", context: { queryClient: { getQueryData: () => undefined, invalidateQueries: (filters) => void refreshes.push(filters) } } },
+	};
+	return refreshes;
+}
 
-const API = "/_emdash/api/plugins/coywolf-pack/features";
+const TOKEN_STATUS = { saved: true, unreadable: false, env: false, accountId: null, older: [], r2KeyPair: false, r2Leftovers: false, r2Page: "File Downloads (large uploads)", olderSecrets: [] };
 
-/** A fake server: features/list and features/save over `stored` (each feature's own switch), like src/core/features-module.ts. */
-function server(stored, { fail } = {}) {
+/**
+ * A fake server over `stored` (each feature's own switch), answering as src/core/features-module.ts does.
+ * `failAfterStore`: stores the switches, then answers 500 (as when a task can't be scheduled). `fail`: answers 500
+ * without storing. `meanwhile`: another admin's changes, stored with the next save. `noChoices`: a save answers
+ * `features` only.
+ */
+function server(stored, options = {}) {
 	const catalog = [
 		{ id: "cwA", label: "Module A", features: ["cwA", "cwA.one", "cwA.two"] },
 		{ id: "cwB", label: "Module B", features: ["cwB", "cwB.x"] },
@@ -48,117 +75,110 @@ function server(stored, { fail } = {}) {
 		const call = { url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(init.body) : undefined };
 		calls.push(call);
 		const reply = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
-		if (call.url === `${API}/list`) {
+		if (call.url === `${API}/features/list`) {
 			const now = applies();
-			return reply({ data: { modules: catalog.map((m) => ({ id: m.id, label: m.label, features: m.features.map((id) => ({ id, label: id, description: "", enabled: now[id], choice: stored[id] })) })) } });
+			return reply({ data: { modules: catalog.map((m) => ({ id: m.id, label: m.label, features: m.features.map((id) => ({ id, label: id, description: `About ${id}`, enabled: now[id], choice: stored[id] })) })) } });
 		}
-		if (call.url === `${API}/save` && call.method === "POST") {
-			if (fail) return reply({ error: { code: "INTERNAL", message: fail } }, 500);
-			Object.assign(stored, call.body.features);
-			return reply({ data: { features: applies(), choices: { ...stored } } });
+		if (call.url === `${API}/features/save` && call.method === "POST") {
+			if (options.fail) return reply({ error: { code: "INTERNAL", message: options.fail } }, 500);
+			Object.assign(stored, options.meanwhile, call.body.features);
+			if (options.failAfterStore) return reply({ error: { code: "TASK_SCHEDULE_FAILED", message: options.failAfterStore } }, 500);
+			return reply({ data: options.noChoices ? { features: applies() } : { features: applies(), choices: { ...stored } } });
 		}
+		if (call.url === `${API}/cloudflare-token/status`) return reply({ data: { ...TOKEN_STATUS, ...options.token } });
 		return reply({ error: { message: "not found" } }, 404);
 	};
-	return { calls, posts: () => calls.filter((c) => c.method === "POST") };
+	return { calls, posts: () => calls.filter((c) => c.method === "POST"), lists: () => calls.filter((c) => c.url === `${API}/features/list`).length };
 }
 
-/**
- * The page's switches and Save bar buttons, as features.tsx renders them (checked by the source test below),
- * with the effects counted.
- */
-async function renderPage({ refreshes = true } = {}) {
-	const React = await import("react");
-	const { createRoot } = await import("react-dom/client");
-	const { Switch } = await import("@cloudflare/kumo");
-	const h = React.createElement;
-	const counts = { refreshManifest: 0, resetUpdates: 0, saved: 0, failed: [], reload: 0 };
-	const effects = {
-		refreshManifest: () => (counts.refreshManifest++, refreshes),
-		resetUpdates: () => void counts.resetUpdates++,
-		saved: () => void counts.saved++,
-		failed: (message) => void counts.failed.push(message),
-		clear() {},
-		reload: () => void counts.reload++,
-	};
-	const page = {};
-	function Page() {
-		const root = React.useRef(null);
-		const features = useFeatureDraft(effects, root);
-		page.current = features;
-		const { modules, draft, saving } = features;
-		return h(
-			"div",
-			{ ref: root },
-			draft &&
-				modules?.map((module) => {
-					const [main, ...subs] = module.features;
-					const mainOn = draft[main.id] ?? false;
-					return h(
-						"section",
-						{ key: module.id },
-						h(Switch, { "aria-label": `${main.label}: ${mainOn ? "on" : "off"}`, checked: mainOn, disabled: saving, onCheckedChange: (on) => features.set(main.id, on) }),
-						subs.map((feature) => {
-							const on = Boolean(draft[feature.id]) && mainOn;
-							return h(Switch, { key: feature.id, size: "sm", "aria-label": `${feature.label}: ${on ? "on" : "off"}`, checked: on, disabled: saving || !mainOn, onCheckedChange: (next) => features.set(feature.id, next) });
-						}),
-					);
-				}),
-			features.dirty && h("button", { type: "button", "data-save": "", onClick: () => void features.save() }, "Save"),
-			features.dirty && h("button", { type: "button", "data-discard": "", onClick: features.discard }, "Discard"),
-		);
-	}
-	// EmDash's scrolling <main>.
+/** Lets the page's requests and their state updates finish. */
+const settle = () =>
+	act(async () => {
+		for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	});
+
+/** The real FeaturesPage inside EmDash's scrolling <main> and Kumo's toast provider, as the admin renders it. */
+async function renderPage() {
 	const main = window.document.createElement("main");
 	main.style.overflowY = "auto";
 	window.document.body.appendChild(main);
 	const root = createRoot(main);
-	await React.act(async () => root.render(h(Page)));
+	await act(async () => root.render(h(Toasty, null, h(FeaturesPage))));
+	await settle();
 	const switchFor = (id) => main.querySelector(`[role="switch"][aria-label^="${id}:"]`);
+	const bar = () => main.querySelector('[role="region"][aria-label="Unsaved changes"]');
+	const button = (label) => [...(bar()?.querySelectorAll("button") ?? [])].find((b) => b.textContent.trim() === label);
 	return {
 		main,
-		page,
-		counts,
 		switchFor,
+		bar,
 		checked: (id) => switchFor(id).getAttribute("aria-checked") === "true",
-		click: (id) => React.act(async () => switchFor(id).click()),
-		save: () => React.act(async () => main.querySelector("[data-save]").click()),
-		discard: () => React.act(async () => main.querySelector("[data-discard]").click()),
-		saveBar: () => Boolean(main.querySelector("[data-save]")),
+		disabled: (id) => switchFor(id).hasAttribute("disabled"),
+		async click(id) {
+			await act(async () => switchFor(id).click());
+		},
+		async save() {
+			await act(async () => button("Save").click());
+			await settle();
+		},
+		async discard() {
+			await act(async () => button("Discard").click());
+		},
+		text: () => window.document.body.textContent,
 		async unmount() {
-			await React.act(async () => root.unmount());
+			await act(async () => root.unmount());
 			main.remove();
 		},
 	};
 }
 
-test("the changed switches: only those that differ from what's saved", () => {
-	assert.deepEqual(changedSwitches({ a: true, b: false, c: true }, { a: true, b: true, c: false }), { b: false, c: true });
-	assert.deepEqual(changedSwitches({ a: true }, { a: true }), {});
-	// Each feature's own switch from features/list (`enabled` only from a route that doesn't send `choice`).
-	assert.deepEqual(switchesOf([{ id: "m", label: "", features: [{ id: "m", enabled: false, choice: false }, { id: "m.p", enabled: false, choice: true }, { id: "m.q", enabled: true }] }]), { m: false, "m.p": true, "m.q": true });
-});
+const START = { cwA: true, "cwA.one": true, "cwA.two": false, cwB: false, "cwB.x": false, updates: true };
 
-test("clicking a switch changes the draft only: no request, and the Save bar shows", async () => {
-	const s = server({ cwA: true, "cwA.one": true, "cwA.two": false, cwB: false, "cwB.x": false, updates: true });
+test("clicking a switch changes the draft only: no request, and the Save bar shows as the page's last part", async () => {
+	const s = server({ ...START });
+	adminRouter();
 	const p = await renderPage();
 	try {
-		assert.deepEqual(s.calls.map((c) => c.url), [`${API}/list`]);
-		assert.equal(p.saveBar(), false);
+		assert.deepEqual(s.calls.map((c) => c.url).sort(), [`${API}/cloudflare-token/status`, `${API}/features/list`]);
+		assert.equal(p.bar(), null);
 		await p.click("cwA.two");
 		await p.click("cwB");
 		assert.equal(p.checked("cwA.two"), true);
 		assert.equal(p.checked("cwB"), true);
-		assert.match(p.switchFor("cwB").getAttribute("aria-label"), /: on$/, "the label follows the draft");
+		assert.equal(p.switchFor("cwB").getAttribute("aria-label"), "cwB: on", "the label follows the draft");
+		assert.equal(p.switchFor("cwB.x").getAttribute("aria-label"), "cwB.x: off");
 		assert.deepEqual(s.posts(), [], "nothing is saved on click");
-		assert.equal(p.counts.refreshManifest, 0, "nor is the sidebar refreshed");
-		assert.equal(p.saveBar(), true);
+		assert.ok(p.bar(), "the Save bar shows");
+		const page = p.main.querySelector(".space-y-6");
+		assert.equal(page.lastElementChild, p.bar(), "the bar is the page root's last child");
 	} finally {
 		await p.unmount();
 	}
 });
 
-test("Save sends one request with only the changed switches; then the page shows what's saved, clean", async () => {
-	const s = server({ cwA: true, "cwA.one": true, "cwA.two": false, cwB: false, "cwB.x": false, updates: true });
+test("a part shows its own switch only while its module's draft switch is on, and can't be switched while it's off", async () => {
+	server({ ...START, cwA: false, "cwA.one": true });
+	adminRouter();
+	const p = await renderPage();
+	try {
+		assert.equal(p.checked("cwA.one"), false, "off while its module is");
+		assert.equal(p.disabled("cwA.one"), true);
+		assert.equal(p.switchFor("cwA.one").getAttribute("aria-label"), "cwA.one: off");
+		await p.click("cwA");
+		assert.equal(p.checked("cwA.one"), true, "its own switch, as it'll be once saved");
+		assert.equal(p.checked("cwA.two"), false);
+		assert.equal(p.disabled("cwA.one"), false);
+		await p.click("cwA");
+		assert.equal(p.checked("cwA.one"), false);
+		assert.equal(p.disabled("cwA.one"), true);
+	} finally {
+		await p.unmount();
+	}
+});
+
+test("Save sends one request with only the changed switches, refreshes the sidebar once, and the page ends clean", async () => {
+	const s = server({ ...START });
+	const refreshes = adminRouter();
 	const p = await renderPage();
 	try {
 		await p.click("cwB");
@@ -168,144 +188,173 @@ test("Save sends one request with only the changed switches; then the page shows
 		await p.click("cwA.one");
 		await p.save();
 		assert.equal(s.posts().length, 1, "one request");
-		assert.deepEqual(s.posts()[0], { url: `${API}/save`, method: "POST", body: { features: { cwB: true, "cwB.x": true } } });
-		assert.equal(p.saveBar(), false, "saved: nothing left to save");
+		assert.deepEqual(s.posts()[0], { url: `${API}/features/save`, method: "POST", body: { features: { cwB: true, "cwB.x": true } } });
+		assert.equal(p.bar(), null, "nothing left to save");
 		assert.equal(p.checked("cwB.x"), true);
-		assert.equal(p.counts.saved, 1);
-		assert.equal(p.counts.refreshManifest, 1, "a module was turned on: the sidebar is refreshed once");
-		assert.equal(p.counts.reload, 0);
-		assert.deepEqual(s.calls.map((c) => c.url), [`${API}/list`, `${API}/save`], "no reload of the list either");
+		assert.deepEqual(refreshes, [{ queryKey: ["manifest"] }], "a module was turned on: one refresh, in place");
+		assert.equal(s.lists(), 1, "the page isn't loaded again");
+		assert.match(p.text(), /Features saved/, "the success toast");
+	} finally {
+		await p.unmount();
+	}
+});
+
+test("Ctrl/⌘+S saves too", async () => {
+	const s = server({ ...START });
+	adminRouter();
+	const p = await renderPage();
+	try {
+		await p.click("cwA.two");
+		await act(async () => window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "s", metaKey: true, bubbles: true })));
+		await settle();
+		assert.deepEqual(s.posts().map((c) => c.body), [{ features: { "cwA.two": true } }]);
+		assert.equal(p.bar(), null);
 	} finally {
 		await p.unmount();
 	}
 });
 
 test("Discard puts the draft back, without a request", async () => {
-	const s = server({ cwA: true, "cwA.one": true, "cwA.two": false, cwB: false, "cwB.x": false, updates: true });
+	const s = server({ ...START });
+	adminRouter();
 	const p = await renderPage();
 	try {
 		await p.click("cwA.one");
 		await p.click("cwA");
-		assert.equal(p.checked("cwA"), false);
-		assert.equal(p.switchFor("cwA.two").hasAttribute("disabled"), true, "a part can't be switched while its module is off in the draft");
+		assert.equal(p.disabled("cwA.two"), true);
 		await p.discard();
 		assert.equal(p.checked("cwA"), true);
 		assert.equal(p.checked("cwA.one"), true);
-		assert.equal(p.switchFor("cwA.two").hasAttribute("disabled"), false);
-		assert.equal(p.saveBar(), false);
+		assert.equal(p.disabled("cwA.two"), false);
+		assert.equal(p.bar(), null);
 		assert.deepEqual(s.posts(), []);
 	} finally {
 		await p.unmount();
 	}
 });
 
-test("the sidebar is refreshed only when a module's main switch changed, once per save; the update notices reset only for the update check", async () => {
-	const s = server({ cwA: true, "cwA.one": true, "cwA.two": false, cwB: true, "cwB.x": false, updates: true });
+test("parts only: no sidebar refresh; the update check: the notices ask again", async () => {
+	const s = server({ ...START, cwB: true });
+	const refreshes = adminRouter();
+	let notices = 0;
+	const onChanged = () => notices++;
+	window.addEventListener("coywolf-pack:update-changed", onChanged);
 	const p = await renderPage();
 	try {
-		// Parts only: no refresh.
 		await p.click("cwA.two");
 		await p.click("cwB.x");
 		await p.save();
 		assert.equal(s.posts().length, 1);
-		assert.equal(p.counts.refreshManifest, 0);
-		assert.equal(p.counts.resetUpdates, 0);
+		assert.deepEqual(refreshes, []);
+		assert.equal(notices, 0);
 
-		// Two modules (and a part) in one save: one refresh.
+		// Two modules and a part in one save: one refresh.
 		await p.click("cwA.one");
 		await p.click("cwA");
 		await p.click("updates");
 		await p.save();
 		assert.deepEqual(s.posts()[1].body, { features: { cwA: false, "cwA.one": false, updates: false } });
-		assert.equal(p.counts.refreshManifest, 1);
-		assert.equal(p.counts.resetUpdates, 1);
+		assert.equal(refreshes.length, 1);
+		assert.equal(notices, 1);
 	} finally {
+		window.removeEventListener("coywolf-pack:update-changed", onChanged);
 		await p.unmount();
 	}
 });
 
-test("a module off with its parts on: turning it on in the draft shows the parts as they'll be once saved", async () => {
-	server({ cwA: false, "cwA.one": true, "cwA.two": false, cwB: false, "cwB.x": false, updates: true });
+test("the saved switches come from the answer: another admin's change shows, and an answer without `choices` keeps the draft", async () => {
+	const s = server({ ...START }, { meanwhile: { "cwA.two": true, cwB: true } });
+	adminRouter();
 	const p = await renderPage();
 	try {
-		assert.equal(p.checked("cwA.one"), false, "off while its module is");
-		assert.equal(p.switchFor("cwA.one").hasAttribute("disabled"), true);
-		await p.click("cwA");
-		assert.equal(p.checked("cwA.one"), true, "its own switch");
-		assert.equal(p.checked("cwA.two"), false);
+		await p.click("cwA.one");
+		await p.save();
+		assert.deepEqual(s.posts()[0].body, { features: { "cwA.one": false } });
+		assert.equal(p.checked("cwA.two"), true, "stored by someone else meanwhile");
+		assert.equal(p.checked("cwB"), true);
+		assert.equal(p.checked("cwA.one"), false);
+		assert.equal(p.bar(), null, "what's shown is what's saved");
 	} finally {
 		await p.unmount();
 	}
+
+	server({ ...START }, { noChoices: true });
+	adminRouter();
+	const q = await renderPage();
+	try {
+		await q.click("cwB");
+		await q.click("cwB.x");
+		await q.save();
+		assert.equal(q.checked("cwB"), true);
+		assert.equal(q.checked("cwB.x"), true);
+		assert.equal(q.bar(), null);
+	} finally {
+		await q.unmount();
+	}
 });
 
-test("a failed save keeps the draft and reports the message; nothing is refreshed or reloaded", async () => {
-	const s = server({ cwA: true, "cwA.one": true, "cwA.two": false, cwB: false, "cwB.x": false, updates: true }, { fail: "The database is busy" });
-	const p = await renderPage({ refreshes: false });
+test("a failed save that wasn't stored: the draft and the bar stay, with the message; Discard goes back to what's saved", async () => {
+	const s = server({ ...START }, { fail: "The database is busy" });
+	const refreshes = adminRouter();
+	const p = await renderPage();
 	try {
 		await p.click("cwB");
 		await p.save();
 		assert.equal(s.posts().length, 1);
-		assert.deepEqual(p.counts.failed, ["The database is busy"]);
+		assert.equal(s.lists(), 2, "the switches are read back");
 		assert.equal(p.checked("cwB"), true, "the draft is kept");
-		assert.equal(p.saveBar(), true);
-		assert.equal(p.counts.refreshManifest, 0);
-		assert.equal(p.counts.reload, 0, "never a reload with unsaved changes");
+		assert.ok(p.bar());
+		assert.match(p.bar().textContent, /The database is busy/, "the message is on the bar");
+		assert.deepEqual(refreshes, [], "nothing changed: no refresh");
+		await p.discard();
+		assert.equal(p.checked("cwB"), false);
+		assert.equal(p.bar(), null);
 	} finally {
 		await p.unmount();
 	}
 });
 
-test("no way to refresh the sidebar in place: after the save, the page reloads at the same scroll position", async () => {
-	server({ cwA: true, "cwA.one": true, "cwA.two": false, cwB: false, "cwB.x": false, updates: true });
-	const p = await renderPage({ refreshes: false });
+test("a failed save that was really stored (a task couldn't be scheduled): the page shows what's stored, clean, with the message, and the sidebar is refreshed", async () => {
+	const message = "The switches are saved, but cwBTask couldn't be scheduled, so it won't run yet: busy. Open the Features page again to retry.";
+	const s = server({ ...START }, { failAfterStore: message, meanwhile: { "cwA.two": true } });
+	const refreshes = adminRouter();
+	const p = await renderPage();
 	try {
 		await p.click("cwB");
-		assert.equal(p.counts.reload, 0, "not while there are unsaved changes");
-		p.main.scrollTop = 240;
 		await p.save();
-		assert.equal(p.counts.reload, 1, "reloaded once the save is in");
-		assert.deepEqual(JSON.parse(window.sessionStorage.getItem("coywolf-pack:features-scroll")), { path: "/_emdash/admin/plugins/coywolf-pack/features", top: 240 });
+		assert.equal(s.lists(), 2, "the switches are read back");
+		assert.equal(p.checked("cwB"), true);
+		assert.equal(p.checked("cwA.two"), true, "and what else was stored");
+		assert.equal(p.bar(), null, "nothing left to save");
+		assert.ok([...p.main.querySelectorAll('[role="alert"]')].some((a) => a.textContent.includes("The switches are saved, but")), "the message stays on the page");
+		assert.deepEqual(refreshes, [{ queryKey: ["manifest"] }], "Module B was stored on: the sidebar is refreshed");
+
+		// Discard now goes back to what's stored, not to the switches before the save.
+		await p.click("cwA.one");
+		await p.discard();
+		assert.equal(p.checked("cwB"), true);
+		assert.equal(p.checked("cwA.one"), true);
+		assert.equal(p.checked("cwA.two"), true);
+		assert.equal(p.bar(), null);
 	} finally {
 		await p.unmount();
 	}
-	// The page again, after the reload: back where it was, once.
-	const again = await renderPage();
-	try {
-		assert.equal(again.main.scrollTop, 240);
-		assert.equal(window.sessionStorage.getItem("coywolf-pack:features-scroll"), null);
-	} finally {
-		await again.unmount();
+});
+
+test("the token card says what large uploads use with leftover R2 values when the saved token can't be read", async () => {
+	const cases = [
+		[{ unreadable: true, saved: false, env: false, r2Leftovers: true }, /It isn't used: large uploads need the Cloudflare API token saved again \(the saved one can't be read\), or a complete key pair\./],
+		[{ unreadable: true, saved: false, env: true, r2Leftovers: true }, /It isn't used: large uploads use the CLOUDFLARE_API_TOKEN Worker secret, since the saved token can't be read\./],
+		[{ saved: true, r2Leftovers: true }, /It isn't used: large uploads use the Cloudflare API token\./],
+	];
+	for (const [token, expected] of cases) {
+		server({ ...START }, { token });
+		adminRouter();
+		const p = await renderPage();
+		try {
+			assert.match(p.main.querySelector('[aria-labelledby="cw-cloudflare-token"]').textContent, expected);
+		} finally {
+			await p.unmount();
+		}
 	}
-});
-
-test("refreshAdminManifest: invalidates [\"manifest\"] on the admin's own client, from the router's context", () => {
-	const calls = [];
-	const queryClient = { getQueryData: () => undefined, invalidateQueries: (filters) => (calls.push(filters), Promise.resolve()) };
-	const router = { navigate() {}, history: { block: () => () => {} }, options: { basepath: "/_emdash/admin", context: { queryClient } } };
-	assert.equal(refreshAdminManifest({ __TSR_ROUTER__: router }), true);
-	assert.deepEqual(calls, [{ queryKey: ["manifest"] }]);
-	assert.equal(refreshAdminManifest({}), false, "no router");
-	assert.equal(refreshAdminManifest({ __TSR_ROUTER__: { ...router, options: { basepath: "/_emdash/admin", context: {} } } }), false, "no client");
-});
-
-test("features.tsx: switches edit the draft, the shared Save bar is the page's last child, and the manifest is refreshed in place first", () => {
-	const src = readFileSync(new URL("../src/admin/features.tsx", import.meta.url), "utf8");
-	// No request of its own: the draft hook saves, in one request.
-	assert.doesNotMatch(src, /apiFetch|features\/save|postJson|apiPost/);
-	assert.match(src, /const features = useFeatureDraft\(/);
-	assert.match(src, /onCheckedChange=\{\(on\) => features\.set\(main\.id, on\)\}/);
-	assert.match(src, /onCheckedChange=\{\(next\) => features\.set\(feature\.id, next\)\}/);
-	assert.match(src, /aria-label=\{`\$\{main\.label\}: \$\{mainOn \? "on" : "off"\}`\}/);
-	assert.match(src, /aria-label=\{`\$\{feature\.label\}: \$\{on \? "on" : "off"\}`\}/);
-	assert.match(src, /disabled=\{saving \|\| !mainOn\}/);
-	// The Save bar, as on the other settings pages: the last child of the page's root, with the failed save's message and Discard.
-	assert.match(src, /<SaveBar\s+error=\{result\.error\}\s+dirty=\{features\.dirty\}\s+saving=\{saving\}\s+onSave=\{\(\) => void features\.save\(\)\}\s+onDiscard=\{features\.discard\}\s+\/>\s+<\/div>\s+\);\s+\}\s*$/);
-	assert.match(src, /const result = useSaveResult\(\);/);
-	// The admin's own client first, through the shared hook (src/admin/manifest.ts); never a reload from the page itself.
-	assert.match(src, /const refreshManifest = useManifestRefresh\(\);/);
-	assert.match(src, /refreshManifest,\s*\/\/ The update notices/);
-	assert.doesNotMatch(src, /useQueryClient|location\.reload/);
-	assert.match(src, /resetUpdates: resetUpdateStatus/);
-	// The Cloudflare token card keeps its own buttons.
-	assert.match(src, /<CloudflareTokenCard \/>/);
 });

@@ -45,6 +45,8 @@ export function FeaturesPage() {
 			/>
 
 			{features.loadError && <Banner variant="error" role="alert" description={features.loadError} />}
+			{/* A save that failed after the switches were stored leaves nothing to save: its message shows here instead of on the bar. */}
+			{result.error && !features.dirty && <Banner variant="error" role="alert" description={result.error} />}
 
 			<CloudflareTokenCard />
 
