@@ -74,14 +74,24 @@ export function legacyChoice(stored: FeatureMap | null | undefined, def: Feature
 }
 
 /**
- * Stored choices over catalog defaults. A feature with no stored choice
- * takes its legacy ids' choice (FeatureDef.replaces), then its default
- * (`legacyDefault` until the map records the 0.36.0 defaults). A
- * sub-feature ("a.b") is on only when its parent ("a") is on too.
+ * Each feature's own switch: its stored choice, else its legacy ids' choice
+ * (FeatureDef.replaces), else its default (`legacyDefault` until the map
+ * records the 0.36.0 defaults). A part keeps its own switch while its module
+ * is off, so it comes back as it was when the module is turned on again. The
+ * Features page shows the switches from this (features/list, features/save).
  */
-export function resolveFeatures(stored: FeatureMap | null | undefined): FeatureMap {
+export function featureChoices(stored: FeatureMap | null | undefined): FeatureMap {
 	const out: FeatureMap = {};
 	for (const def of catalog.values()) out[def.id] = stored?.[def.id] ?? legacyChoice(stored, def) ?? defaultOf(def, stored);
+	return out;
+}
+
+/**
+ * The switches as they apply: each feature's own switch (featureChoices),
+ * with a sub-feature ("a.b") on only when its parent ("a") is on too.
+ */
+export function resolveFeatures(stored: FeatureMap | null | undefined): FeatureMap {
+	const out = featureChoices(stored);
 	for (const id of Object.keys(out)) {
 		const parent = parentOf(id);
 		if (parent && parent in out && !out[parent]) out[id] = false;
@@ -99,16 +109,24 @@ interface SettingsCtx {
 	settings: { get<T>(key: string): Promise<T | null | undefined> };
 }
 
-export async function ctxFeatures(ctx: SettingsCtx): Promise<FeatureMap> {
-	let stored: FeatureMap | null | undefined;
+async function readStored(ctx: SettingsCtx): Promise<FeatureMap | null | undefined> {
 	try {
-		stored = await ctx.settings.get<FeatureMap>(FEATURES_SETTING);
+		return await ctx.settings.get<FeatureMap>(FEATURES_SETTING);
 	} catch (error) {
 		// A page hook that can't read the switches adds nothing to the page: keep that page out of the edge cache.
 		noteReadFailure("feature switches (plugin context)");
 		throw error;
 	}
-	return remember(resolveFeatures(stored));
+}
+
+export async function ctxFeatures(ctx: SettingsCtx): Promise<FeatureMap> {
+	return remember(resolveFeatures(await readStored(ctx)));
+}
+
+/** For the Features page's routes: the switches as they apply, and each one's own switch (featureChoices), from one read. */
+export async function ctxFeatureState(ctx: SettingsCtx): Promise<{ features: FeatureMap; choices: FeatureMap }> {
+	const stored = await readStored(ctx);
+	return { features: remember(resolveFeatures(stored)), choices: featureChoices(stored) };
 }
 
 /**

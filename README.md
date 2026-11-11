@@ -157,7 +157,7 @@ A good first set for most sites:
 
 ### Using the admin
 
-- **Features** (**Coywolf Pack → Features**) turns modules and their parts on or off. A module's page also has switches for its parts.
+- **Features** (**Coywolf Pack → Features**) turns modules and their parts on or off: flip the switches, then **Save** (or Ctrl/⌘+S). A module's page also has switches for its parts, which apply right away.
 - **Each module's page** holds its settings, grouped into sections, with step-by-step guides. A feature that needs an API key or a binding shows a setup card until it's there.
 - **API keys and tokens** go on the plugin's **Settings** page ([Keys](#keys)). EmDash stores them encrypted.
 - **In the entry editor and content lists** (EmDash 1.4+, admins only): sections in a saved entry's sidebar for **Schema & Social**, **AI suggestions** and **Link status**, and a **Links** column in content lists, each while its module is on.
