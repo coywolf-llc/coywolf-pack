@@ -983,8 +983,8 @@ test("Settings page: the script keeps four fields in view, hides empty older tok
 		for (const key of ["cloudflareApiToken", "aiApiKey", "insightsFathomApiKey", "insightsGoogleServiceAccount"]) assert.equal(wrapper(key).hidden, false, `${key} stays in view`);
 		for (const key of OLDER_SECRET_KEYS) assert.equal(wrapper(key).hidden, true, `${key} is out of view`);
 		assert.equal(wrapper("videosWebhookSecret").hidden, true, "the webhook secret is hidden even when saved");
-		for (const key of [...OLDER_SECRET_KEYS, "videosWebhookSecret"]) assert.equal(wrapper(key).querySelector("input").getAttribute("autocomplete"), "off", `${key}: password managers leave it be`);
-		assert.equal(wrapper("cloudflareApiToken").querySelector("input").getAttribute("autocomplete"), "new-password", "the four fields keep EmDash's");
+		// Browsers ignore autocomplete="off" on password inputs but respect "new-password", so no field may lose EmDash's hint.
+		for (const key of ["cloudflareApiToken", ...OLDER_SECRET_KEYS, "videosWebhookSecret"]) assert.equal(wrapper(key).querySelector("input").getAttribute("autocomplete"), "new-password", `${key} keeps EmDash's new-password hint`);
 		const toggle = list.querySelector("[data-cw-older-toggle] button");
 		assert.ok(toggle, "a toggle for the saved older tokens");
 		assert.match(toggle.textContent, /Older tokens \(2\)/);

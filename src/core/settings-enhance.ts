@@ -17,8 +17,9 @@
  * works in any admin language. A field once seen saved stays with the older
  * tokens after Clear is selected, so the change can still be undone; once
  * that's saved (EmDash shows the field's "not set" placeholder, neither the
- * saved nor the cleared one), it's hidden and the count goes down. Older and
- * hidden fields get autocomplete="off", so password managers leave them be.
+ * saved nor the cleared one), it's hidden and the count goes down. Fields keep
+ * EmDash's autocomplete="new-password", which password managers respect
+ * (browsers ignore "off" on password inputs).
  *
  * Progressive enhancement: it never moves EmDash's (React's) nodes, only sets
  * `hidden` and attributes on them in place and adds its own nodes beside them.
@@ -89,7 +90,6 @@ var p=b.querySelector("[data-cw-intro]");p.id=d.id+"-cw";d.hidden=true;d.parentN
 i.setAttribute("aria-describedby",p.id);i.setAttribute("data-cw-guide","1");}}
 var k=H.indexOf(t)>=0?"hidden":O.indexOf(t)>=0?"older":"";if(!k)return;
 var w=i.parentElement&&i.parentElement.parentElement;if(!w||w===f||w.querySelectorAll("input").length!==1)return;
-attr(i,"autocomplete","off");
 if(k==="hidden"){w.hidden=true;return;}
 if(!first)first=w;var ph=i.getAttribute("placeholder")||"";
 if(saved(w)){w.setAttribute("data-cw-older","");attr(w,"data-cw-ph-set",ph);w.removeAttribute("data-cw-ph-cleared");w.removeAttribute("data-cw-removed");}
