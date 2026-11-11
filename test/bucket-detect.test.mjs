@@ -24,6 +24,7 @@ for (const name of ["CLOUDFLARE_API_TOKEN", "CF_ACCOUNT_ID", "CLOUDFLARE_ACCOUNT
 
 const W = await import("../src/core/worker-bindings.ts");
 const T = await import("../src/core/cloudflare-token.ts");
+const { DEADLINES } = await import("../src/core/single-flight.ts");
 
 const ACCOUNT = "a".repeat(32);
 const VERSION = "v-123";
@@ -161,16 +162,104 @@ test("a Cloudflare that didn't answer isn't remembered: asked again next time", 
 	assert.equal((await W.boundBucket(ctx2, env(), "MEDIA", access(network))).bucket, "coywolf-staging-media");
 });
 
-test("a token without Workers read access is named with the editor's permission, and isn't remembered either", async () => {
+test("a token without Workers read access is named with the editor's permission, and asked again only after a while (per isolate)", async () => {
 	let allowed = false;
 	const cf = cloudflare({ [`/accounts/${ACCOUNT}/workers/scripts`]: () => (allowed ? ok([{ id: "coywolf" }]) : refused()) });
 	const ctx = fakeCtx();
-	const lookup = await W.boundBucket(ctx, env(), "MEDIA", { ...access(cf), tokenName: "Cloudflare API token" });
+	const a = { ...access(cf), tokenName: "Cloudflare API token" };
+	const lookup = await W.boundBucket(ctx, env(), "MEDIA", a);
 	assert.deepEqual([lookup.bucket, lookup.miss], [null, "forbidden"]);
 	assert.equal(lookup.message, "The Cloudflare API token can't read this site's Worker: it needs Workers → Metadata Read-Only.");
-	// The permission added in Cloudflare's dashboard: the next look finds it (the token itself didn't change).
+	// The Files list asks on every load: not Cloudflare each time.
+	const calls = cf.calls.length;
+	assert.equal((await W.boundBucket(ctx, env(), "MEDIA", a)).message, lookup.message);
+	assert.equal(cf.calls.length, calls, "not asked again right away");
+	assert.equal(ctx.kvMap.size, 0, "a refusal isn't stored in KV");
+	// The permission added in Cloudflare's dashboard: a later look finds it (the token itself didn't change).
 	allowed = true;
+	W.resetBucketMisses();
+	assert.equal((await W.boundBucket(ctx, env(), "MEDIA", a)).bucket, "coywolf-staging-media");
+
+	// A refusal on the deployments read is a refusal too, not a Worker that isn't there.
+	const deployments = cloudflare({ [`/accounts/${ACCOUNT}/workers/scripts/coywolf/deployments`]: () => refused(), [`/accounts/${ACCOUNT}/workers/scripts/other/deployments`]: () => refused() });
+	assert.equal((await W.boundBucket(fakeCtx(), env(), "MEDIA", access(deployments))).miss, "forbidden");
+});
+
+test("a deployments read that fails isn't taken for a Worker that isn't there: the hint is tried again, and a miss isn't remembered", async () => {
+	const ctx = fakeCtx();
+	assert.equal((await W.boundBucket(ctx, env(), "MEDIA", access(cloudflare()))).worker, "coywolf");
+	const deployed = env({ CF_VERSION_METADATA: { id: "v-456" } });
+	const coywolfDeployments = `/accounts/${ACCOUNT}/workers/scripts/coywolf/deployments`;
+	const broken = () => new Response(JSON.stringify({ success: false, errors: [{ code: 10013, message: "Internal error" }] }), { status: 500 });
+	const running = () => ok({ deployments: [{ versions: [{ version_id: "v-456" }] }] });
+
+	// The hint's read fails once after the deploy: the scan reads it again and finds it.
+	let first = true;
+	const once = cloudflare({ [coywolfDeployments]: () => (first ? ((first = false), broken()) : running()) }, { version: "v-456" });
+	assert.equal((await W.boundBucket(ctx, deployed, "MEDIA", access(once))).bucket, "coywolf-staging-media");
+	assert.equal(once.calls.filter((c) => c.path === coywolfDeployments).length, 2);
+
+	// It keeps failing: Cloudflare didn't answer, not "not found", and the next look asks again.
+	const ctx2 = fakeCtx();
+	await W.boundBucket(ctx2, env(), "MEDIA", access(cloudflare()));
+	let down = true;
+	const failing = cloudflare({ [coywolfDeployments]: () => (down ? broken() : running()) }, { version: "v-456" });
+	const lookup = await W.boundBucket(ctx2, deployed, "MEDIA", access(failing));
+	assert.deepEqual([lookup.bucket, lookup.miss], [null, "unavailable"]);
+	assert.match(lookup.message, /Couldn't read every Worker's deployments \(Cloudflare API 500: Internal error\)/);
+	const calls = failing.calls.length;
+	down = false;
+	assert.equal((await W.boundBucket(ctx2, deployed, "MEDIA", access(failing))).bucket, "coywolf-staging-media");
+	assert.ok(failing.calls.length > calls, "asked again at once");
+
+	// A Worker Cloudflare says isn't there (404) just doesn't match.
+	const gone = cloudflare({ [`/accounts/${ACCOUNT}/workers/scripts/other/deployments`]: () => new Response(JSON.stringify({ success: false, errors: [{ code: 10007, message: "not found" }] }), { status: 404 }) });
+	assert.equal((await W.boundBucket(fakeCtx(), env(), "MEDIA", access(gone))).bucket, "coywolf-staging-media");
+});
+
+test("an answer the pack can't read isn't remembered: settings without bindings, or a Workers list that isn't a list", async () => {
+	let good = false;
+	const cf = cloudflare({ [`/accounts/${ACCOUNT}/workers/scripts/coywolf/settings`]: () => (good ? ok({ bindings: COYWOLF_BINDINGS }) : ok(null)) });
+	const ctx = fakeCtx();
+	const lookup = await W.boundBucket(ctx, env(), "MEDIA", access(cf));
+	assert.deepEqual([lookup.bucket, lookup.miss], [null, "unavailable"]);
+	assert.equal(ctx.kvMap.size, 0, "nothing remembered: not \"no R2 binding named MEDIA\" until the next deploy");
+	good = true;
 	assert.equal((await W.boundBucket(ctx, env(), "MEDIA", access(cf))).bucket, "coywolf-staging-media");
+
+	const noList = cloudflare({ [`/accounts/${ACCOUNT}/workers/scripts`]: () => ok({ scripts: [] }) });
+	assert.equal((await W.boundBucket(fakeCtx(), env(), "MEDIA", access(noList))).miss, "unavailable");
+});
+
+test("the whole lookup has a budget: a slow scan stops and says Cloudflare didn't answer", async () => {
+	const budget = DEADLINES.workerLookupMs;
+	DEADLINES.workerLookupMs = 80;
+	try {
+		const many = Array.from({ length: 40 }, (_, i) => ({ id: `site-${i}`, modified_on: "2026-11-01T00:00:00Z" }));
+		const inner = cloudflare({ [`/accounts/${ACCOUNT}/workers/scripts`]: () => ok(many) });
+		const slow = { ...inner, fetch: async (url, init) => (await new Promise((r) => setTimeout(r, 15)), inner.fetch(url, init)) };
+		const started = Date.now();
+		const lookup = await W.boundBucket(fakeCtx(), env(), "MEDIA", access(slow));
+		assert.deepEqual([lookup.bucket, lookup.miss], [null, "unavailable"]);
+		assert.match(lookup.message, /took longer than 80 ms/);
+		assert.ok(Date.now() - started < 1000, "stopped near the budget");
+		assert.ok(inner.calls.length < 12, `${inner.calls.length} calls, not the whole scan`);
+	} finally {
+		DEADLINES.workerLookupMs = budget;
+	}
+});
+
+test("only R2 bindings count: another binding with a bucket_name isn't taken for a bucket", async () => {
+	const cf = cloudflare({}, {
+		bindings: [
+			{ type: "r2_bucket", name: "MEDIA", bucket_name: "coywolf-staging-media" },
+			{ type: "secret_text", name: "MEDIA", bucket_name: "not-a-bucket" },
+			{ type: "kv_namespace", name: "FILES", bucket_name: "not-a-bucket-either" },
+		],
+	});
+	const ctx = fakeCtx();
+	assert.equal((await W.boundBucket(ctx, env(), "MEDIA", access(cf))).bucket, "coywolf-staging-media");
+	assert.equal((await W.boundBucket(ctx, env(), "FILES", access(cf))).miss, "no-binding");
 });
 
 test("a Worker that isn't found is looked for again only after a while (per isolate); without CF_VERSION_METADATA nothing is asked", async () => {
@@ -205,6 +294,14 @@ test("usage finds the D1 database with the same lookups", async () => {
 	const report = await usageReport(ctx, false, env());
 	assert.equal(report.worker, "coywolf");
 	assert.equal(report.databaseId, "db1");
+
+	// The D1 binding named DB wins over another one listed first.
+	const two = cloudflare({}, { bindings: [{ type: "d1", name: "ANALYTICS", database_id: "db-other" }, { type: "d1", name: "DB", database_id: "db1" }] });
+	const ctx2 = fakeCtx({ cloudflareApiToken: "tok" }, async (url, init) => {
+		if (url.endsWith("/graphql")) return new Response(JSON.stringify({ data: { viewer: { accounts: [{}] } }, errors: null }), { status: 200 });
+		return two.fetch(url, init);
+	});
+	assert.equal((await usageReport(ctx2, false, env())).databaseId, "db1");
 });
 
 // ── Large uploads ────────────────────────────────────────────
@@ -296,6 +393,11 @@ test("Set up media host uses the bucket bound as MEDIA; a typed or saved name wi
 		assert.deepEqual(domainsCalls(saved), ["my-media"]);
 		assert.deepEqual(saved.workerCalls(), [], "a saved name: no lookup");
 
+		// The override cleared on the page (an empty bucket sent): the bound bucket.
+		const cleared = withZone(domains("coywolf-staging-media"));
+		await plan(cleared, { imagesBucketName: "my-media" }, { bucket: "" });
+		assert.deepEqual(domainsCalls(cleared), ["coywolf-staging-media"]);
+
 		const typed = withZone(domains("typed-media"));
 		await plan(typed, { imagesBucketName: "my-media" }, { bucket: "typed-media" });
 		assert.deepEqual(domainsCalls(typed), ["typed-media"]);
@@ -304,6 +406,7 @@ test("Set up media host uses the bucket bound as MEDIA; a typed or saved name wi
 		// No bucket found and none entered: the old message, with why.
 		const forbidden = withZone({ [`/accounts/${ACCOUNT}/workers/scripts`]: () => refused() });
 		await assert.rejects(plan(forbidden), /Enter the R2 bucket name first\. The pack couldn't find it from the MEDIA binding\. The Cloudflare API token can't read this site's Worker: it needs Workers → Metadata Read-Only\.$/);
+		W.resetBucketMisses(); // the refusal above is remembered for this token and version
 		const eu = cloudflare({}, { bindings: [{ type: "r2_bucket", name: "MEDIA", bucket_name: "eu-media", jurisdiction: "eu" }] });
 		await assert.rejects(plan(eu), /MEDIA binding's bucket eu-media is in the eu jurisdiction, which Set up media host can't use yet/);
 		assert.deepEqual(domainsCalls(eu), [], "nothing was asked of the bucket");
@@ -383,6 +486,10 @@ test("Retention on Cloudflare uses the bucket bound as BACKUPS, still checks it'
 		// The bucket check still runs on a found name: a binding that names another bucket than the one BACKUPS writes to is refused.
 		const elsewhere = cf("coywolf-staging-backups", { bindings: [{ type: "r2_bucket", name: "BACKUPS", bucket_name: "wellbeing-backups" }] });
 		await assert.rejects(routes["backups/cloudflare/check"].handler({ ...fakeCtx({ cloudflareApiToken: "tok" }, elsewhere.fetch), input: {} }), /The bucket wellbeing-backups isn't the one bound as BACKUPS/);
+		// Apply and remove check it too, before they change anything.
+		await assert.rejects(routes["backups/cloudflare/apply"].handler({ ...fakeCtx({ cloudflareApiToken: "tok" }, elsewhere.fetch), input: { lock: false } }), /The bucket wellbeing-backups isn't the one bound as BACKUPS/);
+		await assert.rejects(routes["backups/cloudflare/remove"].handler({ ...fakeCtx({ cloudflareApiToken: "tok" }, elsewhere.fetch), input: {} }), /The bucket wellbeing-backups isn't the one bound as BACKUPS/);
+		assert.deepEqual(elsewhere.calls.filter((c) => c.key.startsWith("PUT")), [], "no rule was written");
 
 		// A saved name wins: no lookup, and the check runs on it.
 		const saved = cf("my-backups");
@@ -390,11 +497,17 @@ test("Retention on Cloudflare uses the bucket bound as BACKUPS, still checks it'
 		assert.equal(savedState.bucket, "my-backups");
 		assert.deepEqual(saved.workerCalls(), []);
 
+		// The override cleared on the card (an empty bucket sent): the bound bucket is checked, and the saved name removed.
+		const clearing = fakeCtx({ cloudflareApiToken: "tok", [RETENTION_SETTINGS.bucket]: "my-backups" }, cf().fetch);
+		assert.equal((await routes["backups/cloudflare/check"].handler({ ...clearing, input: { bucket: "" } })).bucket, "coywolf-staging-backups");
+		assert.equal(clearing.stored.has(RETENTION_SETTINGS.bucket), false);
+
 		// Not found: the old message, with why. A jurisdiction: said plainly.
 		const forbidden = cf("coywolf-staging-backups");
 		const inner = forbidden.fetch;
 		forbidden.fetch = async (url, init) => (new URL(url).pathname.endsWith("/workers/scripts") ? refused() : inner(url, init));
 		await assert.rejects(routes["backups/cloudflare/check"].handler({ ...fakeCtx({ cloudflareApiToken: "tok" }, forbidden.fetch), input: {} }), /Enter the backup bucket name first\. The pack couldn't find it from the BACKUPS binding\. The Cloudflare API token can't read this site's Worker: it needs Workers → Metadata Read-Only\./);
+		W.resetBucketMisses(); // the refusal above is remembered for this token and version
 		const eu = cf("coywolf-staging-backups", { bindings: [{ type: "r2_bucket", name: "BACKUPS", bucket_name: "eu-backups", jurisdiction: "eu" }] });
 		await assert.rejects(routes["backups/cloudflare/check"].handler({ ...fakeCtx({ cloudflareApiToken: "tok" }, eu.fetch), input: {} }), /eu jurisdiction, which Retention on Cloudflare can't use yet/);
 		assert.deepEqual(bucketsTouched(eu), [], "nothing was asked of the bucket");

@@ -149,7 +149,8 @@ async function credentials(ctx: PluginContext, input: z.infer<typeof setupInput>
 	const e = await env();
 	const resolved = await cloudflareToken(ctx, e, "images", { typed: input.token });
 	const { token, unreadable } = resolved;
-	let bucket = input.bucket || (await ctx.settings.get<string>(IMAGES_SETTINGS.bucket))?.trim() || "";
+	// An empty bucket sent on purpose skips the saved one (its field was cleared): the bound bucket is used.
+	let bucket = input.bucket !== undefined ? input.bucket : (await ctx.settings.get<string>(IMAGES_SETTINGS.bucket))?.trim() || "";
 	const host = input.host || imageCdn() || "";
 	if (!token && unreadable) throw PluginRouteError.badRequest(UNREADABLE_TOKEN_MESSAGE);
 	let accountId: string | null = null;

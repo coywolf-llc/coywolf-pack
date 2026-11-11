@@ -575,7 +575,8 @@ export function ImagesPage() {
 	const setupBody = () => ({
 		host: setupHost,
 		...(draft.accountId.trim() ? { accountId: draft.accountId.trim() } : {}),
-		...(draft.bucket.trim() ? { bucket: draft.bucket.trim() } : {}),
+		// Always sent: an empty field (a cleared override) uses the bucket found from the binding.
+		bucket: draft.bucket.trim(),
 		...(draft.token.trim() ? { token: draft.token.trim() } : {}),
 	});
 

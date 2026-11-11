@@ -16,7 +16,7 @@ import type { PluginContext } from "emdash";
 import { cloudflareApi, contextFetch } from "../core/cloudflare-api.js";
 import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, noTokenMessage, tokenName } from "../core/cloudflare-token.js";
 import { DEADLINES, sharedRead, sharedSlot } from "../core/single-flight.js";
-import { findWorkerScript, workerBindings } from "../core/worker-bindings.js";
+import { type WorkerBinding, WorkerScanIncomplete, findWorkerScript, workerSettings } from "../core/worker-bindings.js";
 import { afterResponse, workerEnv } from "../shared.js";
 import { versionId } from "./lib.js";
 import {
@@ -131,11 +131,17 @@ async function findTarget(ctx: PluginContext, env: Record<string, unknown>, a: A
 	// The same lookups as bucket detection (src/core/worker-bindings.ts).
 	const call = { token: a.token, fetch: a.doFetch, accountId };
 	try {
-		target.worker = version ? await findWorkerScript({ ...call, version }) : null;
+		// Listed even without a version, so a token that can't read Workers gets its note. A scan that didn't hear from
+		// every Worker counts as not found here, as before the lookup was shared.
+		target.worker = await findWorkerScript({ ...call, version }).catch((error: unknown) => {
+			if (error instanceof WorkerScanIncomplete) return null;
+			throw error;
+		});
 		if (!target.worker) notes.push(version ? "Couldn't find this site's Worker among the account's Workers." : "This Worker has no CF_VERSION_METADATA binding, so its own usage can't be told apart.");
 		if (target.worker) {
-			const bindings = await workerBindings({ ...call, script: target.worker });
-			const d1 = bindings.find((b) => b.type === "d1" && b.name === "DB") ?? bindings.find((b) => b.type === "d1");
+			// No settings at all is an error (the note below); settings without bindings, no database.
+			const settings = (await workerSettings({ ...call, script: target.worker })) as { bindings?: WorkerBinding[] };
+			const d1 = settings.bindings?.find((b) => b.type === "d1" && b.name === "DB") ?? settings.bindings?.find((b) => b.type === "d1");
 			target.databaseId = d1?.database_id ?? d1?.id ?? null;
 		}
 	} catch (error) {

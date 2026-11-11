@@ -219,7 +219,8 @@ export function backupsModule(options: BackupsOptions) {
 		const saved = async (key: string) => ((await ctx.settings.get<string>(key).catch(() => null)) ?? "").trim();
 		const resolved = await cloudflareToken(ctx, env, "backupsRetention", { typed: input.token, olderEnv: [tokenSecretName()] });
 		const { token, unreadable } = resolved;
-		let bucket = input.bucket || (await saved(RETENTION_SETTINGS.bucket));
+		// An empty bucket sent on purpose clears the saved override: the bound one is used (and the saved name removed once it works).
+		let bucket = input.bucket !== undefined ? input.bucket : await saved(RETENTION_SETTINGS.bucket);
 		if (!token && unreadable) throw PluginRouteError.badRequest(UNREADABLE_TOKEN_MESSAGE);
 		const missing = [!bucket && "backup bucket name", !token && "Cloudflare API token (on the plugin's Settings page)"].filter(Boolean);
 		if (!token) throw PluginRouteError.badRequest(`Enter the ${missing.join(", ")} first.`);
@@ -298,10 +299,11 @@ export function backupsModule(options: BackupsOptions) {
 		throw error;
 	};
 
-	/** Save the account and bucket that worked (and the token, when asked to). */
+	/** Save the account and bucket that worked (and the token, when asked to). An empty bucket removes the saved one. */
 	async function rememberAccess(ctx: PluginContext, input: z.infer<typeof retentionInput> & { saveToken?: boolean }, access: RetentionAccess) {
 		if (input.accountId) await ctx.settings.set(RETENTION_SETTINGS.accountId, access.accountId);
 		if (input.bucket) await ctx.settings.set(RETENTION_SETTINGS.bucket, access.bucket);
+		else if (input.bucket === "") await ctx.settings.delete(RETENTION_SETTINGS.bucket);
 		if (input.saveToken && input.token) await ctx.settings.set(RETENTION_SETTINGS.token, input.token);
 	}
 

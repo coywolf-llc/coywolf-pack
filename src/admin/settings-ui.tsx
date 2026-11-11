@@ -120,19 +120,31 @@ export interface DetectedBucket {
 	message: string | null;
 }
 
-/** Whether the bucket was found (a page then moves its bucket field under Advanced, as an override). */
-export const bucketFound = (detected?: DetectedBucket | null): detected is DetectedBucket & { bucket: string } => Boolean(detected?.bucket);
+/**
+ * Whether the bucket was found and can be used: the page then moves its bucket field under Advanced, as an override.
+ * A bucket in a jurisdiction doesn't count (the feature can't use it), so the field stays where the owner sees it.
+ */
+export const bucketFound = (detected?: DetectedBucket | null): detected is DetectedBucket & { bucket: string } => Boolean(detected?.bucket && !detected.jurisdiction);
 
 /** A saved bucket name that differs from the one found: it wins, so the page opens Advanced to show it. */
 export const bucketOverridden = (detected: DetectedBucket | null | undefined, saved: string | undefined) => Boolean(bucketFound(detected) && saved?.trim() && saved.trim() !== detected.bucket);
 
 /**
  * One line about the bucket: "Found: <name>, from the MEDIA binding." (and when a saved name wins over it), or why
- * it couldn't be found, so the field next to it is needed. `feature`: what can't use a bucket in a jurisdiction.
+ * it couldn't be found, so the field next to it is needed. Nothing when a saved name is in use and nothing was found
+ * (the saved name is all that matters then). `feature`: what can't use a bucket in a jurisdiction.
  */
 export function BucketFound(props: { detected?: DetectedBucket | null; saved?: string; feature: string }) {
 	const d = props.detected;
-	if (!d) return null;
+	const saved = props.saved?.trim();
+	if (!d || (saved && !bucketFound(d))) return null;
+	if (d.bucket && d.jurisdiction) {
+		return (
+			<p className="text-sm">
+				Found <span className="font-medium">{d.bucket}</span> from the <code>{d.binding}</code> binding, but it's in the {d.jurisdiction} jurisdiction, which {props.feature} can't use yet.
+			</p>
+		);
+	}
 	if (!bucketFound(d)) {
 		return (
 			<p className="text-xs text-kumo-subtle">
@@ -140,11 +152,9 @@ export function BucketFound(props: { detected?: DetectedBucket | null; saved?: s
 			</p>
 		);
 	}
-	const saved = props.saved?.trim();
 	return (
 		<p className="text-sm">
 			Found: <span className="font-medium">{d.bucket}</span>, from the <code>{d.binding}</code> binding.
-			{d.jurisdiction ? ` It's in the ${d.jurisdiction} jurisdiction, which ${props.feature} can't use yet.` : ""}
 			{saved && saved !== d.bucket ? ` The bucket name saved under Advanced (${saved}) is used instead; clear it to use this one.` : ""}
 		</p>
 	);

@@ -17,8 +17,9 @@
  * A bucket lookup that read the Worker's settings is remembered in plugin KV for that Worker version, account and
  * token (its fingerprint, src/core/cloudflare-token.ts): a deploy that changes wrangler.jsonc runs a new version, so
  * it's read again, starting with the Worker found before. Only answers are remembered, as with the token's account:
- * a Worker that wasn't found for five minutes per isolate, a refusal (the token lacks the permission) or a Cloudflare
- * that didn't answer not at all.
+ * a Worker that wasn't found (every script's deployments answered) and a refusal (the token lacks the permission) for
+ * five minutes per isolate; a Cloudflare that didn't answer, an answer the pack can't read, or a scan past its total
+ * budget (DEADLINES.workerLookupMs) not at all.
  *
  * It runs only where a bucket is needed (admin routes, large uploads, Set up media host, Retention on Cloudflare),
  * never on a page render. Kept free of EmDash imports so tests can load it directly.
@@ -26,7 +27,7 @@
 import { CloudflareApiError, type Fetch, cloudflareApi } from "./cloudflare-api.js";
 import { type ResolvedToken, UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, noAccountMessage, noTokenMessage, tokenFingerprint, tokenName } from "./cloudflare-token.js";
 import { CLOUDFLARE_PERMISSIONS } from "./guide-content.js";
-import { DEADLINES } from "./single-flight.js";
+import { DEADLINES, DeadlineError } from "./single-flight.js";
 import { versionId } from "../pageCache/lib.js";
 
 /** One of a Worker's bindings as the settings endpoint returns it (only the fields the pack reads). */
@@ -43,39 +44,93 @@ export interface WorkerBinding {
 	id?: string;
 }
 
-/** How to call Cloudflare's API for one account. `deadlineMs`: per call (default DEADLINES.cloudflareApiMs). */
+/**
+ * How to call Cloudflare's API for one account. `deadlineMs`: per call (default DEADLINES.cloudflareApiMs).
+ * `budget`: the whole lookup's: no call starts after `until`, and none runs past it.
+ */
 export interface WorkerApi {
 	token: string;
 	fetch?: Fetch;
 	accountId: string;
 	deadlineMs?: number;
+	budget?: { until: number; ms: number };
 }
 
-const read = async <T>(a: WorkerApi, path: string): Promise<T> => (await cloudflareApi<T>(path, { token: a.token, fetch: a.fetch, deadlineMs: a.deadlineMs })).result;
+/** The lookup's total budget ran out (a scan of many Workers, or a slow Cloudflare). */
+export class WorkerLookupBudgetSpent extends DeadlineError {}
+
+/** A scan that didn't hear from every Worker: a deployments read failed (not a 404) and no Worker matched. Not an answer. */
+export class WorkerScanIncomplete extends Error {
+	constructor(cause: unknown) {
+		super(`Couldn't read every Worker's deployments (${(cause instanceof Error ? cause.message : String(cause)).replace(/\.$/, "")})`);
+		this.name = "WorkerScanIncomplete";
+	}
+}
+
+const isRefusal = (error: unknown) => error instanceof CloudflareApiError && (error.status === 401 || error.status === 403);
+
+async function read<T>(a: WorkerApi, path: string): Promise<T> {
+	let deadlineMs = a.deadlineMs ?? DEADLINES.cloudflareApiMs;
+	if (a.budget) {
+		const left = a.budget.until - Date.now();
+		if (left <= 0) throw new WorkerLookupBudgetSpent("Looking up this site's Worker", a.budget.ms);
+		deadlineMs = Math.min(deadlineMs, left);
+	}
+	return (await cloudflareApi<T>(path, { token: a.token, fetch: a.fetch, deadlineMs })).result;
+}
+
+const scriptPath = (a: WorkerApi, script: string, what: "deployments" | "settings") =>
+	`/accounts/${encodeURIComponent(a.accountId)}/workers/scripts/${encodeURIComponent(script)}/${what}`;
 
 /**
  * The script whose current deployment runs `version` (a gradual deployment's two versions both count): `hint` first
- * (the Worker found before), then the account's scripts, most recently changed first (the first 50). Null when none
- * does. Throws when the scripts can't be listed; a script whose deployments can't be read is skipped.
+ * (the Worker found before), then the account's scripts, most recently changed first (the first 50). Null when every
+ * script checked answered and none runs it. Throws when the scripts can't be listed (or the answer isn't a list),
+ * when the token is refused, when a deployments read failed and nothing matched (WorkerScanIncomplete), and when
+ * the budget runs out. A script Cloudflare says doesn't exist (404) just doesn't match. `version` null: only lists
+ * the scripts (so a token that can't is still told apart), and returns null.
  */
-export async function findWorkerScript(a: WorkerApi & { version: string; hint?: string | null }): Promise<string | null> {
+export async function findWorkerScript(a: WorkerApi & { version: string | null; hint?: string | null }): Promise<string | null> {
+	const answered = new Set<string>();
+	let failed: unknown = null;
 	const runsVersion = async (script: string) => {
-		const answer = await read<{ deployments?: Array<{ versions?: Array<{ version_id?: string }> }> } | null>(a, `/accounts/${a.accountId}/workers/scripts/${encodeURIComponent(script)}/deployments`).catch(() => null);
-		return Boolean(answer?.deployments?.[0]?.versions?.some((v) => v.version_id === a.version));
+		try {
+			const answer = await read<{ deployments?: Array<{ versions?: Array<{ version_id?: string }> }> } | null>(a, scriptPath(a, script, "deployments"));
+			answered.add(script);
+			return Boolean(answer?.deployments?.[0]?.versions?.some((v) => v.version_id === a.version));
+		} catch (error) {
+			if (error instanceof CloudflareApiError && error.status === 404) {
+				answered.add(script);
+				return false;
+			}
+			if (error instanceof WorkerLookupBudgetSpent || isRefusal(error)) throw error;
+			failed ??= error;
+			return false;
+		}
 	};
-	if (a.hint && (await runsVersion(a.hint))) return a.hint;
-	const listed = await read<Array<{ id?: string; modified_on?: string }> | null>(a, `/accounts/${a.accountId}/workers/scripts`);
-	const scripts = (Array.isArray(listed) ? listed : []).filter((s): s is { id: string; modified_on?: string } => typeof s?.id === "string" && s.id !== "" && s.id !== a.hint);
+	if (a.version !== null && a.hint && (await runsVersion(a.hint))) return a.hint;
+	const listed = await read<Array<{ id?: string; modified_on?: string }> | null>(a, `/accounts/${encodeURIComponent(a.accountId)}/workers/scripts`);
+	if (!Array.isArray(listed)) throw new Error("Cloudflare's API didn't answer with a list of the account's Workers.");
+	if (a.version === null) return null;
+	// A hint whose read failed is checked again in the scan; one that answered isn't.
+	const scripts = listed.filter((s): s is { id: string; modified_on?: string } => typeof s?.id === "string" && s.id !== "" && !answered.has(s.id));
 	// The Worker deployed most recently first: usually this one.
 	scripts.sort((x, y) => (Date.parse(y.modified_on ?? "") || 0) - (Date.parse(x.modified_on ?? "") || 0));
 	for (const script of scripts.slice(0, 50)) if (await runsVersion(script.id)) return script.id;
+	if (failed) throw new WorkerScanIncomplete(failed);
 	return null;
 }
 
-/** The script's bindings, from its settings. Throws when they can't be read. */
+/** The script's settings as Cloudflare answers them (`bindings`, among others), or null. Throws when they can't be read. */
+export async function workerSettings(a: WorkerApi & { script: string }): Promise<{ bindings?: WorkerBinding[] } | null> {
+	return read<{ bindings?: WorkerBinding[] } | null>(a, scriptPath(a, a.script, "settings"));
+}
+
+/** The script's bindings. Throws when the settings can't be read, or come back without a list of bindings (not an answer). */
 export async function workerBindings(a: WorkerApi & { script: string }): Promise<WorkerBinding[]> {
-	const settings = await read<{ bindings?: WorkerBinding[] } | null>(a, `/accounts/${a.accountId}/workers/scripts/${encodeURIComponent(a.script)}/settings`);
-	return Array.isArray(settings?.bindings) ? settings.bindings.filter((b) => b && typeof b === "object") : [];
+	const settings = await workerSettings(a);
+	if (!Array.isArray(settings?.bindings)) throw new Error("Cloudflare's API answered the Worker's settings without its bindings.");
+	return settings.bindings.filter((b) => b && typeof b === "object");
 }
 
 // ── Buckets ──────────────────────────────────────────────────
@@ -110,8 +165,11 @@ const BUCKETS_KEY = "state:cloudflare:buckets";
 /** Versions remembered (a gradual deployment runs two at once; a site may have the new token and an older one in use). */
 const REMEMBERED = 4;
 const MISS_RETRY_MS = 5 * 60_000;
-/** Workers that weren't found for a version, account and token, per isolate, so a page that asks often doesn't scan each time. */
-const workerMisses = new Map<string, number>();
+/**
+ * Answers that found no bucket, per isolate, for a version, account and token: a Worker that wasn't found, or a token
+ * refused (without Workers read access), so a page that asks often (the Files list) doesn't ask Cloudflare each time.
+ */
+const workerMisses = new Map<string, { until: number; miss: "not-found" | "forbidden"; name?: string }>();
 
 /** Forget the isolate's misses (tests). */
 export function resetBucketMisses(): void {
@@ -160,21 +218,31 @@ export async function boundBucket(ctx: BucketCtx, env: Record<string, unknown>, 
 	const hit = entries.find((e) => same(e) && e.version === version);
 	if (hit) return fromRemembered(hit, binding);
 	const missKey = `${version}|${fp}|${a.accountId}`;
-	if ((workerMisses.get(missKey) ?? 0) > Date.now()) return missed(binding, "not-found");
+	const memo = workerMisses.get(missKey);
+	if (memo && memo.until > Date.now()) return missed(binding, memo.miss, { name: memo.name });
 
-	const api: WorkerApi = { token: a.token, fetch: a.fetch, accountId: a.accountId, deadlineMs: DEADLINES.cloudflareReadMs };
+	const api: WorkerApi = {
+		token: a.token,
+		fetch: a.fetch,
+		accountId: a.accountId,
+		deadlineMs: DEADLINES.cloudflareReadMs,
+		budget: { until: Date.now() + DEADLINES.workerLookupMs, ms: DEADLINES.workerLookupMs },
+	};
 	let worker: string | null;
 	let bindings: WorkerBinding[];
 	try {
 		// The Worker found for an earlier version first: a deploy keeps the Worker's name.
 		worker = await findWorkerScript({ ...api, version, hint: entries.find(same)?.worker ?? null });
 		if (!worker) {
-			workerMisses.set(missKey, Date.now() + MISS_RETRY_MS);
+			workerMisses.set(missKey, { until: Date.now() + MISS_RETRY_MS, miss: "not-found" });
 			return missed(binding, "not-found");
 		}
 		bindings = await workerBindings({ ...api, script: worker });
 	} catch (error) {
-		if (error instanceof CloudflareApiError && (error.status === 401 || error.status === 403)) return missed(binding, "forbidden", { name: a.tokenName });
+		if (isRefusal(error)) {
+			workerMisses.set(missKey, { until: Date.now() + MISS_RETRY_MS, miss: "forbidden", name: a.tokenName });
+			return missed(binding, "forbidden", { name: a.tokenName });
+		}
 		return missed(binding, "unavailable", { detail: error instanceof Error ? error.message : String(error) });
 	}
 	const buckets: Remembered["buckets"] = {};

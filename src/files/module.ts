@@ -86,6 +86,8 @@ const filesSettingsInput = z.object({
 });
 
 const filled = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
+/** The saved R2 account ID, only when it's an account ID (it goes into Cloudflare API paths). */
+const savedAccount = (v: unknown): string | null => (typeof v === "string" && /^[a-f0-9]{32}$/i.test(v.trim()) ? v.trim() : null);
 
 /** What large uploads say about a bucket in a jurisdiction (the S3 endpoint they use doesn't reach those). */
 const filesJurisdictionMessage = (lookup: BucketLookup) =>
@@ -109,7 +111,7 @@ export async function r2Readiness(
 	const resolved = await cloudflareToken(ctx, env, "files");
 	if (!resolved.token) return { configured: false, problem: resolved.unreadable || pair?.secretUnreadable ? UNREADABLE_TOKEN_MESSAGE : null };
 	if (filled(bucket)) return { configured: true, problem: null };
-	const lookup = await findBoundBucket(ctx, env, uploadsBindingName(env, options), { resolved, fetch: contextFetch(ctx), account: pair?.accountId });
+	const lookup = await findBoundBucket(ctx, env, uploadsBindingName(env, options), { resolved, fetch: contextFetch(ctx), account: savedAccount(pair?.accountId) });
 	if (!lookup.bucket) return { configured: false, problem: null, bucketReason: lookup.message };
 	if (lookup.jurisdiction) return { configured: false, problem: filesJurisdictionMessage(lookup) };
 	return { configured: true, problem: null };
@@ -313,7 +315,7 @@ export function filesModule(options: FilesOptions) {
 			cloudflareToken(ctx, env, "files"),
 		]);
 		// The bucket bound for large uploads, found with the token (shown even when a saved name overrides it).
-		const detectedBucket = await findBoundBucket(ctx, env, uploadsBindingName(env, options), { resolved, fetch: contextFetch(ctx), account: accountId?.trim() || null });
+		const detectedBucket = await findBoundBucket(ctx, env, uploadsBindingName(env, options), { resolved, fetch: contextFetch(ctx), account: savedAccount(accountId) });
 		return {
 			filesBase: site.base,
 			filesPublicBaseUrl: site.publicBaseUrl,
