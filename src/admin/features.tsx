@@ -4,39 +4,24 @@
  * every change in one request.
  */
 import { Banner, Switch } from "@cloudflare/kumo";
-import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { CloudflareTokenCard } from "./cloudflare-token-card.js";
-import { refreshAdminManifest } from "./extensions.js";
 import { useFeatureDraft } from "./features-draft.js";
+import { useManifestRefresh } from "./manifest.js";
 import { PageHeader, Loading } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { useSaveResult } from "./toast.js";
 import { resetUpdateStatus } from "./update-notice.js";
 
-/** The pack's React Query client: the admin's only when both use the same copy (null if not). */
-function usePackQueryClient() {
-	try {
-		return useQueryClient();
-	} catch {
-		return null;
-	}
-}
-
 export function FeaturesPage() {
-	const queryClient = usePackQueryClient();
+	const refreshManifest = useManifestRefresh();
 	const result = useSaveResult();
 	const root = React.useRef<HTMLDivElement>(null);
 	const features = useFeatureDraft(
 		{
 			// A module's pages show in the sidebar only while it's on: refresh the admin manifest, in place.
-			refreshManifest: () => {
-				if (refreshAdminManifest()) return true;
-				if (!queryClient) return false;
-				void queryClient.invalidateQueries({ queryKey: ["manifest"] });
-				return true;
-			},
+			refreshManifest,
 			// The update notices ask again whether to show (the dashboard card follows the manifest).
 			resetUpdates: resetUpdateStatus,
 			saved: () => result.saved("Features saved"),

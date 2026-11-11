@@ -301,9 +301,10 @@ test("features.tsx: switches edit the draft, the shared Save bar is the page's l
 	// The Save bar, as on the other settings pages: the last child of the page's root, with the failed save's message and Discard.
 	assert.match(src, /<SaveBar\s+error=\{result\.error\}\s+dirty=\{features\.dirty\}\s+saving=\{saving\}\s+onSave=\{\(\) => void features\.save\(\)\}\s+onDiscard=\{features\.discard\}\s+\/>\s+<\/div>\s+\);\s+\}\s*$/);
 	assert.match(src, /const result = useSaveResult\(\);/);
-	// The admin's own client first (the pack's useQueryClient can be another copy's), never a reload from the page itself.
-	assert.match(src, /if \(refreshAdminManifest\(\)\) return true;\s*if \(!queryClient\) return false;/);
-	assert.doesNotMatch(src, /location\.reload/);
+	// The admin's own client first, through the shared hook (src/admin/manifest.ts); never a reload from the page itself.
+	assert.match(src, /const refreshManifest = useManifestRefresh\(\);/);
+	assert.match(src, /refreshManifest,\s*\/\/ The update notices/);
+	assert.doesNotMatch(src, /useQueryClient|location\.reload/);
 	assert.match(src, /resetUpdates: resetUpdateStatus/);
 	// The Cloudflare token card keeps its own buttons.
 	assert.match(src, /<CloudflareTokenCard \/>/);

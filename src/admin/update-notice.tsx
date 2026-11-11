@@ -6,10 +6,10 @@
  * Dismissing hides both for everyone on the site until a newer version.
  */
 import { Banner, Button } from "@cloudflare/kumo";
-import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { useManifestRefresh } from "./manifest.js";
 import type { UpdateStatus } from "../updates/check.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/updates";
@@ -33,17 +33,8 @@ export function resetUpdateStatus(): void {
 	window.dispatchEvent(new Event(CHANGED_EVENT));
 }
 
-/** The EmDash admin's query client, to refresh the dashboard after a dismissal (null if unavailable). */
-function useAdminQueryClient() {
-	try {
-		return useQueryClient();
-	} catch {
-		return null;
-	}
-}
-
 function useUpdate(options: { reloadAfterDismiss?: boolean } = {}): { status: UpdateStatus | null; loaded: boolean; update: Available | null; dismiss: () => Promise<void>; error: string | null } {
-	const queryClient = useAdminQueryClient();
+	const refreshManifest = useManifestRefresh();
 	const [status, setStatus] = React.useState<UpdateStatus | null>(null);
 	const [loaded, setLoaded] = React.useState(false);
 	const [error, setError] = React.useState<string | null>(null);
@@ -76,10 +67,9 @@ function useUpdate(options: { reloadAfterDismiss?: boolean } = {}): { status: Up
 			await parseApiResponse(response, "Couldn't dismiss the notice");
 			pending = Promise.resolve({ ...update, dismissed: true });
 			window.dispatchEvent(new Event(CHANGED_EVENT));
-			// The dashboard card is listed by the admin manifest: refresh it so the card goes. EmDash's admin
-			// keeps its own copy of React Query, so its client may be out of reach: then reload, like the Features page.
-			if (queryClient) void queryClient.invalidateQueries({ queryKey: ["manifest"] });
-			else if (options.reloadAfterDismiss) window.location.reload();
+			// The dashboard card is listed by the admin manifest: refresh it in place so the card goes (src/admin/manifest.ts),
+			// or reload the dashboard when the admin's client can't be reached.
+			if (!refreshManifest() && options.reloadAfterDismiss) window.location.reload();
 		} catch (cause) {
 			setError(cause instanceof Error && cause.message ? cause.message : "Couldn't dismiss the notice");
 		}
