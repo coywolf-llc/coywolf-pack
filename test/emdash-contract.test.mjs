@@ -1100,6 +1100,28 @@ test("plugin pages render inside the admin's <Toasty> and RouterProvider, bare (
 	assert.match(functionSource(admin, "PluginPage"), /if \(PluginComponent\) return \/\* @__PURE__ \*\/ jsx\(PluginComponent, \{\}\)/);
 });
 
+test("refreshing the manifest keeps a plugin page mounted and scrolled (src/admin/extensions.ts refreshAdminManifest, the Features page's Save)", () => {
+	// The admin layout swaps the page for its loading screen only before the first manifest (isLoading), not on a refetch.
+	const layout = functionSource(admin, "RootComponent");
+	assert.match(layout, /const \{ data: manifest, isLoading, error \} = useQuery\(\{\s*queryKey: \["manifest"\],/);
+	assert.match(layout, /if \(isLoading\) return \/\* @__PURE__ \*\/ jsx\(ConfigurationLoadingScreen, \{\}\);/);
+	// A refetch that fails (after the admin's one retry) swaps the page for the error screen: the only case a refresh unmounts it.
+	assert.match(layout, /if \(error \|\| !manifest\) return \/\* @__PURE__ \*\/ jsx\(ErrorScreen, \{ error:/);
+	assert.match(admin, /new QueryClient\(\{ defaultOptions: \{ queries: \{\s*staleTime: [^,]+,\s*retry: 1\s*\} \} \}\)/);
+	// Nothing else in the layout returns early or keys the shell: those would remount the page on a refetch.
+	assert.equal(layout.match(/\breturn\b/g)?.length, 3, `the layout has another early return:\n${layout}`);
+	assert.doesNotMatch(layout, /isFetching|isRefetching|key: /, "the layout now reacts to a refetch: the page may remount");
+	assert.match(layout, /jsx\(Shell, \{\s*manifest,\s*children: \/\* @__PURE__ \*\/ jsx\(Outlet, \{\}\)/);
+	// The page scrolls inside the shell's <main>, which stays across manifest changes; plugin pages come from a fixed registry, not the manifest.
+	assert.match(functionSource(admin, "Shell"), /jsx\("main", \{\s*className: fullBleed \? [^:]+: "flex-1 overflow-y-auto[^"]*",\s*children\s*\}\)/);
+	assert.match(functionSource(admin, "usePluginPage"), /useContext\(PluginAdminContext\)/);
+	// The admin brings its own React Query (a dependency, not a peer), so a site can have two copies, each with its own
+	// context, and the pack's useQueryClient() then can't see the admin's client: the router's context is the way to it.
+	assert.ok(adminPkg.dependencies?.["@tanstack/react-query"], "@emdash-cms/admin no longer brings its own React Query");
+	assert.match(functionSource(admin, "createAdminRouter"), /context: \{ queryClient \}/);
+	assert.match(admin, /const queryClient = new QueryClient\(/);
+});
+
 test("entry editor panels and content-list columns: read from the plugin's admin module, picked by a synchronous collections predicate re-run when manifest.plugins changes, and the manifest is in the router context's queryClient (src/admin/extensions.ts)", async () => {
 	// The admin registry imports each plugin's admin entry as a namespace, so named exports reach pluginAdmins.
 	const registry = [...emdashDist.values()].find((src) => src.includes("function generateAdminRegistryModule("));

@@ -40,8 +40,14 @@ export interface AdminRouter {
 		block(blocker: { blockerFn: (args: BlockerArgs) => boolean | Promise<boolean>; enableBeforeUnload?: boolean | (() => boolean) }): () => void;
 	};
 	navigate(options: { to: string; search?: Record<string, string> }): unknown;
-	/** `context.queryClient`: the admin's React Query client (createAdminRouter puts it there); src/admin/extensions.ts reads the manifest from it. */
-	options?: { basepath?: string; context?: { queryClient?: { getQueryData(key: readonly unknown[]): unknown } } };
+	/**
+	 * `context.queryClient`: the admin's React Query client (createAdminRouter puts it there); src/admin/extensions.ts reads the
+	 * manifest from it and refreshes it (the pack's own import of React Query can be a second copy, without the admin's client).
+	 */
+	options?: {
+		basepath?: string;
+		context?: { queryClient?: { getQueryData(key: readonly unknown[]): unknown; invalidateQueries?(filters: { queryKey: readonly unknown[] }): unknown } };
+	};
 }
 
 /** The admin's router, or null when it isn't there (outside the admin, or an admin that no longer uses TanStack Router). */

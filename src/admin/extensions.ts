@@ -32,6 +32,21 @@ export function adminManifest(scope?: { __TSR_ROUTER__?: unknown }): ManifestLik
 	return manifest && typeof manifest === "object" ? (manifest as ManifestLike) : null;
 }
 
+/**
+ * Refetch the admin's manifest (the sidebar, the dashboard widgets, these
+ * panels) in place, through the admin's own React Query client. EmDash's
+ * admin keeps its own copy of React Query, so the pack's useQueryClient()
+ * can't reach that client on a site. The page stays mounted and keeps its
+ * scroll position (the admin shows its loading screen only before the first
+ * manifest: test/emdash-contract.test.mjs). False when the client isn't there.
+ */
+export function refreshAdminManifest(scope?: { __TSR_ROUTER__?: unknown }): boolean {
+	const client = adminRouter(scope)?.options?.context?.queryClient;
+	if (typeof client?.invalidateQueries !== "function") return false;
+	void Promise.resolve(client.invalidateQueries({ queryKey: ["manifest"] })).catch(() => undefined);
+	return true;
+}
+
 /** Whether the pack's page `page` ("/schema") is in the admin's sidebar right now: its module is on. */
 export function packPageOn(page: string, scope?: { __TSR_ROUTER__?: unknown }): boolean {
 	const plugin = adminManifest(scope)?.plugins?.[PACK_ID];
