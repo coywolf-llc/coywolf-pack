@@ -34,6 +34,12 @@ test("the script carries the older and hidden fields by their labels, and the ol
 test("the script parses and can't close its <script> element", () => {
 	const script = settingsEnhanceScript();
 	assert.doesNotMatch(script, /<\/script/i);
+	// The guides' child lists go in escaped, like every other tag, and come back out whole.
+	assert.ok(!script.includes("<ul") && script.includes("\\u003cul class="));
+	const token = settingsPageData().guides[SECRET_SETTINGS.cloudflareApiToken.label];
+	assert.ok(token.includes("<ul"));
+	const data = new vm.Script(`(${script.slice(script.indexOf("var D=") + 6, script.indexOf(";var O="))})`).runInNewContext();
+	assert.equal(data[SECRET_SETTINGS.cloudflareApiToken.label], token);
 	assert.doesNotThrow(() => new vm.Script(script));
 	assert.equal(settingsEnhanceScript(), script, "built once per isolate");
 });

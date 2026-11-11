@@ -20,7 +20,12 @@ The Coywolf Files plugin for WordPress, on EmDash. Add a **File download** block
 ## Setup
 
 1. Turn on **File Downloads** on the **Features** page (**Coywolf Pack → Features** in the sidebar). The middleware from the Redirects setup (`coywolfPack()`) serves the download URLs; nothing else to add.
-2. Settings (**Files → Settings**): download URL base (default `download`), optional public bucket / CDN URL, card color scheme, accent color, and largest upload (default 5 GB).
+2. Settings (**Files → Settings**):
+   - download URL base (default `download`)
+   - optional public bucket / CDN URL
+   - card color scheme
+   - accent color
+   - largest upload (default 5 GB)
 3. Bindings: `DB` and `MEDIA`. To keep large uploads in their own bucket, bind it as `FILES` (or pass `files: { uploads: "MYBINDING" }`, and note the middleware looks for `FILES`).
 
 ## Large uploads
