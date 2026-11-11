@@ -203,6 +203,56 @@ test("check: the bucket named must be the one bound as BACKUPS, then its rules a
 	assert.ok(!other.calls.some((c) => c.startsWith("PUT")));
 });
 
+test("the token: the Cloudflare API token wins; the older retention token and the restore secret still work alone; CLOUDFLARE_API_TOKEN ranks last", async () => {
+	// The fake Cloudflare accepts only tok-123: a check that passes used it, one refused used another.
+	const check = async (settings, env = {}) => {
+		const backups = bucket();
+		globalThis.__testEnv = { DB: {}, MEDIA: bucket(), BACKUPS: backups, ...env };
+		const cf = cloudflare({ keys: () => [...backups.store.keys()] });
+		const { routes } = backupsModule({ name: "coywolf" });
+		const ctx = context(cf, { [RETENTION_SETTINGS.accountId]: ACCOUNT, [RETENTION_SETTINGS.bucket]: "coywolf-backups", ...settings });
+		try {
+			await routes["backups/cloudflare/check"].handler({ ...ctx, input: {} });
+			return "used tok-123";
+		} catch (error) {
+			return error.message;
+		} finally {
+			globalThis.__testEnv = undefined;
+		}
+	};
+	assert.equal(await check({ cloudflareApiToken: "tok-123", [RETENTION_SETTINGS.token]: "old-token" }), "used tok-123");
+	assert.match(await check({ cloudflareApiToken: "new-token", [RETENTION_SETTINGS.token]: "tok-123" }), /The Cloudflare API token needs Account → Workers R2 Storage → Edit/, "the new token wins once saved");
+	assert.equal(await check({ [RETENTION_SETTINGS.token]: "tok-123" }), "used tok-123");
+	assert.equal(await check({}, { BACKUPS_API_TOKEN: "tok-123", CLOUDFLARE_API_TOKEN: "other" }), "used tok-123");
+	assert.equal(await check({}, { CLOUDFLARE_API_TOKEN: "tok-123" }), "used tok-123");
+	assert.match(await check({}), /Enter the Cloudflare API token \(on the plugin's Settings page\) first/);
+
+	// The card hides its token field only while the Cloudflare API token is the one in use.
+	const card = async (settings) => {
+		globalThis.__testEnv = { DB: {}, MEDIA: bucket(), BACKUPS: bucket() };
+		try {
+			return (await backupsModule({ name: "coywolf" }).routes["backups/cloudflare"].handler(context(cloudflare(), settings))).sharedToken;
+		} finally {
+			globalThis.__testEnv = undefined;
+		}
+	};
+	assert.equal(await card({ cloudflareApiToken: "tok-123" }), true);
+	assert.equal(await card({ [RETENTION_SETTINGS.token]: "tok-123" }), false);
+});
+
+test("restores keep their own token: the Cloudflare API token never stands in for BACKUPS_API_TOKEN", async () => {
+	globalThis.__testEnv = { DB: {}, MEDIA: bucket(), BACKUPS: bucket(), CLOUDFLARE_API_TOKEN: "tok-123" };
+	try {
+		const { routes } = backupsModule({ name: "coywolf", restore: { accountId: ACCOUNT, databaseId: "db-1" } });
+		const ctx = context(cloudflare(), { cloudflareApiToken: "tok-123" });
+		const list = await routes["backups/list"].handler(ctx);
+		assert.equal(list.restore.enabled, false);
+		assert.match(list.restore.reason, /BACKUPS_API_TOKEN Worker secret/);
+	} finally {
+		globalThis.__testEnv = undefined;
+	}
+});
+
 test("apply: sets the rule to the retention days, keeps the bucket's own rules, and locks only with LOCK typed", async () => {
 	const backups = bucket();
 	globalThis.__testEnv = { DB: {}, MEDIA: bucket(), BACKUPS: backups, BACKUPS_API_TOKEN: "tok-123" };

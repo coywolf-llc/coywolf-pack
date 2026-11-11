@@ -61,8 +61,10 @@ export interface CloudflareCall {
 	fetch?: Fetch;
 	/** Default DEADLINES.cloudflareApiMs. The deadline covers the answer's body too. */
 	deadlineMs?: number;
-	/** What the token needs, added to the message of a 401 or 403 ("The API token needs …."). */
+	/** What the token needs, added to the message of a 401 or 403 ("The Cloudflare API token needs …."). */
 	permission?: string;
+	/** Which token the permission hint names (default "Cloudflare API token"; restores name their own). */
+	tokenName?: string;
 	/** The start of an error message (default "Cloudflare API"). */
 	label?: string;
 	/** GraphQL (/graphql): the whole body comes back, and an answer with errors and no data fails. */
@@ -120,7 +122,7 @@ export async function cloudflareApi<T>(path: string, call: CloudflareCall): Prom
 	const failed = !ok || envelope.success === false || (call.graphql === true && errors.length > 0 && envelope.data === undefined);
 	if (failed) {
 		const detail = errorDetail(errors) || statusText || "error";
-		const hint = (status === 401 || status === 403) && call.permission ? ` The API token needs ${call.permission}.` : "";
+		const hint = (status === 401 || status === 403) && call.permission ? ` The ${call.tokenName ?? "Cloudflare API token"} needs ${call.permission}.` : "";
 		throw new CloudflareApiError(scrubToken(`${call.label ?? "Cloudflare API"} ${status}: ${detail}.${hint}`, call.token), status, errors);
 	}
 	return { status, result: (call.graphql ? envelope : envelope.result ?? null) as T };

@@ -256,3 +256,26 @@ test("light embed poster: Stream thumbnails in three widths; an explicit image a
 	const own = posterImage("customer-abc.cloudflarestream.com", uid, { posterImage: "https://example.com/poster.jpg" });
 	assert.deepEqual(own, { src: "https://example.com/poster.jpg" });
 });
+
+test("Stream's token: the Cloudflare API token wins over the older Stream token; the older one and CF_STREAM_TOKEN still work alone", async () => {
+	await import("./ts-resolve.mjs");
+	const { credentials } = await import("../src/videos/store.ts");
+	const ACCOUNT = "e".repeat(32);
+	const ctx = (settings, fetch) => {
+		const kv = new Map();
+		return {
+			settings: { get: async (k) => settings[k] ?? null },
+			kv: { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v) },
+			...(fetch ? { http: { fetch } } : {}),
+		};
+	};
+	const saved = { videosAccountId: ACCOUNT };
+	assert.deepEqual(await credentials(ctx({ ...saved, cloudflareApiToken: "new-token", videosApiToken: "old-token" }), { CF_STREAM_TOKEN: "env-token" }), { accountId: ACCOUNT, token: "new-token" });
+	assert.deepEqual(await credentials(ctx({ ...saved, videosApiToken: "old-token" }), { CLOUDFLARE_API_TOKEN: "shared-env" }), { accountId: ACCOUNT, token: "old-token" });
+	assert.deepEqual(await credentials(ctx(saved), { CF_STREAM_TOKEN: "env-token", CLOUDFLARE_API_TOKEN: "shared-env" }), { accountId: ACCOUNT, token: "env-token" });
+	assert.equal(await credentials(ctx(saved), {}), null, "no token, no Stream");
+	// No account saved: CF_ACCOUNT_ID, else the token's only account.
+	assert.deepEqual(await credentials(ctx({ cloudflareApiToken: "new-token" }), { CF_ACCOUNT_ID: ACCOUNT }), { accountId: ACCOUNT, token: "new-token" });
+	const lookup = async (url) => (assert.match(url, /\/accounts\?per_page=5$/), Response.json({ success: true, result: [{ id: "f".repeat(32) }] }));
+	assert.deepEqual(await credentials(ctx({ cloudflareApiToken: "new-token-2" }, lookup), {}), { accountId: "f".repeat(32), token: "new-token-2" });
+});

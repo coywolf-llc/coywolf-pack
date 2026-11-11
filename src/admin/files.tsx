@@ -18,7 +18,7 @@ import { saveFile, siteSlug, today } from "./download.js";
 import { CredentialGuide } from "./guides.js";
 import { PreviewSection } from "./preview.js";
 import { SaveBar, isDirty } from "./save-bar.js";
-import { SecretField, SettingsSection, SetupCard } from "./settings-ui.js";
+import { SecretField, SettingsSection, SetupCard, SharedTokenNote } from "./settings-ui.js";
 import { PartSwitches } from "./feature-switches.js";
 import { useSaveResult } from "./toast.js";
 
@@ -54,6 +54,8 @@ interface ListResponse {
 	countsEnabled: boolean;
 	largeUploadsEnabled: boolean;
 	r2Configured: boolean;
+	/** What stands in the way (a saved token or key that can't be decrypted). */
+	r2Problem?: string | null;
 }
 
 interface FilesSettings {
@@ -66,6 +68,9 @@ interface FilesSettings {
 	filesR2AccessKeyId: string;
 	filesR2Bucket: string;
 	r2SecretSet: boolean;
+	/** The Cloudflare API token is there (saved on Settings, or `sharedTokenEnv`: the Worker secret): the key pair goes under Advanced. */
+	sharedToken?: boolean;
+	sharedTokenEnv?: boolean;
 }
 
 type Filter = "all" | "used" | "unused";
@@ -240,7 +245,7 @@ function DeleteDialog(props: { file: FileItem | null; onClose: () => void; onDel
 
 // ── Settings ─────────────────────────────────────────────────────
 
-type SettingsDraft = Omit<FilesSettings, "filesMaxUploadGb" | "r2SecretSet"> & { filesMaxUploadGb: string; filesR2SecretAccessKey: string };
+type SettingsDraft = Omit<FilesSettings, "filesMaxUploadGb" | "r2SecretSet" | "sharedToken" | "sharedTokenEnv"> & { filesMaxUploadGb: string; filesR2SecretAccessKey: string };
 
 function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => void }) {
 	const saveResult = useSaveResult();
@@ -250,7 +255,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 	const [pending, setPending] = React.useState<"save" | "clear">();
 
 	const toDraft = (s: FilesSettings): SettingsDraft => {
-		const { r2SecretSet: _set, filesMaxUploadGb, ...rest } = s;
+		const { r2SecretSet: _set, sharedToken: _shared, sharedTokenEnv: _sharedEnv, filesMaxUploadGb, ...rest } = s;
 		return { ...rest, filesMaxUploadGb: String(filesMaxUploadGb), filesR2SecretAccessKey: "" };
 	};
 	const apply = (s: FilesSettings) => {
@@ -301,6 +306,24 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 		value: draft[key],
 		onChange: (e: React.ChangeEvent<HTMLInputElement>) => set({ [key]: e.target.value }),
 	});
+
+	/** The saved R2 key pair (and its account), for large uploads without the token or limited to one bucket. */
+	const r2KeyFields = () => (
+		<div className="grid gap-4 sm:grid-cols-2">
+			<Input label="R2 account ID" description="Your Cloudflare account ID (32 characters)." {...field("filesR2AccountId")} />
+			<Input label="R2 access key ID" autoComplete="off" {...field("filesR2AccessKeyId")} />
+			<SecretField
+				label="R2 secret access key"
+				saved={saved.r2SecretSet}
+				value={draft.filesR2SecretAccessKey}
+				onChange={(value) => set({ filesR2SecretAccessKey: value })}
+				description="Stored encrypted."
+				onClear={() => void save(true)}
+				clearing={pending === "clear"}
+				disabled={Boolean(pending)}
+			/>
+		</div>
+	);
 
 	const dirty = isDirty(draft, toDraft(saved));
 
@@ -354,26 +377,17 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 					title="Large uploads"
 					description={
 						<>
-							Files over 50 MB, or of any type, upload straight from the browser to R2 through its S3 API. Create an R2 API token with Object Read &amp; Write
-							on the bucket. R2 storage and operations are billed to your account.
+							Files over 50 MB, or of any type, upload straight from the browser to R2 through its S3 API.{" "}
+							{saved.sharedToken || saved.sharedTokenEnv
+								? "The keys are made from the Cloudflare API token (Workers R2 Storage → Edit)."
+								: "Add the Cloudflare API token on the plugin's Settings page, or an R2 API token with Object Read & Write on the bucket."}{" "}
+							R2 storage and operations are billed to your account.
 							{!props.largeUploadsEnabled && " Turn on Large uploads (Turn parts on or off, at the top of this page) to use them."}
 						</>
 					}
 				>
 					<div className="grid gap-4 sm:grid-cols-2">
-						<Input label="R2 account ID" description="Your Cloudflare account ID (32 characters)." {...field("filesR2AccountId")} />
 						<Input label="R2 bucket name" placeholder="mysite-media" description="The bucket bound as MEDIA, unless you set a separate uploads binding." {...field("filesR2Bucket")} />
-						<Input label="R2 access key ID" autoComplete="off" {...field("filesR2AccessKeyId")} />
-						<SecretField
-							label="R2 secret access key"
-							saved={saved.r2SecretSet}
-							value={draft.filesR2SecretAccessKey}
-							onChange={(value) => set({ filesR2SecretAccessKey: value })}
-							description="Stored encrypted."
-							onClear={() => void save(true)}
-							clearing={pending === "clear"}
-							disabled={Boolean(pending)}
-						/>
 						<Input
 							type="number"
 							min={1}
@@ -384,7 +398,19 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 							onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ filesMaxUploadGb: e.target.value })}
 						/>
 					</div>
-					<CredentialGuide id="r2" />
+					{saved.sharedToken || saved.sharedTokenEnv ? (
+						<SharedTokenNote env={saved.sharedTokenEnv}>
+							<p className="text-sm text-kumo-subtle">A key pair for one bucket wins over the token: fill in all three to use it.</p>
+							{r2KeyFields()}
+							<CredentialGuide id="r2" />
+						</SharedTokenNote>
+					) : (
+						<>
+							{r2KeyFields()}
+							<CredentialGuide id="files-token" />
+							<CredentialGuide id="r2" />
+						</>
+					)}
 				</SettingsSection>
 
 				{error && <Banner variant="error" role="alert" description={error} />}
@@ -612,10 +638,11 @@ export function FilesPage() {
 
 			{tab === "files" && data?.largeUploadsEnabled && !data.r2Configured && (
 				<SetupCard
-					title="Add R2 credentials to upload large files"
-					description="Large uploads go straight from the browser to your R2 bucket, so they need an R2 API token: the account ID, access key ID, secret access key and bucket name."
+					title="Set up large uploads"
+					description="Large uploads go straight from the browser to your R2 bucket. They need the bucket name (Settings tab), and the Cloudflare API token from the plugin's Settings page or an R2 key pair."
 				>
-					<CredentialGuide id="r2" />
+					{data.r2Problem && <Banner variant="error" description={data.r2Problem} />}
+					<CredentialGuide id="files-token" />
 					<Button variant="secondary" onClick={() => setTab("settings")}>
 						Open Settings
 					</Button>

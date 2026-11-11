@@ -53,7 +53,7 @@ interface PageData {
 	warnings: Finding[];
 	groupChanges: Array<{ ruleId: string; ruleName: string; group: string; added: string[]; removed: string[] }>;
 	sections: Array<{ label: string; path: string }>;
-	radar: { tokenConfigured: boolean; tokenSource: "settings" | "env" | null; state: SyncState | null; baselineDate: string };
+	radar: { tokenConfigured: boolean; tokenSource: "shared" | "shared-env" | "settings" | "env" | null; tokenUnreadable?: boolean; state: SyncState | null; baselineDate: string };
 }
 
 interface Confirm {

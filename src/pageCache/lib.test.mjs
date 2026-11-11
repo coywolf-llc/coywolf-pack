@@ -309,6 +309,7 @@ const READ_ONLY_ROUTES = [
 	"backups/cloudflare/check",
 	"backups/cloudflare/remove",
 	"backups/download-link",
+	"cloudflare-token/clear-older",
 	"cloudflare/fix",
 	"cloudflare/token/save",
 	"codeBlocks/preview",

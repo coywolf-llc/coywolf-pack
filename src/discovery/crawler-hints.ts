@@ -11,10 +11,11 @@
  * through an internal endpoint that refuses API tokens (POST
  * /zones/{id}/flags/products/cache/changes answers 10000, Authentication error,
  * even with Zone Settings Edit: checked November 2026). So the pack only reads
- * it, with the read-only token the Performance page uses, and links to the
- * switch in the dashboard.
+ * it, with the Cloudflare API token (src/core/cloudflare-token.ts), and links
+ * to the switch in the dashboard.
  */
 import { CloudflareApiError, type CloudflareErrorItem, type Fetch, cloudflareApi, scrubToken } from "../core/cloudflare-api.js";
+import { TOKEN_HOME, noTokenMessage } from "../core/cloudflare-token.js";
 import { DEADLINES } from "../core/single-flight.js";
 
 
@@ -95,16 +96,18 @@ const describe = (error: unknown) => (error instanceof Error ? error.message : S
 const badToken = (error: unknown) =>
 	error instanceof CloudflareApiError && (error.codes.some((c) => c === 6111 || c === 1000) || /invalid (access|api) token|authorization header/i.test(error.message));
 
-const badTokenMessage = (error: unknown) =>
-	`Cloudflare doesn't accept the API token (${describe(error)}): it may be mistyped, deleted or expired. Check the token saved as Cloudflare usage on the plugin's Settings page, or the USAGE_API_TOKEN Worker secret.`;
+const badTokenMessage = (error: unknown, name: string) =>
+	`Cloudflare doesn't accept the ${name} (${describe(error)}): it may be mistyped, deleted or expired. Check it${name === "Cloudflare API token" ? ` (${TOKEN_HOME})` : ""}.`;
 
 /** Cloudflare's answer for a token that may not do this (HTTP 401/403, or its authentication and permission codes). */
 const refused = (error: unknown) =>
 	error instanceof CloudflareApiError && (error.status === 401 || error.status === 403 || error.codes.some((c) => c === 10000 || c === 9109));
 
 export interface CrawlerHintsDeps {
-	/** The read-only Cloudflare API token (Performance page → Cloudflare usage), or null. */
+	/** The Cloudflare API token (src/core/cloudflare-token.ts, feature "read"), or null. */
 	token: string | null;
+	/** The token's name for messages: the one actually used (tokenName). Default "Cloudflare API token". */
+	tokenName?: string;
 	fetch: Fetch;
 	/** The zone found before for this host, so it isn't looked up again. */
 	knownZone?: CrawlerHintsZone | null;
@@ -120,12 +123,12 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 			...base,
 			problem: {
 				kind: "no-token",
-				message:
-					"To see here whether Crawler Hints is on, the pack needs a read-only Cloudflare API token with Zone → Zone → Read. The Performance page's Cloudflare usage token works once that permission is added to it.",
+				message: noTokenMessage("Zone → Read"),
 			},
 		};
 	}
 	const token = deps.token;
+	const name = deps.tokenName ?? "Cloudflare API token";
 
 	let zone = deps.knownZone && zoneCandidates(host).includes(deps.knownZone.name) ? deps.knownZone : null;
 	if (!zone) {
@@ -139,9 +142,9 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 				}
 			}
 		} catch (error) {
-			if (badToken(error)) return { ...base, problem: { kind: "bad-token", message: badTokenMessage(error) } };
+			if (badToken(error)) return { ...base, problem: { kind: "bad-token", message: badTokenMessage(error, name) } };
 			return refused(error)
-				? { ...base, problem: { kind: "no-zone", message: `The Cloudflare API token can't list zones (${describe(error)}). Add Zone → Zone → Read to it.` } }
+				? { ...base, problem: { kind: "no-zone", message: `The ${name} can't list zones (${describe(error)}). Add Zone → Read to it, for this site's domain.` } }
 				: { ...base, problem: { kind: "error", message: `Couldn't reach Cloudflare's API: ${describe(error)}` } };
 		}
 	}
@@ -150,7 +153,7 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 			...base,
 			problem: {
 				kind: "no-zone",
-				message: `The Cloudflare API token can't see a zone for ${host}. Add Zone → Zone → Read to it (for all zones, or for this site's zone). If it already has that, the zone is in a different Cloudflare account than the token.`,
+				message: `The ${name} can't see a zone for ${host}. Add Zone → Read to it, for this site's domain (or all domains). If it already has that, the zone is in a different Cloudflare account than the token.`,
 			},
 		};
 	}
@@ -164,13 +167,13 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 		}
 		return { ...withZone, enabled: value };
 	} catch (error) {
-		if (badToken(error)) return { ...withZone, problem: { kind: "bad-token", message: badTokenMessage(error) } };
+		if (badToken(error)) return { ...withZone, problem: { kind: "bad-token", message: badTokenMessage(error, name) } };
 		return refused(error)
 			? {
 					...withZone,
 					problem: {
 						kind: "no-access",
-						message: `The token sees ${zone.name}, but Cloudflare didn't show it the Crawler Hints setting (${describe(error)}). Check it in the Cloudflare dashboard.`,
+						message: `The ${name} sees ${zone.name}, but Cloudflare didn't show it the Crawler Hints setting (${describe(error)}). Check it in the Cloudflare dashboard.`,
 					},
 				}
 			: { ...withZone, problem: { kind: "error", message: `Couldn't read Crawler Hints from Cloudflare: ${describe(error)}` } };

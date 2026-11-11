@@ -11,7 +11,7 @@ Feature switch: **Social Images** (`socialImages`), off by default. It needs [Sc
 The template is an HTML page (`src/social/template.ts`). Cloudflare **Browser Run** (formerly Browser Rendering) opens it in a headless browser and takes a 1200×630 PNG screenshot. The pack reaches Browser Run in one of two ways:
 
 - **A `BROWSER` binding** (no token): add `"browser": { "binding": "BROWSER" }` to the site's `wrangler.jsonc`. Its Quick Actions need a `compatibility_date` of 2026-03-24 or later.
-- **The REST API**: a Cloudflare API token with **Account → Browser Run → Edit**, saved on the Social Images page (stored encrypted) or set as the `BROWSER_RUN_API_TOKEN` Worker secret, and the account ID (on the page, or the `CF_ACCOUNT_ID` Worker secret; not needed when the token can see one account). The page has the step-by-step guide and a pre-filled token form. Calls go to `api.cloudflare.com` through the plugin's allowed hosts, with a 30-second deadline.
+- **The REST API**: the [Cloudflare API token](README.md#the-cloudflare-api-token) with **Browser Run → Edit** (added by hand: Cloudflare's form can't pre-select it). The account comes from the token; if it sees more than one, enter the account ID under **Advanced** on the Social Images page, or set `CF_ACCOUNT_ID`. An older Social Images token (saved on the page, or the `BROWSER_RUN_API_TOKEN` Worker secret) still works until the Cloudflare API token is saved. Calls go to `api.cloudflare.com` through the plugin's allowed hosts, with a 30-second deadline.
 
 **Render a test image** on the page makes one with a sample title and shows it, without storing it.
 

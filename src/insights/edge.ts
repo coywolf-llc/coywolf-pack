@@ -2,7 +2,7 @@
  * Edge errors and crawlers: the site's 404 and 410 paths (files, images and
  * the media host included), 5xx responses, and requests per crawler, from
  * Cloudflare's HTTP request analytics for the site's zone. Read with the
- * read-only token (it needs Zone → Zone → Read and Zone → Analytics → Read)
+ * Cloudflare API token (it needs Zone → Zone → Read and Zone → Analytics → Read)
  * and kept for an hour. The pure part is ./edge-core.ts.
  */
 import type { PluginContext } from "emdash";

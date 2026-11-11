@@ -14,10 +14,10 @@
 import type { PluginContext } from "emdash";
 
 import { CLOUDFLARE_API, type Fetch, contextFetch, scrubToken } from "../core/cloudflare-api.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, noTokenMessage, sharedTokenState, tokenName } from "../core/cloudflare-token.js";
 import { siteName as readSiteName } from "../core/site.js";
 import { withDeadline } from "../core/single-flight.js";
-import { IMAGES_SETTINGS } from "../images/settings.js";
-import { secret, workerEnv } from "../shared.js";
+import { workerEnv } from "../shared.js";
 import { SOCIAL_SETTINGS_KEY, type SocialImageDoc, docId, parseDefaultImages, socialImages } from "./store.js";
 import { HEIGHT, type TemplateSettings, WIDTH, imageHash, imageKey, normalizeTemplate, socialImageHtml } from "./template.js";
 
@@ -83,37 +83,33 @@ interface BrowserBinding {
 }
 
 /** How this site reaches Browser Run, or why it can't. */
-export type Renderer = { kind: "binding"; browser: BrowserBinding } | { kind: "api"; token: string; accountId: string; fetch: Fetch } | { kind: "none"; reason: string };
+export type Renderer = { kind: "binding"; browser: BrowserBinding } | { kind: "api"; token: string; accountId: string; fetch: Fetch; tokenName?: string } | { kind: "none"; reason: string };
 
-/** The token: the encrypted setting, else the BROWSER_RUN_API_TOKEN Worker secret. */
-async function token(ctx: PluginContext, env: Record<string, unknown>): Promise<string | null> {
-	const saved = await ctx.settings.get<string>(TOKEN_SETTING).catch(() => null);
-	return (typeof saved === "string" && saved.trim()) || secret(env, "BROWSER_RUN_API_TOKEN") || null;
+/**
+ * The token (src/core/cloudflare-token.ts): the Cloudflare API token, else the older Social Images token or the
+ * BROWSER_RUN_API_TOKEN Worker secret, else CLOUDFLARE_API_TOKEN. `sharedToken`: it's the Cloudflare API token.
+ */
+export async function browserRunToken(ctx: PluginContext, bindings?: Record<string, unknown>) {
+	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
+	const resolved = await cloudflareToken(ctx, env, "browserRun");
+	return { ...resolved, ...sharedTokenState(resolved) };
 }
 
-/** The account: Social Images' setting, the CF_ACCOUNT_ID Worker secret, Clean Image URLs' account ID, else the token's only account. */
-async function accountId(ctx: PluginContext, env: Record<string, unknown>, settings: SocialSettings, apiToken: string, doFetch: Fetch): Promise<string | null> {
-	const known = settings.accountId || secret(env, "CF_ACCOUNT_ID") || secret(env, "CLOUDFLARE_ACCOUNT_ID") || (await ctx.settings.get<string>(IMAGES_SETTINGS.accountId).catch(() => null))?.trim();
-	if (known) return known;
-	try {
-		const response = await withDeadline(doFetch(`${CLOUDFLARE_API}/accounts?per_page=5`, { headers: { Authorization: `Bearer ${apiToken}` } }), 8_000, "Looking up the Cloudflare account");
-		const body = (await response.json().catch(() => ({}))) as { result?: Array<{ id?: string }> };
-		return body.result?.length === 1 && body.result[0].id ? body.result[0].id : null;
-	} catch {
-		return null;
-	}
-}
-
+/**
+ * How this site reaches Browser Run: the BROWSER binding, else the API with the token and the account (Social
+ * Images' own account ID, CF_ACCOUNT_ID, Clean Image URLs' account ID, else the token's only account).
+ */
 export async function renderer(ctx: PluginContext, settings: SocialSettings, bindings?: Record<string, unknown>): Promise<Renderer> {
 	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
 	const browser = env.BROWSER as Partial<BrowserBinding> | undefined;
 	if (browser && typeof browser.quickAction === "function") return { kind: "binding", browser: browser as BrowserBinding };
-	const apiToken = await token(ctx, env);
-	if (!apiToken) return { kind: "none", reason: "Add a Cloudflare API token with Browser Run → Edit (below), or a BROWSER binding to the site's Worker." };
+	const resolved = await cloudflareToken(ctx, env, "browserRun");
+	const { token: apiToken, unreadable } = resolved;
+	if (!apiToken) return { kind: "none", reason: unreadable ? UNREADABLE_TOKEN_MESSAGE : `${noTokenMessage("Browser Run → Edit")} Or add a BROWSER binding to the site's Worker.` };
 	const doFetch = contextFetch(ctx);
-	const account = await accountId(ctx, env, settings, apiToken, doFetch);
-	if (!account) return { kind: "none", reason: "Enter the Cloudflare account ID (the token can see more than one account)." };
-	return { kind: "api", token: apiToken, accountId: account, fetch: doFetch };
+	const account = await cloudflareAccountId(ctx, env, { token: apiToken, fetch: doFetch }, settings.accountId);
+	if (!account) return { kind: "none", reason: noAccountMessage("Advanced") };
+	return { kind: "api", token: apiToken, accountId: account, fetch: doFetch, tokenName: tokenName(resolved) };
 }
 
 const SCREENSHOT = {
@@ -123,7 +119,7 @@ const SCREENSHOT = {
 };
 
 /** Read a screenshot answer: the PNG, or an error with Browser Run's message. */
-async function pngFrom(response: Response, apiToken?: string): Promise<Uint8Array> {
+async function pngFrom(response: Response, apiToken?: string, name = "Cloudflare API token"): Promise<Uint8Array> {
 	const type = response.headers.get("content-type") ?? "";
 	if (response.ok && type.startsWith("image/")) {
 		const bytes = new Uint8Array(await response.arrayBuffer());
@@ -133,7 +129,7 @@ async function pngFrom(response: Response, apiToken?: string): Promise<Uint8Arra
 	}
 	const body = (await response.json().catch(() => null)) as { errors?: Array<{ message?: string }> } | null;
 	const detail = body?.errors?.map((e) => e.message).filter(Boolean).join("; ") || response.statusText || "error";
-	const hint = response.status === 401 || response.status === 403 ? " The API token needs Account → Browser Run → Edit." : response.status === 429 ? " Browser Run's limit for now is reached; the rest wait for the next run." : "";
+	const hint = response.status === 401 || response.status === 403 ? ` The ${name} needs Browser Run → Edit.` : response.status === 429 ? " Browser Run's limit for now is reached; the rest wait for the next run." : "";
 	throw new RenderError(scrubToken(`Browser Run ${response.status}: ${detail}.${hint}`, apiToken), response.status, response.status === 429 ? retryAfterMs(response.headers.get("retry-after")) : null);
 }
 
@@ -173,7 +169,7 @@ export async function screenshot(r: Exclude<Renderer, { kind: "none" }>, html: s
 				let response = await call("browser-run");
 				// Accounts (or API versions) that only know the old name.
 				if (response.status === 404) response = await call("browser-rendering");
-				return pngFrom(response, r.token);
+				return pngFrom(response, r.token, r.tokenName);
 			})(),
 			RENDER_MS,
 			"Browser Run's screenshot",

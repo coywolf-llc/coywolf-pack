@@ -2,13 +2,13 @@
  * Cloudflare Checkup's calls to Cloudflare's API, through the shared client
  * (src/core/cloudflare-api.ts: deadlines, ctx.http, no token in errors).
  *
- * Reading uses the read-only token the Performance page already has (Zone →
- * Read finds the zone; Zone Settings → Read, Bot Management → Read and DNS →
- * Read are needed for the settings, the bot rows and the zone's other
- * hostnames, and each part that can't be read says which one is missing).
- * The fixes use a separate setup token (Zone Settings → Edit) and change
- * exactly one zone setting each, only when it isn't already set: nothing
- * else in the zone is touched.
+ * Reading uses the Cloudflare API token (src/core/cloudflare-token.ts, as the
+ * Performance page reads it: Zone → Read finds the zone; Zone Settings, Bot
+ * Management and DNS read access are needed for the settings, the bot rows and
+ * the zone's other hostnames, and each part that can't be read says which one
+ * is missing). The fixes use the same token, or the older setup token (Zone
+ * Settings → Edit), and change exactly one zone setting each, only when it
+ * isn't already set: nothing else in the zone is touched.
  */
 import { CloudflareApiError, type Fetch, cloudflareApi } from "../core/cloudflare-api.js";
 import { DEADLINES } from "../core/single-flight.js";
@@ -31,6 +31,8 @@ export interface CheckupResult {
 
 export interface CheckupDeps {
 	token: string | null;
+	/** The token's name for messages: the one actually used (src/core/cloudflare-token.ts tokenName). */
+	tokenName?: string;
 	fetch: Fetch;
 	knownZone?: CheckupZone | null;
 	trackingWrapper: boolean;
@@ -52,7 +54,7 @@ async function read<T>(deps: { token: string; fetch: Fetch }, path: string): Pro
  * left out. When the bulk read fails for another reason than permissions (a
  * timeout, a server error), each setting is read on its own instead.
  */
-async function readSettings(deps: { token: string; fetch: Fetch }, zoneId: string): Promise<{ settings: Map<string, unknown> | null; problem?: string; refused?: boolean }> {
+async function readSettings(deps: { token: string; fetch: Fetch; name: string }, zoneId: string): Promise<{ settings: Map<string, unknown> | null; problem?: string; refused?: boolean }> {
 	const settings = new Map<string, unknown>();
 	let bulkError: unknown = null;
 	try {
@@ -60,7 +62,7 @@ async function readSettings(deps: { token: string; fetch: Fetch }, zoneId: strin
 		for (const s of Array.isArray(all) ? all : []) if (typeof s?.id === "string") settings.set(s.id, s.value);
 	} catch (error) {
 		if (refused(error)) {
-			return { settings: null, refused: true, problem: "The read-only token can't read this zone's settings. Add Zone → Zone Settings → Read to it (the steps are below)." };
+			return { settings: null, refused: true, problem: `The ${deps.name} can't read this zone's settings. Add Zone Settings → Edit (or Read) to it (the steps are below).` };
 		}
 		bulkError = error;
 	}
@@ -79,13 +81,13 @@ async function readSettings(deps: { token: string; fetch: Fetch }, zoneId: strin
 	return { settings };
 }
 
-async function readBots(deps: { token: string; fetch: Fetch }, zoneId: string): Promise<{ bots: BotSettings | null; problem?: string }> {
+async function readBots(deps: { token: string; fetch: Fetch; name: string }, zoneId: string): Promise<{ bots: BotSettings | null; problem?: string }> {
 	try {
 		return { bots: (await read<BotSettings>(deps, `/zones/${encodeURIComponent(zoneId)}/bot_management`)) ?? {} };
 	} catch (error) {
 		return {
 			bots: null,
-			problem: refused(error) ? "Add Zone → Bot Management → Read to the read-only token to see the bot settings here." : `Couldn't read the bot settings: ${message(error)}`,
+			problem: refused(error) ? `Add Bot Management → Read to the ${deps.name} to see the bot settings here.` : `Couldn't read the bot settings: ${message(error)}`,
 		};
 	}
 }
@@ -93,7 +95,7 @@ async function readBots(deps: { token: string; fetch: Fetch }, zoneId: string): 
 /** Proxied DNS records read for the zone's other hostnames: one page of them (a zone with more is said to have more). */
 export const DNS_PAGE = 500;
 
-async function readOtherHosts(deps: { token: string; fetch: Fetch }, zoneId: string, host: string): Promise<{ hosts: string[] | null; more?: boolean; problem?: string }> {
+async function readOtherHosts(deps: { token: string; fetch: Fetch; name: string }, zoneId: string, host: string): Promise<{ hosts: string[] | null; more?: boolean; problem?: string }> {
 	try {
 		const records = await read<Array<{ name?: string; type?: string; proxied?: boolean }>>(deps, `/zones/${encodeURIComponent(zoneId)}/dns_records?proxied=true&per_page=${DNS_PAGE}`);
 		const list = Array.isArray(records) ? records : [];
@@ -102,7 +104,7 @@ async function readOtherHosts(deps: { token: string; fetch: Fetch }, zoneId: str
 		return {
 			hosts: null,
 			problem: refused(error)
-				? "Add Zone → DNS → Read to the read-only token to list the zone's other hostnames here."
+				? `Add DNS → Edit (or Read) to the ${deps.name} to list the zone's other hostnames here.`
 				: `Couldn't list the zone's hostnames: ${message(error)}`,
 		};
 	}
@@ -115,7 +117,7 @@ async function readOtherHosts(deps: { token: string; fetch: Fetch }, zoneId: str
 export async function readCheckup(host: string, deps: CheckupDeps): Promise<CheckupResult> {
 	const checkedAt = new Date((deps.now ?? Date.now)()).toISOString();
 	// Finds the zone (or says why it can't) and reads Crawler Hints, as the Discovery page does.
-	const hints = await readCrawlerHints(host, { token: deps.token, fetch: deps.fetch, knownZone: deps.knownZone ?? null, now: deps.now });
+	const hints = await readCrawlerHints(host, { token: deps.token, tokenName: deps.tokenName, fetch: deps.fetch, knownZone: deps.knownZone ?? null, now: deps.now });
 	const local = { trackingWrapper: deps.trackingWrapper, trackingState: deps.trackingState ?? null, speculationOn: deps.speculationOn, robotsOn: deps.robotsOn };
 	if (!hints.zone || !deps.token) {
 		// Only what doesn't need Cloudflare: the tracking-parameter row.
@@ -125,13 +127,13 @@ export async function readCheckup(host: string, deps: CheckupDeps): Promise<Chec
 				? {
 						kind: "no-token" as const,
 						message:
-							"To read the zone's settings, the pack needs a read-only Cloudflare API token with Zone → Read and Zone Settings → Read. The Performance page's Cloudflare usage token works once those permissions are added to it.",
+							"To read the zone's settings, add the Cloudflare API token on the plugin's Settings page (or the CLOUDFLARE_API_TOKEN Worker secret). Here it needs Zone → Read and Zone Settings → Edit.",
 					}
 				: (hints.problem ?? { kind: "error" as const, message: "Couldn't find the site's zone." });
 		return { host, zone: null, problem, rows, otherHosts: null, checkedAt };
 	}
 	const zone: CheckupZone = hints.zone;
-	const access = { token: deps.token, fetch: deps.fetch };
+	const access = { token: deps.token, fetch: deps.fetch, name: deps.tokenName ?? "Cloudflare API token" };
 	const [settings, bots, others] = await Promise.all([readSettings(access, zone.id), readBots(access, zone.id), readOtherHosts(access, zone.id, host)]);
 	const rows = checkupRows({
 		zone,
@@ -181,10 +183,10 @@ export interface FixResult {
  * where the fix puts it. One zone setting, nothing else. Throws
  * CloudflareApiError (without the token) when Cloudflare refuses.
  */
-export async function applyFix(fix: FixId, zone: CheckupZone, deps: { token: string; fetch: Fetch }): Promise<FixResult> {
+export async function applyFix(fix: FixId, zone: CheckupZone, deps: { token: string; fetch: Fetch; tokenName?: string }): Promise<FixResult> {
 	const def = FIXES[fix];
 	const path = `/zones/${encodeURIComponent(zone.id)}/settings/${def.setting}`;
-	const call = { token: deps.token, fetch: deps.fetch, permission: "Zone → Zone Settings → Edit, for this zone", label: "Cloudflare's API" };
+	const call = { token: deps.token, fetch: deps.fetch, permission: "Zone Settings → Edit, for this site's domain", tokenName: deps.tokenName, label: "Cloudflare's API" };
 	const before = (await cloudflareApi<{ value?: unknown } | null>(path, { ...call, deadlineMs: DEADLINES.cloudflareReadMs })).result?.value;
 	if (!def.needed(before)) {
 		return { fix, zone: zone.name, setting: def.setting, changed: false, before, after: before, message: `Nothing to change: ${def.setting} is already ${String(before)} on ${zone.name}.` };

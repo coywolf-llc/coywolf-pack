@@ -14,7 +14,7 @@ import { PageHeader, Loading } from "./page.js";
 import { type LibrarySummary, monthlyWithoutMax, oneTimeCost, paybackMonths, storageCost, trafficEstimate } from "../images/variants-estimate.js";
 import { CredentialGuide } from "./guides.js";
 import { SaveBar, isDirty } from "./save-bar.js";
-import { SecretField, SettingsSection } from "./settings-ui.js";
+import { SecretField, SettingsSection, SharedTokenNote } from "./settings-ui.js";
 import { useSaveResult } from "./toast.js";
 
 const API = "/_emdash/api/plugins/coywolf-pack/images";
@@ -36,6 +36,9 @@ interface Settings {
 	tokenSet: boolean;
 	envToken: boolean;
 	envAccountId: boolean;
+	/** The Cloudflare API token is the one in use (saved on Settings, or `sharedTokenEnv`: the Worker secret). */
+	sharedToken?: boolean;
+	sharedTokenEnv?: boolean;
 	siteHost: string;
 	quotaNote: string;
 }
@@ -753,6 +756,42 @@ export function ImagesPage() {
 								</Button>
 							}
 						>
+							{saved.sharedToken || saved.sharedTokenEnv ? (
+								<>
+									<div className="grid gap-4 sm:grid-cols-2">
+										<Input
+											label="R2 bucket name"
+											description="The bucket bound as MEDIA in wrangler.jsonc (its bucket_name)."
+											value={draft.bucket}
+											disabled={busy}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ bucket: e.target.value })}
+										/>
+									</div>
+									<SharedTokenNote env={saved.sharedTokenEnv}>
+										<div className="grid gap-4 sm:grid-cols-2">
+											<Input
+												label="Cloudflare account ID"
+												description="Only if the token sees more than one account. Empty uses CF_ACCOUNT_ID, or the token's own account."
+												value={draft.accountId}
+												disabled={busy}
+												onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ accountId: e.target.value })}
+											/>
+											{saved.sharedTokenEnv && (
+												<SecretField
+													label="Cloudflare API token"
+													saved={saved.tokenSet}
+													value={draft.token}
+													onChange={(value) => set({ token: value })}
+													description="Only to use another token than the Worker secret: typed here, it's used for this setup; saved, it wins over the Worker secret (stored encrypted)."
+													onClear={() => void save(true)}
+													clearing={pending === "clear"}
+													disabled={busy}
+												/>
+											)}
+										</div>
+									</SharedTokenNote>
+								</>
+							) : (
 							<div className="grid gap-4 sm:grid-cols-2">
 								<Input
 									label="Cloudflare account ID"
@@ -783,6 +822,7 @@ export function ImagesPage() {
 									disabled={busy}
 								/>
 							</div>
+							)}
 							<CredentialGuide id="images-token" />
 
 							{plan && (

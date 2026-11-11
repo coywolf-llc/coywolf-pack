@@ -7,6 +7,7 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { errorText } from "./api.js";
+import { CloudflareTokenCard } from "./cloudflare-token-card.js";
 import { PageHeader, Loading } from "./page.js";
 import { resetUpdateStatus } from "./update-notice.js";
 
@@ -93,6 +94,8 @@ export function FeaturesPage() {
 			/>
 
 			{error && <Banner variant="error" role="alert" description={error} />}
+
+			<CloudflareTokenCard />
 
 			{!modules && !error && (
 				<Loading />

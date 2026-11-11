@@ -12,6 +12,8 @@ import { ctxFeatures, requireFeature } from "../core/features.js";
 import { parseInput, workerEnv } from "../shared.js";
 import { downloadPath, extensionOf, formatSize, isUploadId, newUploadId, safeFilename } from "./format.js";
 import { MAX_THROUGH_SITE, type R2Config, S3Error, partSizeFor, r2Client } from "./s3.js";
+import { contextFetch } from "../core/cloudflare-api.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, r2S3Credentials, sharedTokenState } from "../core/cloudflare-token.js";
 import { uploadsBindingName } from "./serve.js";
 import { COLLECTIONS, type UploadDoc, invalidateSiteCache, settingsFrom } from "./site.js";
 import { entryTitle, fileIdsIn } from "./walker.js";
@@ -44,7 +46,9 @@ export const CLEANUP_TASK = "files-abort-stale-uploads";
 /**
  * File Downloads settings, edited on the Files page → Settings. Only the R2
  * secret access key is in the plugin's settingsSchema (secrets only), so every
- * other read supplies its default here or in settingsFrom().
+ * other read supplies its default here or in settingsFrom(). Large uploads use
+ * the saved R2 key pair when it's complete, else keys made from the Cloudflare
+ * API token (r2Config below).
  */
 const R2_KEYS = ["filesR2AccountId", "filesR2AccessKeyId", "filesR2SecretAccessKey", "filesR2Bucket"] as const;
 
@@ -80,10 +84,35 @@ const filesSettingsInput = z.object({
 	clearR2Secret: z.boolean().optional(),
 });
 
-/** Whether all four R2 credentials are saved (not whether they work). */
-async function r2Configured(ctx: PluginContext): Promise<boolean> {
-	const values = await Promise.all(R2_KEYS.map((key) => ctx.settings.get<string>(key).catch(() => null)));
-	return values.every((v) => typeof v === "string" && v.trim() !== "");
+const filled = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
+
+/** The saved R2 secret access key, or whether it's stored but can't be decrypted. */
+async function savedR2Secret(ctx: PluginContext): Promise<{ value: string | null; unreadable: boolean }> {
+	try {
+		const value = await ctx.settings.get<string>("filesR2SecretAccessKey");
+		return { value: filled(value) ? value : null, unreadable: false };
+	} catch {
+		return { value: null, unreadable: true };
+	}
+}
+
+/**
+ * Whether large uploads have what they need (not whether it works): the bucket name, and all four saved R2
+ * credentials or the Cloudflare API token. `problem`: a saved secret that can't be decrypted stands in the way.
+ * Asks Cloudflare nothing. `bindings` replaces the Worker's env (tests).
+ */
+export async function r2Readiness(ctx: PluginContext, bindings?: Record<string, unknown>): Promise<{ configured: boolean; problem: string | null }> {
+	const [accountId, accessKeyId, secret, bucket] = await Promise.all([
+		ctx.settings.get<string>("filesR2AccountId").catch(() => null),
+		ctx.settings.get<string>("filesR2AccessKeyId").catch(() => null),
+		savedR2Secret(ctx),
+		ctx.settings.get<string>("filesR2Bucket").catch(() => null),
+	]);
+	if (filled(accountId) && filled(accessKeyId) && secret.value && filled(bucket)) return { configured: true, problem: null };
+	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
+	const resolved = await cloudflareToken(ctx, env, "files");
+	if (resolved.token) return { configured: filled(bucket), problem: null };
+	return { configured: false, problem: resolved.unreadable || secret.unreadable ? UNREADABLE_TOKEN_MESSAGE : null };
 }
 
 interface UsageDoc {
@@ -122,20 +151,44 @@ async function queryAll<T>(c: StorageCollection<T>, where?: Record<string, strin
 	return out;
 }
 
-async function r2Config(ctx: PluginContext): Promise<R2Config> {
-	const [accountId, accessKeyId, secretAccessKey, bucket] = await Promise.all([
+/**
+ * R2's S3 settings for large uploads. A complete saved key pair (account ID, access key ID and secret) wins: it
+ * can be limited to one bucket. Else the keys are made from the Cloudflare API token (src/core/cloudflare-token.ts:
+ * the token's ID and its SHA-256), in the account saved here, CF_ACCOUNT_ID or the token's own. The bucket name
+ * is always needed. `bindings` replaces the Worker's env (tests).
+ */
+export async function r2Config(ctx: PluginContext, bindings?: Record<string, unknown>): Promise<R2Config> {
+	const [accountId, accessKeyId, secretAccessKey, bucket, secretUnreadable] = await Promise.all([
 		ctx.settings.get<string>("filesR2AccountId"),
 		ctx.settings.get<string>("filesR2AccessKeyId"),
-		ctx.settings.get<string>("filesR2SecretAccessKey"),
+		// A saved secret that can't be decrypted counts as missing: the token can still stand in.
+		savedR2Secret(ctx),
 		ctx.settings.get<string>("filesR2Bucket"),
-	]);
-	if (!accountId || !accessKeyId || !secretAccessKey || !bucket)
-		throw PluginRouteError.badRequest(
-			"Large uploads aren't set up: add the R2 account ID, access key ID, secret access key and bucket name on the Files page → Settings.",
-		);
-	if (!/^[a-f0-9]{32}$/i.test(accountId.trim())) throw PluginRouteError.badRequest("The R2 account ID should be 32 hexadecimal characters.");
+	]).then(([a, k, s, b]) => [a, k, s.value, b, s.unreadable] as const);
+	if (filled(accountId) && !/^[a-f0-9]{32}$/i.test(accountId.trim())) throw PluginRouteError.badRequest("The R2 account ID should be 32 hexadecimal characters.");
+	if (!filled(bucket)) throw PluginRouteError.badRequest("Large uploads aren't set up: enter the R2 bucket name on the Files page → Settings.");
 	if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket.trim())) throw PluginRouteError.badRequest("The R2 bucket name isn't valid.");
-	return { accountId: accountId.trim(), accessKeyId: accessKeyId.trim(), secretAccessKey: secretAccessKey.trim(), bucket: bucket.trim() };
+	if (filled(accountId) && filled(accessKeyId) && filled(secretAccessKey)) {
+		return { accountId: accountId.trim(), accessKeyId: accessKeyId.trim(), secretAccessKey: secretAccessKey.trim(), bucket: bucket.trim() };
+	}
+	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
+	const { token, unreadable } = await cloudflareToken(ctx, env, "files");
+	if (!token && (unreadable || secretUnreadable)) throw PluginRouteError.badRequest(UNREADABLE_TOKEN_MESSAGE);
+	if (!token) {
+		throw PluginRouteError.badRequest(
+			"Large uploads aren't set up: add the Cloudflare API token on the plugin's Settings page (it needs Workers R2 Storage → Edit), or an R2 key pair on the Files page → Settings → Advanced.",
+		);
+	}
+	const fetch = contextFetch(ctx);
+	const account = await cloudflareAccountId(ctx, env, { token, fetch }, accountId);
+	if (!account) throw PluginRouteError.badRequest(noAccountMessage("Advanced on the Files page → Settings"));
+	const keys = await r2S3Credentials(ctx, { token, fetch, accountId: account });
+	if (!keys) {
+		throw PluginRouteError.badRequest(
+			"Couldn't make R2 keys from the Cloudflare API token: Cloudflare didn't give the token's ID. Save an R2 key pair on the Files page → Settings → Advanced instead.",
+		);
+	}
+	return { accountId: account, ...keys, bucket: bucket.trim() };
 }
 
 async function client(ctx: PluginContext) {
@@ -153,7 +206,7 @@ async function s3<T>(fn: () => Promise<T>): Promise<T> {
 		if (error instanceof S3Error) {
 			const hint =
 				error.status === 403
-					? " Check the access key, secret and bucket permissions."
+					? " Check the access key, secret and bucket permissions (with the Cloudflare API token, it needs Workers R2 Storage → Edit)."
 					: error.code === "NoSuchUpload"
 						? " The upload expired or was already finished."
 						: "";
@@ -257,6 +310,8 @@ export function filesModule(options: FilesOptions) {
 			filesR2AccessKeyId: accessKeyId ?? "",
 			filesR2Bucket: bucket ?? "",
 			r2SecretSet: typeof secretKey === "string" && secretKey.trim() !== "",
+			/** The Cloudflare API token is there: the page puts the key pair under Advanced. */
+			...sharedTokenState(await cloudflareToken(ctx, await workerEnv().catch(() => ({}) as Record<string, unknown>), "files")),
 		};
 	}
 
@@ -366,7 +421,7 @@ export function filesModule(options: FilesOptions) {
 					base: settings.base,
 					countsEnabled: features[COUNTS_FEATURE] ?? false,
 					largeUploadsEnabled: features[LARGE_UPLOADS_FEATURE] ?? false,
-					r2Configured: await r2Configured(ctx),
+					...(await r2Readiness(ctx).then((r) => ({ r2Configured: r.configured, r2Problem: r.problem }))),
 				};
 			},
 		},

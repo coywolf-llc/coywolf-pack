@@ -10,6 +10,7 @@ import { type PluginContext, PluginRouteError, definePluginRoute } from "emdash"
 import { z } from "zod";
 
 import { CLOUDFLARE_API_HOST, CloudflareApiError, contextFetch } from "../core/cloudflare-api.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareToken, noTokenMessage, sharedTokenState, tokenName } from "../core/cloudflare-token.js";
 import { ctxFeatures, isOn, registerFeatures, requireFeature } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
 import { readOnlyRoute } from "../core/routes.js";
@@ -21,9 +22,9 @@ import { type CheckupZone, FIXES, type FixId, isFixId } from "./checkup-core.js"
 import { applyFix, findZone, readCheckup } from "./zone.js";
 
 export const CHECKUP_FEATURE = "cloudflareCheckup";
-/** The setup token (Zone Settings → Edit), declared secret in src/core/secrets.ts. */
+/** The older setup token (Zone Settings → Edit), declared secret in src/core/secrets.ts; the Cloudflare API token ranks above it. */
 export const SETUP_TOKEN_SETTING = "cloudflareSetupToken";
-/** The site's zone, found once with the read-only token and kept: { host, zone }. */
+/** The site's zone, found once with the Cloudflare API token and kept: { host, zone }. */
 const ZONE_KEY = "state:cloudflare:zone";
 
 const FEATURES = [
@@ -69,13 +70,15 @@ export function cloudflarePack(): PackModule {
 					await requireFeature(ctx, CHECKUP_FEATURE);
 					const host = siteHost(ctx);
 					const env: Record<string, unknown> = await workerEnv().catch(() => ({}));
-					const { token, unreadable } = await readCloudflareToken(ctx, env);
+					const read = await readCloudflareToken(ctx, env);
+					const { token, unreadable } = read;
 					const features = await ctxFeatures(ctx);
 					const known = await storedZone(ctx, host);
 					// What the Worker wrapper last recorded (src/worker.ts): whether it could call itself, and the cache status.
 					const trackingState = await ctx.kv.get<TrackingState>(TRACKING_STATE_KEY).catch(() => null);
 					const deps = {
 						token,
+						tokenName: tokenName(read),
 						fetch: contextFetch(ctx),
 						trackingWrapper: trackingWrapperInstalled() !== null,
 						trackingState: trackingState && typeof trackingState === "object" ? trackingState : null,
@@ -89,27 +92,22 @@ export function cloudflarePack(): PackModule {
 						result = await readCheckup(host, { ...deps, knownZone: null });
 					}
 					if (result.zone && !(known && known.id === result.zone.id)) await ctx.kv.set(ZONE_KEY, { host, zone: result.zone }).catch(() => undefined);
-					const setup = await savedSetupToken(ctx);
+					const [setup, fixToken] = await Promise.all([savedSetupToken(ctx), cloudflareToken(ctx, env, "checkupFix")]);
 					return {
 						...result,
-						...(!token && unreadable
-							? {
-									problem: {
-										kind: "bad-token" as const,
-										message:
-											"The saved Cloudflare usage token can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed. Save the token again (Cloudflare usage on the plugin's Settings page), or set the USAGE_API_TOKEN Worker secret.",
-									},
-								}
-							: {}),
+						...(!token && unreadable ? { problem: { kind: "bad-token" as const, message: UNREADABLE_TOKEN_MESSAGE } } : {}),
 						setupToken: { saved: Boolean(setup.token), unreadable: setup.unreadable },
+						// The fixes use the Cloudflare API token when there is one: the page then hides the setup token.
+						...sharedTokenState(fixToken),
 						fixes: Object.fromEntries(Object.entries(FIXES).map(([id, f]) => [id, { title: f.title, button: f.button, setting: f.setting, target: f.target, targetLabel: f.targetLabel, effect: f.effect }])),
 					};
 				},
 			},
 
 			/**
-			 * Apply one fix with the setup token (the one typed in, used just this once, or the saved one). Changes one
-			 * zone setting, only if it isn't already set; no page changes, so it clears no cache (readOnlyRoute).
+			 * Apply one fix with a token typed in (used just this once), else the Cloudflare API token, else the older
+			 * saved setup token (src/core/cloudflare-token.ts). Changes one zone setting, only if it isn't already set;
+			 * no page changes, so it clears no cache (readOnlyRoute).
 			 */
 			"cloudflare/fix": readOnlyRoute(
 				definePluginRoute({
@@ -120,15 +118,16 @@ export function cloudflarePack(): PackModule {
 						await requireFeature(ctx, CHECKUP_FEATURE);
 						const input = parseInput(z.object({ fix: z.string().refine(isFixId, "Unknown fix."), token: z.string().max(400).optional() }), ctx.input);
 						const fix = input.fix as FixId;
-						const typed = input.token?.trim();
-						const token = typed || (await savedSetupToken(ctx)).token;
-						if (!token) throw PluginRouteError.badRequest("Add the setup token first (Zone Settings → Edit for this site's zone): the steps are on this page.");
+						const env: Record<string, unknown> = await workerEnv().catch(() => ({}));
+						const resolved = await cloudflareToken(ctx, env, "checkupFix", { typed: input.token });
+						const { token, unreadable } = resolved;
+						if (!token) throw PluginRouteError.badRequest(unreadable ? UNREADABLE_TOKEN_MESSAGE : noTokenMessage("Zone → Read and Zone Settings → Edit, for this site's domain"));
 						const host = siteHost(ctx);
 						const doFetch = contextFetch(ctx);
 						try {
 							const zone = (await storedZone(ctx, host)) ?? (await findZone(host, { token, fetch: doFetch }));
-							if (!zone) throw PluginRouteError.badRequest(`The setup token can't see a zone for ${host}. Give it Zone → Read for the site's domain.`);
-							const result = await applyFix(fix, zone, { token, fetch: doFetch });
+							if (!zone) throw PluginRouteError.badRequest(`The ${tokenName(resolved)} can't see a zone for ${host}. Add Zone → Read to it, for this site's domain.`);
+							const result = await applyFix(fix, zone, { token, fetch: doFetch, tokenName: tokenName(resolved) });
 							ctx.log.info("Cloudflare Checkup: fix", { fix, zone: result.zone, setting: result.setting, changed: result.changed, before: String(result.before), after: String(result.after) });
 							return result;
 						} catch (error) {
@@ -139,7 +138,7 @@ export function cloudflarePack(): PackModule {
 				}),
 			),
 
-			/** Save or remove the setup token (stored encrypted). Shown on no page, so it clears no cache. */
+			/** Save or remove the older setup token (stored encrypted). Shown on no page, so it clears no cache. Kept so a saved one can still be removed here. */
 			"cloudflare/token/save": readOnlyRoute(
 				definePluginRoute({
 					permission: "plugins:manage",

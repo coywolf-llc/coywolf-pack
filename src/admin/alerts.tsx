@@ -291,7 +291,7 @@ export function AlertsPage() {
 													min={0}
 													step="0.01"
 													label="Threshold (US dollars)"
-													description="Empty turns this alert off. Needs the Cloudflare usage token (Performance page)."
+													description="Empty turns this alert off. Needs the Cloudflare API token (the Performance page's usage card reads with it)."
 													placeholder="25"
 													value={draft.billThreshold}
 													onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, billThreshold: e.target.value })}

@@ -37,7 +37,7 @@ const RESTORE_CALL_MS = 60_000;
 /** One D1 call through the shared client (src/core/cloudflare-api.ts): a deadline, ctx.http when the route passes it, no token in errors. */
 async function cf<T>(config: RestoreConfig, path: string, init: { method?: string; body?: string } = {}): Promise<T> {
 	try {
-		return (await cloudflareApi<T>(`/accounts/${config.accountId}${path}`, { token: config.token, fetch: config.fetch, method: init.method ?? "GET", body: init.body, permission: "Account → D1 → Edit", deadlineMs: RESTORE_CALL_MS })).result;
+		return (await cloudflareApi<T>(`/accounts/${config.accountId}${path}`, { token: config.token, fetch: config.fetch, method: init.method ?? "GET", body: init.body, permission: "Account → D1 → Edit", tokenName: "restore token (BACKUPS_API_TOKEN, or the backups.restore tokenSecret)", deadlineMs: RESTORE_CALL_MS })).result;
 	} catch (error) {
 		// Surface the API's message in the admin (plain Errors become a generic 500).
 		if (error instanceof CloudflareApiError) throw PluginRouteError.badRequest(error.message);

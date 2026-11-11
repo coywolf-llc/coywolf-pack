@@ -54,7 +54,7 @@ export function discoveryPack(options: DiscoveryOptions): PackModule {
 		hookFeature: { "page:fragments": FEATURE.main },
 		adminPages: [{ path: "/discovery", label: "Discovery", icon: "compass" }],
 		capabilities: ["content:read", "schema:read", "bylines:read", "network:request", "hooks.page-fragments:register"],
-		// Crawler Hints is read from Cloudflare's API (the read-only token).
+		// Crawler Hints is read from Cloudflare's API (the Cloudflare API token).
 		allowedHosts: [CLOUDFLARE_API_HOST],
 	};
 }

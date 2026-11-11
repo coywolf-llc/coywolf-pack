@@ -293,7 +293,7 @@ export function PerformancePage() {
 									: media.rule
 										? `${media.host} is cached at Cloudflare's edge for ${days(media.rule.edgeTtl)} days and in browsers for ${days(media.rule.browserTtl)} days${media.rule.enabled ? "" : " (the rule is turned off)"}.`
 										: media.reason
-											? `Couldn't check ${media.host}: ${media.reason} The token needs Zone → Cache Rules → Edit.`
+											? `Couldn't check ${media.host}: ${media.reason} It needs Cache Rules → Edit.`
 											: `${media.host} isn't cached at Cloudflare's edge yet, so every image is fetched from storage. Media file names never change, so a year is safe.`}
 							</p>
 						</div>

@@ -38,7 +38,7 @@ test("errors: one class with the status and codes, Cloudflare's messages, the pe
 		assert.ok(error instanceof CloudflareApiError);
 		assert.equal(error.status, 403);
 		assert.deepEqual(error.codes, [10000]);
-		assert.equal(error.message, "Cloudflare API 403: Authentication error. The API token needs Zone → Zone → Read.");
+		assert.equal(error.message, "Cloudflare API 403: Authentication error. The Cloudflare API token needs Zone → Zone → Read.");
 		return true;
 	});
 	// success: false on a 200 is an error too; no hint off 401/403.

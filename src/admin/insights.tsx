@@ -13,7 +13,8 @@ import { PACK_API, apiGet, apiPost, errorText } from "./api.js";
 import { useConfirm } from "./confirm-dialog.js";
 import { FEATURES_CHANGED, PartSwitch, useParts } from "./feature-switches.js";
 import { CredentialGuide, type GuideId } from "./guides.js";
-import { DocsLink, FeaturesLink, Loading, PackLink, PageHeader } from "./page.js";
+import { AdminLink, DocsLink, FeaturesLink, Loading, PackLink, PageHeader } from "./page.js";
+import { SETTINGS_PAGE_PATH } from "./settings-ui.js";
 import { redirectPrefillHref } from "./redirect-prefill.js";
 import { useUnsavedChanges } from "./save-bar.js";
 import { useToast } from "./toast.js";
@@ -872,7 +873,11 @@ export function InsightsPage() {
 							variant="default"
 							description={
 								<>
-									The Cloudflare reports use the read-only token from the <PackLink page="/performance">Performance page</PackLink>'s usage card, with two zone permissions added. The steps are in each card.
+									The Cloudflare reports use the Cloudflare API token from the plugin's{" "}
+									<AdminLink to={SETTINGS_PAGE_PATH} className="text-kumo-link underline">
+										Settings page
+									</AdminLink>
+									. What each report needs is in its card.
 								</>
 							}
 						/>

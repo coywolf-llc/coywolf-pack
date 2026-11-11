@@ -17,6 +17,7 @@ import { type CrawlerHintsZone, crawlerHintsDashboardUrl, readCrawlerHints } fro
 import { buildFeed } from "./feed-build.js";
 import { FEED_PATH, FEED_TAG } from "./feed.js";
 import { purgePageCache } from "../pageCache/lib.js";
+import { UNREADABLE_TOKEN_MESSAGE, tokenName } from "../core/cloudflare-token.js";
 import { readCloudflareToken } from "../pageCache/usage.js";
 import { markdownUrl } from "./markdown.js";
 import { SECURITY_TXT_PATH, SECURITY_TXT_TAG, securityTxtProblems } from "./security-txt.js";
@@ -99,11 +100,12 @@ export async function retireIndexNow(ctx: PluginContext): Promise<void> {
 /** The site's zone, found once with the token and kept: { host, zone }. */
 const ZONE_KEY = "state:discovery:crawlerHintsZone";
 
-/** Whether Crawler Hints is on for the site's zone, read with the read-only Cloudflare API token. */
+/** Whether Crawler Hints is on for the site's zone, read with the Cloudflare API token (Zone → Read). */
 async function crawlerHintsStatus(ctx: PluginContext) {
 	const host = new URL(siteOrigin(ctx)).host;
 	const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
-	const { token, unreadable } = await readCloudflareToken(ctx, env);
+	const read = await readCloudflareToken(ctx, env);
+	const { token, unreadable } = read;
 	if (!token && unreadable) {
 		return {
 			enabled: null,
@@ -112,8 +114,7 @@ async function crawlerHintsStatus(ctx: PluginContext) {
 			dashboardUrl: crawlerHintsDashboardUrl(null),
 			problem: {
 				kind: "bad-token" as const,
-				message:
-					"The saved Cloudflare usage token can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed. Save the token again (Cloudflare usage on the plugin's Settings page), or set the USAGE_API_TOKEN Worker secret.",
+				message: UNREADABLE_TOKEN_MESSAGE,
 			},
 			checkedAt: new Date().toISOString(),
 		};
@@ -121,12 +122,12 @@ async function crawlerHintsStatus(ctx: PluginContext) {
 	const stored = await ctx.kv.get<{ host: string; zone: CrawlerHintsZone }>(ZONE_KEY).catch(() => null);
 	const known = stored?.host === host ? stored.zone : null;
 	const doFetch = (ctx.http ? ctx.http.fetch.bind(ctx.http) : fetch) as (url: string, init?: RequestInit) => Promise<Response>;
-	let status = await readCrawlerHints(host, { token, fetch: doFetch, knownZone: known });
+	let status = await readCrawlerHints(host, { token, tokenName: tokenName(read), fetch: doFetch, knownZone: known });
 	// The remembered zone stopped working (the zone was deleted and added again, or moved to another account):
 	// forget it and look the zone up again, once.
 	if (known && status.enabled === null && status.problem?.kind !== "bad-token") {
 		await ctx.kv.delete(ZONE_KEY).catch(() => undefined);
-		status = await readCrawlerHints(host, { token, fetch: doFetch, knownZone: null });
+		status = await readCrawlerHints(host, { token, tokenName: tokenName(read), fetch: doFetch, knownZone: null });
 	}
 	// Keep the zone only when its setting could be read with it (a zone the token can't use is looked up again).
 	if (status.zone && status.enabled !== null && !(known && known.id === status.zone.id)) {
@@ -283,7 +284,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 
 		/**
 		 * Whether Crawler Hints is on for the site's Cloudflare zone, and the link to its switch. Read with the
-		 * read-only Cloudflare API token (Zone → Zone → Read); Cloudflare doesn't let API tokens change it. A GET:
+		 * Cloudflare API token (Zone → Zone → Read); Cloudflare doesn't let API tokens change it. A GET:
 		 * it changes nothing, so it clears no cache. Loaded by the Discovery page after the rest of the page.
 		 */
 		"discovery/crawler-hints": {

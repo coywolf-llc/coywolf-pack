@@ -1,6 +1,6 @@
 /**
  * Core Web Vitals card: real visitors' LCP, INP and CLS at the 75th
- * percentile from Cloudflare Web Analytics, read with the read-only token
+ * percentile from Cloudflare Web Analytics, read with the Cloudflare API token
  * (Account Analytics → Read for the numbers, Account Settings → Read to find
  * the site's tag) and kept for an hour. The beacon itself is the
  * insights.beacon part (pack.ts); the card also reads sites whose beacon comes
@@ -46,7 +46,7 @@ export async function vitalsReport(ctx: Ctx, refresh = false, bindings?: Record<
 			const sites = parseSites(await cfCall<unknown>(a, `/accounts/${encodeURIComponent(accountId)}/rum/site_info/list?per_page=100`, { permission: "Account → Account Settings → Read" }));
 			site = matchSite(sites, { token, host: a.host, zoneNames: zone ? [zone.name] : zoneCandidates(a.host) });
 		} catch (error) {
-			notes.push(`Couldn't list the account's Web Analytics sites (the token needs Account → Account Settings → Read): ${messageOf(error)}`);
+			notes.push(`Couldn't list the account's Web Analytics sites (the ${a.name ?? "Cloudflare API token"} needs Account → Account Settings → Read): ${messageOf(error)}`);
 		}
 		const siteTag = site?.tag ?? token;
 		if (!siteTag) {

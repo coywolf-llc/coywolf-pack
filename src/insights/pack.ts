@@ -56,13 +56,13 @@ export const FEATURES = [
 		id: F.edge,
 		label: "Edge errors and crawlers",
 		description:
-			"404 and 410 paths (files, images and the media host too), server errors and requests per crawler, from Cloudflare's analytics for the last 30 days, with Create redirect for each 404. Uses the read-only Cloudflare token with Zone → Analytics → Read added.",
+			"404 and 410 paths (files, images and the media host too), server errors and requests per crawler, from Cloudflare's analytics for the last 30 days, with Create redirect for each 404. Uses the Cloudflare API token (Zone → Read and Analytics → Read).",
 		default: false,
 	},
 	{
 		id: F.vitals,
 		label: "Core Web Vitals",
-		description: "Real visitors' LCP, INP and CLS from Cloudflare Web Analytics for the last 7 and 30 days, and the slowest pages. Uses the read-only Cloudflare token.",
+		description: "Real visitors' LCP, INP and CLS from Cloudflare Web Analytics for the last 7 and 30 days, and the slowest pages. Uses the Cloudflare API token (Account Analytics → Read).",
 		default: false,
 	},
 	{

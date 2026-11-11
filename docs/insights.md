@@ -6,8 +6,8 @@ One admin page (**Coywolf Pack → Insights**) with reports EmDash doesn't have:
 
 | Part | Feature id | What it shows | Needs |
 | --- | --- | --- | --- |
-| Edge errors and crawlers | `insights.edge` | 404 and 410 paths (files, images and the media host included), 5xx errors, requests per crawler, for the last 30 days | The read-only Cloudflare token, with **Zone → Zone → Read** and **Zone → Analytics → Read** |
-| Core Web Vitals | `insights.vitals` | Real visitors' LCP, INP and CLS at the 75th percentile, for 7 and 30 days, and the slowest pages | Cloudflare Web Analytics for the site; the read-only token (**Account Analytics → Read**, **Account Settings → Read**) |
+| Edge errors and crawlers | `insights.edge` | 404 and 410 paths (files, images and the media host included), 5xx errors, requests per crawler, for the last 30 days | The [Cloudflare API token](README.md#the-cloudflare-api-token), with **Zone → Read** and **Analytics → Read** |
+| Core Web Vitals | `insights.vitals` | Real visitors' LCP, INP and CLS at the 75th percentile, for 7 and 30 days, and the slowest pages | Cloudflare Web Analytics for the site; the Cloudflare API token (**Account Analytics → Read**, **Account Settings → Read**) |
 | Web Analytics beacon | `insights.beacon` | Adds Cloudflare's beacon to every public page | The site's Web Analytics token (public) |
 | Fathom traffic | `insights.fathom` | Visitors, pageviews and top pages for 7 and 30 days | The Fathom site ID and a read-only Fathom API key |
 | Google Search Console | `insights.searchConsole` | Clicks, impressions, CTR, average position, top queries and pages for 28 days | A Google service account's JSON key, added as a user on the property |
@@ -15,7 +15,7 @@ One admin page (**Coywolf Pack → Insights**) with reports EmDash doesn't have:
 
 Each report is kept in plugin KV: an hour for the Cloudflare and Fathom reports, six hours for Search Console. **Refresh** reads again (at most once a minute; Search Console every ten minutes). After a failed reading the provider isn't asked again for a few minutes, and the last good reading, if any, shows with what went wrong. A reading belongs to the settings it was made with, so changing a site ID, property, key or token reads again at once. Every call has a deadline (20 seconds for Cloudflare, 15 for Fathom and Google) and goes through EmDash's `ctx.http` with the plugin's allowed hosts: `api.cloudflare.com`, `api.usefathom.com`, `oauth2.googleapis.com` and `www.googleapis.com`.
 
-Credentials are encrypted secret settings (the Fathom API key and the Google key: **Insights — Fathom API key** and **Insights — Google service account key (JSON)** on the plugin's Settings page, or on the Insights page), never shown again after they're saved, and never logged. The Cloudflare token is the one the Performance page's usage card uses (**Cloudflare usage** on the Settings page, or the `USAGE_API_TOKEN` Worker secret).
+Credentials are encrypted secret settings (the Fathom API key and the Google key: **Fathom API key** and **Google service account key** on the plugin's Settings page, or on the Insights page), never shown again after they're saved, and never logged. The Cloudflare reports use the [Cloudflare API token](README.md#the-cloudflare-api-token), as the Performance page's usage card does (until it's saved, the token saved as **Older: Cloudflare usage token**, or the `USAGE_API_TOKEN` Worker secret).
 
 ## Edge errors and crawlers
 
@@ -33,13 +33,13 @@ How it reads: the zone is found once with **Zone → Zone → Read** and remembe
 
 ### The token
 
-Add two zone permissions to the read-only token: **Zone → Read** and **Analytics → Read** (the zone one, not Account Analytics), in a policy scoped to **All Domains** or the site's domain. For a new token, Cloudflare's pre-filled form selects Account Analytics → Read, Account Settings → Read, Zone → Read and Analytics → Read; the guide on the card has the steps. Errors name the missing permission.
+The Cloudflare API token's form pre-fills everything Insights needs: **Zone → Read** and **Analytics → Read** (the zone one, not Account Analytics) in the policy for the site's domain, and **Account Analytics → Read** and **Account Settings → Read** for the whole account. An older read-only token needs the two zone permissions added; the guide on the card has the steps. Errors name the missing permission.
 
 ## Core Web Vitals
 
 Largest Contentful Paint, Interaction to Next Paint and Cumulative Layout Shift at the 75th percentile, from real visits measured by [Cloudflare Web Analytics](https://developers.cloudflare.com/web-analytics/), for the last 7 and 30 days, with a Good, Needs improvement or Poor label from web.dev's thresholds (2.5 s / 4 s, 200 ms / 500 ms, 0.1 / 0.25), and the slowest of the 50 most visited pages (with at least five measured views). Known bots are left out (`bot: 0`). CLS is measured in Chromium browsers only, and a low-traffic site needs a few days of visits before the numbers mean much.
 
-The card reads the account's `rumWebVitalsEventsAdaptiveGroups` dataset with the read-only token (**Account Analytics → Read**), filtered by the site's Web Analytics tag. It finds the tag in the account's Web Analytics sites (`GET /accounts/{id}/rum/site_info/list`, **Account Settings → Read**): the site with the saved beacon token, or the one for the site's host or zone. Without Account Settings → Read, the beacon token stands in for the tag. The account is the `CF_ACCOUNT_ID` Worker variable, the Clean Image URLs account, the zone's account, or the token's only account.
+The card reads the account's `rumWebVitalsEventsAdaptiveGroups` dataset with the Cloudflare API token (**Account Analytics → Read**), filtered by the site's Web Analytics tag. It finds the tag in the account's Web Analytics sites (`GET /accounts/{id}/rum/site_info/list`, **Account Settings → Read**): the site with the saved beacon token, or the one for the site's host or zone. Without Account Settings → Read, the beacon token stands in for the tag. The account is the `CF_ACCOUNT_ID` Worker variable, the Clean Image URLs account, the zone's account, or the token's only account.
 
 ### The beacon
 

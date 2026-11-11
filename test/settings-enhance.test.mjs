@@ -5,17 +5,30 @@ import vm from "node:vm";
 
 import "./ts-resolve.mjs";
 
-const { settingsEnhanceScript, settingsGuideHtml, injectAdminEnhancements } = await import("../src/core/settings-enhance.ts");
-const { SECRET_SETTINGS } = await import("../src/core/secrets.ts");
+const { settingsEnhanceScript, settingsGuideHtml, settingsPageData, injectAdminEnhancements } = await import("../src/core/settings-enhance.ts");
+const { SECRET_SETTINGS, OLDER_SECRET_KEYS } = await import("../src/core/secrets.ts");
+const { tokenFormUrl, CLOUDFLARE_TOKEN_FORM } = await import("../src/core/guide-content.ts");
 
-test("guides for each credential, keyed by the Settings page label", () => {
+test("four fields get guides: the Cloudflare API token, the AI key, Fathom and Google", () => {
 	const html = settingsGuideHtml();
-	assert.deepEqual(Object.keys(html).sort(), [SECRET_SETTINGS.aiApiKey.label, SECRET_SETTINGS.backupsCloudflareToken.label, SECRET_SETTINGS.cloudflareSetupToken.label, SECRET_SETTINGS.filesR2SecretAccessKey.label, SECRET_SETTINGS.imagesApiToken.label, SECRET_SETTINGS.insightsFathomApiKey.label, SECRET_SETTINGS.insightsGoogleServiceAccount.label, SECRET_SETTINGS.robotsRadarToken.label, SECRET_SETTINGS.socialImagesApiToken.label, SECRET_SETTINGS.videosApiToken.label].sort());
-	assert.match(html[SECRET_SETTINGS.socialImagesApiToken.label], /<ol[^>]*>.*Account → Browser Run → Edit/);
-	assert.equal((html[SECRET_SETTINGS.aiApiKey.label].match(/<details/g) ?? []).length, 3);
-	assert.match(html[SECRET_SETTINGS.videosApiToken.label], /<ol[^>]*>.*Account → Stream → Edit/);
-	assert.match(html[SECRET_SETTINGS.imagesApiToken.label], /<ol[^>]*>.*Zone → Transform Rules → Edit/);
-	assert.match(html[SECRET_SETTINGS.backupsCloudflareToken.label], /<ol[^>]*>.*Account → Workers R2 Storage → Edit/);
+	const { cloudflareApiToken, aiApiKey, insightsFathomApiKey, insightsGoogleServiceAccount } = SECRET_SETTINGS;
+	assert.deepEqual(Object.keys(html).sort(), [cloudflareApiToken.label, aiApiKey.label, insightsFathomApiKey.label, insightsGoogleServiceAccount.label].sort());
+	assert.equal((html[aiApiKey.label].match(/<details/g) ?? []).length, 3);
+	// The token's guide is the one pre-filled form, with the zone policy advice.
+	const token = html[cloudflareApiToken.label];
+	assert.ok(token.includes(tokenFormUrl(CLOUDFLARE_TOKEN_FORM.name, CLOUDFLARE_TOKEN_FORM.keys).replaceAll("&", "&amp;")) || token.includes(tokenFormUrl(CLOUDFLARE_TOKEN_FORM.name, CLOUDFLARE_TOKEN_FORM.keys)));
+	assert.match(token, /Specified Domains<\/strong> and pick this site's domain \(recommended/);
+	assert.match(token, /All Domains<\/strong> instead/);
+});
+
+test("the script carries the older and hidden fields by their labels, and the older ones are every saved token it replaces", () => {
+	const data = settingsPageData();
+	assert.deepEqual(data.older, OLDER_SECRET_KEYS.map((key) => SECRET_SETTINGS[key].label));
+	assert.deepEqual(data.hidden, [SECRET_SETTINGS.videosWebhookSecret.label]);
+	// None of the four fields people fill in is hidden or tucked away.
+	for (const label of Object.keys(data.guides)) assert.ok(!data.older.includes(label) && !data.hidden.includes(label), label);
+	const script = settingsEnhanceScript();
+	for (const label of [...data.older, ...data.hidden]) assert.ok(script.includes(JSON.stringify(label)), `the script names ${label}`);
 });
 
 test("the script parses and can't close its <script> element", () => {

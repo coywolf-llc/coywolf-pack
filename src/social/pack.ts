@@ -17,7 +17,7 @@ import { readOnlyRoute } from "../core/routes.js";
 import { purgePageCache } from "../pageCache/lib.js";
 import { siteName } from "../core/site.js";
 import { afterResponse, parseInput, workerEnv } from "../shared.js";
-import { NOT_SET_UP, type RenderContext, RenderError, SETTINGS_KEY, type SocialSettings, TOKEN_SETTING, hashFor, normalizeSocialSettings, readSocialSettings, removeEntryImage, renderContext, renderEntry, renderer, screenshot, siteLogo, templateInputs } from "./render.js";
+import { NOT_SET_UP, type RenderContext, RenderError, SETTINGS_KEY, type SocialSettings, TOKEN_SETTING, browserRunToken, hashFor, normalizeSocialSettings, readSocialSettings, removeEntryImage, renderContext, renderEntry, renderer, screenshot, siteLogo, templateInputs } from "./render.js";
 import { knownPlan } from "../core/plan.js";
 import { SOCIAL_STORAGE, type SocialImageDoc, counts, docId, markPending, parseDefaultImages, socialImages, socialImageUrl } from "./store.js";
 import { TEMPLATE_DEFAULTS, socialImageHtml } from "./template.js";
@@ -326,6 +326,7 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 					const settings = await readSocialSettings(ctx);
 					const r = await renderer(ctx, settings);
 					const tokenSaved = Boolean(await ctx.settings.get<string>(TOKEN_SETTING).catch(() => null));
+					const { sharedToken, sharedTokenEnv } = await browserRunToken(ctx);
 					const recent = await socialImages(ctx).query({ orderBy: { updatedAt: "desc" }, limit: 12 });
 					const origin = ctx.site?.url ?? "";
 					const features = await ctxFeatures(ctx);
@@ -335,6 +336,9 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 						settings,
 						renderer: r.kind === "none" ? { kind: "none", reason: r.reason } : { kind: r.kind },
 						tokenSaved,
+						// The Cloudflare API token is the one in use: the page shows no token field of its own.
+						sharedToken,
+						sharedTokenEnv,
 						counts: await counts(ctx),
 						backfill: (await ctx.kv.get<BackfillState>(BACKFILL_KEY)) ?? IDLE_BACKFILL,
 						collections: (await collections(ctx)).map((c) => ({ slug: c.slug, label: c.label })),
