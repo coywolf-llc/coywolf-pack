@@ -68,7 +68,9 @@ export const SETTINGS_PAGE_PATH = "/plugins-manager/coywolf-pack/settings";
 /**
  * In place of a module's own token field when the Cloudflare API token is the one
  * in use: one line saying so, and `children` (overrides such as an account ID)
- * under a closed Advanced disclosure.
+ * under a closed Advanced disclosure. `env`: it's the CLOUDFLARE_API_TOKEN
+ * Worker secret, which a token saved on the page outranks, so pages put their
+ * own token field among the children then.
  */
 export function SharedTokenNote(props: { env?: boolean; children?: React.ReactNode }) {
 	return (
@@ -76,7 +78,7 @@ export function SharedTokenNote(props: { env?: boolean; children?: React.ReactNo
 			<p className="text-sm text-kumo-subtle">
 				{props.env ? (
 					<>
-						Uses the Cloudflare API token from the <code>CLOUDFLARE_API_TOKEN</code> Worker secret.
+						Uses the <code>CLOUDFLARE_API_TOKEN</code> Worker secret.
 					</>
 				) : (
 					<>

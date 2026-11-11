@@ -57,7 +57,7 @@ Reading and the fixes use the [Cloudflare API token](README.md#the-cloudflare-ap
 
 A part the token can't read says which permission to add. Each fix changes one zone setting, only when it isn't already set, and the token is only ever sent to `api.cloudflare.com`, never logged or returned.
 
-Before the Cloudflare API token is saved, reading uses the older read-only token ([Cloudflare usage](performance.md#cloudflare-usage), or `USAGE_API_TOKEN`), and the fixes the older setup token: the page then shows a **Setup token** field (saved as `cloudflareSetupToken`, or typed in and used just for the next fix). Once the Cloudflare API token is saved, that field goes away.
+Before the Cloudflare API token is saved, reading uses the older read-only token (**Older: Cloudflare usage token** on Settings, or `USAGE_API_TOKEN`; see [Cloudflare usage](performance.md#cloudflare-usage)), and the fixes the older setup token: the page then shows a **Setup token** field (saved as `cloudflareSetupToken`, or typed in and used just for the next fix). Once the Cloudflare API token is saved on Settings, that field goes away; with only the `CLOUDFLARE_API_TOKEN` Worker secret it stays under **Advanced**, since a setup token saved there outranks the secret.
 
 ## Tracking parameters
 

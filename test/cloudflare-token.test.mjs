@@ -100,12 +100,27 @@ test("Backups names its own older secret; restores' token never comes from here"
 
 test("a saved token that can't be decrypted is skipped and reported, never thrown", async () => {
 	const ctx = fakeCtx({ usageApiToken: "older" }, { unreadable: ["cloudflareApiToken"] });
-	assert.deepEqual(await T.cloudflareToken(ctx, {}, "read"), { token: "older", source: "older", unreadable: true });
+	assert.deepEqual(await T.cloudflareToken(ctx, {}, "read"), { token: "older", source: "older", from: "usageApiToken", unreadable: true });
 	const none = await T.cloudflareToken(fakeCtx({}, { unreadable: ["cloudflareApiToken", "usageApiToken"] }), {}, "read");
-	assert.deepEqual(none, { token: null, source: null, unreadable: true });
-	assert.deepEqual(T.sharedTokenState({ source: "shared" }), { sharedToken: true, sharedTokenEnv: false });
-	assert.deepEqual(T.sharedTokenState({ source: "shared-env" }), { sharedToken: true, sharedTokenEnv: true });
-	assert.deepEqual(T.sharedTokenState({ source: "older" }), { sharedToken: false, sharedTokenEnv: false });
+	assert.deepEqual(none, { token: null, source: null, from: null, unreadable: true });
+	assert.equal(T.sharedTokenState(none).tokenUnreadable, true);
+	assert.equal(T.sharedTokenState({ source: "older", unreadable: true }).tokenUnreadable, false, "a token still works: nothing to report");
+});
+
+test("pages hide their own token fields only for the token saved on Settings, not for the CLOUDFLARE_API_TOKEN Worker secret", () => {
+	assert.deepEqual(T.sharedTokenState({ source: "shared", unreadable: false }), { sharedToken: true, sharedTokenEnv: false, tokenUnreadable: false });
+	// A token saved on the page outranks the Worker secret, so the page keeps that field (under Advanced).
+	assert.deepEqual(T.sharedTokenState({ source: "shared-env", unreadable: false }), { sharedToken: false, sharedTokenEnv: true, tokenUnreadable: false });
+	assert.deepEqual(T.sharedTokenState({ source: "older", unreadable: false }), { sharedToken: false, sharedTokenEnv: false, tokenUnreadable: false });
+});
+
+test("messages name the token that was used", async () => {
+	const name = async (settings, env, feature) => T.tokenName(await T.cloudflareToken(fakeCtx(settings), env, feature));
+	assert.equal(await name({ cloudflareApiToken: "t", videosApiToken: "o" }, {}, "stream"), "Cloudflare API token");
+	assert.equal(await name({ videosApiToken: "o" }, { CLOUDFLARE_API_TOKEN: "e" }, "stream"), "older Videos Stream token");
+	assert.equal(await name({}, { CF_STREAM_TOKEN: "e", CLOUDFLARE_API_TOKEN: "x" }, "stream"), "token in the CF_STREAM_TOKEN Worker secret");
+	assert.match(await name({}, { CLOUDFLARE_API_TOKEN: "x" }, "radar"), /CLOUDFLARE_API_TOKEN Worker secret/);
+	assert.equal(T.tokenName({ source: "typed", from: null }), "token you entered");
 });
 
 // ── Which account ────────────────────────────────────────────
@@ -140,6 +155,31 @@ test("the token's account is remembered for that token only; more than one accou
 	await T.cloudflareAccountId(fakeCtx(), {}, { token: "tok-3", fetch: many.fetch });
 	assert.equal(many.calls.length, 2);
 	assert.match(T.noAccountMessage("Advanced"), /more than one account.*Enter the account ID under Advanced/);
+});
+
+test("a Cloudflare that can't answer (an error status, a network error) isn't taken for an answer: asked again next time", async () => {
+	let calls = 0;
+	const flaky = async () => {
+		calls++;
+		if (calls === 1) return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: "Internal error" }] }), { status: 500 });
+		if (calls === 2) throw new TypeError("network connection lost");
+		return new Response(JSON.stringify({ success: true, result: [{ id: ACCOUNT }] }), { status: 200 });
+	};
+	const ctx = fakeCtx();
+	assert.equal(await T.cloudflareAccountId(ctx, {}, { token: "tok-flaky", fetch: flaky }), null);
+	assert.equal(await T.cloudflareAccountId(ctx, {}, { token: "tok-flaky", fetch: flaky }), null);
+	assert.equal(await T.cloudflareAccountId(ctx, {}, { token: "tok-flaky", fetch: flaky }), ACCOUNT, "neither failure kept it from asking again");
+	assert.equal(calls, 3);
+});
+
+test("the remembered accounts hold a few tokens, so two tokens in use don't push each other out", async () => {
+	const ctx = fakeCtx();
+	const answer = (id) => async () => new Response(JSON.stringify({ success: true, result: [{ id }] }), { status: 200 });
+	assert.equal(await T.cloudflareAccountId(ctx, {}, { token: "tok-a", fetch: answer("a".repeat(32)) }), "a".repeat(32));
+	assert.equal(await T.cloudflareAccountId(ctx, {}, { token: "tok-b", fetch: answer("b".repeat(32)) }), "b".repeat(32));
+	const never = async () => assert.fail("asked Cloudflare again");
+	assert.equal(await T.cloudflareAccountId(ctx, {}, { token: "tok-a", fetch: never }), "a".repeat(32));
+	assert.equal(await T.cloudflareAccountId(ctx, {}, { token: "tok-b", fetch: never }), "b".repeat(32));
 });
 
 // ── R2 keys from the token ───────────────────────────────────
@@ -194,29 +234,65 @@ test("large uploads: a complete saved key pair wins; otherwise keys from the Clo
 
 // ── The Features page's routes ───────────────────────────────
 
-test("status: the token, its remembered account, the older tokens still saved and the older Worker secrets set; it asks Cloudflare nothing", async () => {
+test("status: the token, its remembered account, the older tokens still saved (with their pages) and the older Worker secrets set; it asks Cloudflare nothing", async () => {
 	const ctx = fakeCtx({ cloudflareApiToken: "tok", videosApiToken: "v", robotsRadarToken: "r", filesR2AccessKeyId: "AKID" }, { unreadable: ["imagesApiToken"] });
 	const status = await cloudflareTokenStatus(ctx, { CF_STREAM_TOKEN: "x", BACKUPS_API_TOKEN: "restore", CF_ACCOUNT_ID: ACCOUNT });
 	assert.equal(status.saved, true);
+	assert.equal(status.unreadable, false);
 	assert.equal(status.accountId, ACCOUNT);
 	assert.deepEqual(status.older.map((o) => o.key).sort(), ["imagesApiToken", "robotsRadarToken", "videosApiToken"], "an unreadable one is still there to remove");
-	assert.ok(status.older.every((o) => !o.label.startsWith("Older:")));
+	assert.ok(status.older.every((o) => !o.label.startsWith("Older:") && o.page), "each with the pages it served");
 	assert.equal(status.r2KeyPair, true);
 	assert.deepEqual(status.olderSecrets, ["CF_STREAM_TOKEN"], "the restore token isn't an older token");
 	assert.equal(ctx.http, undefined);
+
+	const unreadable = await cloudflareTokenStatus(fakeCtx({}, { unreadable: ["cloudflareApiToken"] }), {});
+	assert.deepEqual([unreadable.saved, unreadable.unreadable], [false, true]);
 });
 
-test("clear-older: only once the Cloudflare API token is there; the R2 key pair only when asked", async () => {
+/** Cloudflare answering for a token: its accounts and its verify status. */
+const checked = ({ accounts = [{ id: ACCOUNT }], status = "active", accountsStatus = 200 } = {}) =>
+	cloudflare({
+		"GET /accounts?per_page=5": accountsStatus === 200 ? accounts : new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: "Authentication error" }] }), { status: accountsStatus }),
+		"GET /user/tokens/verify": { id: "tid", status },
+		[`GET /accounts/${ACCOUNT}/tokens/verify`]: { id: "tid", status },
+	});
+
+test("clear-older: only with the token saved on Settings, after Cloudflare says it's active and sees one account; the R2 key pair only when asked", async () => {
 	const { "cloudflare-token/clear-older": route } = cloudflareTokenRoutes();
 	const older = Object.fromEntries(OLDER_TOKEN_SETTINGS.map((k) => [k, "old"]));
 	const pair = { filesR2SecretAccessKey: "S", filesR2AccessKeyId: "AKID", filesR2Bucket: "b", filesR2AccountId: ACCOUNT };
+	const untouched = (ctx) => assert.equal(OLDER_TOKEN_SETTINGS.filter((k) => ctx.stored.has(k)).length, OLDER_TOKEN_SETTINGS.length, "nothing removed");
 
-	const before = fakeCtx({ ...older });
-	await assert.rejects(route.handler({ ...before, input: {} }), /Save the Cloudflare API token/);
-	assert.equal(before.stored.size, OLDER_TOKEN_SETTINGS.length, "nothing removed");
+	const none = fakeCtx({ ...older });
+	await assert.rejects(route.handler({ ...none, input: {} }), /Save the Cloudflare API token/);
+	untouched(none);
 
-	const ctx = fakeCtx({ ...older, ...pair, cloudflareApiToken: "tok", aiApiKey: "ai" });
+	// The Worker secret alone never counts: older tokens outrank it, so removing them would switch features to it unasked.
+	globalThis.__testEnv = { CLOUDFLARE_API_TOKEN: "env" };
+	const viaEnv = fakeCtx({ ...older }, { fetch: checked().fetch });
+	await assert.rejects(route.handler({ ...viaEnv, input: {} }), /Save the Cloudflare API token/);
+	untouched(viaEnv);
+	globalThis.__testEnv = {};
+
+	const unreadable = fakeCtx({ ...older }, { unreadable: ["cloudflareApiToken"], fetch: checked().fetch });
+	await assert.rejects(route.handler({ ...unreadable, input: {} }), /can't be read/);
+	untouched(unreadable);
+
+	for (const [why, cf, message] of [
+		["a token Cloudflare refuses", checked({ accountsStatus: 403 }), /didn't accept the Cloudflare API token/],
+		["a token that sees two accounts", checked({ accounts: [{ id: "x" }, { id: "y" }] }), /sees more than one account/],
+		["a disabled token", checked({ status: "disabled" }), /is disabled, not active/],
+	]) {
+		const ctx = fakeCtx({ ...older, cloudflareApiToken: "tok" }, { fetch: cf.fetch });
+		await assert.rejects(route.handler({ ...ctx, input: {} }), (error) => message.test(error.message) && /Nothing was removed/.test(error.message), why);
+		untouched(ctx);
+	}
+
+	const cf = checked();
+	const ctx = fakeCtx({ ...older, ...pair, cloudflareApiToken: "tok", aiApiKey: "ai" }, { fetch: cf.fetch });
 	const result = await route.handler({ ...ctx, input: {} });
+	assert.ok(cf.calls.some((c) => c.key === "GET /user/tokens/verify" && c.auth === "Bearer tok"), "the token was verified");
 	assert.equal(result.removed, OLDER_TOKEN_SETTINGS.length);
 	for (const k of OLDER_TOKEN_SETTINGS) assert.ok(!ctx.stored.has(k), k);
 	assert.equal(ctx.stored.get("cloudflareApiToken"), "tok");
@@ -227,9 +303,26 @@ test("clear-older: only once the Cloudflare API token is there; the R2 key pair 
 	await route.handler({ ...ctx, input: { r2: true } });
 	assert.ok(!ctx.stored.has("filesR2SecretAccessKey") && !ctx.stored.has("filesR2AccessKeyId"));
 	assert.equal(ctx.stored.get("filesR2Bucket"), "b", "the bucket name is still needed");
+});
 
-	// The Worker secret counts as the token being there.
-	globalThis.__testEnv = { CLOUDFLARE_API_TOKEN: "env" };
-	const viaEnv = fakeCtx({ usageApiToken: "old" });
-	assert.equal((await route.handler({ ...viaEnv, input: {} })).removed, 1);
+test("Videos, Radar and large uploads say when a saved token can't be read, instead of asking for one", async () => {
+	const { streamAccess } = await import("../src/videos/store.ts");
+	const stream = await streamAccess(fakeCtx({ videosAccountId: ACCOUNT }, { unreadable: ["cloudflareApiToken"] }), {});
+	assert.equal(stream.credentials, null);
+	assert.equal(stream.reason, T.UNREADABLE_TOKEN_MESSAGE);
+	assert.match((await streamAccess(fakeCtx({ videosAccountId: ACCOUNT }), {})).reason, /Add the Cloudflare API token.*Stream → Edit/);
+
+	const { syncRadar, radarTokenStatus } = await import("../src/robots/radar.ts");
+	const radarCtx = fakeCtx({}, { unreadable: ["robotsRadarToken"] });
+	assert.equal((await syncRadar(radarCtx, {})).error, T.UNREADABLE_TOKEN_MESSAGE);
+	assert.deepEqual(await radarTokenStatus(radarCtx, {}), { tokenSource: null, tokenUnreadable: true });
+	assert.deepEqual(await radarTokenStatus(fakeCtx({ robotsRadarToken: "r" }, { unreadable: ["cloudflareApiToken"] }), {}), { tokenSource: "settings", tokenUnreadable: false }, "the older token still works");
+
+	const { r2Config, r2Readiness } = await import("../src/files/module.ts");
+	const files = fakeCtx({ filesR2Bucket: "coywolf-media" }, { unreadable: ["cloudflareApiToken"] });
+	await assert.rejects(r2Config(files, {}), (error) => error.message === T.UNREADABLE_TOKEN_MESSAGE);
+	assert.deepEqual(await r2Readiness(files, {}), { configured: false, problem: T.UNREADABLE_TOKEN_MESSAGE });
+	const secret = fakeCtx({ filesR2Bucket: "coywolf-media", filesR2AccountId: ACCOUNT, filesR2AccessKeyId: "AKID" }, { unreadable: ["filesR2SecretAccessKey"] });
+	assert.deepEqual(await r2Readiness(secret, {}), { configured: false, problem: T.UNREADABLE_TOKEN_MESSAGE });
+	assert.deepEqual(await r2Readiness(fakeCtx({ filesR2Bucket: "coywolf-media" }), {}), { configured: false, problem: null });
 });

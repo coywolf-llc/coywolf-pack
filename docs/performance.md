@@ -131,7 +131,7 @@ It uses the [Cloudflare API token](README.md#the-cloudflare-api-token) (the plug
 - **Workers → Metadata Read-Only** (finds the site's Worker and database, and reads Workers Logs for the warming estimate; on a personal token: Account → Workers Scripts → Read and Account → Workers Observability → Edit)
 - **Account Settings → Read** (the plan, from the account's entitlements)
 
-The older read-only token (**Cloudflare usage** on the Settings page, or the `USAGE_API_TOKEN` Worker secret) still works until the Cloudflare API token is saved. The account comes from `CF_ACCOUNT_ID`, the Clean Image URLs account ID, or the token itself when it sees one account. A part the token can't read is left out with a note naming the permission; the rest still shows.
+The older read-only token (**Older: Cloudflare usage token** on the Settings page, or the `USAGE_API_TOKEN` Worker secret) still works until the Cloudflare API token is saved. The account comes from `CF_ACCOUNT_ID`, the Clean Image URLs account ID, or the token itself when it sees one account. A part the token can't read is left out with a note naming the permission; the rest still shows.
 
 ## Speculation Rules
 

@@ -10,7 +10,7 @@ import type { PluginContext } from "emdash";
 import { CloudflareApiError, type Fetch, cloudflareApi, contextFetch } from "../core/cloudflare-api.js";
 import { zoneCandidates } from "../discovery/crawler-hints.js";
 import { siteOrigin } from "../discovery/urls.js";
-import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, noAccountMessage, noTokenMessage } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, noAccountMessage, noTokenMessage, tokenName } from "../core/cloudflare-token.js";
 import { readCloudflareToken } from "../pageCache/usage.js";
 import { workerEnv } from "../shared.js";
 import { INSIGHTS_DEADLINES } from "./keys.js";
@@ -21,6 +21,8 @@ export interface CloudflareAccess {
 	/** The site's host (from EmDash's site URL). */
 	host: string;
 	env: Record<string, unknown>;
+	/** The token's name for messages: the one actually used (src/core/cloudflare-token.ts tokenName). */
+	name: string;
 }
 
 export interface Zone {
@@ -34,13 +36,14 @@ type Ctx = Pick<PluginContext, "settings" | "kv" | "site"> & { http?: PluginCont
 /** The token (and how to call), or why there's none. */
 export async function cloudflareAccess(ctx: Ctx, bindings?: Record<string, unknown>): Promise<CloudflareAccess | { setup: string }> {
 	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
-	const { token, unreadable } = await readCloudflareToken(ctx, env);
+	const resolved = await readCloudflareToken(ctx, env);
+	const { token, unreadable } = resolved;
 	if (!token) {
 		return {
 			setup: unreadable ? UNREADABLE_TOKEN_MESSAGE : `${noTokenMessage("Zone → Read and Analytics → Read (edge errors), and Account Analytics → Read (Core Web Vitals)")} The steps are below.`,
 		};
 	}
-	return { token, fetch: contextFetch(ctx), host: new URL(siteOrigin(ctx)).host.toLowerCase(), env };
+	return { token, fetch: contextFetch(ctx), host: new URL(siteOrigin(ctx)).host.toLowerCase(), env, name: tokenName(resolved) };
 }
 
 /** One call to Cloudflare's API with Insights' deadline. GraphQL calls return the whole body ({ data, errors }). */
@@ -52,6 +55,7 @@ export async function cfCall<T>(a: CloudflareAccess, path: string, options: { bo
 		body: options.body,
 		graphql: options.graphql,
 		permission: options.permission,
+		tokenName: a.name,
 		deadlineMs: INSIGHTS_DEADLINES.cloudflareMs,
 		label: "Cloudflare's API",
 	});
@@ -62,7 +66,7 @@ export async function cfCall<T>(a: CloudflareAccess, path: string, options: { bo
 export async function cfGraphql(a: CloudflareAccess, query: string, variables: Record<string, unknown>, permission: string): Promise<{ data: Record<string, unknown> | null; errors: string[] }> {
 	const body = await cfCall<{ data?: Record<string, unknown> | null; errors?: Array<{ message?: string }> | null }>(a, "/graphql", { body: { query, variables }, permission, graphql: true });
 	const errors = (Array.isArray(body?.errors) ? body.errors : []).map((e) => e?.message ?? "error").filter(Boolean);
-	if (!body?.data && errors.length) throw new Error(`Cloudflare analytics: ${errors.join("; ")}. The Cloudflare API token needs ${permission}.`);
+	if (!body?.data && errors.length) throw new Error(`Cloudflare analytics: ${errors.join("; ")}. The ${a.name ?? "Cloudflare API token"} needs ${permission}.`);
 	return { data: body?.data ?? null, errors };
 }
 
@@ -81,7 +85,7 @@ export async function findZone(ctx: Ctx, a: CloudflareAccess): Promise<Zone> {
 			return zone;
 		}
 	}
-	throw new Error(`The Cloudflare API token can't see a zone for ${a.host}. Add Zone → Zone → Read to it (for this site's domain, or all domains), or check that the zone is in the token's account.`);
+	throw new Error(`The ${a.name ?? "Cloudflare API token"} can't see a zone for ${a.host}. Add Zone → Zone → Read to it (for this site's domain, or all domains), or check that the zone is in the token's account.`);
 }
 
 /** Forget the remembered zone (it stopped working: deleted and added again, or moved). */

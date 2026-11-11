@@ -13,7 +13,7 @@ import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
 import { contextFetch } from "../core/cloudflare-api.js";
-import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, sharedTokenState } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, sharedTokenState, tokenName } from "../core/cloudflare-token.js";
 import { requireFeature } from "../core/features.js";
 import { afterResponse, parseInput, secret, workerEnv } from "../shared.js";
 import { CloudflareApiError, type CloudflareConfig, applySetup, checkMediaHost, planSetup, purgeHost } from "./cloudflare.js";
@@ -134,7 +134,8 @@ async function accountFor(ctx: PluginContext, e: Record<string, unknown>, token:
 /** Credentials for the setup: the request's, then the saved ones, then Worker variables. */
 async function credentials(ctx: PluginContext, input: z.infer<typeof setupInput>): Promise<CloudflareConfig & { bucket: string; host: string }> {
 	const e = await env();
-	const { token, unreadable } = await cloudflareToken(ctx, e, "images", { typed: input.token });
+	const resolved = await cloudflareToken(ctx, e, "images", { typed: input.token });
+	const { token, unreadable } = resolved;
 	const bucket = input.bucket || (await ctx.settings.get<string>(IMAGES_SETTINGS.bucket))?.trim() || "";
 	const host = input.host || imageCdn() || "";
 	if (!token && unreadable) throw PluginRouteError.badRequest(UNREADABLE_TOKEN_MESSAGE);
@@ -143,7 +144,7 @@ async function credentials(ctx: PluginContext, input: z.infer<typeof setupInput>
 	const accountId = await accountFor(ctx, e, token as string, input.accountId);
 	if (!accountId) throw PluginRouteError.badRequest(noAccountMessage("Advanced"));
 	const doFetch = ctx.http ? (ctx.http.fetch.bind(ctx.http) as CloudflareConfig["fetch"]) : undefined;
-	return { token: token as string, accountId, bucket, host, fetch: doFetch };
+	return { token: token as string, accountId, bucket, host, fetch: doFetch, tokenName: tokenName(resolved) };
 }
 
 /**
@@ -159,19 +160,20 @@ export async function mediaApiAccess(
 	if (!host) return { hostname: null, reason: "No media host is set (Clean Image URLs)." };
 	const hostname = new URL(host).hostname;
 	const e = await env();
-	const { token, unreadable } = await cloudflareToken(ctx, e, "images");
+	const resolved = await cloudflareToken(ctx, e, "images");
+	const { token, unreadable } = resolved;
 	if (!token) return { hostname, reason: unreadable ? UNREADABLE_TOKEN_MESSAGE : "Add the Cloudflare API token on the plugin's Settings page (or the CLOUDFLARE_API_TOKEN Worker secret)." };
 	const accountId = await accountFor(ctx, e, token);
 	if (!accountId) return { hostname, reason: noAccountMessage("Advanced on the Clean Image URLs page") };
 	const doFetch = ctx.http ? (ctx.http.fetch.bind(ctx.http) as CloudflareConfig["fetch"]) : undefined;
-	return { hostname, config: { token, accountId, fetch: doFetch } };
+	return { hostname, config: { token, accountId, fetch: doFetch, tokenName: tokenName(resolved) } };
 }
 
 /** Clear the media host's images from Cloudflare's zone cache. Says why when it can't, instead of throwing. */
 export async function purgeMediaHost(ctx: PluginContext): Promise<{ purged: boolean; host: string | null; message?: string }> {
 	const access = await mediaApiAccess(ctx);
 	if (!("config" in access)) {
-		return { purged: false, host: access.hostname, message: access.hostname ? `Images on ${access.hostname} weren't cleared. ${access.reason} The Cloudflare API token needs Cache Purge → Purge.` : access.reason };
+		return { purged: false, host: access.hostname, message: access.hostname ? `Images on ${access.hostname} weren't cleared. ${access.reason} It needs Cache Purge → Purge.` : access.reason };
 	}
 	try {
 		await purgeHost(access.config, access.hostname);

@@ -1,9 +1,9 @@
 /**
  * The Features page's Cloudflare API token card: whether the one token is
- * there, which older tokens are still saved, and removing them once it is
- * (cloudflare-token/status and cloudflare-token/clear-older,
- * src/core/cloudflare-token-routes.ts). Removing the File Downloads R2 key
- * pair is a separate box to tick.
+ * there, which older tokens are still saved, and removing them once it's
+ * saved on Settings (cloudflare-token/status and cloudflare-token/clear-older,
+ * src/core/cloudflare-token-routes.ts, which checks the token with Cloudflare
+ * first). Removing the File Downloads R2 key pair is a separate box to tick.
  */
 import { Banner, Button, Checkbox } from "@cloudflare/kumo";
 import * as React from "react";
@@ -19,8 +19,9 @@ interface TokenStatus {
 	unreadable: boolean;
 	env: boolean;
 	accountId: string | null;
-	older: Array<{ key: string; label: string }>;
+	older: Array<{ key: string; label: string; page: string }>;
 	r2KeyPair: boolean;
+	r2Page: string;
 	olderSecrets: string[];
 }
 
@@ -47,8 +48,8 @@ export function CloudflareTokenCard() {
 	if (error) return <Banner variant="error" role="alert" title="Cloudflare API token" description={error} />;
 	if (!status) return null;
 
-	const hasToken = status.saved || status.env;
-	const removable = hasToken && (status.older.length > 0 || status.r2KeyPair);
+	// Only the token saved on Settings replaces older tokens: the Worker secret ranks below them.
+	const removable = status.saved && (status.older.length > 0 || status.r2KeyPair);
 	const ask = () => {
 		setR2(status.older.length === 0);
 		setRemoveError(null);
@@ -68,6 +69,7 @@ export function CloudflareTokenCard() {
 			setPending(false);
 		}
 	};
+	const removing = [...status.older, ...(r2 && status.r2KeyPair ? [{ key: "r2", label: "File Downloads R2 key pair", page: status.r2Page }] : [])];
 
 	return (
 		<section className="space-y-3 rounded-lg border border-kumo-line p-4" aria-labelledby="cw-cloudflare-token">
@@ -79,7 +81,13 @@ export function CloudflareTokenCard() {
 					{status.saved ? (
 						<>Saved on the plugin's Settings page. Every Cloudflare feature uses it.</>
 					) : status.env ? (
-						<>From the CLOUDFLARE_API_TOKEN Worker secret. Features with an older token still saved use that one first.</>
+						<>
+							From the CLOUDFLARE_API_TOKEN Worker secret. Features with an older token still saved use that one first; save the token on the plugin's{" "}
+							<AdminLink to={SETTINGS_PAGE_PATH} className="text-kumo-link underline">
+								Settings page
+							</AdminLink>{" "}
+							to replace them.
+						</>
 					) : (
 						<>
 							Not set. One token covers every Cloudflare feature: add it on the plugin's{" "}
@@ -89,7 +97,7 @@ export function CloudflareTokenCard() {
 							.
 						</>
 					)}
-					{hasToken && status.accountId ? ` Account ${status.accountId}.` : ""}
+					{(status.saved || status.env) && status.accountId ? ` Account ${status.accountId}.` : ""}
 				</p>
 			</div>
 			{status.unreadable && (
@@ -101,7 +109,7 @@ export function CloudflareTokenCard() {
 			{status.older.length > 0 && (
 				<p className="text-sm">
 					{plural(status.older.length, "older token is", "older tokens are")} still saved: {status.older.map((o) => o.label).join(", ")}.{" "}
-					{hasToken ? "The Cloudflare API token replaces them." : "They're what the features use until the Cloudflare API token is saved."}
+					{status.saved ? "The Cloudflare API token replaces them." : "They're what the features use until the Cloudflare API token is saved on Settings."}
 				</p>
 			)}
 			{status.r2KeyPair && <p className="text-sm text-kumo-subtle">File Downloads has an R2 key pair saved. It wins over the token for large uploads.</p>}
@@ -121,15 +129,23 @@ export function CloudflareTokenCard() {
 				open={asking}
 				onClose={() => !pending && setAsking(false)}
 				title="Remove the older tokens?"
-				description="Every Cloudflare feature then uses the Cloudflare API token. This can't be undone here: to go back, paste the older tokens again. The tokens themselves stay in Cloudflare until you delete them there."
+				description="First open each page below and check it works with the Cloudflare API token. The pack then checks the token with Cloudflare before it removes anything. This can't be undone here: to go back, paste the older tokens again. The tokens themselves stay in Cloudflare until you delete them there."
 				confirmLabel="Remove"
-				pendingLabel="Removing…"
+				pendingLabel="Checking and removing…"
 				isPending={pending}
-				confirmDisabled={!status.older.length && !r2}
+				confirmDisabled={removing.length === 0}
 				error={removeError}
 				onConfirm={() => void remove()}
 			>
-				{status.older.length > 0 && <p className="text-sm">Removes: {status.older.map((o) => o.label).join(", ")}.</p>}
+				{removing.length > 0 && (
+					<ul className="space-y-1 text-sm" role="list">
+						{removing.map((o) => (
+							<li key={o.key}>
+								<strong className="font-medium">{o.label}</strong>, used by {o.page}
+							</li>
+						))}
+					</ul>
+				)}
 				{status.r2KeyPair && (
 					<Checkbox
 						label="Also remove the File Downloads R2 key pair (large uploads then use the Cloudflare API token)"

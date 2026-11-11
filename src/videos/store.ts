@@ -7,7 +7,7 @@ import { STORAGE_IN_LIMIT, deleteManyBatched, getManyBatched } from "../core/sto
 import type { PluginContext, StorageCollection } from "emdash";
 
 import { contextFetch } from "../core/cloudflare-api.js";
-import { cloudflareAccountId, cloudflareToken, sharedTokenState } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, noTokenMessage, sharedTokenState } from "../core/cloudflare-token.js";
 import { PLUGIN_ID, isCurrent, readSiteSetting, registerSiteSetting, settingsEpoch } from "../core/features.js";
 import { batchedAll } from "../core/d1-batch.js";
 import { peekRequestMemo, seedRequestMemo } from "../core/request-memo.js";
@@ -134,14 +134,20 @@ async function learnHost(ctx: Ctx, videos: StreamVideo[]): Promise<void> {
 /**
  * Stream's token and account: the Cloudflare API token (else the older Stream token, else CF_STREAM_TOKEN, else
  * CLOUDFLARE_API_TOKEN), and the account saved on the Videos page, else CF_ACCOUNT_ID, else the token's own.
- * Null until both are known. `bindings` replaces the Worker's env (tests).
+ * `reason` says what's missing until both are known (a saved token that can't be decrypted, no token, no
+ * account). `bindings` replaces the Worker's env (tests).
  */
-export async function credentials(ctx: Ctx, bindings?: Record<string, unknown>): Promise<StreamCredentials | null> {
+export async function streamAccess(ctx: Ctx, bindings?: Record<string, unknown>): Promise<{ credentials: StreamCredentials } | { credentials: null; reason: string }> {
 	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
-	const [accountId, { token }] = await Promise.all([ctx.settings.get<string>(SETTINGS.accountId), cloudflareToken(ctx, env, "stream")]);
-	if (!token) return null;
+	const [accountId, { token, unreadable }] = await Promise.all([ctx.settings.get<string>(SETTINGS.accountId), cloudflareToken(ctx, env, "stream")]);
+	if (!token) return { credentials: null, reason: unreadable ? UNREADABLE_TOKEN_MESSAGE : noTokenMessage("Stream → Edit") };
 	const a = await cloudflareAccountId(ctx, env, { token, fetch: contextFetch(ctx) }, accountId);
-	return a ? { accountId: a, token } : null;
+	return a ? { credentials: { accountId: a, token } } : { credentials: null, reason: noAccountMessage("Videos → Settings → Advanced") };
+}
+
+/** Stream's token and account, or null until both are known (streamAccess says why). */
+export async function credentials(ctx: Ctx, bindings?: Record<string, unknown>): Promise<StreamCredentials | null> {
+	return (await streamAccess(ctx, bindings)).credentials;
 }
 
 /** The saved settings for the Videos page's Settings tab (the token only as set / not set). */
@@ -242,7 +248,10 @@ export async function library(ctx: Ctx, force = false): Promise<LibraryVideo[]> 
 		}
 	}
 	const api = await client(ctx);
-	if (!api) throw new Error("Connect Cloudflare Stream first: add the Cloudflare API token on the plugin's Settings page (it needs Stream → Edit).");
+	if (!api) {
+		const access = await streamAccess(ctx);
+		throw new Error(`Connect Cloudflare Stream first. ${"reason" in access ? access.reason : ""}`.trim());
+	}
 	const videos = await api.list();
 	await learnHost(ctx, videos);
 	const items = videos.map(slim);

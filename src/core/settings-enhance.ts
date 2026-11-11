@@ -15,7 +15,10 @@
  * A secret is saved when EmDash shows its "Clear stored value" button: a
  * button[type=button] beside the field, rendered only for a set secret, so it
  * works in any admin language. A field once seen saved stays with the older
- * tokens after Clear is selected, so the change can still be undone.
+ * tokens after Clear is selected, so the change can still be undone; once
+ * that's saved (EmDash shows the field's "not set" placeholder, neither the
+ * saved nor the cleared one), it's hidden and the count goes down. Older and
+ * hidden fields get autocomplete="off", so password managers leave them be.
  *
  * Progressive enhancement: it never moves EmDash's (React's) nodes, only sets
  * `hidden` and attributes on them in place and adds its own nodes beside them.
@@ -71,9 +74,14 @@ export function settingsEnhanceScript(): string {
 
 function buildEnhanceScript(): string {
 	const data = settingsPageData();
-	return `(function(){var D=${scriptJson(data.guides)};var O=${scriptJson(data.older)};var H=${scriptJson(data.hidden)};var N=${scriptJson(OLDER_TOKENS_NOTE)};var P=${PAGE.toString()};var q=0;
-function cleared(w){for(var c=w.firstElementChild;c;c=c.nextElementSibling)if(c.tagName==="BUTTON"&&c.getAttribute("type")==="button")return true;return false;}
-function run(){q=0;if(!P.test(location.pathname))return;var f=document.getElementById("plugin-settings-form");if(!f)return;var older=[],first=null;
+	// Older fields carry: data-cw-older (seen saved), data-cw-ph-set (the placeholder while saved), data-cw-ph-cleared
+	// (the placeholder once Clear stored value was selected), data-cw-removed (saved since as cleared: a placeholder
+	// that's neither). Placeholders are compared, never read for words, so it works in any admin language.
+	return `(function(){var D=${scriptJson(data.guides)};var O=${scriptJson(data.older)};var H=${scriptJson(data.hidden)};var N=${scriptJson(OLDER_TOKENS_NOTE)};var P=${PAGE.toString()};var q=0,seq=0;
+function saved(w){for(var c=w.firstElementChild;c;c=c.nextElementSibling)if(c.tagName==="BUTTON"&&c.getAttribute("type")==="button")return true;return false;}
+function attr(e,n,v){if(e.getAttribute(n)!==v)e.setAttribute(n,v);}
+function run(){q=0;if(!P.test(location.pathname)){document.querySelectorAll("[data-cw-older-toggle]").forEach(function(g){g.hidden=true;});return;}
+var f=document.getElementById("plugin-settings-form");if(!f)return;var older=[],first=null;
 f.querySelectorAll("input[aria-labelledby]").forEach(function(i){var l=document.getElementById(i.getAttribute("aria-labelledby"));var t=l&&l.textContent.trim();if(!t)return;
 var h=D[t];if(h&&!i.getAttribute("data-cw-guide")){var d=document.getElementById(i.getAttribute("aria-describedby")||"");if(d&&d.parentNode){
 var b=document.createElement("div");b.className="col-span-full space-y-2";b.setAttribute("data-cw-guides","");b.innerHTML=h;
@@ -81,9 +89,13 @@ var p=b.querySelector("[data-cw-intro]");p.id=d.id+"-cw";d.hidden=true;d.parentN
 i.setAttribute("aria-describedby",p.id);i.setAttribute("data-cw-guide","1");}}
 var k=H.indexOf(t)>=0?"hidden":O.indexOf(t)>=0?"older":"";if(!k)return;
 var w=i.parentElement&&i.parentElement.parentElement;if(!w||w===f||w.querySelectorAll("input").length!==1)return;
+attr(i,"autocomplete","off");
 if(k==="hidden"){w.hidden=true;return;}
-if(!first)first=w;if(cleared(w))w.setAttribute("data-cw-older","");
-if(w.hasAttribute("data-cw-older"))older.push(w);else w.hidden=true;});
+if(!first)first=w;var ph=i.getAttribute("placeholder")||"";
+if(saved(w)){w.setAttribute("data-cw-older","");attr(w,"data-cw-ph-set",ph);w.removeAttribute("data-cw-ph-cleared");w.removeAttribute("data-cw-removed");}
+else if(w.hasAttribute("data-cw-older")&&!w.hasAttribute("data-cw-removed")){if(!w.hasAttribute("data-cw-ph-cleared"))w.setAttribute("data-cw-ph-cleared",ph);
+else if(ph!==w.getAttribute("data-cw-ph-cleared")&&ph!==w.getAttribute("data-cw-ph-set"))w.setAttribute("data-cw-removed","");}
+if(w.hasAttribute("data-cw-older")&&!w.hasAttribute("data-cw-removed")){if(!w.id)w.id="cw-older-"+(++seq);older.push(w);}else w.hidden=true;});
 var g=f.querySelector("[data-cw-older-toggle]");
 if(!older.length){if(g)g.hidden=true;return;}
 if(!g){g=document.createElement("div");g.className="space-y-1";g.setAttribute("data-cw-older-toggle","");
@@ -92,11 +104,12 @@ x.innerHTML='<span aria-hidden="true"></span><span></span>';
 x.addEventListener("click",function(){x.setAttribute("aria-expanded",x.getAttribute("aria-expanded")==="true"?"false":"true");run();});
 var n=document.createElement("p");n.className="text-sm text-kumo-subtle";n.textContent=N;g.appendChild(x);g.appendChild(n);first.parentNode.insertBefore(g,first);}
 g.hidden=false;var btn=g.querySelector("button");var open=btn.getAttribute("aria-expanded")==="true";
+attr(btn,"aria-controls",older.map(function(w){return w.id;}).join(" "));
 var arrow=open?"\\u25be":"\\u25b8",label="Older tokens ("+older.length+")";
 if(btn.firstChild.textContent!==arrow)btn.firstChild.textContent=arrow;if(btn.lastChild.textContent!==label)btn.lastChild.textContent=label;
 older.forEach(function(w){w.hidden=!open;});}
 function later(){if(!q)q=requestAnimationFrame(run);}
-new MutationObserver(later).observe(document.documentElement,{childList:true,subtree:true});later();})();`;
+new MutationObserver(later).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["placeholder"]});later();})();`;
 }
 
 /** Add the script to an admin HTML page. Returns the response unchanged when it isn't HTML. */

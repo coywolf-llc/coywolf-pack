@@ -17,7 +17,7 @@ import { type CrawlerHintsZone, crawlerHintsDashboardUrl, readCrawlerHints } fro
 import { buildFeed } from "./feed-build.js";
 import { FEED_PATH, FEED_TAG } from "./feed.js";
 import { purgePageCache } from "../pageCache/lib.js";
-import { UNREADABLE_TOKEN_MESSAGE } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, tokenName } from "../core/cloudflare-token.js";
 import { readCloudflareToken } from "../pageCache/usage.js";
 import { markdownUrl } from "./markdown.js";
 import { SECURITY_TXT_PATH, SECURITY_TXT_TAG, securityTxtProblems } from "./security-txt.js";
@@ -104,7 +104,8 @@ const ZONE_KEY = "state:discovery:crawlerHintsZone";
 async function crawlerHintsStatus(ctx: PluginContext) {
 	const host = new URL(siteOrigin(ctx)).host;
 	const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
-	const { token, unreadable } = await readCloudflareToken(ctx, env);
+	const read = await readCloudflareToken(ctx, env);
+	const { token, unreadable } = read;
 	if (!token && unreadable) {
 		return {
 			enabled: null,
@@ -121,12 +122,12 @@ async function crawlerHintsStatus(ctx: PluginContext) {
 	const stored = await ctx.kv.get<{ host: string; zone: CrawlerHintsZone }>(ZONE_KEY).catch(() => null);
 	const known = stored?.host === host ? stored.zone : null;
 	const doFetch = (ctx.http ? ctx.http.fetch.bind(ctx.http) : fetch) as (url: string, init?: RequestInit) => Promise<Response>;
-	let status = await readCrawlerHints(host, { token, fetch: doFetch, knownZone: known });
+	let status = await readCrawlerHints(host, { token, tokenName: tokenName(read), fetch: doFetch, knownZone: known });
 	// The remembered zone stopped working (the zone was deleted and added again, or moved to another account):
 	// forget it and look the zone up again, once.
 	if (known && status.enabled === null && status.problem?.kind !== "bad-token") {
 		await ctx.kv.delete(ZONE_KEY).catch(() => undefined);
-		status = await readCrawlerHints(host, { token, fetch: doFetch, knownZone: null });
+		status = await readCrawlerHints(host, { token, tokenName: tokenName(read), fetch: doFetch, knownZone: null });
 	}
 	// Keep the zone only when its setting could be read with it (a zone the token can't use is looked up again).
 	if (status.zone && status.enabled !== null && !(known && known.id === status.zone.id)) {

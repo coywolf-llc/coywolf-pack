@@ -96,8 +96,8 @@ const describe = (error: unknown) => (error instanceof Error ? error.message : S
 const badToken = (error: unknown) =>
 	error instanceof CloudflareApiError && (error.codes.some((c) => c === 6111 || c === 1000) || /invalid (access|api) token|authorization header/i.test(error.message));
 
-const badTokenMessage = (error: unknown) =>
-	`Cloudflare doesn't accept the API token (${describe(error)}): it may be mistyped, deleted or expired. Check ${TOKEN_HOME}, or the older Cloudflare usage token if that's the one in use.`;
+const badTokenMessage = (error: unknown, name: string) =>
+	`Cloudflare doesn't accept the ${name} (${describe(error)}): it may be mistyped, deleted or expired. Check it${name === "Cloudflare API token" ? ` (${TOKEN_HOME})` : ""}.`;
 
 /** Cloudflare's answer for a token that may not do this (HTTP 401/403, or its authentication and permission codes). */
 const refused = (error: unknown) =>
@@ -106,6 +106,8 @@ const refused = (error: unknown) =>
 export interface CrawlerHintsDeps {
 	/** The Cloudflare API token (src/core/cloudflare-token.ts, feature "read"), or null. */
 	token: string | null;
+	/** The token's name for messages: the one actually used (tokenName). Default "Cloudflare API token". */
+	tokenName?: string;
 	fetch: Fetch;
 	/** The zone found before for this host, so it isn't looked up again. */
 	knownZone?: CrawlerHintsZone | null;
@@ -126,6 +128,7 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 		};
 	}
 	const token = deps.token;
+	const name = deps.tokenName ?? "Cloudflare API token";
 
 	let zone = deps.knownZone && zoneCandidates(host).includes(deps.knownZone.name) ? deps.knownZone : null;
 	if (!zone) {
@@ -139,9 +142,9 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 				}
 			}
 		} catch (error) {
-			if (badToken(error)) return { ...base, problem: { kind: "bad-token", message: badTokenMessage(error) } };
+			if (badToken(error)) return { ...base, problem: { kind: "bad-token", message: badTokenMessage(error, name) } };
 			return refused(error)
-				? { ...base, problem: { kind: "no-zone", message: `The Cloudflare API token can't list zones (${describe(error)}). Add Zone → Read to it, for this site's domain.` } }
+				? { ...base, problem: { kind: "no-zone", message: `The ${name} can't list zones (${describe(error)}). Add Zone → Read to it, for this site's domain.` } }
 				: { ...base, problem: { kind: "error", message: `Couldn't reach Cloudflare's API: ${describe(error)}` } };
 		}
 	}
@@ -150,7 +153,7 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 			...base,
 			problem: {
 				kind: "no-zone",
-				message: `The Cloudflare API token can't see a zone for ${host}. Add Zone → Read to it, for this site's domain (or all domains). If it already has that, the zone is in a different Cloudflare account than the token.`,
+				message: `The ${name} can't see a zone for ${host}. Add Zone → Read to it, for this site's domain (or all domains). If it already has that, the zone is in a different Cloudflare account than the token.`,
 			},
 		};
 	}
@@ -164,13 +167,13 @@ export async function readCrawlerHints(host: string, deps: CrawlerHintsDeps): Pr
 		}
 		return { ...withZone, enabled: value };
 	} catch (error) {
-		if (badToken(error)) return { ...withZone, problem: { kind: "bad-token", message: badTokenMessage(error) } };
+		if (badToken(error)) return { ...withZone, problem: { kind: "bad-token", message: badTokenMessage(error, name) } };
 		return refused(error)
 			? {
 					...withZone,
 					problem: {
 						kind: "no-access",
-						message: `The Cloudflare API token sees ${zone.name}, but Cloudflare didn't show it the Crawler Hints setting (${describe(error)}). Check it in the Cloudflare dashboard.`,
+						message: `The ${name} sees ${zone.name}, but Cloudflare didn't show it the Crawler Hints setting (${describe(error)}). Check it in the Cloudflare dashboard.`,
 					},
 				}
 			: { ...withZone, problem: { kind: "error", message: `Couldn't read Crawler Hints from Cloudflare: ${describe(error)}` } };

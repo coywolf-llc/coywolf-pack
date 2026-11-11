@@ -68,9 +68,10 @@ import {
 	refreshDownload,
 	refreshVideo,
 	statsStore,
+	streamAccess,
 } from "./store.js";
 import { FONT_WEIGHTS, normalizeDisplay } from "./render.js";
-import { StreamError } from "./stream.js";
+import { StreamError, streamClient } from "./stream.js";
 import { readOnlyRoute } from "../core/routes.js";
 
 export interface VideosOptions {
@@ -168,9 +169,9 @@ async function stream<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function requireClient(ctx: Ctx) {
-	const api = await client(ctx);
-	if (!api) throw PluginRouteError.badRequest("Add the Cloudflare API token on the plugin's Settings page first (it needs Stream → Edit). If it sees more than one account, enter the account ID on the Videos page → Settings → Advanced.");
-	return api;
+	const access = await streamAccess(ctx);
+	if (!access.credentials) throw PluginRouteError.badRequest(access.reason);
+	return streamClient(access.credentials);
 }
 
 // ── Embed index ──────────────────────────────────────────────────
@@ -611,9 +612,11 @@ export function videosModule(options: VideosOptions) {
 			permission: "media:upload" as const,
 			handler: async (ctx: Ctx) => {
 				await requireFeature(ctx, F.main);
-				const [api, features, cfg, webhookSecret] = await Promise.all([client(ctx), ctxFeatures(ctx), publicConfig(ctx), ctx.settings.get<string>(SETTINGS.webhookSecret)]);
+				const [access, features, cfg, webhookSecret] = await Promise.all([streamAccess(ctx), ctxFeatures(ctx), publicConfig(ctx), ctx.settings.get<string>(SETTINGS.webhookSecret)]);
 				return {
-					configured: api !== null,
+					configured: access.credentials !== null,
+					/** Why Stream isn't connected (a saved token that can't be decrypted, no token, no account). */
+					reason: "reason" in access ? access.reason : null,
 					host: cfg.host,
 					features: Object.fromEntries(Object.entries(F).map(([k, id]) => [k, isOn(features, id)])),
 					webhook: { subscribed: Boolean(webhookSecret), url: ctx.url("/_emdash/api/plugins/coywolf-pack/videos/webhook") },

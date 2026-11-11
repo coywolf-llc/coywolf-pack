@@ -46,7 +46,7 @@ export async function vitalsReport(ctx: Ctx, refresh = false, bindings?: Record<
 			const sites = parseSites(await cfCall<unknown>(a, `/accounts/${encodeURIComponent(accountId)}/rum/site_info/list?per_page=100`, { permission: "Account → Account Settings → Read" }));
 			site = matchSite(sites, { token, host: a.host, zoneNames: zone ? [zone.name] : zoneCandidates(a.host) });
 		} catch (error) {
-			notes.push(`Couldn't list the account's Web Analytics sites (the Cloudflare API token needs Account → Account Settings → Read): ${messageOf(error)}`);
+			notes.push(`Couldn't list the account's Web Analytics sites (the ${a.name ?? "Cloudflare API token"} needs Account → Account Settings → Read): ${messageOf(error)}`);
 		}
 		const siteTag = site?.tag ?? token;
 		if (!siteTag) {

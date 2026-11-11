@@ -10,7 +10,7 @@ import { type PluginContext, PluginRouteError, definePluginRoute } from "emdash"
 import { z } from "zod";
 
 import { CLOUDFLARE_API_HOST, CloudflareApiError, contextFetch } from "../core/cloudflare-api.js";
-import { UNREADABLE_TOKEN_MESSAGE, cloudflareToken, noTokenMessage, sharedTokenState } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareToken, noTokenMessage, sharedTokenState, tokenName } from "../core/cloudflare-token.js";
 import { ctxFeatures, isOn, registerFeatures, requireFeature } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
 import { readOnlyRoute } from "../core/routes.js";
@@ -70,13 +70,15 @@ export function cloudflarePack(): PackModule {
 					await requireFeature(ctx, CHECKUP_FEATURE);
 					const host = siteHost(ctx);
 					const env: Record<string, unknown> = await workerEnv().catch(() => ({}));
-					const { token, unreadable } = await readCloudflareToken(ctx, env);
+					const read = await readCloudflareToken(ctx, env);
+					const { token, unreadable } = read;
 					const features = await ctxFeatures(ctx);
 					const known = await storedZone(ctx, host);
 					// What the Worker wrapper last recorded (src/worker.ts): whether it could call itself, and the cache status.
 					const trackingState = await ctx.kv.get<TrackingState>(TRACKING_STATE_KEY).catch(() => null);
 					const deps = {
 						token,
+						tokenName: tokenName(read),
 						fetch: contextFetch(ctx),
 						trackingWrapper: trackingWrapperInstalled() !== null,
 						trackingState: trackingState && typeof trackingState === "object" ? trackingState : null,
@@ -117,14 +119,15 @@ export function cloudflarePack(): PackModule {
 						const input = parseInput(z.object({ fix: z.string().refine(isFixId, "Unknown fix."), token: z.string().max(400).optional() }), ctx.input);
 						const fix = input.fix as FixId;
 						const env: Record<string, unknown> = await workerEnv().catch(() => ({}));
-						const { token, unreadable } = await cloudflareToken(ctx, env, "checkupFix", { typed: input.token });
+						const resolved = await cloudflareToken(ctx, env, "checkupFix", { typed: input.token });
+						const { token, unreadable } = resolved;
 						if (!token) throw PluginRouteError.badRequest(unreadable ? UNREADABLE_TOKEN_MESSAGE : noTokenMessage("Zone → Read and Zone Settings → Edit, for this site's domain"));
 						const host = siteHost(ctx);
 						const doFetch = contextFetch(ctx);
 						try {
 							const zone = (await storedZone(ctx, host)) ?? (await findZone(host, { token, fetch: doFetch }));
-							if (!zone) throw PluginRouteError.badRequest(`The Cloudflare API token can't see a zone for ${host}. Add Zone → Read to it, for this site's domain.`);
-							const result = await applyFix(fix, zone, { token, fetch: doFetch });
+							if (!zone) throw PluginRouteError.badRequest(`The ${tokenName(resolved)} can't see a zone for ${host}. Add Zone → Read to it, for this site's domain.`);
+							const result = await applyFix(fix, zone, { token, fetch: doFetch, tokenName: tokenName(resolved) });
 							ctx.log.info("Cloudflare Checkup: fix", { fix, zone: result.zone, setting: result.setting, changed: result.changed, before: String(result.before), after: String(result.after) });
 							return result;
 						} catch (error) {

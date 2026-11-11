@@ -13,6 +13,8 @@ export interface CloudflareConfig {
 	token: string;
 	accountId: string;
 	fetch?: Fetch;
+	/** The token's name for messages: the one actually used (src/core/cloudflare-token.ts tokenName). Default "Cloudflare API token". */
+	tokenName?: string;
 }
 
 /** What each step of the setup needs, for error messages when the token lacks it. */
@@ -33,7 +35,7 @@ function cf<T>(config: CloudflareConfig, path: string, init: { method?: string; 
 		fetch: config.fetch,
 		method: init.method ?? "GET",
 		body: init.body,
-		...(step ? { permission: PERMISSION_HINT[step] } : {}),
+		...(step ? { permission: PERMISSION_HINT[step], tokenName: config.tokenName } : {}),
 	});
 }
 
@@ -130,7 +132,7 @@ export async function findZone(config: CloudflareConfig, hostname: string): Prom
 		if (zone) return { id: zone.id, name: zone.name, plan: zone.plan?.name };
 	}
 	throw new CloudflareApiError(
-		`No zone for ${hostname} in this Cloudflare account. Add the site's domain to the account, or check the account ID. The Cloudflare API token needs ${PERMISSION_HINT.zone}.`,
+		`No zone for ${hostname} in this Cloudflare account. Add the site's domain to the account, or check the account ID. The ${config.tokenName ?? "Cloudflare API token"} needs ${PERMISSION_HINT.zone}.`,
 		404,
 	);
 }

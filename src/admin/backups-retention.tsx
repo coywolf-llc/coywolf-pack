@@ -126,7 +126,8 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 	const lockInSync = (status?.lockDays ?? null) === (lock ? props.retentionDays : null);
 	const showForm = open || !state;
 	const stoppedWarning = backupsStoppedWarning(info.newestBackup, props.retentionDays, Boolean(state && AGING_PREFIXES.every((p) => state.status.byPrefix[p] != null)));
-	const shared = Boolean(info.sharedToken);
+	// The Cloudflare API token from Settings, or its Worker secret: either way the account comes from the token.
+	const shared = Boolean(info.sharedToken || info.sharedTokenEnv);
 	const hasToken = Boolean(shared || draft.token.trim() || info.tokenSaved || info.envToken);
 	// With the Cloudflare API token, the account is found from the token (the check says so when it can't be).
 	const ready = Boolean((shared || draft.accountId.trim() || info.envAccountId) && (draft.bucket.trim() || info.bucket) && hasToken);
@@ -239,6 +240,25 @@ export function RetentionCard(props: { retentionDays: number; onChanged?: () => 
 								onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft((d) => ({ ...d, accountId: e.target.value }))}
 							/>
 						</div>
+						{info.sharedTokenEnv && (
+							<>
+								<SecretField
+									label="Cloudflare API token"
+									saved={info.tokenSaved}
+									value={draft.token}
+									disabled={busy}
+									description="Only to use another token than the Worker secret (it needs Workers R2 Storage → Edit): typed here, it's used for this check; remembered, it wins over the Worker secret."
+									onChange={(token) => setDraft((d) => ({ ...d, token }))}
+								/>
+								{draft.token.trim() && (
+									<Checkbox
+										label="Remember the token (stored encrypted), so the site can look at the rule each day"
+										checked={draft.saveToken}
+										onCheckedChange={(checked: boolean) => setDraft((d) => ({ ...d, saveToken: checked }))}
+									/>
+								)}
+							</>
+						)}
 					</SharedTokenNote>
 					<CredentialGuide id="backups-token" />
 					<CredentialGuide id="backups-retention" />

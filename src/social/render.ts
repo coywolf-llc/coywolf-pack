@@ -14,7 +14,7 @@
 import type { PluginContext } from "emdash";
 
 import { CLOUDFLARE_API, type Fetch, contextFetch, scrubToken } from "../core/cloudflare-api.js";
-import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, noTokenMessage, sharedTokenState } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, noTokenMessage, sharedTokenState, tokenName } from "../core/cloudflare-token.js";
 import { siteName as readSiteName } from "../core/site.js";
 import { withDeadline } from "../core/single-flight.js";
 import { workerEnv } from "../shared.js";
@@ -83,7 +83,7 @@ interface BrowserBinding {
 }
 
 /** How this site reaches Browser Run, or why it can't. */
-export type Renderer = { kind: "binding"; browser: BrowserBinding } | { kind: "api"; token: string; accountId: string; fetch: Fetch } | { kind: "none"; reason: string };
+export type Renderer = { kind: "binding"; browser: BrowserBinding } | { kind: "api"; token: string; accountId: string; fetch: Fetch; tokenName?: string } | { kind: "none"; reason: string };
 
 /**
  * The token (src/core/cloudflare-token.ts): the Cloudflare API token, else the older Social Images token or the
@@ -103,12 +103,13 @@ export async function renderer(ctx: PluginContext, settings: SocialSettings, bin
 	const env = bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>));
 	const browser = env.BROWSER as Partial<BrowserBinding> | undefined;
 	if (browser && typeof browser.quickAction === "function") return { kind: "binding", browser: browser as BrowserBinding };
-	const { token: apiToken, unreadable } = await cloudflareToken(ctx, env, "browserRun");
+	const resolved = await cloudflareToken(ctx, env, "browserRun");
+	const { token: apiToken, unreadable } = resolved;
 	if (!apiToken) return { kind: "none", reason: unreadable ? UNREADABLE_TOKEN_MESSAGE : `${noTokenMessage("Browser Run → Edit")} Or add a BROWSER binding to the site's Worker.` };
 	const doFetch = contextFetch(ctx);
 	const account = await cloudflareAccountId(ctx, env, { token: apiToken, fetch: doFetch }, settings.accountId);
 	if (!account) return { kind: "none", reason: noAccountMessage("Advanced") };
-	return { kind: "api", token: apiToken, accountId: account, fetch: doFetch };
+	return { kind: "api", token: apiToken, accountId: account, fetch: doFetch, tokenName: tokenName(resolved) };
 }
 
 const SCREENSHOT = {
@@ -118,7 +119,7 @@ const SCREENSHOT = {
 };
 
 /** Read a screenshot answer: the PNG, or an error with Browser Run's message. */
-async function pngFrom(response: Response, apiToken?: string): Promise<Uint8Array> {
+async function pngFrom(response: Response, apiToken?: string, name = "Cloudflare API token"): Promise<Uint8Array> {
 	const type = response.headers.get("content-type") ?? "";
 	if (response.ok && type.startsWith("image/")) {
 		const bytes = new Uint8Array(await response.arrayBuffer());
@@ -128,7 +129,7 @@ async function pngFrom(response: Response, apiToken?: string): Promise<Uint8Arra
 	}
 	const body = (await response.json().catch(() => null)) as { errors?: Array<{ message?: string }> } | null;
 	const detail = body?.errors?.map((e) => e.message).filter(Boolean).join("; ") || response.statusText || "error";
-	const hint = response.status === 401 || response.status === 403 ? " The Cloudflare API token needs Browser Run → Edit." : response.status === 429 ? " Browser Run's limit for now is reached; the rest wait for the next run." : "";
+	const hint = response.status === 401 || response.status === 403 ? ` The ${name} needs Browser Run → Edit.` : response.status === 429 ? " Browser Run's limit for now is reached; the rest wait for the next run." : "";
 	throw new RenderError(scrubToken(`Browser Run ${response.status}: ${detail}.${hint}`, apiToken), response.status, response.status === 429 ? retryAfterMs(response.headers.get("retry-after")) : null);
 }
 
@@ -168,7 +169,7 @@ export async function screenshot(r: Exclude<Renderer, { kind: "none" }>, html: s
 				let response = await call("browser-run");
 				// Accounts (or API versions) that only know the old name.
 				if (response.status === 404) response = await call("browser-rendering");
-				return pngFrom(response, r.token);
+				return pngFrom(response, r.token, r.tokenName);
 			})(),
 			RENDER_MS,
 			"Browser Run's screenshot",

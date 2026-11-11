@@ -77,6 +77,8 @@ type Filter = "all" | "plays" | "likes" | "used" | "unused";
 
 interface Status {
 	configured: boolean;
+	/** Why Stream isn't connected yet. */
+	reason?: string | null;
 	host: string | null;
 	features: Record<string, boolean>;
 	webhook: { subscribed: boolean; url: string };
@@ -94,7 +96,7 @@ interface VideosSettings {
 	defaultTags: string;
 	envAccountId: boolean;
 	envToken: boolean;
-	/** The Cloudflare API token is the one in use (saved on Settings, or `sharedTokenEnv`: the Worker secret). */
+	/** `sharedToken`: the Cloudflare API token saved on Settings is the one in use. `sharedTokenEnv`: the CLOUDFLARE_API_TOKEN Worker secret is (a token saved here would win). */
 	sharedToken?: boolean;
 	sharedTokenEnv?: boolean;
 }
@@ -630,11 +632,24 @@ function ConnectForm(props: { onConnected: () => void }) {
 				void save();
 			}}
 		>
-			{settings?.sharedToken ? (
+			{settings?.sharedToken || settings?.sharedTokenEnv ? (
 				<>
+					<SharedTokenNote env={settings.sharedTokenEnv}>
+						{settings.sharedTokenEnv && (
+							<div className="sm:max-w-md">
+								<SecretField
+									label="Stream API token"
+									saved={settings.tokenSet}
+									value={token}
+									onChange={setToken}
+									description="Only to use another token than the Worker secret: one saved here wins over it. Stored encrypted."
+									disabled={pending}
+								/>
+							</div>
+						)}
+					</SharedTokenNote>
 					<p className="text-sm text-kumo-subtle">
-						The Cloudflare API token is there, but the pack couldn't tell which account to use: it sees more than one. Enter the account that holds your
-						Stream library.
+						The pack couldn't tell which account to use: the token sees more than one. Enter the account that holds your Stream library.
 					</p>
 					<div className="sm:max-w-md">
 						<Input
@@ -750,19 +765,31 @@ function SettingsPanel(props: { onSaved: () => void }) {
 					id="videos-connection"
 					title="Cloudflare Stream connection"
 					description={
-						saved.sharedToken
+						saved.sharedToken || saved.sharedTokenEnv
 							? "The account that holds your Stream library, reached with the Cloudflare API token (Stream → Edit)."
 							: "The account that holds your Stream library and an API token with Account → Stream → Edit. Empty fields fall back to the CF_ACCOUNT_ID and CF_STREAM_TOKEN Worker variables."
 					}
 				>
-					{saved.sharedToken ? (
+					{saved.sharedToken || saved.sharedTokenEnv ? (
 						<SharedTokenNote env={saved.sharedTokenEnv}>
-							<div className="sm:max-w-md">
+							<div className="grid gap-4 sm:grid-cols-2">
 								<Input
 									label="Cloudflare account ID"
 									description="Only if the token sees more than one account. Empty uses CF_ACCOUNT_ID, or the token's own account."
 									{...text("accountId")}
 								/>
+								{saved.sharedTokenEnv && (
+									<SecretField
+										label="Stream API token"
+										saved={saved.tokenSet}
+										value={draft.token}
+										onChange={(value) => set({ token: value })}
+										description="Only to use another token than the Worker secret: one saved here wins over it. Stored encrypted."
+										onClear={() => void save(true)}
+										clearing={pending === "clear"}
+										disabled={Boolean(pending)}
+									/>
+								)}
 							</div>
 						</SharedTokenNote>
 					) : (
@@ -1043,9 +1070,10 @@ export function VideosPage() {
 
 			{tab === "library" && status && !status.configured && (
 				<SetupCard
-					title="Add a Stream API token to manage videos"
-					description="Connect your Cloudflare Stream account to see the library, upload videos, manage captions and subscribe to the Stream webhook. Or set the CF_ACCOUNT_ID and CF_STREAM_TOKEN Worker variables and reload this page."
+					title="Connect Cloudflare Stream to manage videos"
+					description="Videos uses the Cloudflare API token from the plugin's Settings page (it needs Stream → Edit) to show the library, upload videos, manage captions and subscribe to the Stream webhook."
 				>
+					{status.reason && <Banner variant="default" description={status.reason} />}
 					<ConnectForm
 						onConnected={() => {
 							setNotice("Connected to Cloudflare Stream.");

@@ -16,7 +16,7 @@
 import type { PluginContext } from "emdash";
 
 import { CLOUDFLARE_API_HOST, CloudflareApiError, cloudflareApi, contextFetch, errorDetail } from "../core/cloudflare-api.js";
-import { cloudflareToken, noTokenMessage } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareToken, noTokenMessage, tokenName } from "../core/cloudflare-token.js";
 import { workerEnv } from "../shared.js";
 import { type BotOverlay, type RadarBot, mergeRadar } from "./bots.js";
 import { baselineBots } from "./directory.js";
@@ -52,9 +52,17 @@ async function radarResolved(ctx: Pick<PluginContext, "settings">, bindings?: Re
 	return cloudflareToken(ctx, bindings ?? (await workerEnv().catch(() => ({}) as Record<string, unknown>)), "radar");
 }
 
+const sourceOf = (source: string | null): RadarTokenSource | null =>
+	source === "shared" || source === "shared-env" ? source : source === "older" ? "settings" : source === "older-env" ? "env" : null;
+
 export async function radarTokenSource(ctx: Pick<PluginContext, "settings">, bindings?: Record<string, unknown>): Promise<RadarTokenSource | null> {
-	const { source } = await radarResolved(ctx, bindings);
-	return source === "shared" || source === "shared-env" ? source : source === "older" ? "settings" : source === "older-env" ? "env" : null;
+	return sourceOf((await radarResolved(ctx, bindings)).source);
+}
+
+/** Where the token comes from, and whether a saved one can't be decrypted (with none to use instead), for the Bots tab. */
+export async function radarTokenStatus(ctx: Pick<PluginContext, "settings">, bindings?: Record<string, unknown>): Promise<{ tokenSource: RadarTokenSource | null; tokenUnreadable: boolean }> {
+	const resolved = await radarResolved(ctx, bindings);
+	return { tokenSource: sourceOf(resolved.source), tokenUnreadable: resolved.unreadable && !resolved.token };
 }
 
 /** The token the Radar sync uses (`bindings` replaces the Worker's env in tests). */
@@ -77,7 +85,7 @@ export async function readOverlays(ctx: PluginContext): Promise<BotOverlay[]> {
 	return out;
 }
 
-async function fetchRadar(ctx: PluginContext, token: string): Promise<RadarBot[]> {
+async function fetchRadar(ctx: PluginContext, token: string, name: string): Promise<RadarBot[]> {
 	const doFetch = contextFetch(ctx);
 	const bots: RadarBot[] = [];
 	for (let page = 0; page < MAX_PAGES; page++) {
@@ -87,7 +95,7 @@ async function fetchRadar(ctx: PluginContext, token: string): Promise<RadarBot[]
 		} catch (error) {
 			if (!(error instanceof CloudflareApiError)) throw error;
 			if (error.status === 401 || error.status === 403) {
-				throw new Error(`Cloudflare refused the token (${error.status}). The Cloudflare API token needs Radar → Read.`);
+				throw new Error(`Cloudflare refused the token (${error.status}). The ${name} needs Radar → Read.`);
 			}
 			const detail = errorDetail(error.errors);
 			throw new Error(`Radar API error ${error.status}${detail ? `: ${detail}` : ""}`);
@@ -99,17 +107,18 @@ async function fetchRadar(ctx: PluginContext, token: string): Promise<RadarBot[]
 	return bots;
 }
 
-/** Fetch Radar, merge into the stored overlay, and record the outcome. Throws on failure (after recording it). */
-export async function syncRadar(ctx: PluginContext): Promise<SyncState> {
+/** Fetch Radar, merge into the stored overlay, and record the outcome. Throws on failure (after recording it). `bindings` replaces the Worker's env (tests). */
+export async function syncRadar(ctx: PluginContext, bindings?: Record<string, unknown>): Promise<SyncState> {
 	const at = new Date().toISOString();
-	const token = await radarToken(ctx);
+	const resolved = await radarResolved(ctx, bindings);
+	const token = resolved.token;
 	if (!token) {
-		const state: SyncState = { at, ok: false, error: noTokenMessage("Radar → Read") };
+		const state: SyncState = { at, ok: false, error: resolved.unreadable ? UNREADABLE_TOKEN_MESSAGE : noTokenMessage("Radar → Read") };
 		await ctx.kv.set(SYNC_STATE_KEY, state);
 		return state;
 	}
 	try {
-		const radar = await fetchRadar(ctx, token);
+		const radar = await fetchRadar(ctx, token, tokenName(resolved));
 		if (radar.length < 100) throw new Error(`Radar returned only ${radar.length} bots; keeping the current directory.`);
 		const result = mergeRadar(await baselineBots(), await readOverlays(ctx), radar, at.slice(0, 10));
 		const collection = ctx.storage[OVERLAY_COLLECTION];

@@ -186,6 +186,21 @@ test("a Worker that isn't found is remembered for this version, not searched for
 	assert.equal(api.calls.filter((c) => c.path.endsWith("/deployments")).length, scans);
 });
 
+test("the remembered Worker and database are still used while Cloudflare can't be asked for the account", async () => {
+	const ok1 = fakeApi();
+	const ctx = { ...fakeCtx({ usageApiToken: "tok" }), http: { fetch: ok1.fetch } };
+	assert.equal((await usageReport(ctx, false, { CF_VERSION_METADATA: { id: "v-123" } })).configured, true);
+	// A new reading, with the account lookup forgotten and Cloudflare answering 500 for it.
+	ctx.kvMap.delete("cache:usage");
+	ctx.kvMap.delete("state:cloudflare:account");
+	const down = fakeApi({ "/accounts?per_page=5": () => new Response(JSON.stringify({ success: false, errors: [{ message: "Internal error" }] }), { status: 500 }) });
+	ctx.http = { fetch: down.fetch };
+	const r = await usageReport(ctx, false, { CF_VERSION_METADATA: { id: "v-123" } });
+	assert.equal(r.configured, true);
+	assert.equal(r.worker, "coywolf");
+	assert.ok(!down.calls.some((c) => c.path === "/accounts?per_page=5"), "the remembered target's account is used without asking");
+});
+
 test("the Cloudflare API token wins over the older usage token; the older one, and its Worker secret, still work alone", async () => {
 	const read = async (settings, env) => {
 		const api = fakeApi();

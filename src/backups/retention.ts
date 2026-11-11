@@ -176,11 +176,13 @@ export interface RetentionAccess {
 	accountId: string;
 	bucket: string;
 	fetch?: CloudflareCall["fetch"];
+	/** The token's name for messages: the one actually used (src/core/cloudflare-token.ts tokenName). */
+	tokenName?: string;
 }
 
 const PERMISSION = "Account → Workers R2 Storage → Edit";
 const bucketPath = (access: RetentionAccess) => `/accounts/${encodeURIComponent(access.accountId)}/r2/buckets/${encodeURIComponent(access.bucket)}`;
-const call = (access: RetentionAccess, label: string, extra: Partial<CloudflareCall> = {}): CloudflareCall => ({ token: access.token, fetch: access.fetch, permission: PERMISSION, label, ...extra });
+const call = (access: RetentionAccess, label: string, extra: Partial<CloudflareCall> = {}): CloudflareCall => ({ token: access.token, fetch: access.fetch, permission: PERMISSION, tokenName: access.tokenName, label, ...extra });
 
 export async function getLifecycle(access: RetentionAccess): Promise<LifecycleRule[]> {
 	const { result } = await cloudflareApi<{ rules?: LifecycleRule[] } | null>(`${bucketPath(access)}/lifecycle`, call(access, "R2 lifecycle rules"));

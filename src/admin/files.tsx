@@ -54,6 +54,8 @@ interface ListResponse {
 	countsEnabled: boolean;
 	largeUploadsEnabled: boolean;
 	r2Configured: boolean;
+	/** What stands in the way (a saved token or key that can't be decrypted). */
+	r2Problem?: string | null;
 }
 
 interface FilesSettings {
@@ -376,7 +378,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 					description={
 						<>
 							Files over 50 MB, or of any type, upload straight from the browser to R2 through its S3 API.{" "}
-							{saved.sharedToken
+							{saved.sharedToken || saved.sharedTokenEnv
 								? "The keys are made from the Cloudflare API token (Workers R2 Storage → Edit)."
 								: "Add the Cloudflare API token on the plugin's Settings page, or an R2 API token with Object Read & Write on the bucket."}{" "}
 							R2 storage and operations are billed to your account.
@@ -396,7 +398,7 @@ function SettingsPanel(props: { largeUploadsEnabled: boolean; onSaved: () => voi
 							onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ filesMaxUploadGb: e.target.value })}
 						/>
 					</div>
-					{saved.sharedToken ? (
+					{saved.sharedToken || saved.sharedTokenEnv ? (
 						<SharedTokenNote env={saved.sharedTokenEnv}>
 							<p className="text-sm text-kumo-subtle">A key pair for one bucket wins over the token: fill in all three to use it.</p>
 							{r2KeyFields()}
@@ -639,6 +641,7 @@ export function FilesPage() {
 					title="Set up large uploads"
 					description="Large uploads go straight from the browser to your R2 bucket. They need the bucket name (Settings tab), and the Cloudflare API token from the plugin's Settings page or an R2 key pair."
 				>
+					{data.r2Problem && <Banner variant="error" description={data.r2Problem} />}
 					<CredentialGuide id="files-token" />
 					<Button variant="secondary" onClick={() => setTab("settings")}>
 						Open Settings

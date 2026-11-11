@@ -14,7 +14,7 @@
 import type { PluginContext } from "emdash";
 
 import { cloudflareApi, contextFetch } from "../core/cloudflare-api.js";
-import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, noTokenMessage } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, noTokenMessage, tokenName } from "../core/cloudflare-token.js";
 import { DEADLINES, sharedRead, sharedSlot } from "../core/single-flight.js";
 import { afterResponse, workerEnv } from "../shared.js";
 import { versionId } from "./lib.js";
@@ -93,10 +93,17 @@ export async function readCloudflareToken(ctx: Pick<PluginContext, "settings">, 
 /** What the usage card needs of the token, for the message when there's none. */
 const USAGE_NEEDS = "Account Analytics → Read, Account Settings → Read and Workers → Metadata Read-Only";
 
-async function access(ctx: PluginContext, env: Record<string, unknown>): Promise<{ token: string; doFetch: Fetch } | { reason: string }> {
-	const { token, unreadable } = await readCloudflareToken(ctx, env);
-	if (!token) return { reason: unreadable ? UNREADABLE_TOKEN_MESSAGE : `${noTokenMessage(USAGE_NEEDS)} The steps are below.` };
-	return { token, doFetch: contextFetch(ctx) as Fetch };
+/** The token, how to call, and the token's name for messages (the one actually used). */
+interface Access {
+	token: string;
+	doFetch: Fetch;
+	name: string;
+}
+
+async function access(ctx: PluginContext, env: Record<string, unknown>): Promise<Access | { reason: string }> {
+	const resolved = await readCloudflareToken(ctx, env);
+	if (!resolved.token) return { reason: resolved.unreadable ? UNREADABLE_TOKEN_MESSAGE : `${noTokenMessage(USAGE_NEEDS)} The steps are below.` };
+	return { token: resolved.token, doFetch: contextFetch(ctx) as Fetch, name: tokenName(resolved) };
 }
 
 interface Target {
@@ -107,14 +114,17 @@ interface Target {
 }
 
 /** The account, this site's Worker and its D1 database: found once per deployed version and remembered. */
-async function findTarget(ctx: PluginContext, env: Record<string, unknown>, a: { token: string; doFetch: Fetch }, notes: string[]): Promise<Target> {
+async function findTarget(ctx: PluginContext, env: Record<string, unknown>, a: Access, notes: string[]): Promise<Target> {
 	const version = versionId(env) ?? null;
-	// The account: CF_ACCOUNT_ID, Clean Image URLs' account ID, or the token's only account (src/core/cloudflare-token.ts).
-	const accountId = await cloudflareAccountId(ctx, env, { token: a.token, fetch: a.doFetch });
-	if (!accountId) throw new UsageError(noAccountMessage().replace(/\.$/, ""));
+	// The account set (CF_ACCOUNT_ID, Clean Image URLs' account ID) or found before for this token, without asking Cloudflare.
+	const configured = await cloudflareAccountId(ctx, env, { token: a.token, fetch: a.doFetch }, null, { lookup: false });
 	const known = await ctx.kv.get<Target>(TARGET_KEY);
-	// Remembered per deployed version, found or not (a Worker that wasn't found isn't searched for again until the next deploy).
-	if (known && known.version === version && known.accountId === accountId) return known;
+	// Remembered per deployed version, found or not (a Worker that wasn't found isn't searched for again until the next deploy);
+	// so a reading still works while Cloudflare can't be asked for the account.
+	if (known && known.version === version && (!configured || known.accountId === configured)) return known;
+	// Else the token's only account (src/core/cloudflare-token.ts).
+	const accountId = configured ?? (await cloudflareAccountId(ctx, env, { token: a.token, fetch: a.doFetch }));
+	if (!accountId) throw new UsageError(noAccountMessage().replace(/\.$/, ""));
 
 	const target: Target = { version, accountId, worker: null, databaseId: null };
 	try {
@@ -135,7 +145,7 @@ async function findTarget(ctx: PluginContext, env: Record<string, unknown>, a: {
 			target.databaseId = d1?.database_id ?? d1?.id ?? null;
 		}
 	} catch (error) {
-		notes.push(`Couldn't find this site's Worker (the Cloudflare API token needs Workers → Metadata Read-Only, or Account → Workers Scripts → Read on a personal token): ${String(error instanceof Error ? error.message : error)}`);
+		notes.push(`Couldn't find this site's Worker (the ${a.name} needs Workers → Metadata Read-Only, or Account → Workers Scripts → Read on a personal token): ${String(error instanceof Error ? error.message : error)}`);
 	}
 	if (target.worker || version) await ctx.kv.set(TARGET_KEY, target);
 	return target;
@@ -157,7 +167,7 @@ const USAGE_QUERY = `query Usage($a: String!, $d1: Date!, $d7: Date!, $d30: Date
 
 type Rows<T> = T[] | undefined;
 
-async function readUsage(ctx: PluginContext, a: { token: string; doFetch: Fetch }, target: Target, notes: string[]): Promise<Omit<UsageReport, "at" | "notes">> {
+async function readUsage(ctx: PluginContext, a: Access, target: Target, notes: string[]): Promise<Omit<UsageReport, "at" | "notes">> {
 	const now = new Date();
 	const date = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 	const time = (ms: number) => new Date(ms).toISOString();
@@ -171,7 +181,7 @@ async function readUsage(ctx: PluginContext, a: { token: string; doFetch: Fetch 
 			variables: { a: target.accountId, d1: date(startOfToday), d7: date(startOfToday - 6 * DAY_MS), d30: date(startOfToday - 29 * DAY_MS), today: date(startOfToday), t1: time(startOfToday), t7: time(startOfToday - 6 * DAY_MS), t30: time(startOfToday - 29 * DAY_MS), now: time(n) },
 		}),
 	});
-	if (body.errors?.length) throw new UsageError(`Cloudflare analytics: ${body.errors.map((e) => e.message).join("; ")}. The Cloudflare API token needs Account → Account Analytics → Read.`);
+	if (body.errors?.length) throw new UsageError(`Cloudflare analytics: ${body.errors.map((e) => e.message).join("; ")}. The ${a.name} needs Account → Account Analytics → Read.`);
 	const acc = body.data?.viewer?.accounts?.[0] ?? {};
 	// any: GraphQL rows.
 	const rows = (key: string) => (acc[key] ?? []) as any[];
@@ -195,7 +205,7 @@ async function readUsage(ctx: PluginContext, a: { token: string; doFetch: Fetch 
 		const peak = (list: Array<{ sum?: Record<string, number> }>, field: string) => Math.max(0, ...list.map((r) => r.sum?.[field] ?? 0));
 		plan = planFromDailyPeaks({ requests: peak(rows("wDaily"), "requests"), rowsRead: peak(rows("d1Daily"), "rowsRead"), rowsWritten: peak(rows("d1Daily"), "rowsWritten") });
 		if (plan) planSource = "usage";
-		else notes.push("Couldn't read the account's plan (the Cloudflare API token needs Account → Account Settings → Read); the bill assumes Workers Paid.");
+		else notes.push(`Couldn't read the account's plan (the ${a.name} needs Account → Account Settings → Read); the bill assumes Workers Paid.`);
 	}
 
 	// The cache warmer's share, from Workers Logs (sampled, so an estimate).
@@ -226,7 +236,7 @@ async function readUsage(ctx: PluginContext, a: { token: string; doFetch: Fetch 
 			const value = (alias: string) => Number(result.calculations?.find((c) => c.alias === alias)?.aggregates?.[0]?.value ?? 0) || 0;
 			warming = estimateWarming({ visits: Math.round(value("visits")), cpuMs: Math.round(value("cpu")) }, periods.week.site, WARM_DAYS);
 		} catch (error) {
-			notes.push(`Couldn't estimate cache warming from Workers Logs (the Cloudflare API token needs Workers → Metadata Read-Only, or Account → Workers Observability → Edit on a personal token, and the Worker needs Workers Logs on): ${String(error instanceof Error ? error.message : error)}`);
+			notes.push(`Couldn't estimate cache warming from Workers Logs (the ${a.name} needs Workers → Metadata Read-Only, or Account → Workers Observability → Edit on a personal token, and the Worker needs Workers Logs on): ${String(error instanceof Error ? error.message : error)}`);
 		}
 	}
 

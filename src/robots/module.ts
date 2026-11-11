@@ -14,7 +14,7 @@ import { type BotOverride, applyOverrides, customSlug, mergeDirectory } from "./
 import { baselineBots, baselineDate } from "./directory.js";
 import { ADDITIONS_NOTES, emdashRobots, importRobots } from "./importer.js";
 import { CONFIG_SETTING, invalidateRobotsCache, readEmdashAiTraining, readEmdashCustomRobots } from "./middleware.js";
-import { RADAR_TOKEN_SETTING, SYNC_STATE_KEY, type SyncState, radarTokenSource, readOverlays, syncRadar } from "./radar.js";
+import { RADAR_TOKEN_SETTING, SYNC_STATE_KEY, type SyncState, radarTokenStatus, readOverlays, syncRadar } from "./radar.js";
 import { type GroupChange, PRESETS, RULE_KINDS, type RobotsConfig, automaticFrom, generate, isValidToken, normalizeConfig, refreshGroups } from "./rules.js";
 import { checkConfig, extraLineWarnings } from "./validate.js";
 
@@ -251,7 +251,7 @@ export function robotsModule(options: RobotsOptions) {
 				}
 				const config: RobotsConfig = { ...refreshed.config, automatic: automaticFrom(await ctxFeatures(ctx), await emdashAiTraining(database)) };
 				const siteUrl = siteUrlOf(ctx);
-				const tokenSource = await radarTokenSource(ctx);
+				const { tokenSource, tokenUnreadable } = await radarTokenStatus(ctx);
 				const emdash = await emdashServed(database, siteUrl).catch(() => ({ text: "EmDash's robots.txt couldn't be read right now.", custom: false }));
 				let history = await readHistory(ctx).catch(() => []);
 				if (!history.length) {
@@ -274,6 +274,7 @@ export function robotsModule(options: RobotsOptions) {
 					radar: {
 						tokenSource,
 						tokenConfigured: Boolean(tokenSource),
+						tokenUnreadable,
 						state: await ctx.kv.get<SyncState>(SYNC_STATE_KEY),
 						baselineDate: await baselineDate(),
 					},
@@ -420,8 +421,8 @@ export function robotsModule(options: RobotsOptions) {
 				else if (input.token) await ctx.settings.set(RADAR_TOKEN_SETTING, input.token);
 				else throw PluginRouteError.badRequest("Enter a Cloudflare Radar API token.");
 				ctx.log.info(input.clear ? "Radar token removed" : "Radar token saved");
-				const tokenSource = await radarTokenSource(ctx);
-				return { tokenSource, tokenConfigured: Boolean(tokenSource) };
+				const { tokenSource, tokenUnreadable } = await radarTokenStatus(ctx);
+				return { tokenSource, tokenConfigured: Boolean(tokenSource), tokenUnreadable };
 			},
 		}),
 

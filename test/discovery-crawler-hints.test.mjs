@@ -118,7 +118,7 @@ test("a token Cloudflare doesn't accept (malformed, deleted, expired) says so, n
 	});
 	const m = await readCrawlerHints("coywolf.com", { token: "not a token", fetch: malformed.fetch });
 	assert.equal(m.problem.kind, "bad-token");
-	assert.match(m.problem.message, /doesn't accept the API token \(HTTP 400: Invalid format for Authorization header \(code 6111\)\)/);
+	assert.match(m.problem.message, /doesn't accept the Cloudflare API token \(HTTP 400: Invalid format for Authorization header \(code 6111\)\)/);
 	const unknown = cloudflare({ onZones: () => fail(403, 9109, "Invalid access token") });
 	const u = await readCrawlerHints("coywolf.com", { token: TOKEN, fetch: unknown.fetch });
 	assert.equal(u.problem.kind, "bad-token");
@@ -247,6 +247,11 @@ test("the Cloudflare API token wins over the older usage token; the older one st
 	const older = cloudflare(zones);
 	assert.equal((await pack.routes["discovery/crawler-hints"].handler(fakeCtx({ settings: { usageApiToken: TOKEN }, fetch: older.fetch }))).enabled, true);
 	assert.deepEqual([...new Set(older.calls.map((c) => c.auth))], [`Bearer ${TOKEN}`]);
+	// A message names the token that was used, so it never sends you to fix the other one.
+	const blind = await pack.routes["discovery/crawler-hints"].handler(fakeCtx({ settings: { usageApiToken: TOKEN }, fetch: cloudflare().fetch }));
+	assert.match(blind.problem.message, /^The older Cloudflare usage token can't see a zone for coywolf\.com/);
+	const blindNew = await pack.routes["discovery/crawler-hints"].handler(fakeCtx({ settings: { cloudflareApiToken: TOKEN }, fetch: cloudflare().fetch }));
+	assert.match(blindNew.problem.message, /^The Cloudflare API token can't see a zone/);
 });
 
 test("a remembered zone that stopped working is looked up again, once, and replaced", async () => {

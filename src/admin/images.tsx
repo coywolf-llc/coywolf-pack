@@ -756,7 +756,7 @@ export function ImagesPage() {
 								</Button>
 							}
 						>
-							{saved.sharedToken ? (
+							{saved.sharedToken || saved.sharedTokenEnv ? (
 								<>
 									<div className="grid gap-4 sm:grid-cols-2">
 										<Input
@@ -768,7 +768,7 @@ export function ImagesPage() {
 										/>
 									</div>
 									<SharedTokenNote env={saved.sharedTokenEnv}>
-										<div className="sm:max-w-md">
+										<div className="grid gap-4 sm:grid-cols-2">
 											<Input
 												label="Cloudflare account ID"
 												description="Only if the token sees more than one account. Empty uses CF_ACCOUNT_ID, or the token's own account."
@@ -776,6 +776,18 @@ export function ImagesPage() {
 												disabled={busy}
 												onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ accountId: e.target.value })}
 											/>
+											{saved.sharedTokenEnv && (
+												<SecretField
+													label="Cloudflare API token"
+													saved={saved.tokenSet}
+													value={draft.token}
+													onChange={(value) => set({ token: value })}
+													description="Only to use another token than the Worker secret: typed here, it's used for this setup; saved, it wins over the Worker secret (stored encrypted)."
+													onClear={() => void save(true)}
+													clearing={pending === "clear"}
+													disabled={busy}
+												/>
+											)}
 										</div>
 									</SharedTokenNote>
 								</>

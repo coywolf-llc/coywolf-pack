@@ -7,7 +7,7 @@ import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
 import { CloudflareApiError, contextFetch } from "../core/cloudflare-api.js";
-import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, sharedTokenState } from "../core/cloudflare-token.js";
+import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, sharedTokenState, tokenName } from "../core/cloudflare-token.js";
 import { type CronScheduler, type SettingsReader, parseInput, secret, workerEnv } from "../shared.js";
 import { createDownloadLink } from "./download.js";
 import { dumpLines } from "./dump.js";
@@ -211,7 +211,8 @@ export function backupsModule(options: BackupsOptions) {
 	async function retentionAccess(ctx: PluginContext, input: z.infer<typeof retentionInput> = {}): Promise<RetentionAccess> {
 		const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
 		const saved = async (key: string) => ((await ctx.settings.get<string>(key).catch(() => null)) ?? "").trim();
-		const { token, unreadable } = await cloudflareToken(ctx, env, "backupsRetention", { typed: input.token, olderEnv: [tokenSecretName()] });
+		const resolved = await cloudflareToken(ctx, env, "backupsRetention", { typed: input.token, olderEnv: [tokenSecretName()] });
+		const { token, unreadable } = resolved;
 		const bucket = input.bucket || (await saved(RETENTION_SETTINGS.bucket));
 		if (!token && unreadable) throw PluginRouteError.badRequest(UNREADABLE_TOKEN_MESSAGE);
 		const missing = [!bucket && "backup bucket name", !token && "Cloudflare API token (on the plugin's Settings page)"].filter(Boolean);
@@ -220,7 +221,7 @@ export function backupsModule(options: BackupsOptions) {
 		const fetch = contextFetch(ctx);
 		const accountId = await cloudflareAccountId(ctx, env, { token: token as string, fetch }, own);
 		if (!accountId) throw PluginRouteError.badRequest(noAccountMessage("Advanced"));
-		return { token: token as string, accountId, bucket, fetch };
+		return { token: token as string, accountId, bucket, fetch, tokenName: tokenName(resolved) };
 	}
 
 	/**

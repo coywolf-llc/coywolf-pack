@@ -176,6 +176,8 @@ interface RadarInfo {
 	tokenConfigured: boolean;
 	/** "shared": the Cloudflare API token from Settings; "shared-env": its Worker secret; "settings" and "env": the older Radar token. */
 	tokenSource: "shared" | "shared-env" | "settings" | "env" | null;
+	/** A saved token can't be decrypted (and there's none to use instead). */
+	tokenUnreadable?: boolean;
 	state: { at: string; ok: boolean; total?: number; added?: number; updated?: number; error?: string } | null;
 	baselineDate: string;
 }
@@ -582,7 +584,13 @@ function RadarCard(props: { radar: RadarInfo; onRadar: (r: Partial<RadarInfo>) =
 							: "Token set; no sync has run yet."}{" "}
 						{r.tokenSource === "env" && "Using the RADAR_API_TOKEN Worker secret."} Turn on “Weekly crawler list from Cloudflare Radar” (at the top of this page) to refresh it every week.
 					</p>
-					{(r.tokenSource === "shared" || r.tokenSource === "shared-env") && <SharedTokenNote env={r.tokenSource === "shared-env"} />}
+					{r.tokenSource === "shared" && <SharedTokenNote />}
+					{r.tokenSource === "shared-env" && (
+						<SharedTokenNote env>
+							<p className="text-sm text-kumo-subtle">Only to use another token than the Worker secret: a Radar token saved here wins over it.</p>
+							<RadarTokenForm source={r.tokenSource} onChanged={changed} />
+						</SharedTokenNote>
+					)}
 					{editing && <RadarTokenForm source={r.tokenSource} onChanged={changed} onCancel={() => setEditing(false)} />}
 				</>
 			) : (
@@ -590,6 +598,9 @@ function RadarCard(props: { radar: RadarInfo; onRadar: (r: Partial<RadarInfo>) =
 					title="Keep this list current with Cloudflare Radar"
 					description="Optional. With the Cloudflare API token from the plugin's Settings page (it needs Radar → Read), Refresh from Radar updates the crawler list now, and the weekly sync (a part at the top of this page) keeps it current. An older Radar token below works too."
 				>
+					{r.tokenUnreadable && (
+						<Banner variant="error" description="A saved Cloudflare token can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed. Save the Cloudflare API token again on the plugin's Settings page." />
+					)}
 					<RadarTokenForm source={r.tokenSource} onChanged={changed} />
 				</SetupCard>
 			)}

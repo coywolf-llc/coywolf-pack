@@ -928,6 +928,12 @@ test("Settings page: the route, the form id and Kumo's Input for each secret fie
 		new RegExp(String.raw`\}\), secretSet && !secretCleared && ${pure}jsx\(Button, \{\s*type: "button",[\s\S]{0,300}?message: "Clear stored value"`),
 		`the Clear stored value button is no longer rendered only for a saved secret, as type="button", next to the Input:\n${secret.slice(0, 1200)}`,
 	);
+	// The count of older tokens follows Save by the placeholder: one for a cleared value, another for a saved one, a third for none.
+	assert.match(
+		secret,
+		/placeholder: secretCleared \? [\s\S]{0,120}?message: "Will be cleared on save"[\s\S]{0,40}?\}\) : secretSet \? [\s\S]{0,120}?message: "Currently set[^"]*"[\s\S]{0,40}?\}\) : [\s\S]{0,80}?message: "Not set"/,
+		`the secret field's placeholder no longer tells cleared, saved and empty apart:\n${secret.slice(0, 1200)}`,
+	);
 	// The fields are siblings in one container (the toggle is added among them).
 	assert.match(page, /className: "space-y-4",\s*children: \[fields\.length === 0 && [\s\S]{0,400}?fields\.map\(\(\[key, field\]\) => [\s\S]{0,40}?jsx\(SettingFieldInput, \{/);
 });
@@ -946,17 +952,27 @@ test("Settings page: the script keeps four fields in view, hides empty older tok
 		const { Button, Input } = await import("@cloudflare/kumo");
 		const { SECRET_SETTINGS, OLDER_SECRET_KEYS } = await import("../src/core/secrets.ts");
 		const { settingsEnhanceScript } = await import("../src/core/settings-enhance.ts");
-		const saved = new Set(["cloudflareApiToken", "videosApiToken", "videosWebhookSecret"]);
-		// EmDash's SettingFieldInput for a secret (checked against its bundle above), with its Clear stored value state.
-		function SecretField({ field, set }) {
-			const [cleared, setCleared] = React.useState(false);
-			return h("div", { className: "space-y-1" }, h(Input, { type: "password", label: field.label, description: field.description, value: "", onChange() {} }), set && !cleared && h(Button, { type: "button", variant: "ghost", size: "sm", onClick: () => setCleared(true) }, "Clear stored value"));
+		// EmDash's PluginSettings for the secrets (checked against its bundle above): its saved and cleared state, the
+		// placeholder for each, and Save, which drops the cleared values and resets the cleared state.
+		const page = {};
+		function SecretField({ field, set, cleared, onClear }) {
+			const placeholder = cleared ? "Will be cleared on save" : set ? "Currently set — enter a new value to replace" : "Not set";
+			return h("div", { className: "space-y-1" }, h(Input, { type: "password", label: field.label, description: field.description, autoComplete: "new-password", placeholder, value: "", onChange() {} }), set && !cleared && h(Button, { type: "button", variant: "ghost", size: "sm", onClick: onClear }, "Clear stored value"));
+		}
+		function Form() {
+			const [saved, setSaved] = React.useState(() => new Set(["cloudflareApiToken", "videosApiToken", "imagesApiToken", "videosWebhookSecret"]));
+			const [cleared, setCleared] = React.useState(() => new Set());
+			page.save = () => {
+				setSaved((s) => new Set([...s].filter((k) => !cleared.has(k))));
+				setCleared(new Set());
+			};
+			const fields = Object.entries(SECRET_SETTINGS).map(([key, field]) => h(SecretField, { key, field, set: saved.has(key), cleared: cleared.has(key), onClear: () => setCleared((c) => new Set(c).add(key)) }));
+			return h("form", { id: "plugin-settings-form" }, h("div", { className: "rounded-lg" }, h("div", { className: "space-y-4" }, fields)));
 		}
 		const container = window.document.createElement("div");
 		window.document.body.appendChild(container);
 		const reactRoot = createRoot(container);
-		const fields = Object.entries(SECRET_SETTINGS).map(([key, field]) => h(SecretField, { key, field, set: saved.has(key) }));
-		await act(async () => reactRoot.render(h("form", { id: "plugin-settings-form" }, h("div", { className: "rounded-lg" }, h("div", { className: "space-y-4" }, fields)))));
+		await act(async () => reactRoot.render(h(Form)));
 		const list = container.querySelector(".space-y-4");
 		const reactNodes = [...list.children];
 		const wrapper = (key) => [...container.querySelectorAll("label")].find((l) => l.textContent.trim() === SECRET_SETTINGS[key].label).closest(".space-y-1");
@@ -967,27 +983,43 @@ test("Settings page: the script keeps four fields in view, hides empty older tok
 		for (const key of ["cloudflareApiToken", "aiApiKey", "insightsFathomApiKey", "insightsGoogleServiceAccount"]) assert.equal(wrapper(key).hidden, false, `${key} stays in view`);
 		for (const key of OLDER_SECRET_KEYS) assert.equal(wrapper(key).hidden, true, `${key} is out of view`);
 		assert.equal(wrapper("videosWebhookSecret").hidden, true, "the webhook secret is hidden even when saved");
+		for (const key of [...OLDER_SECRET_KEYS, "videosWebhookSecret"]) assert.equal(wrapper(key).querySelector("input").getAttribute("autocomplete"), "off", `${key}: password managers leave it be`);
+		assert.equal(wrapper("cloudflareApiToken").querySelector("input").getAttribute("autocomplete"), "new-password", "the four fields keep EmDash's");
 		const toggle = list.querySelector("[data-cw-older-toggle] button");
-		assert.ok(toggle, "a toggle for the saved older token");
-		assert.match(toggle.textContent, /Older tokens \(1\)/);
+		assert.ok(toggle, "a toggle for the saved older tokens");
+		assert.match(toggle.textContent, /Older tokens \(2\)/);
 		assert.equal(toggle.getAttribute("aria-expanded"), "false");
+		assert.deepEqual(toggle.getAttribute("aria-controls").split(" ").sort(), [wrapper("imagesApiToken").id, wrapper("videosApiToken").id].sort());
 		assert.equal(toggle.parentElement.nextElementSibling, wrapper(OLDER_SECRET_KEYS[0]), "the toggle sits right above the older tokens");
 
 		toggle.click();
 		await window.happyDOM.waitUntilComplete();
 		assert.equal(toggle.getAttribute("aria-expanded"), "true");
-		assert.equal(wrapper("videosApiToken").hidden, false, "the saved older token shows once opened");
-		assert.equal(wrapper("imagesApiToken").hidden, true, "an empty one never shows");
+		assert.equal(wrapper("videosApiToken").hidden, false, "a saved older token shows once opened");
+		assert.equal(wrapper("usageApiToken").hidden, true, "an empty one never shows");
 
 		// Clear stored value (EmDash removes its button): the field stays with the older tokens, so it can still be seen.
 		await act(async () => wrapper("videosApiToken").querySelector("button[type=button]").click());
 		await window.happyDOM.waitUntilComplete();
 		assert.equal(wrapper("videosApiToken").querySelector("button"), null);
 		assert.equal(wrapper("videosApiToken").hidden, false);
+		assert.match(toggle.textContent, /Older tokens \(2\)/, "not saved yet: still counted");
+
+		// Save Settings: the cleared token is gone, so it leaves the list and the count goes down, without a reload.
+		await act(async () => page.save());
+		await window.happyDOM.waitUntilComplete();
+		assert.equal(wrapper("videosApiToken").hidden, true);
 		assert.match(toggle.textContent, /Older tokens \(1\)/);
+		assert.equal(toggle.getAttribute("aria-controls"), wrapper("imagesApiToken").id);
 
 		// React's own nodes were never moved: the same elements, in the same order, beside the one added toggle.
 		assert.deepEqual([...list.children].filter((n) => !n.hasAttribute("data-cw-older-toggle")), reactNodes);
+
+		// Leaving the page (the admin is a single-page app): the toggle doesn't linger.
+		window.history.pushState({}, "", "/_emdash/admin/plugins");
+		list.appendChild(window.document.createElement("span"));
+		await window.happyDOM.waitUntilComplete();
+		assert.equal(list.querySelector("[data-cw-older-toggle]").hidden, true);
 		await act(async () => reactRoot.unmount());
 	} finally {
 		await window.happyDOM.close();

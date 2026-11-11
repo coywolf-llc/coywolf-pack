@@ -42,7 +42,7 @@ interface Status {
 	settings: { template: Template; collections: string[]; accountId: string; defaultImages: string[] };
 	renderer: { kind: "binding" | "api" } | { kind: "none"; reason: string };
 	tokenSaved: boolean;
-	/** The Cloudflare API token is the one in use (saved on Settings, or `sharedTokenEnv`: the Worker secret). */
+	/** `sharedToken`: the Cloudflare API token saved on Settings is the one in use. `sharedTokenEnv`: the CLOUDFLARE_API_TOKEN Worker secret is (a token saved here would win). */
 	sharedToken?: boolean;
 	sharedTokenEnv?: boolean;
 	counts: Record<Doc["status"], number>;
@@ -298,14 +298,14 @@ export function SocialImagesPage() {
 							status.renderer.kind === "binding"
 								? "Images are made through the Worker's BROWSER binding. No token needed."
 								: status.renderer.kind === "api"
-									? status.sharedToken
+									? status.sharedToken || status.sharedTokenEnv
 										? "Images are made with Browser Run's API, using the Cloudflare API token."
 										: "Images are made with Browser Run's API, using the token below."
 									: `Images are made by taking a screenshot of the template with Cloudflare Browser Run. ${"reason" in status.renderer ? status.renderer.reason : ""}`
 						}
 						actions={status.renderer.kind === "none" ? <Badge variant="warning">Not set up</Badge> : <Badge variant="success">Ready</Badge>}
 					>
-						{status.renderer.kind !== "binding" && status.sharedToken && (
+						{status.renderer.kind !== "binding" && (status.sharedToken || status.sharedTokenEnv) && (
 							<>
 								<SharedTokenNote env={status.sharedTokenEnv}>
 									<div className="sm:w-72">
@@ -316,11 +316,22 @@ export function SocialImagesPage() {
 											onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, accountId: e.target.value.trim() })}
 										/>
 									</div>
+									{status.sharedTokenEnv && (
+										<SecretField
+											label="Cloudflare API token"
+											saved={status.tokenSaved}
+											value={draft.token}
+											onChange={(token) => setDraft({ ...draft, token })}
+											description="Only to use another token than the Worker secret (it needs Browser Run → Edit): one saved here wins over it."
+											onClear={() => void clearToken()}
+											clearing={saving}
+										/>
+									)}
 								</SharedTokenNote>
 								<CredentialGuide id="browser-run-token" />
 							</>
 						)}
-						{status.renderer.kind !== "binding" && !status.sharedToken && (
+						{status.renderer.kind !== "binding" && !status.sharedToken && !status.sharedTokenEnv && (
 							<>
 								<div className="sm:w-72">
 									<Input

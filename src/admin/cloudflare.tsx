@@ -226,7 +226,35 @@ export function CloudflareCheckupPage() {
 	if (asking) lastAsked.current = { fix: asking, value: data.rows.find((r) => r.fix === asking)?.value ?? null };
 	const shown = lastAsked.current;
 	const fix = shown ? data.fixes[shown.fix] : null;
-	const canFix = Boolean(data.sharedToken) || data.setupToken.saved || Boolean(token.trim());
+	const canFix = Boolean(data.sharedToken || data.sharedTokenEnv) || data.setupToken.saved || Boolean(token.trim());
+	// The setup token's fields: the older token's place, or, with only the CLOUDFLARE_API_TOKEN Worker secret, a way to use another token (a saved one wins over it).
+	const setupFields = (
+		<>
+			{data.setupToken.unreadable && (
+				<Banner variant="error" description="The saved setup token can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed. Save it again." />
+			)}
+			<div className="sm:max-w-md">
+				<SecretField
+					label="Setup token"
+					saved={data.setupToken.saved}
+					value={token}
+					onChange={setToken}
+					description="Stored encrypted when saved. Only ever sent to api.cloudflare.com."
+					onClear={() => void saveToken(true)}
+					clearing={tokenBusy === "clear"}
+					disabled={tokenBusy !== null}
+				/>
+			</div>
+			<div className="flex flex-wrap gap-2">
+				<Button variant="secondary" disabled={!token.trim() || tokenBusy !== null} onClick={() => void saveToken(false)}>
+					{tokenBusy === "save" ? "Saving…" : "Save token"}
+				</Button>
+			</div>
+			<div className="sm:max-w-md">
+				<CredentialGuide id="checkup-setup-token" />
+			</div>
+		</>
+	);
 
 	return (
 		<div className="space-y-6" aria-busy={loading}>
@@ -280,11 +308,20 @@ export function CloudflareCheckupPage() {
 
 			{hasFixes && data.sharedToken && (
 				<section className="rounded-lg border border-kumo-line p-4" aria-label="One-click fixes">
-					<SharedTokenNote env={data.sharedTokenEnv} />
+					<SharedTokenNote />
 				</section>
 			)}
 
-			{!data.sharedToken && (hasFixes || data.setupToken.saved) && (
+			{data.sharedTokenEnv && (hasFixes || data.setupToken.saved) && (
+				<section className="rounded-lg border border-kumo-line p-4" aria-label="One-click fixes">
+					<SharedTokenNote env>
+						<p className="text-sm text-kumo-subtle">Only to use another token than the Worker secret: a setup token saved here wins over it, or type one in for the next fix.</p>
+						{setupFields}
+					</SharedTokenNote>
+				</section>
+			)}
+
+			{!data.sharedToken && !data.sharedTokenEnv && (hasFixes || data.setupToken.saved) && (
 				<section className="rounded-lg border border-kumo-line" aria-labelledby="cw-setup-token">
 					<div className="border-b border-kumo-line p-4">
 						<h2 id="cw-setup-token" className="text-base font-semibold">
@@ -295,31 +332,7 @@ export function CloudflareCheckupPage() {
 							Settings → Edit). Until then, they use this older setup token: save it, or type it in and use it for the next fix without saving it.
 						</p>
 					</div>
-					<div className="space-y-3 p-4">
-						{data.setupToken.unreadable && (
-							<Banner variant="error" description="The saved setup token can't be read: EMDASH_ENCRYPTION_KEY is missing or has changed. Save it again." />
-						)}
-						<div className="sm:max-w-md">
-							<SecretField
-								label="Setup token"
-								saved={data.setupToken.saved}
-								value={token}
-								onChange={setToken}
-								description="Stored encrypted when saved. Only ever sent to api.cloudflare.com."
-								onClear={() => void saveToken(true)}
-								clearing={tokenBusy === "clear"}
-								disabled={tokenBusy !== null}
-							/>
-						</div>
-						<div className="flex flex-wrap gap-2">
-							<Button variant="secondary" disabled={!token.trim() || tokenBusy !== null} onClick={() => void saveToken(false)}>
-								{tokenBusy === "save" ? "Saving…" : "Save token"}
-							</Button>
-						</div>
-						<div className="sm:max-w-md">
-							<CredentialGuide id="checkup-setup-token" />
-						</div>
-					</div>
+					<div className="space-y-3 p-4">{setupFields}</div>
 				</section>
 			)}
 
