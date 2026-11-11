@@ -16,6 +16,7 @@ import type { PluginContext } from "emdash";
 import { cloudflareApi, contextFetch } from "../core/cloudflare-api.js";
 import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, noTokenMessage, tokenName } from "../core/cloudflare-token.js";
 import { DEADLINES, sharedRead, sharedSlot } from "../core/single-flight.js";
+import { findWorkerScript, workerBindings } from "../core/worker-bindings.js";
 import { afterResponse, workerEnv } from "../shared.js";
 import { versionId } from "./lib.js";
 import {
@@ -127,25 +128,20 @@ async function findTarget(ctx: PluginContext, env: Record<string, unknown>, a: A
 	if (!accountId) throw new UsageError(noAccountMessage().replace(/\.$/, ""));
 
 	const target: Target = { version, accountId, worker: null, databaseId: null };
+	// The same lookups as bucket detection (src/core/worker-bindings.ts).
+	const call = { token: a.token, fetch: a.doFetch, accountId };
 	try {
-		const scripts = await api<Array<{ id: string; modified_on?: string }>>(a.doFetch, a.token, `/accounts/${accountId}/workers/scripts`);
-		// The Worker deployed most recently first: usually this one.
-		scripts.sort((x, y) => Date.parse(y.modified_on ?? "") - Date.parse(x.modified_on ?? ""));
-		for (const script of version ? scripts.slice(0, 50) : []) {
-			const deployments = await api<{ deployments?: Array<{ versions?: Array<{ version_id?: string }> }> }>(a.doFetch, a.token, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(script.id)}/deployments`).catch(() => null);
-			if (deployments?.deployments?.[0]?.versions?.some((v) => v.version_id === version)) {
-				target.worker = script.id;
-				break;
-			}
-		}
+		target.worker = version ? await findWorkerScript({ ...call, version }) : null;
 		if (!target.worker) notes.push(version ? "Couldn't find this site's Worker among the account's Workers." : "This Worker has no CF_VERSION_METADATA binding, so its own usage can't be told apart.");
 		if (target.worker) {
-			const settings = await api<{ bindings?: Array<{ type?: string; name?: string; id?: string; database_id?: string }> }>(a.doFetch, a.token, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(target.worker)}/settings`);
-			const d1 = settings.bindings?.find((b) => b.type === "d1" && b.name === "DB") ?? settings.bindings?.find((b) => b.type === "d1");
+			const bindings = await workerBindings({ ...call, script: target.worker });
+			const d1 = bindings.find((b) => b.type === "d1" && b.name === "DB") ?? bindings.find((b) => b.type === "d1");
 			target.databaseId = d1?.database_id ?? d1?.id ?? null;
 		}
 	} catch (error) {
-		notes.push(`Couldn't find this site's Worker (the ${a.name} needs Workers → Metadata Read-Only, or Account → Workers Scripts → Read on a personal token): ${String(error instanceof Error ? error.message : error)}`);
+		// Its messages had no closing period before the shared client.
+		const message = (error instanceof Error ? error.message : String(error)).replace(/\.$/, "");
+		notes.push(`Couldn't find this site's Worker (the ${a.name} needs Workers → Metadata Read-Only, or Account → Workers Scripts → Read on a personal token): ${message}`);
 	}
 	if (target.worker || version) await ctx.kv.set(TARGET_KEY, target);
 	return target;

@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import { CloudflareApiError, contextFetch } from "../core/cloudflare-api.js";
 import { UNREADABLE_TOKEN_MESSAGE, cloudflareAccountId, cloudflareToken, noAccountMessage, sharedTokenState, tokenName } from "../core/cloudflare-token.js";
+import { boundBucket, bucketMissText, findBoundBucket, jurisdictionMessage } from "../core/worker-bindings.js";
 import { type CronScheduler, type SettingsReader, parseInput, secret, workerEnv } from "../shared.js";
 import { createDownloadLink } from "./download.js";
 import { dumpLines } from "./dump.js";
@@ -202,26 +203,41 @@ export function backupsModule(options: BackupsOptions) {
 
 	const tokenSecretName = () => options.restore?.tokenSecret ?? "BACKUPS_API_TOKEN";
 
+	/** The backup bucket's R2 binding. */
+	const backupsBinding = () => options.backups ?? "BACKUPS";
+
 	/**
 	 * The token, account and bucket. The token: the request's, else the Cloudflare API token, the older saved
 	 * retention token, the restore token's Worker secret (it can carry R2 Edit too), then CLOUDFLARE_API_TOKEN
 	 * (src/core/cloudflare-token.ts). The account: the request's, the saved one, backups.restore's, else
-	 * CF_ACCOUNT_ID or the token's own. Restores themselves never use this token (bindings() above).
+	 * CF_ACCOUNT_ID or the token's own. The bucket: the request's, the saved one, else the one bound as BACKUPS
+	 * (found with the token, src/core/worker-bindings.ts); verifyBucket checks it either way. Restores themselves
+	 * never use this token (bindings() above).
 	 */
 	async function retentionAccess(ctx: PluginContext, input: z.infer<typeof retentionInput> = {}): Promise<RetentionAccess> {
 		const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
 		const saved = async (key: string) => ((await ctx.settings.get<string>(key).catch(() => null)) ?? "").trim();
 		const resolved = await cloudflareToken(ctx, env, "backupsRetention", { typed: input.token, olderEnv: [tokenSecretName()] });
 		const { token, unreadable } = resolved;
-		const bucket = input.bucket || (await saved(RETENTION_SETTINGS.bucket));
+		let bucket = input.bucket || (await saved(RETENTION_SETTINGS.bucket));
 		if (!token && unreadable) throw PluginRouteError.badRequest(UNREADABLE_TOKEN_MESSAGE);
 		const missing = [!bucket && "backup bucket name", !token && "Cloudflare API token (on the plugin's Settings page)"].filter(Boolean);
-		if (missing.length) throw PluginRouteError.badRequest(`Enter the ${missing.join(", ")} first.`);
+		if (!token) throw PluginRouteError.badRequest(`Enter the ${missing.join(", ")} first.`);
 		const own = input.accountId || (await saved(RETENTION_SETTINGS.accountId)) || options.restore?.accountId || "";
 		const fetch = contextFetch(ctx);
-		const accountId = await cloudflareAccountId(ctx, env, { token: token as string, fetch }, own);
+		const accountId = await cloudflareAccountId(ctx, env, { token, fetch }, own);
 		if (!accountId) throw PluginRouteError.badRequest(noAccountMessage("Advanced"));
-		return { token: token as string, accountId, bucket, fetch, tokenName: tokenName(resolved) };
+		if (!bucket) {
+			const lookup = await boundBucket(ctx, env, backupsBinding(), { token, fetch, accountId, tokenName: tokenName(resolved) });
+			if (!lookup.bucket) throw PluginRouteError.badRequest(`Enter the backup bucket name first. ${bucketMissText(lookup)}`);
+			if (lookup.jurisdiction) {
+				throw PluginRouteError.badRequest(
+					jurisdictionMessage(lookup, "Retention on Cloudflare", "Set the rule by hand in the Cloudflare dashboard instead (How to set the retention rule by hand, on this card)."),
+				);
+			}
+			bucket = lookup.bucket;
+		}
+		return { token, accountId, bucket, fetch, tokenName: tokenName(resolved) };
 	}
 
 	/**
@@ -236,7 +252,7 @@ export function backupsModule(options: BackupsOptions) {
 		try {
 			if (!(await bucketHasKey(access, key))) {
 				throw PluginRouteError.badRequest(
-					`The bucket ${access.bucket} isn't the one bound as ${options.backups ?? "BACKUPS"} in wrangler.jsonc. Check its bucket_name there.`,
+					`The bucket ${access.bucket} isn't the one bound as ${backupsBinding()} in wrangler.jsonc. Check its bucket_name there.`,
 				);
 			}
 		} finally {
@@ -516,21 +532,27 @@ export function backupsModule(options: BackupsOptions) {
 			},
 		}),
 
-		/** Retention on Cloudflare: what's saved and what the last look at the bucket found (no Cloudflare call). */
+		/**
+		 * Retention on Cloudflare: what's saved, what the last look at the bucket found, and the bucket bound as
+		 * BACKUPS (found with the token, remembered per deploy: src/core/worker-bindings.ts). Nothing else asks Cloudflare.
+		 */
 		"backups/cloudflare": {
 			permission: "plugins:manage" as const,
 			handler: async (ctx: PluginContext) => {
 				const env = await workerEnv().catch(() => ({}) as Record<string, unknown>);
 				const saved = async (key: string) => ((await ctx.settings.get<string>(key).catch(() => null)) ?? "").trim();
 				const { retentionDays } = await settings(ctx);
+				const accountId = (await saved(RETENTION_SETTINGS.accountId)) || options.restore?.accountId || "";
+				const resolved = await cloudflareToken(ctx, env, "backupsRetention", { olderEnv: [tokenSecretName()] });
 				return {
-					accountId: (await saved(RETENTION_SETTINGS.accountId)) || options.restore?.accountId || "",
+					accountId,
 					bucket: await saved(RETENTION_SETTINGS.bucket),
+					detectedBucket: await findBoundBucket(ctx, env, backupsBinding(), { resolved, fetch: contextFetch(ctx), account: accountId || null }),
 					suggestedBucket: `${name}-backups`,
 					tokenSaved: Boolean(await saved(RETENTION_SETTINGS.token)),
 					envToken: Boolean(secret(env, tokenSecretName()) || secret(env, "CLOUDFLARE_API_TOKEN")),
 					/** The Cloudflare API token is the one in use: the card shows no token field of its own. */
-					...sharedTokenState(await cloudflareToken(ctx, env, "backupsRetention", { olderEnv: [tokenSecretName()] })),
+					...sharedTokenState(resolved),
 					envTokenName: tokenSecretName(),
 					envAccountId: Boolean(options.restore?.accountId || secret(env, "CF_ACCOUNT_ID") || secret(env, "CLOUDFLARE_ACCOUNT_ID")),
 					retentionDays,

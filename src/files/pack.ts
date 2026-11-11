@@ -51,7 +51,7 @@ export function filesPack(options: FilesOptions): PackModule {
 				schedule: "@daily",
 				feature: LARGE_UPLOADS_FEATURE,
 				handler: async (ctx: PluginContext) => {
-					await abortStaleUploads(ctx);
+					await abortStaleUploads(ctx, options);
 				},
 			},
 		],

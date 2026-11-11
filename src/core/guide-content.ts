@@ -101,7 +101,11 @@ export const CLOUDFLARE_PERMISSIONS = {
 	accountSettings: { name: "Account Settings → Read", scope: "account", form: { key: "account_settings", type: "read" }, for: "finding the account and its plan" },
 	r2: { name: "Workers R2 Storage → Edit", scope: "account", form: { key: "workers_r2", type: "edit" }, for: "Set up media host, Backups retention and large uploads" },
 	stream: { name: "Stream → Edit", scope: "account", form: { key: "stream", type: "edit" }, for: "Videos" },
-	workersMetadata: { name: "Workers → Metadata Read-Only", scope: "account", for: "Cloudflare usage (finds this site's Worker and database, and reads Workers Logs)" },
+	workersMetadata: {
+		name: "Workers → Metadata Read-Only",
+		scope: "account",
+		for: "Cloudflare usage (finds this site's Worker and database, and reads Workers Logs), and finding the R2 bucket names in this site's Worker bindings for large uploads, Set up media host and Backups retention",
+	},
 	rulesets: { name: "Account Rulesets → Read", scope: "account", for: "Set up media host" },
 	browserRun: { name: "Browser Run → Edit", scope: "account", for: "Social Images (called Browser Rendering in some accounts)" },
 	radar: { name: "Radar → Read", scope: "account", for: "the Robots.txt crawler list" },
@@ -231,16 +235,16 @@ export const GUIDES: Record<GuideId, Guide> = {
 	"files-token": featureGuide({
 		summary: "How large uploads use the Cloudflare API token",
 		before: [
-			`Under Buckets in the ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")}, find the bucket bound as ${code("MEDIA")} in your ${code("wrangler.jsonc")} (its ${code("bucket_name")}), and enter it as the R2 bucket name.`,
+			`The pack finds the bucket itself: the ${code("bucket_name")} bound as ${code("FILES")} in your ${code("wrangler.jsonc")}, else as ${code("MEDIA")}. The page then shows it as ${b("Found")}. If it says it couldn't, enter the bucket name: find it under Buckets in the ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")}.`,
 		],
-		needs: ["r2"],
-		note: "The pack makes the R2 keys from the token (R2's access key ID is the token's ID, and its secret is the token's SHA-256), so there's nothing else to paste. A key pair for one bucket, under Advanced, wins over it.",
+		needs: ["r2", "workersMetadata"],
+		note: "The pack makes the R2 keys from the token (R2's access key ID is the token's ID, and its secret is the token's SHA-256), so there's nothing else to paste. Workers → Metadata Read-Only only finds the bucket name; a token without it works once the name is entered. A bucket name saved under Advanced wins over the one found, and a key pair for one bucket wins over the token.",
 	}),
 	r2: {
 		summary: "How to get an R2 key for one bucket (optional)",
 		steps: [
 			`In the ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")}, copy your ${b("Account ID")} (shown on the R2 overview page) into R2 account ID on the Files page → Settings.`,
-			`Under Buckets, note the name of the bucket bound as ${code("MEDIA")} in your ${code("wrangler.jsonc")}. Enter it as the R2 bucket name.`,
+			`Under Buckets, note the name of the bucket bound as ${code("MEDIA")} in your ${code("wrangler.jsonc")}. Enter it as the R2 bucket name, unless the Files page already shows it as ${b("Found")}.`,
 			`Select ${b("Manage API tokens")} (on the R2 overview page), then ${b("Create Account API token")}.`,
 			`Choose the ${b("Object Read &amp; Write")} permission and ${b("Apply to specific buckets only")} → that bucket.`,
 			`Select ${b("Create API Token")}. Copy the ${b("Access Key ID")} and ${b("Secret Access Key")}. The secret is shown only once.`,
@@ -341,10 +345,10 @@ export const GUIDES: Record<GuideId, Guide> = {
 	"backups-token": featureGuide({
 		summary: "How Retention on Cloudflare uses the Cloudflare API token",
 		before: [
-			`Find the backup bucket's name: in the site's ${code("wrangler.jsonc")}, the ${code("bucket_name")} next to ${code('"binding": "BACKUPS"')} (or see ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")}). Enter it as Backup bucket name. The check makes sure it's the bucket this site writes to.`,
+			`The pack finds the backup bucket itself: the ${code("bucket_name")} next to ${code('"binding": "BACKUPS"')} in the site's ${code("wrangler.jsonc")}, shown as ${b("Found")}. If the card says it couldn't, enter that name as Backup bucket name (or find it in the ${link("https://dash.cloudflare.com/?to=/:account/r2/overview", "Cloudflare dashboard → R2")}). Either way, the check makes sure it's the bucket this site writes to.`,
 		],
-		needs: ["r2"],
-		note: `Restores don't use this token: they keep their own (the ${code("BACKUPS_API_TOKEN")} Worker secret, with D1 → Edit). The older retention token, and that Worker secret when it has Workers R2 Storage → Edit, keep working until the Cloudflare API token is saved.`,
+		needs: ["r2", "workersMetadata"],
+		note: `Workers → Metadata Read-Only only finds the bucket name; a token without it works once the name is entered. Restores don't use this token: they keep their own (the ${code("BACKUPS_API_TOKEN")} Worker secret, with D1 → Edit). The older retention token, and that Worker secret when it has Workers R2 Storage → Edit, keep working until the Cloudflare API token is saved.`,
 	}),
 	"backups-retention": {
 		summary: "How to set the retention rule by hand in the Cloudflare dashboard",
@@ -360,8 +364,8 @@ export const GUIDES: Record<GuideId, Guide> = {
 	},
 	"images-token": featureGuide({
 		summary: "How Set up media host uses the Cloudflare API token",
-		needs: ["zone", "zoneSettings", "transformRules", "dns", "r2", "rulesets"],
-		note: `Clearing the media host's images needs ${b(CLOUDFLARE_PERMISSIONS.cachePurge.name)} too, and its cache rule (Performance page) ${b(CLOUDFLARE_PERMISSIONS.cacheRules.name)}. In Cloudflare's token editor, search for “cache”: both rows are under Cache &amp; Performance, one named just Cache and one named Cache Settings. The token is only sent to api.cloudflare.com. The older Clean Image URLs token and ${code("IMAGES_API_TOKEN")} Worker secret keep working until the Cloudflare API token is saved.`,
+		needs: ["zone", "zoneSettings", "transformRules", "dns", "r2", "rulesets", "workersMetadata"],
+		note: `Workers → Metadata Read-Only only finds the media bucket's name (bound as ${code("MEDIA")} in ${code("wrangler.jsonc")}); a token without it works once the name is entered. Clearing the media host's images needs ${b(CLOUDFLARE_PERMISSIONS.cachePurge.name)} too, and its cache rule (Performance page) ${b(CLOUDFLARE_PERMISSIONS.cacheRules.name)}. In Cloudflare's token editor, search for “cache”: both rows are under Cache &amp; Performance, one named just Cache and one named Cache Settings. The token is only sent to api.cloudflare.com. The older Clean Image URLs token and ${code("IMAGES_API_TOKEN")} Worker secret keep working until the Cloudflare API token is saved.`,
 	}),
 	"browser-run-token": featureGuide({
 		summary: "How Social Images uses the Cloudflare API token",
