@@ -220,7 +220,7 @@ let configCache: { at: number; epoch: number; config: Config } | null = null;
  * EmDash's system date columns, which a collection's `dateField` may name since 1.5.0 (Date column source). Only a
  * custom date field makes a collection "dated" (articles): Pages set to Published would otherwise turn into articles.
  */
-const SYSTEM_DATE_FIELDS = new Set(["publishedAt", "createdAt", "updatedAt", "published_at", "created_at", "updated_at"]);
+const SYSTEM_DATE_FIELDS = new Set(["publishedAt", "createdAt", "updatedAt"]);
 
 /** Whether a collection's entries are dated (articles): it has a custom date field. */
 export function isDatedCollection(collection: { dateField?: string | null } | null | undefined): boolean {

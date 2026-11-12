@@ -289,3 +289,13 @@ test("the Discovery page answers with its status (IndexNow and Bing's clean-up, 
 	assert.deepEqual(status.features, { news: false, llms: false, feed: false, securityTxt: false });
 	assert.equal(pack.hooks["plugin:activate"], undefined, "Discovery has nothing to do at activation");
 });
+
+test("Discovery's old daily Bing task, if it still fires on a site that skipped the clean-up releases, is cancelled", async () => {
+	const { composeHooks } = await import("../src/core/compose.ts");
+	const { hooks } = composeHooks([pack], { tasks: [] });
+	const ctx = fakeCtx();
+	await hooks.cron.handler({ name: "discovery-bing-drain" }, ctx);
+	assert.deepEqual(ctx.cancelled, ["discovery-bing-drain"]);
+	await hooks.cron.handler({ name: "some-other-unknown-task" }, ctx);
+	assert.deepEqual(ctx.cancelled, ["discovery-bing-drain"], "other unknown tasks are left alone");
+});

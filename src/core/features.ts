@@ -176,11 +176,10 @@ let freshInstall = false;
  * used a feature: they don't make a site "existing". The fresh-install flag;
  * the deployed version the page cache middleware records on the first request
  * (src/pageCache/lib.ts VERSION_OPTION) and its warming progress
- * (src/pageCache/warm.ts WARM_STATE_OPTION). Discovery's IndexNow clean-up
- * marker (state:discovery:indexnowRetired, 0.35.18–0.37.x) stays on sites that ran it; it's only read
- * here at install, which those sites are long past.
+ * (src/pageCache/warm.ts WARM_STATE_OPTION); Discovery's IndexNow clean-up
+ * marker (state:discovery:indexnowRetired, set by 0.35.18–0.37.x), which stays stored on sites that ran it.
  */
-export const HOUSEKEEPING_KEYS: ReadonlySet<string> = new Set([FRESH_INSTALL_KEY, "pageCache:version", "pageCache:warmState"]);
+export const HOUSEKEEPING_KEYS: ReadonlySet<string> = new Set([FRESH_INSTALL_KEY, "pageCache:version", "pageCache:warmState", "state:discovery:indexnowRetired"]);
 
 /**
  * Anything the pack has stored on this site: a plugin setting or KV row
