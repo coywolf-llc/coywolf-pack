@@ -189,7 +189,7 @@ function rewriteEntryUrls(data: Record<string, unknown>, urlMap: Record<string, 
  * case-sensitive). Left alone: code blocks (example code), image and file blocks' `asset` (EmDash's media usage
  * tracking reads it), link `markDefs`, and media fields (objects: callers pass only string and array fields).
  */
-export function rewriteHtmlMediaUrls<T>(value: T, origin: string | null, toHost: (key: string) => string | null): { value: T; count: number } {
+export function rewriteSiteMediaUrls<T>(value: T, origin: string | null, toHost: (key: string) => string | null): { value: T; count: number } {
 	let count = 0;
 	const site = origin ? origin.replace(/\/+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : null;
 	// The site's own origin, or a site path (not preceded by another host's name).
@@ -229,13 +229,13 @@ export function rewriteHtmlMediaUrls<T>(value: T, origin: string | null, toHost:
 	return { value: walk(value, 0) as T, count };
 }
 
-/** rewriteHtmlMediaUrls on an entry's string and array fields only (media fields are objects, read by EmDash's usage tracking). */
+/** rewriteSiteMediaUrls on an entry's string and array fields only (media fields are objects, read by EmDash's usage tracking). */
 function rewriteEntryMediaHost(data: Record<string, unknown>, origin: string | null, toHost: (key: string) => string | null): { value: Record<string, unknown>; count: number } {
 	let out: Record<string, unknown> | null = null;
 	let count = 0;
 	for (const [field, value] of Object.entries(data)) {
 		if (typeof value !== "string" && !Array.isArray(value)) continue;
-		const r = rewriteHtmlMediaUrls(value, origin, toHost);
+		const r = rewriteSiteMediaUrls(value, origin, toHost);
 		if (!r.count) continue;
 		out ??= { ...data };
 		out[field] = r.value;
@@ -285,7 +285,7 @@ async function scan(ctx: PluginContext, apply: boolean, state: ScanState | null,
 			const result = convertible ? convertEntryData(data, opts) : { value: data, changed: false, changes: [], videos: [], leftovers: {} };
 			for (const [k, v] of Object.entries(result.leftovers)) leftovers[k] = (leftovers[k] ?? 0) + v;
 			const urls = rewritable ? rewriteEntryUrls(result.value, urlMap) : { value: result.value, count: 0 };
-			const hosted = hostable ? rewriteEntryMediaHost(urls.value, ctx.site?.url ?? null, (key) => `${host}/${key}`) : { value: urls.value, count: 0 };
+			const hosted = hostable ? rewriteEntryMediaHost(urls.value, ctx.site?.url ?? null, (key) => (/^[A-Za-z0-9_.-]+\.[A-Za-z0-9]{2,5}$/.test(key) ? `${host}/${key}` : null)) : { value: urls.value, count: 0 };
 			// Media host only: save just the entries whose media addresses change (no conversions on their own).
 			if (host !== null && urlMap === null && !hosted.count) continue;
 			if (!result.changed && !urls.count && !hosted.count) continue;

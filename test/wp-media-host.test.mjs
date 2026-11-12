@@ -5,7 +5,7 @@ import "./ts-resolve.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { rewriteHtmlMediaUrls } = await import("../src/wpImport/pack.ts");
+const { rewriteSiteMediaUrls } = await import("../src/wpImport/pack.ts");
 const toHost = (key) => `https://media.example.com/${key}`;
 
 test("HTML blocks: relative and same-site absolute file URLs go to the media host; other strings and other sites stay", () => {
@@ -15,7 +15,7 @@ test("HTML blocks: relative and same-site absolute file URLs go to the media hos
 		{ _type: "image", _key: "i", asset: { _ref: "m1", url: "/_emdash/api/media/file/01ABC.webp" } },
 		{ _type: "block", _key: "b", markDefs: [{ _key: "l", _type: "link", href: "/_emdash/api/media/file/doc.pdf" }], children: [] },
 	];
-	const { value, count } = rewriteHtmlMediaUrls({ content }, "https://example.com", toHost);
+	const { value, count } = rewriteSiteMediaUrls({ content }, "https://example.com", toHost);
 	assert.equal(count, 2);
 	assert.equal(
 		value.content[0].html,
@@ -27,10 +27,10 @@ test("HTML blocks: relative and same-site absolute file URLs go to the media hos
 
 test("nothing to change: the same value back, no count", () => {
 	const content = [{ _type: "html", _key: "h", html: "<p>No media</p>" }];
-	const out = rewriteHtmlMediaUrls({ content }, "https://example.com", toHost);
+	const out = rewriteSiteMediaUrls({ content }, "https://example.com", toHost);
 	assert.equal(out.count, 0);
 	assert.equal(out.value.content, content);
-	assert.equal(rewriteHtmlMediaUrls({ content }, "https://example.com", () => null).count, 0);
+	assert.equal(rewriteSiteMediaUrls({ content }, "https://example.com", () => null).count, 0);
 });
 
 test("converted blocks' URL strings (a How-To step's image src) are rewritten; code blocks and uppercase keys are safe", () => {
@@ -38,7 +38,7 @@ test("converted blocks' URL strings (a How-To step's image src) are rewritten; c
 		{ _type: "coywolf-howto", _key: "h", steps: [{ jsonText: 'Click <strong>Speed</strong><img src="/_emdash/api/media/file/A.png">', image: { props: { src: "/_emdash/api/media/file/B.PNG" } } }] },
 		{ _type: "code", _key: "c", code: '<img src="/_emdash/api/media/file/EXAMPLE.png">' },
 	];
-	const { value, count } = rewriteHtmlMediaUrls(content, "https://example.com", toHost);
+	const { value, count } = rewriteSiteMediaUrls(content, "https://example.com", toHost);
 	assert.equal(count, 2);
 	assert.equal(value[0].steps[0].jsonText, 'Click <strong>Speed</strong><img src="https://media.example.com/A.png">');
 	assert.equal(value[0].steps[0].image.props.src, "https://media.example.com/B.PNG", "the key keeps its case (R2 keys are case-sensitive)");
