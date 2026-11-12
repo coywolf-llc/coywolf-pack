@@ -325,8 +325,8 @@ const RESULT_LABEL: Record<string, string> = {
 	failed: "Failed",
 };
 
-/** Dry run and apply of the content scan; with `urlMap`, it also rewrites old-site URLs. */
-function ScanPanel({ urlMap, applyLabel, confirmTitle, confirmText }: { urlMap?: Record<string, string>; applyLabel: string; confirmTitle: string; confirmText: string }) {
+/** Dry run and apply of the content scan; with `urlMap`, it also rewrites old-site URLs; with `mediaHost`, the site's own media URLs in HTML. */
+function ScanPanel({ urlMap, mediaHost, applyLabel, confirmTitle, confirmText }: { urlMap?: Record<string, string>; mediaHost?: boolean; applyLabel: string; confirmTitle: string; confirmText: string }) {
 	const [confirm, confirmDialog] = useConfirm();
 	const [report, setReport] = React.useState<ScanReport | null>(null);
 	const [running, setRunning] = React.useState<false | "dry" | "apply">(false);
@@ -348,7 +348,7 @@ function ScanPanel({ urlMap, applyLabel, confirmTitle, confirmText }: { urlMap?:
 		try {
 			let state: unknown = null;
 			for (;;) {
-				const page = await post<ScanPage>("scan", { apply, state, ...(urlMap ? { urlMap } : {}) }, "The scan failed");
+				const page = await post<ScanPage>("scan", { apply, state, ...(urlMap ? { urlMap } : {}), ...(mediaHost ? { mediaHost: true } : {}) }, "The scan failed");
 				acc.scanned += page.scanned;
 				acc.entries.push(...page.entries);
 				acc.videosAdded += page.videosAdded;
@@ -1116,6 +1116,21 @@ function MediaUrlsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 								confirmText="Each entry is saved (published entries are republished). Make a backup first."
 							/>
 						)}
+					</div>
+					<div className="space-y-2">
+						<h3 className="text-sm font-medium">Media host addresses in content</h3>
+						<p className="text-xs text-kumo-subtle">
+							Points this site's own media file addresses (/_emdash/api/media/file/…) in HTML blocks and other blocks' HTML (imported How-To
+							steps, Details) at the media host, so they load from there like the rest of the site's images, and crawlers kept out of
+							/_emdash/ still reach them. Image and file blocks, links, code blocks and theme code aren't changed. Only entries with such
+							addresses are saved.
+						</p>
+						<ScanPanel
+							mediaHost
+							applyLabel="Rewrite to media host"
+							confirmTitle="Point the media addresses in the entries listed in the dry run at the media host?"
+							confirmText="Each entry is saved (published entries are republished). Make a backup first."
+						/>
 					</div>
 					<div className="space-y-2">
 						<h3 className="text-sm font-medium">Redirects from old media URLs</h3>

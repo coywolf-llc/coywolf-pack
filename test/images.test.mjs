@@ -226,3 +226,11 @@ test("the media host only resizes formats Cloudflare's resizer reads (no AVIF or
 		assert.equal(cdnOriginalUrl("/_emdash/api/media/file/ABC.avif"), "https://media.example.com/ABC.avif", "the original still loads from the host");
 	});
 });
+
+test("a key's extension keeps its case on the media host (R2 keys are case-sensitive)", () => {
+	withHost("https://media.example.com", null, () => {
+		assert.equal(cdnOriginalUrl("/_emdash/api/media/file/01ABC.JPG"), "https://media.example.com/01ABC.JPG");
+		assert.equal(cdnOriginalUrl("https://media.example.com/s/600/01ABC.JPG"), "https://media.example.com/01ABC.JPG");
+		assert.equal(parseCdnUrl("https://media.example.com/s/600x315/01ABC.PNG")?.ext, "PNG");
+	});
+});
