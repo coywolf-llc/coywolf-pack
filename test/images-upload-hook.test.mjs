@@ -29,6 +29,12 @@ registerHooks({
 const { composeHooks, hookCapabilities } = await import("../src/core/compose.ts");
 const { invalidateFeatures, registerFeatures, siteFeatures } = await import("../src/core/features.ts");
 const { imagesPack } = await import("../src/images/pack.ts");
+/** The images module with a media host (EmDash's publicUrl, as the sites set it since 0.40.0 removed images.cdn). */
+const hostLib = await import("../src/images/lib.ts");
+const imagesPackWithHost = (options = {}) => {
+	hostLib.setStoragePublicUrl("https://media.example.com");
+	return imagesPack(options);
+};
 const { VARIANTS_VERSION } = await import("../src/images/variants.ts");
 const { definePlugin, HookPipeline } = await import("emdash");
 
@@ -167,7 +173,7 @@ function aiStandIn() {
 
 test("the composed media:afterUpload hook hands its whole job to waitUntil before anything async", async () => {
 	const { db, b, ctx } = arrange();
-	const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+	const { hooks } = composeHooks([imagesPackWithHost()], { tasks: [] });
 	assert.equal(hooks["media:afterUpload"].priority, 0, "runs before other plugins' handlers of this hook");
 	const returned = fire(hooks, structuredClone({ media: upload }), ctx);
 	// Nothing awaited yet: the work is already registered (the request may end at any time now), and nothing ran synchronously.
@@ -184,7 +190,7 @@ test("the composed media:afterUpload hook hands its whole job to waitUntil befor
 
 test("EmDash 1.2's pipeline registers the hook for the config plugin, dispatches it fire-and-forget, and the sizes get made", async () => {
 	const { db, b } = arrange();
-	const modules = [imagesPack({ cdn: "https://media.example.com" })];
+	const modules = [imagesPackWithHost()];
 	const { hooks } = composeHooks(modules, { tasks: [] });
 	// What createPlugin() hands EmDash: the composed hooks with the capabilities they need (media:read for media:afterUpload).
 	const plugin = definePlugin({ id: "coywolf-pack", version: "0.0.0", capabilities: [...new Set([...modules.flatMap((m) => m.capabilities ?? []), ...hookCapabilities(modules)])], hooks });
@@ -228,7 +234,7 @@ test("EmDash 1.2's pipeline registers the hook for the config plugin, dispatches
 test("participants are gated by their feature inside the job: images off, AI on", async () => {
 	const ai = aiStandIn();
 	const { db, b, ctx } = arrange({ features: { images: false, ai: true, "ai.imageText": true } });
-	const { hooks } = composeHooks([ai.module, imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+	const { hooks } = composeHooks([ai.module, imagesPackWithHost()], { tasks: [] });
 	await fire(hooks, structuredClone({ media: upload }), ctx);
 	assert.equal(globalThis.__waited.length, 1);
 	await settled();
@@ -245,7 +251,7 @@ test("AI Enrichment's share is skipped while ai.imageText is off (and while ai i
 	]) {
 		const ai = aiStandIn();
 		const { b, ctx } = arrange({ features });
-		const { hooks } = composeHooks([ai.module, imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+		const { hooks } = composeHooks([ai.module, imagesPackWithHost()], { tasks: [] });
 		await fire(hooks, structuredClone({ media: upload }), ctx);
 		await settled();
 		assert.deepEqual(ai.calls, [], JSON.stringify(features));
@@ -257,7 +263,7 @@ test("AI Enrichment's share is skipped while ai.imageText is off (and while ai i
 test("one participant's failure doesn't stop the others", async () => {
 	const { b, ctx } = arrange({ features: { images: true, ai: true, "ai.imageText": true } });
 	const broken = { ...aiStandIn().module, hooks: { "media:afterUpload": async () => { throw new Error("no model"); } } };
-	const { hooks } = composeHooks([broken, imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+	const { hooks } = composeHooks([broken, imagesPackWithHost()], { tasks: [] });
 	const errors = await quiet("error", async () => {
 		await fire(hooks, structuredClone({ media: upload }), ctx);
 		await settled();
@@ -274,7 +280,7 @@ test("the job is one of EmDash's deferred tasks when a request context is open",
 		const tracked = [];
 		const store = { deferredTasks: { track: (promise) => (tracked.push(promise), promise) } };
 		const { b, ctx } = arrange();
-		const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+		const { hooks } = composeHooks([imagesPackWithHost()], { tasks: [] });
 		await als.run(store, () => fire(hooks, structuredClone({ media: upload }), ctx));
 		assert.equal(tracked.length, 1, "tracked, so a request-scoped database with a close() waits for it");
 		assert.equal(globalThis.__waited[0], tracked[0]);
@@ -293,7 +299,7 @@ test("src/ai/pack.ts gates its media:afterUpload share with ai.imageText (what t
 test("a media host with a binding missing is said out loud, once per upload; no media host is nothing to say", async () => {
 	const { b, ctx } = arrange();
 	delete globalThis.__testEnv.IMAGES;
-	const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+	const { hooks } = composeHooks([imagesPackWithHost()], { tasks: [] });
 	const warnings = await quiet("warn", async () => {
 		await fire(hooks, structuredClone({ media: upload }), ctx);
 		await settled();
@@ -304,6 +310,7 @@ test("a media host with a binding missing is said out loud, once per upload; no 
 
 	// The Worker-route mode (Clean image URLs on, no media host): stored sizes don't apply; silence.
 	const noHost = arrange({ host: null });
+	hostLib.setStoragePublicUrl(null);
 	const { hooks: hooksNoHost } = composeHooks([imagesPack()], { tasks: [] });
 	const silence = await quiet("warn", async () => {
 		await fire(hooksNoHost, structuredClone({ media: upload }), noHost.ctx);
@@ -315,11 +322,20 @@ test("a media host with a binding missing is said out loud, once per upload; no 
 
 test("files that can't have stored sizes are left alone without a word", async () => {
 	const { db, ctx } = arrange();
-	const { hooks } = composeHooks([imagesPack({ cdn: "https://media.example.com" })], { tasks: [] });
+	const { hooks } = composeHooks([imagesPackWithHost()], { tasks: [] });
 	const warnings = await quiet("warn", async () => {
 		await fire(hooks, { media: { ...upload, id: "01SVG", mimeType: "image/svg+xml" } }, ctx);
 		await settled();
 	});
 	assert.equal(db.records().length, 0);
 	assert.deepEqual(warnings, []);
+});
+
+test("images.cdn (removed in 0.40.0) only warns: the media host comes from EmDash's publicUrl or the Clean Image URLs page", async () => {
+	hostLib.setStoragePublicUrl(null);
+	hostLib.setSavedImageCdn(null);
+	const warnings = await quiet("warn", async () => void imagesPack({ cdn: "https://media.example.com" }));
+	assert.equal(warnings.length, 1);
+	assert.match(warnings[0], /images\.cdn was removed in 0\.40\.0/);
+	assert.equal(hostLib.imageCdn(), null);
 });

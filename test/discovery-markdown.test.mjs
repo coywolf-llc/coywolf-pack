@@ -115,3 +115,17 @@ test("frontmatter, tokens, and .md URLs", () => {
 	assert.equal(pagePathFromMarkdownPath("/index.html.md"), "/");
 	assert.equal(pagePathFromMarkdownPath("/blog/post"), null);
 });
+
+test("images in Markdown point at the media host when there is one (not the site's /_emdash/api/media/ route)", async () => {
+	const lib = await import("../src/images/lib.ts");
+	const md = portableTextToMarkdown;
+	lib.setStoragePublicUrl("https://media.example.com");
+	try {
+		const out = md([{ _type: "image", _key: "i", asset: { _ref: "m1", url: "/_emdash/api/media/file/a.jpg" }, alt: "A cat" }], { absolute: (u) => new URL(u, "https://example.com").href });
+		assert.match(out, /!\[A cat\]\(https:\/\/media\.example\.com\/a\.jpg\)/);
+		const byKey = md([{ _type: "image", _key: "k", asset: { _ref: "m2", meta: { storageKey: "B.png" } }, alt: "B" }], { absolute: (u) => new URL(u, "https://example.com").href });
+		assert.match(byKey, /!\[B\]\(https:\/\/media\.example\.com\/B\.png\)/);
+	} finally {
+		lib.setStoragePublicUrl(null);
+	}
+});

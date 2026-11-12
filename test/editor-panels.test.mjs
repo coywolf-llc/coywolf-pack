@@ -115,3 +115,26 @@ test("a collection is dated (its entries are articles) only with a custom date f
 	assert.equal(isDatedCollection({}), false);
 	assert.equal(isDatedCollection(undefined), false);
 });
+
+test("byline avatars in JSON-LD use the public media address, never EmDash's sign-in-only asset URL", async () => {
+	const { publicAvatarUrl, resolveAssetUrls } = await import("../src/schema/module.ts");
+	const ctx = (url) => ({ media: { get: async () => (url ? { url } : null) } });
+	const asset = ctx("/_emdash/api/media/asset/01M41A5F7JYHVSYM3JAXFDJZ4Z/jon-henshaw.png");
+	// The storage key (one cached read) gives the public file route.
+	assert.equal(await publicAvatarUrl(asset, "01M41A5F7JYHVSYM3JAXFDJZ4Z", async () => "01M41A5F7JYHVSYM3JAXFDJZ4Z.png"), "/_emdash/api/media/file/01M41A5F7JYHVSYM3JAXFDJZ4Z.png");
+	// Not found (or not ready): no image rather than a broken one.
+	assert.equal(await publicAvatarUrl(asset, "01M41A5F7JYHVSYM3JAXFDJZ4Z", async () => null), null);
+	// Can't read the database here: the plugin API's URL only when it's a public one.
+	assert.equal(await publicAvatarUrl(asset, "01M41A5F7JYHVSYM3JAXFDJZ4Z", async () => undefined), null);
+	assert.equal(await publicAvatarUrl(ctx("/_emdash/api/media/file/m1.jpg"), "m1", async () => undefined), "/_emdash/api/media/file/m1.jpg");
+	assert.equal(await publicAvatarUrl(ctx("/x"), null), null);
+
+	// A JSON-LD value with an asset URL saved by the old image picker: replaced with the public file route.
+	const graph = { "@graph": [{ "@type": "Organization", logo: "https://example.com/_emdash/api/media/asset/LOGO1/logo.png" }, { image: ["/_emdash/api/media/asset/IMG2/a.jpg", "https://example.com/other.png"] }] };
+	let reads = 0;
+	await resolveAssetUrls(graph, async (id) => (reads++, { LOGO1: "LOGO1.png", IMG2: "IMG2.jpg" })[id]);
+	assert.equal(graph["@graph"][0].logo, "https://example.com/_emdash/api/media/file/LOGO1.png");
+	assert.deepEqual(graph["@graph"][1].image, ["/_emdash/api/media/file/IMG2.jpg", "https://example.com/other.png"]);
+	assert.equal(reads, 2);
+	await resolveAssetUrls({ "@graph": [{ name: "No media here" }] }, async () => assert.fail("no read without an asset URL"));
+});

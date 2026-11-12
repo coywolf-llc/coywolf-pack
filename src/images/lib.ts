@@ -15,8 +15,8 @@
  *    astro.config.mjs, when publicUrl is a plain https origin (not r2.dev).
  *    EmDash's own components (Image, Gallery, site-settings logo and
  *    favicon…) print media there too, so it's one setting for both.
- *  - The host saved on the Clean Image URLs page, else the pack's
- *    `images: { cdn }` option (the pack's own host).
+ *  - The host saved on the Clean Image URLs page (the pack's own host;
+ *    the `images.cdn` option was removed in 0.40.0).
  *
  * When only one is set, that's the host. When both are and they differ, the
  * pack's own host wins (it's the one known to have the /s/ rules), and the
@@ -72,21 +72,15 @@ export function normalizeMediaHost(input: string | null | undefined): string | n
 }
 
 /**
- * The media host set in astro.config.mjs (`images.cdn`), the one saved on the
- * Clean Image URLs page, and EmDash's storage publicUrl (as a plain origin,
- * and as written, for recognizing EmDash's media URLs).
+ * The media host saved on the Clean Image URLs page, and EmDash's storage
+ * publicUrl (as a plain origin, and as written, for recognizing EmDash's media
+ * URLs). The pack's own `images.cdn` option was removed in 0.40.0.
  */
-let optionBase: string | null = null;
 let savedBase: string | null = null;
 let storageBase: string | null = null;
 let storagePrefix: string | null = null;
 
-/** Set (or clear) the media host from the plugin option. Anything but an https origin is ignored. */
-export function setImageCdn(url: string | null | undefined): void {
-	optionBase = normalizeMediaHost(url);
-}
-
-/** Set (or clear) the media host saved in the admin. It overrides the plugin option while set. */
+/** Set (or clear) the media host saved in the admin. */
 export function setSavedImageCdn(url: string | null | undefined): void {
 	savedBase = normalizeMediaHost(url);
 }
@@ -107,7 +101,7 @@ export function setStoragePublicUrl(url: string | null | undefined): void {
 
 /** The media host in use (https origin, no trailing slash), or null when there's none. */
 export function imageCdn(): string | null {
-	const packHost = savedBase ?? optionBase;
+	const packHost = savedBase;
 	// A publicUrl that isn't the pack's own working host doesn't take over unannounced: it may lack the /s/ rules.
 	if (storageBase && packHost && storageBase !== packHost) return packHost;
 	return storageBase ?? packHost;
@@ -115,7 +109,7 @@ export function imageCdn(): string | null {
 
 /** Every base under which a media-library file can appear as <base>/<file>, the host in use first. */
 function mediaBases(): string[] {
-	return [...new Set([imageCdn(), storagePrefix, savedBase, optionBase].filter((b): b is string => Boolean(b)))];
+	return [...new Set([imageCdn(), storagePrefix, savedBase].filter((b): b is string => Boolean(b)))];
 }
 
 /**
@@ -144,21 +138,20 @@ export function withMediaPreconnect(response: Response, host: string | null = im
 
 /**
  * Where the media host comes from: EmDash's publicUrl (`storage`, as a plain
- * origin; `storageUrl` as written), the admin setting, the plugin option, or nowhere.
+ * origin; `storageUrl` as written), the admin setting, or nowhere.
  */
 export function imageCdnSource(): {
 	host: string | null;
-	option: string | null;
 	saved: string | null;
 	storage: string | null;
 	storageUrl: string | null;
-	from: "storage" | "saved" | "option" | null;
+	from: "storage" | "saved" | null;
 	/** EmDash's publicUrl is a usable host but not the one in use (the pack's own differs). */
 	conflict: boolean;
 } {
 	const host = imageCdn();
-	const from = host && host === storageBase ? "storage" : savedBase ? "saved" : optionBase ? "option" : null;
-	return { host, option: optionBase, saved: savedBase, storage: storageBase, storageUrl: storagePrefix, from, conflict: Boolean(storageBase && host && storageBase !== host) };
+	const from = host && host === storageBase ? "storage" : savedBase ? "saved" : null;
+	return { host, saved: savedBase, storage: storageBase, storageUrl: storagePrefix, from, conflict: Boolean(storageBase && host && storageBase !== host) };
 }
 
 export interface ImageRequest {

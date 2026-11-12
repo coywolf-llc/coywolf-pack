@@ -23,9 +23,8 @@ const post = apiPost(API);
 
 interface Settings {
 	host: string;
-	optionHost: string;
 	activeHost: string;
-	/** "storage" (EmDash's r2({ publicUrl })), "saved" (this page), "option" (images.cdn), or "" (none). */
+	/** "storage" (EmDash's r2({ publicUrl })), "saved" (this page), or "" (none). */
 	hostSource?: string;
 	/** EmDash's publicUrl as written, when set. */
 	storageUrl?: string;
@@ -622,7 +621,7 @@ export function ImagesPage() {
 	const hostWorks = Boolean(saved?.activeHost && check?.ok && bare(check.host) === bare(saved.activeHost));
 	// Only the check on load collapses the setup form to "Checking…"; a Check the user asks for leaves the page as it is.
 	const firstCheck = autoChecking && !setupOpen;
-	// EmDash's publicUrl wins over this page and images.cdn: it's changed in astro.config.mjs, not here.
+	// EmDash's publicUrl wins over this page: it's changed in astro.config.mjs, not here.
 	const hostFromStorage = saved?.hostSource === "storage";
 	const showHostInput = !saved?.activeHost || hostOpen || draft.host !== (saved?.host ?? "");
 	const setupDone = (hostWorks || firstCheck) && !setupOpen && !plan && !applied;
@@ -685,9 +684,7 @@ export function ImagesPage() {
 									Images use <span className="font-medium">{saved.activeHost}</span>
 									{hostFromStorage
 										? " (EmDash's own media setting: storage: r2({ publicUrl }) in astro.config.mjs). EmDash's own images load from it too."
-										: saved.host
-											? " (saved here)."
-											: " (images.cdn in astro.config.mjs)."}{" "}
+										: " (saved here)."}{" "}
 									Old /media/ addresses redirect there.
 								</>
 							) : (
@@ -711,7 +708,7 @@ export function ImagesPage() {
 							<Banner
 								variant="alert"
 								title="EmDash's media setting names another host"
-								description={`EmDash's storage publicUrl is ${saved.storageConflict}, but the pack uses ${saved.activeHost}, which it knows serves resized images. EmDash's own components print media at ${saved.storageConflict}. Make publicUrl ${saved.activeHost} in astro.config.mjs, or, after Check passes on ${saved.storageConflict}, remove the pack's own host (images.cdn, or the one saved here) so publicUrl takes over.`}
+								description={`EmDash's storage publicUrl is ${saved.storageConflict}, but the pack uses ${saved.activeHost}, which it knows serves resized images. EmDash's own components print media at ${saved.storageConflict}. Make publicUrl ${saved.activeHost} in astro.config.mjs, or, after Check passes on ${saved.storageConflict}, clear the host saved here so publicUrl takes over.`}
 							/>
 						)}
 						{saved.activeHost && !hostFromStorage && !saved.storageUrl && (
@@ -722,22 +719,8 @@ export function ImagesPage() {
 									<>
 										EmDash 1.5 uses its storage publicUrl for its own images, the site logo, the favicon and the default social image,
 										so one setting can cover EmDash and the pack. In astro.config.mjs, change the storage line to{" "}
-										<code className="text-xs">{`storage: r2({ binding: "MEDIA", publicUrl: "${saved.activeHost}" })`}</code>
-										{saved.optionHost ? (
-											<>
-												{" "}
-												and remove <code className="text-xs">cdn</code> from <code className="text-xs">coywolfPlugin({"{"} images {"}"})</code>
-											</>
-										) : null}
-										, then deploy. Nothing changes for visitors.
-										{saved.optionHost ? (
-											<>
-												{" "}
-												The <code className="text-xs">images.cdn</code> option is deprecated and is removed in Coywolf Pack 0.40.0.
-											</>
-										) : (
-											" The host saved here keeps working; EmDash's setting covers more."
-										)}
+										<code className="text-xs">{`storage: r2({ binding: "MEDIA", publicUrl: "${saved.activeHost}" })`}</code>, then deploy.
+										Nothing changes for visitors. The host saved here keeps working; EmDash's setting covers more.
 									</>
 								}
 							/>
@@ -752,11 +735,7 @@ export function ImagesPage() {
 							<Input
 								label="Media host"
 								placeholder={`https://${suggestedHost}`}
-								description={
-									saved.optionHost
-										? `Leave empty to use the one in astro.config.mjs (${saved.optionHost}). Check it before saving: images switch to it right away.`
-										: "An https address like https://media.example.com. Check it before saving: images switch to it right away."
-								}
+								description="An https address like https://media.example.com. Check it before saving: images switch to it right away."
 								value={draft.host}
 								disabled={busy}
 								onChange={(e: React.ChangeEvent<HTMLInputElement>) => set({ host: e.target.value })}

@@ -20,9 +20,9 @@ https://media.coywolf.com/s/<w>/<file>         width only, keeps the ratio
 
 1. **EmDash's own media setting**: `storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" })` in `astro.config.mjs`. It has to be a plain `https://` address with no path, on a domain of the site's zone (an `r2.dev` address can't resize, so it's never used as the media host; its URLs are still recognized). With it, EmDash's own components (Image, Gallery, Video) print media at the same host, and since EmDash 1.5 the site settings' logo, favicon and default social image too, so one setting covers EmDash and the pack. The Clean Image URLs page shows the host as coming from EmDash's setting, and it's changed in `astro.config.mjs` only.
 2. **The host saved on the Clean Image URLs page** (takes effect within a minute, no deploy).
-3. **The pack's option**, `coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })`: the fallback, from before EmDash had `publicUrl`. **Deprecated since 0.38.0 and removed in 0.40.0**: move it to `publicUrl` (below). The Clean Image URLs page shows the change to make while the host comes from here or from the page and `publicUrl` isn't set.
+The pack's own option, `coywolfPlugin({ images: { cdn } })`, was removed in 0.40.0 (deprecated in 0.38.0). A site that still sets it gets a warning in the Worker's logs and no media host from it: move the host to `publicUrl` (below).
 
-`publicUrl` is used when the pack has no host of its own (2 or 3), or the same one. When the pack has a different working host, that one stays in use (`publicUrl` may not have the `/s/` rules), and the Clean Image URLs page says so: make `publicUrl` the same host, or, once **Check** passes on it, remove the pack's own host so `publicUrl` takes over.
+`publicUrl` is used when no host is saved on the page, or the same one is. When the pack has a different working host, that one stays in use (`publicUrl` may not have the `/s/` rules), and the Clean Image URLs page says so: make `publicUrl` the same host, or, once **Check** passes on it, remove the pack's own host so `publicUrl` takes over.
 
 **Media URLs in every form.** Wherever the pack takes an image (`cleanImageUrl()`, `originalImageUrl()`, `imageInfo()`, `responsiveImage()`, `croppedImage()`, the og:image and JSON-LD images, the default social image from **Settings → SEO**), it accepts EmDash's `/_emdash/api/media/file/<file>`, the original under EmDash's `publicUrl` (`https://media.coywolf.com/<file>`, the form EmDash prints when it's set, also when `publicUrl` has a path and can't be the media host), and the original on the media host. Stored content keeps EmDash's `/_emdash/api/media/file/<file>` addresses, and those keep working.
 
@@ -30,7 +30,7 @@ https://media.coywolf.com/s/<w>/<file>         width only, keeps the ratio
 
 ## Moving a site to EmDash's publicUrl
 
-A site that sets `images.cdn` should move the host to EmDash's own setting before 0.40.0, which removes the option. Using coywolf.com as the example:
+A site that set `images.cdn` (before 0.40.0) moves the host to EmDash's own setting. Using coywolf.com as the example:
 
 1. **Update the pack first** to a release with this change (it reads `publicUrl` and accepts `https://media.coywolf.com/<file>` URLs from EmDash). An older pack doesn't recognize EmDash's media-host URLs, so images EmDash hands it in that form would lose their clean sizes. Updating in the same commit as step 2 is fine.
 2. **In `astro.config.mjs`**, add `publicUrl` to the storage adapter, with the same host the pack uses now:
@@ -40,7 +40,6 @@ A site that sets `images.cdn` should move the host to EmDash's own setting befor
      storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" }),
      plugins: [
        coywolfPlugin({
-         // images.cdn can go: EmDash's publicUrl is the media host now.
          images: { crops: [[400, 210], [600, 315], [900, 473], [50, 50], [100, 100], [120, 120], [240, 240], [64, 64], [128, 128]] },
        }),
      ],
@@ -54,7 +53,7 @@ A site that sets `images.cdn` should move the host to EmDash's own setting befor
 Nothing else has to change at the same time: the media host's Cloudflare setup (custom domain, rewrite rules, Image Transformations, Smart Tiered Cache) stays as it is, themes that build `/_emdash/api/media/file/<key>` addresses keep working (coywolf.com's `src/lib/site.ts` does), and stored content isn't rewritten. Two things to know:
 
 - **The bucket is public through the host.** This was already true with `images.cdn`: everything in the media bucket can be fetched at `https://media.coywolf.com/<key>`, including large uploads stored there (`files/<id>/<name>`, unless they have their own `FILES` bucket) and EmDash's own JSON backups under `backups/` if they're ever turned on (**Settings → Backups**; the pack's Backups use their own private bucket). Keep private files out of the media bucket.
-- **To move back**, remove `publicUrl` (and put `images.cdn` back) and deploy.
+- **To use another host**, change `publicUrl` and deploy, or save a host on the Clean Image URLs page.
 
 ## Setting up a media host
 
@@ -102,13 +101,9 @@ Then turn the media host on: best with EmDash's own setting in `astro.config.mjs
 storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" })
 ```
 
-or on the Clean Image URLs page (takes effect within a minute, no deploy), or with the pack's option:
+or on the Clean Image URLs page (takes effect within a minute, no deploy).
 
-```js
-coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })
-```
-
-EmDash's `publicUrl` is used when the pack has no host of its own or the same one (see above); a host saved on the page wins over the option, and clearing it there falls back to the option. The host must be an `https://` origin with no path.
+EmDash's `publicUrl` is used when no host is saved on the page or the same one is (see above). The host must be an `https://` origin with no path.
 
 **Quota.** Cloudflare's Free plan includes 5,000 unique image transformations a month (each new size of each image counts once a month; repeat views come from the cache). Beyond that, transformations need a paid Cloudflare Images plan.
 
@@ -152,7 +147,7 @@ https://media.coywolf.com/v1/<id>-<w>x<h>.avif|.webp      the site's crops (fit:
 - **Crops** are the exact sizes the theme shows (list thumbnails, avatars at 1x and 2x, the Testimonial block's 64×64 and 128×128 photo). They're made **on first use**: when `croppedImage()` finds an image's widths stored but a listed crop missing, it makes just that crop after the response (one at a time per isolate, at most 6 images queued; a failure waits an hour before it's tried again), merges it into the record in SQL (crops added meanwhile by another isolate are kept), and marks the page as a stopgap so its next render uses it. So avatars and testimonial crops are made only for the images that are shown that way, and list crops only for featured images. A size not in `images.crops` always uses `/s/`.
 
   ```js
-  coywolfPlugin({ images: { cdn: "https://media.coywolf.com", crops: [[400, 210], [600, 315], [900, 473], [50, 50], [100, 100], [64, 64], [128, 128]] } })
+  coywolfPlugin({ images: { crops: [[400, 210], [600, 315], [900, 473], [50, 50], [100, 100], [64, 64], [128, 128]] } })
   ```
 
   Adding crops later is fine: they're made as pages show them. Removed crops' files stay until the image is deleted.

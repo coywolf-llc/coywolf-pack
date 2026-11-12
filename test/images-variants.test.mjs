@@ -337,7 +337,7 @@ test("legacy listed posters are upgraded to stored sizes; ones that can't be are
 
 test("after media writes: a delete removes copies and record; replaced files get sizes; imports run the backfill; confirms are left to the upload hook", async () => {
 	const { variantsAfterMediaWrite } = await import("../src/images/pack.ts");
-	const { setImageCdn } = await import("../src/images/lib.ts");
+	const { setStoragePublicUrl: setMediaHost } = await import("../src/images/lib.ts");
 	const db = d1();
 	const v = `v${V.VARIANTS_VERSION}`;
 	const b = bucket({ [`${v}/01D-400.webp`]: 1, [`${v}/01E-400.webp`]: 1 });
@@ -351,7 +351,7 @@ test("after media writes: a delete removes copies and record; replaced files get
 	assert.deepEqual([...b.objects.keys()], [`${v}/01E-400.webp`], "deleted even with the feature off");
 	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM _plugin_storage").get().n, 0);
 
-	setImageCdn("https://media.example.com");
+	setMediaHost("https://media.example.com");
 	addMedia(db, "01F", "jpg", "image/jpeg", 700, 500);
 	b.objects.set("01F.jpg", { body: new Uint8Array([1]).buffer, options: {} });
 	assert.equal(variantsAfterMediaWrite("POST", "/_emdash/api/media/01F/confirm", true), null);
@@ -386,7 +386,7 @@ test("after media writes: a delete removes copies and record; replaced files get
 	await setBulk(db, true);
 	await variantsAfterMediaWrite("POST", "/_emdash/api/import/wordpress/media", true);
 	assert.ok(b.objects.has(`${v}/01G-800.webp`), "the import's media got sizes once turned on");
-	setImageCdn(null);
+	setMediaHost(null);
 	globalThis.__testEnv = undefined;
 });
 
@@ -397,7 +397,7 @@ function setBulk(db, on) {
 
 test("the hourly backfill does nothing until sizes for existing images are turned on", async () => {
 	const { startBackfillChain: runVariantsBackfill } = await import("../src/images/pack.ts");
-	const { setImageCdn } = await import("../src/images/lib.ts");
+	const { setStoragePublicUrl: setMediaHost } = await import("../src/images/lib.ts");
 	const { invalidateFeatures } = await import("../src/core/features.ts");
 	const db = d1();
 	const b = bucket();
@@ -405,7 +405,7 @@ test("the hourly backfill does nothing until sizes for existing images are turne
 	b.objects.set("01H.jpg", { body: new Uint8Array([1]).buffer, options: {} });
 	const img = images();
 	globalThis.__testEnv = { DB: db, MEDIA: b, IMAGES: img };
-	setImageCdn("https://media.example.com");
+	setMediaHost("https://media.example.com");
 	invalidateFeatures();
 	assert.equal(await runVariantsBackfill(), null);
 	assert.equal(img.calls.length, 0);
@@ -416,7 +416,7 @@ test("the hourly backfill does nothing until sizes for existing images are turne
 	assert.equal(state.phase, "done");
 	assert.equal(state.done, 1);
 	assert.equal(state.lease, undefined, "the lease is let go");
-	setImageCdn(null);
+	setMediaHost(null);
 	globalThis.__testEnv = undefined;
 });
 
@@ -436,7 +436,7 @@ test("crops made on first use are merged into the record without dropping others
 
 test("renders: stopgaps only when sizes are coming; missing crops are made after the response; small images have no <picture>", async () => {
 	const pack = await import("../src/images/pack.ts");
-	const { setImageCdn } = await import("../src/images/lib.ts");
+	const { setStoragePublicUrl: setMediaHost } = await import("../src/images/lib.ts");
 	const { invalidateFeatures } = await import("../src/core/features.ts");
 	const { PENDING_MEDIA_LOCAL } = await import("../src/images/pending.ts");
 	const db = d1();
@@ -444,7 +444,7 @@ test("renders: stopgaps only when sizes are coming; missing crops are made after
 	const b = bucket();
 	const img = images();
 	globalThis.__testEnv = { DB: db, MEDIA: b, IMAGES: img };
-	setImageCdn("https://media.example.com");
+	setMediaHost("https://media.example.com");
 	invalidateFeatures();
 	V.setImageCrops([[400, 210], [50, 50]]);
 	pack.resetCropJobs();
@@ -515,13 +515,13 @@ test("renders: stopgaps only when sizes are coming; missing crops are made after
 
 	V.setImageCrops([]);
 	pack.resetCropJobs();
-	setImageCdn(null);
+	setMediaHost(null);
 	globalThis.__testEnv = undefined;
 });
 
 test("crops: a job that never settles (its request was canceled) doesn't stop the crops queued after it", { timeout: 3_000 }, async () => {
 	const pack = await import("../src/images/pack.ts");
-	const { setImageCdn } = await import("../src/images/lib.ts");
+	const { setStoragePublicUrl: setMediaHost } = await import("../src/images/lib.ts");
 	const { invalidateFeatures } = await import("../src/core/features.ts");
 	const { DEADLINES } = await import("../src/core/single-flight.ts");
 	const saved = DEADLINES.cropJobMs;
@@ -531,7 +531,7 @@ test("crops: a job that never settles (its request was canceled) doesn't stop th
 	const b = bucket();
 	const img = images();
 	globalThis.__testEnv = { DB: db, MEDIA: b, IMAGES: img };
-	setImageCdn("https://media.example.com");
+	setMediaHost("https://media.example.com");
 	invalidateFeatures();
 	V.setImageCrops([[400, 210]]);
 	pack.resetCropJobs();
@@ -570,7 +570,7 @@ test("crops: a job that never settles (its request was canceled) doesn't stop th
 	DEADLINES.cropJobMs = saved;
 	V.setImageCrops([]);
 	pack.resetCropJobs();
-	setImageCdn(null);
+	setMediaHost(null);
 	globalThis.__testEnv = undefined;
 });
 
@@ -648,17 +648,17 @@ function selfBinding(pack, img) {
 
 async function chainSetup(n) {
 	const pack = await import("../src/images/pack.ts");
-	const { setImageCdn } = await import("../src/images/lib.ts");
+	const { setStoragePublicUrl: setMediaHost } = await import("../src/images/lib.ts");
 	const db = d1();
 	const b = bucket();
 	library(db, b, n);
 	const img = images();
 	const s = selfBinding(pack, img);
 	globalThis.__testEnv = { DB: db, MEDIA: b, IMAGES: img, SELF: s.self };
-	setImageCdn("https://media.example.com");
+	setMediaHost("https://media.example.com");
 	await setBulk(db, true);
 	const done = () => {
-		setImageCdn(null);
+		setMediaHost(null);
 		globalThis.__testEnv = undefined;
 	};
 	return { pack, db, b, img, ...s, done };
