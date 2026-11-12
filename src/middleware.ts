@@ -168,8 +168,9 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			method !== "GET" && method !== "HEAD" && context.url.pathname.startsWith("/_emdash/api/")
 				? watchInvalidation((context as unknown as { cache?: Parameters<typeof watchInvalidation>[0] }).cache)
 				: null;
-		// Only SEO saves can change it (not General, Social…), so other settings saves don't touch the settings generation.
-		// A staging change (EmDash's Site Status: Go live, or back to staging) changes every page's robots tag.
+		// A save with SEO settings can change /robots.txt; one without them doesn't touch the settings generation. (EmDash's
+		// General, SEO and Social pages each send every setting but staging, so all three carry `seo` once it's set.)
+		// A staging change (EmDash's Site Status: Go live, or back to staging, sent on its own) changes every page's robots tag.
 		// A copy of the body, read only after EmDash has accepted the save (it checks permissions after this middleware).
 		const settingsLength = Number(context.request.headers.get("content-length"));
 		const settingsCopy = method === "POST" && context.url.pathname === EMDASH_SETTINGS_API && settingsLength > 0 && settingsLength <= 64 * 1024 ? context.request.clone() : null;
@@ -187,25 +188,20 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			// their "Disallow AI training" lines, and EmDash's own (Robots.txt Rules off) is built from their robots.txt
 			// setting. Both are kept at the edge for a day, and Cloudflare's purge by URL doesn't reach Workers Cache: clear
 			// it here now and (settling purge) again once every isolate's robots.txt rules cache has expired.
-			if (seoSave && response.status < 400) {
-				// Only the pack's file has a rules cache in this isolate (EmDash reads its settings on every render).
-				if (isOn(features, "robots")) invalidateRobotsCache();
-				const scope: PurgeScope = { pathPrefixes: ["/robots.txt"] };
-				waitUntil(
-					(db ? recordSettingsChange(db, scope) : Promise.resolve())
-						.then(() => purge(scope))
-						.catch((error) => console.error("coywolf-pack: could not clear robots.txt after EmDash's settings changed", error)),
-				);
-			}
+			// Only the pack's file has a rules cache in this isolate (EmDash reads its settings on every render).
+			if (seoSave && response.status < 400 && isOn(features, "robots")) invalidateRobotsCache();
 			// Going live (or back to staging) changes every page's robots tag: EmDash renders noindex, nofollow on every page
 			// while the site is in staging, and only clears pages tagged with its settings. Clear every cached page (which
 			// restarts warming), and again once every isolate has the new settings (settling purge).
-			if (settingsKeys.staging && response.status < 400) {
-				const scope: PurgeScope = { purgeEverything: true };
+			// One scope for both, recorded and purged once: two recordSettingsChange calls at once would each rewrite the
+			// row from the same read, and the last one could drop the other's settling purge.
+			const settingsScope =
+				response.status < 400 ? mergeScopes(seoSave ? { pathPrefixes: ["/robots.txt"] } : null, settingsKeys.staging ? { purgeEverything: true } : null) : null;
+			if (settingsScope) {
 				waitUntil(
-					(db ? recordSettingsChange(db, scope) : Promise.resolve())
-						.then(() => purge(scope))
-						.catch((error) => console.error("coywolf-pack: could not clear pages after the site's staging status changed", error)),
+					(db ? recordSettingsChange(db, settingsScope) : Promise.resolve())
+						.then(() => purge(settingsScope))
+						.catch((error) => console.error("coywolf-pack: could not clear robots.txt or pages after EmDash's settings changed", error)),
 				);
 			}
 			// Stored image sizes follow media deletes, replaced files and WordPress media imports (new uploads: the media:afterUpload hook).

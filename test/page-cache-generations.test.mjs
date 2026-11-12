@@ -284,13 +284,30 @@ test("an SEO save clears /robots.txt with Robots.txt Rules off too (EmDash's own
 	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }], "Cloudflare's purge by URL doesn't reach Workers Cache");
 	assert.deepEqual(row(db).settle, { pathPrefixes: ["/robots.txt"] });
 	assert.deepEqual(await settleLaterRequest(db, savedAt), [{ pathPrefixes: ["/robots.txt"] }], "cleared again once every isolate has the new settings");
-	// Other settings saves (General, Social…) don't touch robots.txt.
+	// A save without SEO settings (EmDash's General page on a site that never saved any) doesn't touch robots.txt.
 	const other = d1();
 	freshIsolate(other);
 	await features.siteFeatures();
 	await acceptedSettingsSave({ title: "A new title" });
 	assert.deepEqual(globalThis.__purges, []);
 	assert.equal(row(other), null, "no settings change recorded");
+});
+
+test("a settings save with SEO settings and a staging change clears everything once, and settles everything", async () => {
+	const db = d1();
+	// Count the settings generation's writes (recordSettingsChange's upsert).
+	const prepare = db.prepare;
+	let recorded = 0;
+	db.prepare = (sql) => {
+		if (/^INSERT INTO options .* DO UPDATE SET value/.test(sql)) recorded++;
+		return prepare(sql);
+	};
+	freshIsolate(db);
+	await features.siteFeatures();
+	await acceptedSettingsSave({ seo: { robotsTxt: "User-agent: *\nAllow: /\n" }, staging: false });
+	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }], "/robots.txt is cleared with everything else, not separately");
+	assert.deepEqual(row(db).settle, { purgeEverything: true });
+	assert.equal(recorded, 1, "one settings change recorded, not two rewriting the row from the same read");
 });
 
 test("with Robots.txt Rules on, an SEO save also drops this isolate's robots.txt rules cache", async () => {
