@@ -205,7 +205,7 @@ function ServedFile(props: { text: string; emdash: PageData["emdash"]; config: R
 					</ul>
 				</div>
 			)}
-			<textarea readOnly aria-label="robots.txt being served" className="w-full resize-none rounded-lg border bg-kumo-tint/40 p-3 font-mono text-xs" rows={rows} value={props.text} />
+			<textarea readOnly aria-label="robots.txt being served" className="w-full resize-none rounded-lg border cw-bg-tint-40 p-3 font-mono text-xs" rows={rows} value={props.text} />
 			<p className="text-xs text-kumo-subtle">
 				Turn Robots.txt off on <FeaturesLink /> to serve EmDash's own robots.txt again. Your rules are kept for next time.
 			</p>
@@ -235,7 +235,7 @@ function SitemapOption(props: { config: RobotsConfig; siteUrl: string; busy: boo
 			/>
 			<p className="cw-ps-6 text-xs text-kumo-subtle">A Sitemap line tells every search engine where your sitemap is. Turn it off if you'd rather submit sitemaps yourself, for example in Google Search Console.</p>
 			{!props.config.includeSitemap && !props.noteDismissed && (
-				<div className="flex items-start gap-2 rounded bg-kumo-tint/40 px-3 py-2 text-sm" role="note">
+				<div className="flex items-start gap-2 rounded cw-bg-tint-40 px-3 py-2 text-sm" role="note">
 					<Info className="mt-0.5 shrink-0 text-kumo-subtle" aria-hidden="true" />
 					<span className="flex-1">
 						Your sitemap isn't listed in robots.txt. That's fine if you submit it in Search Console; other search engines may find it more slowly.{" "}
@@ -354,7 +354,7 @@ function RulesList(props: {
 				})();
 				const unverified = rule.agents.filter((a) => byToken.get(a.toLowerCase())?.status === "unverified");
 				return (
-					<li key={rule.id} className={`flex items-start gap-3 border-b px-4 py-3 text-sm last:border-0 ${rule.enabled ? "" : "opacity-60"}`}>
+					<li key={rule.id} className={`flex items-start gap-3 border-b px-4 py-3 text-sm cw-last-border-0 ${rule.enabled ? "" : "opacity-60"}`}>
 						<Switch className="shrink-0" size="sm" aria-label={`${rule.name}: ${rule.enabled ? "on" : "off"}`} checked={rule.enabled} disabled={props.busy} onCheckedChange={(on) => props.onToggle(rule, on)} />
 						<div className="min-w-0 flex-1">
 							<div className="font-medium">{rule.name || sentence}</div>
@@ -566,7 +566,7 @@ function SettingsTab(props: {
 				) : (
 					<ul className="rounded-lg border">
 						{props.data.history.map((h, i) => (
-							<li key={h.id} className="flex flex-wrap items-center gap-3 border-b px-4 py-2 text-sm last:border-0">
+							<li key={h.id} className="flex flex-wrap items-center gap-3 border-b px-4 py-2 text-sm cw-last-border-0">
 								<div className="min-w-0 flex-1">
 									<div className="font-medium">
 										{h.label} {i === 0 && <Badge variant="secondary">current</Badge>}

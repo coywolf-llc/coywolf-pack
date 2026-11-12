@@ -166,7 +166,7 @@ function SettingsDialog(props: { open: boolean; status: Status | undefined; onCl
 							{numberField("staleMonths", "Stale after (months)", "0 turns the check off.")}
 						</div>
 						<Switch label="The theme shows the entry's title as the page's H1" checked={draft.titleIsH1} onCheckedChange={(on: boolean) => setDraft({ ...draft, titleIsH1: on })} />
-						<p className="-mt-3 text-xs text-kumo-subtle">Then an H1 in the content is a second one, and the first heading in the content should be an H2.</p>
+						<p className="cw-mt-n3 text-xs text-kumo-subtle">Then an H1 in the content is a second one, and the first heading in the content should be an H2.</p>
 						{error && <Banner variant="error" role="alert" description={error} />}
 						<div className="flex justify-end gap-2">
 							<Button type="button" variant="secondary" disabled={pending} onClick={props.onClose}>

@@ -82,7 +82,7 @@ export function BotPicker(props: { bots: BotEntry[]; selected: string[]; onChang
 					const expanded = Boolean(q) || open.has(cat);
 					const panelId = `cw-bots-${cat}`;
 					return (
-						<div key={cat} className="border-b border-kumo-line last:border-0">
+						<div key={cat} className="border-b border-kumo-line cw-last-border-0">
 							<div className="flex items-center gap-2 px-3 py-2">
 								<TriCheckbox
 									checked={on > 0 && on === list.length}
@@ -300,14 +300,14 @@ export function BotsTab(props: {
 			<div className="overflow-x-auto rounded-lg border">
 				<table className="w-full text-start text-sm">
 					<caption className="sr-only">Crawler directory</caption>
-					<thead className="border-b bg-kumo-tint/40 text-xs text-kumo-subtle">
+					<thead className="border-b cw-bg-tint-40 text-xs text-kumo-subtle">
 						<tr>
 							<th scope="col" className="px-3 py-2 font-medium">Name</th>
 							<th scope="col" className="px-3 py-2 font-medium">Token</th>
 							<th scope="col" className="cw-md-table-cell px-3 py-2 font-medium">Operator</th>
 							<th scope="col" className="cw-md-table-cell px-3 py-2 font-medium">Category and purpose</th>
 							<th scope="col" className="px-3 py-2 font-medium">Status</th>
-							<th scope="col" className="hidden px-3 py-2 font-medium lg:table-cell">Rules</th>
+							<th scope="col" className="px-3 py-2 font-medium cw-lg-table-cell">Rules</th>
 							<th scope="col" className="px-3 py-2"><span className="sr-only">Actions</span></th>
 						</tr>
 					</thead>
@@ -315,7 +315,7 @@ export function BotsTab(props: {
 						{visible.slice(0, limit).map((bot) => {
 							const used = usage.get(bot.token.toLowerCase()) ?? [];
 							return (
-								<tr key={bot.slug} className="border-b last:border-0 align-top">
+								<tr key={bot.slug} className="border-b cw-last-border-0 align-top">
 									<td className="px-3 py-2">
 										<div className="font-medium">{bot.name}</div>
 										{bot.originalName && <div className="text-xs text-kumo-subtle">Listed as {bot.originalName}</div>}
@@ -340,7 +340,7 @@ export function BotsTab(props: {
 											</a>
 										)}
 									</td>
-									<td className="hidden px-3 py-2 text-xs lg:table-cell">{used.length ? used.map((r) => r.name).join(", ") : "—"}</td>
+									<td className="px-3 py-2 text-xs cw-lg-table-cell">{used.length ? used.map((r) => r.name).join(", ") : "—"}</td>
 									<td className="px-3 py-2 text-end">
 										<DropdownMenu>
 											<DropdownMenu.Trigger render={<Button type="button" variant="ghost" shape="square" icon={<DotsThree aria-hidden="true" />} aria-label={`Actions for ${bot.name}`} />} />

@@ -427,7 +427,7 @@ function TypesTab(props: { config: Config; onSaved: (types: Record<string, TypeC
 						<div className="cw-w-60">Article type</div>
 					</div>
 					{rows.map((row) => (
-						<div key={row.key} className="flex flex-col gap-2 border-b px-4 py-3 last:border-0 cw-md-row md:gap-4">
+						<div key={row.key} className="flex flex-col gap-2 border-b px-4 py-3 cw-last-border-0 cw-md-row md:gap-4">
 							<div className="min-w-0 flex-1">
 								<div className="text-sm font-medium">{row.label}</div>
 								<div className="truncate text-xs text-kumo-subtle">{row.hint}</div>
@@ -638,7 +638,7 @@ function EntryPicker(props: { collections: Collection[]; onPick: (collection: st
 							<li key={item.id}>
 								<button
 									type="button"
-									className="flex w-full items-center gap-2 px-3 py-2 text-start text-sm hover:bg-kumo-tint focus:bg-kumo-tint focus:outline-none"
+									className="flex w-full items-center gap-2 px-3 py-2 text-start text-sm hover:bg-kumo-tint cw-focus-tint focus:outline-none"
 									onClick={() => props.onPick(collection, item)}
 								>
 									<span className="min-w-0 flex-1 truncate">{item.title}</span>
@@ -917,7 +917,7 @@ function OverridesTab(props: { config: Config; bylines: Byline[] | undefined; op
 			) : (
 				<div className="rounded-lg border">
 					{items?.map((item) => (
-						<div key={`${item.collection}:${item.entryId}`} className="flex items-center gap-4 border-b px-4 py-2 text-sm last:border-0">
+						<div key={`${item.collection}:${item.entryId}`} className="flex items-center gap-4 border-b px-4 py-2 text-sm cw-last-border-0">
 							<div className="min-w-0 flex-1">
 								<div className="truncate font-medium">{item.title || item.entryId}</div>
 								<div className="text-xs text-kumo-subtle">{collectionLabel(item.collection)}</div>

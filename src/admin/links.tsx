@@ -803,7 +803,7 @@ export function LinksPage(props: { views?: React.ReactNode } = {}) {
 					{items.map((row) => {
 						const open = expanded.has(row.id);
 						return (
-							<div key={row.id} className={`border-b px-4 py-2 text-sm last:border-0 ${row.ignored ? "opacity-60" : ""}`}>
+							<div key={row.id} className={`border-b px-4 py-2 text-sm cw-last-border-0 ${row.ignored ? "opacity-60" : ""}`}>
 								<div className="flex items-center gap-3">
 									<div className="w-5">
 										<Checkbox

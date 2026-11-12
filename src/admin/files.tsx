@@ -707,7 +707,7 @@ export function FilesPage() {
 						</div>
 					</div>
 					{visible.map((file) => (
-						<div role="row" key={file.id} className={`flex items-center gap-4 border-b px-4 py-2 text-sm last:border-0 ${file.status === "uploading" ? "opacity-60" : ""}`}>
+						<div role="row" key={file.id} className={`flex items-center gap-4 border-b px-4 py-2 text-sm cw-last-border-0 ${file.status === "uploading" ? "opacity-60" : ""}`}>
 							<div role="cell" className="flex min-w-0 flex-1 items-center gap-3">
 								<TypeBadge ext={file.ext} />
 								<div className="min-w-0">

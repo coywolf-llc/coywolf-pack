@@ -25,8 +25,13 @@ export const ADMIN_CSS = `.cw-fill-tint{fill:var(--color-kumo-tint)}
 .cw-pre-wrap{white-space:pre-wrap;overflow-wrap:anywhere}
 .cw-ps-6{padding-inline-start:1.5rem}
 .cw-pe-4{padding-inline-end:1rem}
+.cw-pe-24{padding-inline-end:6rem}
+.cw-mt-n3{margin-top:-.75rem}
+.cw-bg-tint-40{background-color:color-mix(in oklab,var(--color-kumo-tint) 40%,transparent)}
+.cw-last-border-0:last-child{border-width:0}
+.cw-focus-tint:focus{background-color:var(--color-kumo-tint)}
 .cw-dialog-scroll{max-height:calc(100dvh - 12rem);overflow-y:auto;overscroll-behavior:contain;padding-inline-end:.25rem}
-.cw-md-flex,.cw-md-table-cell,.cw-lg-block{display:none}
+.cw-md-flex,.cw-md-table-cell,.cw-lg-block,.cw-lg-table-cell{display:none}
 @media (min-width:40rem){
 .cw-sm-cols-8-fill{grid-template-columns:8rem minmax(0,1fr)}
 }
@@ -38,6 +43,7 @@ export const ADMIN_CSS = `.cw-fill-tint{fill:var(--color-kumo-tint)}
 }
 @media (min-width:64rem){
 .cw-lg-block{display:block}
+.cw-lg-table-cell{display:table-cell}
 .cw-lg-cols-6{grid-template-columns:repeat(6,minmax(0,1fr))}
 .cw-lg-cols-20-fill{grid-template-columns:minmax(0,20rem) minmax(0,1fr)}
 .cw-lg-cols-24-fill{grid-template-columns:minmax(0,24rem) minmax(0,1fr)}

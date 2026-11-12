@@ -389,7 +389,7 @@ export function BackupsPage() {
 						<div className="w-10" />
 					</div>
 					{data.items.map((backup) => (
-						<div key={backup.stamp} className="flex items-center gap-4 border-b px-4 py-2 text-sm last:border-0">
+						<div key={backup.stamp} className="flex items-center gap-4 border-b px-4 py-2 text-sm cw-last-border-0">
 							<div className="min-w-0 flex-1">
 								<div className="truncate">{formatDate(backup.createdAt)}</div>
 								<div className="text-xs text-kumo-subtle">{ago(backup.createdAt)}</div>

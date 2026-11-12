@@ -16,7 +16,8 @@
 import "./ts-resolve.mjs";
 
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -662,8 +663,30 @@ async function distClass(name, marker) {
 		const exported = src.match(/export \{([^}]*)\};?\s*(?:\/\/# sourceMappingURL=.*)?$/)?.[1] ?? "";
 		const entry = exported.split(",").map((s) => s.trim().split(/\s+as\s+/)).find(([local]) => local === name);
 		if (entry) return (await import(pathToFileURL(file).href))[entry[1] ?? entry[0]];
+		// Since 1.5.0 some classes (EmailPipeline) live only inside a chunk that doesn't export them and that
+		// can't load outside Astro (it imports virtual: modules). Load the class's own source region instead.
+		return (await import(regionModule(file, src, name)))[name];
 	}
-	assert.fail(`EmDash ${emdashVersion}'s dist has no exported class ${name} with ${marker}`);
+	assert.fail(`EmDash ${emdashVersion}'s dist has no class ${name} with ${marker}`);
+}
+
+/**
+ * A file URL for a module made of the bundler region (`//#region` … `//#endregion`) of `src` that declares `local`,
+ * exporting it. Only for self-contained regions: Node builtins are the one import it adds. Removed after the tests.
+ */
+function regionModule(file, src, local) {
+	const at = src.indexOf(`var ${local} = class`);
+	const from = src.lastIndexOf("//#region", at);
+	const to = src.indexOf("//#endregion", at);
+	assert.ok(from !== -1 && to !== -1, `${local} in ${relative(emdashDir, file)} is not inside a //#region`);
+	const region = src.slice(from, to);
+	const builtins = ["AsyncLocalStorage"].filter((n) => new RegExp(`\\b${n}\\b`).test(region));
+	const dir = mkdtempSync(join(tmpdir(), "coywolf-contract-"));
+	after(() => rmSync(dir, { recursive: true, force: true }));
+	const out = join(dir, `${local}.mjs`);
+	const head = builtins.length ? `import { ${builtins.join(", ")} } from "node:async_hooks";\n` : "";
+	writeFileSync(out, `${head}${region}\nexport { ${local} };\n`);
+	return pathToFileURL(out).href;
 }
 
 test("ctx.redirects (redirects:write): Slug changes delete EmDash's own slug-change redirect through it, matched by auto, group, source and destination (src/redirects/slug-changes.ts)", async () => {
@@ -827,7 +850,8 @@ test("page:metadata: EmDash accepts the pack's contributions, and the pack's pri
 	// get keeps the theme's extra keys (coywolf.entry, coywolf.videos…), since the SEO panel overlay spreads it.
 	const head = readFileSync(join(emdashDir, "src/components/EmDashHead.astro"), "utf8");
 	assert.match(head, /runtime\.collectPageMetadata\(resolvedPage\)/);
-	assert.match(head, /\[\s*\.\.\.pluginContributions,\s*\.\.\.siteContributions,\s*\.\.\.baseContributions,/);
+	// 1.5.0 puts the staging noindex first (only while staging), so a staging site stays noindex whatever the pack says.
+	assert.match(head, /\[\s*(?:\.\.\.stagingContributions,\s*)?\.\.\.pluginContributions,\s*\.\.\.siteContributions,\s*\.\.\.baseContributions,/);
 	const overlay = functionSource(readFileSync(join(emdashDir, "src/page/seo-contributions.ts"), "utf8"), "applySeoPanelToPageContext");
 	assert.match(overlay, /return \{\s*\.\.\.page,/, overlay);
 });
@@ -909,7 +933,8 @@ test("EmDash's settings POST body has SEO at its top level, and staging there on
 
 test("Settings page: the route, the form id and Kumo's Input for each secret field (src/core/settings-enhance.ts)", () => {
 	assert.match(admin, /basepath: "\/_emdash\/admin"/);
-	assert.match(admin, /path: "\/plugins-manager\/\$pluginId\/settings",\s*component: PluginSettingsPage/);
+	// 1.5.0 wraps the page in RequireAdmin (admins only, as the pack's settings already are).
+	assert.match(admin, /path: "\/plugins-manager\/\$pluginId\/settings",\s*component: (?:PluginSettingsPage|\(\) => \/\* @__PURE__ \*\/ jsx\(RequireAdmin, \{ children: \/\* @__PURE__ \*\/ jsx\(PluginSettingsPage, \{\}\) \}\))(?![\w$])/);
 	const page = functionSource(admin, "PluginSettings");
 	assert.match(page, /jsxs?\("form", \{\s*id: "plugin-settings-form"/, "the settings form no longer has id plugin-settings-form");
 	const field = functionSource(admin, "SettingFieldInput");
@@ -1115,7 +1140,9 @@ test("refreshing the manifest keeps a plugin page mounted and scrolled (src/admi
 	// The admin layout swaps the page for its loading screen only before the first manifest (isLoading), not on a refetch.
 	const layout = functionSource(admin, "RootComponent");
 	assert.match(layout, /const \{ data: manifest, isLoading, error \} = useQuery\(\{\s*queryKey: \["manifest"\],/);
-	assert.match(layout, /if \(isLoading\) return \/\* @__PURE__ \*\/ jsx\(ConfigurationLoadingScreen, \{\}\);/);
+	// 1.5.0 also waits for the current user, on first load only (userSettled never goes back to false).
+	assert.match(layout, /if \(isLoading(?: \|\| !userSettled)?\) return \/\* @__PURE__ \*\/ jsx\(ConfigurationLoadingScreen, \{\}\);/);
+	if (layout.includes("userSettled")) assert.match(layout, /if \(!userSettled && !currentUser\.isLoading\) setUserSettled\(true\);/);
 	// A refetch that fails (after the admin's one retry) swaps the page for the error screen: the only case a refresh unmounts it.
 	assert.match(layout, /if \(error \|\| !manifest\) return \/\* @__PURE__ \*\/ jsx\(ErrorScreen, \{ error:/);
 	assert.match(admin, /new QueryClient\(\{ defaultOptions: \{ queries: \{\s*staleTime: [^,]+,\s*retry: 1\s*\} \} \}\)/);
@@ -1143,7 +1170,12 @@ test("entry editor panels and content-list columns: read from the plugin's admin
 	assert.match(panels, /pluginAdmins\[pluginId\]\?\.contentEditorPanels/);
 	assert.match(admin, /function appliesToCollection\$1\(pluginId, panel, collection\) \{[\s\S]{0,300}?return panel\.collections\(collection\);/);
 	assert.match(panels, /candidate\.minRole !== void 0 && userRole < candidate\.minRole/);
-	assert.match(admin, /resolveContentEditorPanels\(pluginAdmins, collection, currentUser\?\.role \?\? 0, manifest\?\.plugins\) : \[\], \[[\s\S]{0,120}?manifest\?\.plugins,/);
+	// 1.4.0 calls it from the editor; 1.5.0 through resolveEditorExtensionSections (the editor sidebar's sections), which
+	// passes the manifest's plugins on. Either way the memo re-runs when manifest.plugins changes.
+	if (admin.includes("function resolveEditorExtensionSections(")) {
+		assert.match(functionSource(admin, "resolveEditorExtensionSections"), /resolveContentEditorPanels\(pluginAdmins, collection, role, plugins\)/);
+		assert.match(admin, /resolveEditorExtensionSections\(pluginAdmins, manifest\?\.plugins, collection, currentUser\?\.role \?\? 0\) : \[\], \[[\s\S]{0,120}?manifest\?\.plugins,/);
+	} else assert.match(admin, /resolveContentEditorPanels\(pluginAdmins, collection, currentUser\?\.role \?\? 0, manifest\?\.plugins\) : \[\], \[[\s\S]{0,120}?manifest\?\.plugins,/);
 	assert.match(admin, /jsx\(Panel, \{\s*collection,\s*entry: item,\s*locale:/);
 	// Columns: the same, keyed on pluginStates = manifest.plugins; cells get the page's visibleItems.
 	const columns = functionSource(admin, "resolveContentListColumns");
@@ -1166,10 +1198,30 @@ test("entry editor panels and content-list columns: read from the plugin's admin
 	assert.equal(packPageOn("/schema", { __TSR_ROUTER__: router }), false);
 });
 
+test("EmDash's generated plugins module: an array made at import (1.4) or a cached plugins() function (1.5+), as src/core/ready.ts handles", () => {
+	const virtualModules = [...emdashDist.values()].find((src) => src.includes("function generatePluginsModule("));
+	assert.ok(virtualModules, "no generatePluginsModule");
+	const generator = functionSource(virtualModules, "generatePluginsModule");
+	const lazy = /export function plugins\(\) \{[\s\S]{0,200}?Symbol\.for\("emdash:plugins"\)[\s\S]{0,200}?\?\?= \[/.test(generator);
+	const eager = /export const plugins = \[/.test(generator);
+	assert.ok(lazy !== eager, `the plugins module has another shape: ensurePackStarted() can't start the pack:\n${generator.slice(-900)}`);
+	// Native plugins still come from the entrypoint's createPlugin(options), which marks the pack ready.
+	assert.match(generator, /import \{ createPlugin as \$\{varName\} \} from "\$\{descriptor\.entrypoint\}";/);
+	if (lazy) {
+		// EmDash's middleware reads it the same way.
+		const middleware = readFileSync(join(emdashDir, "src/astro/middleware.ts"), "utf8");
+		assert.match(middleware, /typeof plugins === "function" \? plugins\(\) : plugins/);
+	}
+});
+
 test("EmDash runs plugin:install, then plugin:activate, once for a config plugin with no _plugin_state row (the 0.36.0 defaults: src/core/features.ts recordDefaults)", () => {
 	const runtime = [...emdashDist.values()].find((src) => src.includes("installUnrecordedConfigPlugins(configPlugins"));
 	assert.ok(runtime, `EmDash ${emdashVersion} no longer installs unrecorded config plugins at boot`);
 	const install = runtime.slice(runtime.indexOf("installUnrecordedConfigPlugins(configPlugins"));
-	assert.match(install, /if \(recordedStates\.has\(plugin\.id\)\) continue;[\s\S]{0,300}?createActiveIfAbsent\(plugin\.id[\s\S]{0,300}?runPluginInstall\(plugin\.id\)[\s\S]{0,600}?runPluginActivate\(plugin\.id\)/);
+	// In this order, within the one loop (1.5.0 put sandbox-readiness checks between them; the order is the same).
+	const body = install.slice(0, install.indexOf("if (failed.length === 0)") === -1 ? 4000 : install.indexOf("if (failed.length === 0)"));
+	const steps = ["if (recordedStates.has(plugin.id)) continue;", "createActiveIfAbsent(plugin.id", "runPluginInstall(plugin.id)", "runPluginActivate(plugin.id)"].map((step) => [step, body.indexOf(step)]);
+	for (const [step, at] of steps) assert.notEqual(at, -1, `installUnrecordedConfigPlugins no longer has ${step}`);
+	assert.deepEqual(steps.map(([, at]) => at), steps.map(([, at]) => at).toSorted((a, b) => a - b), "install and activate no longer run in this order");
 	assert.match(runtime, /runtime\.installUnrecordedConfigPlugins\(/, "the boot no longer calls it");
 });

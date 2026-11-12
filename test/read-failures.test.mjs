@@ -18,6 +18,10 @@ registerHooks({
 				shortCircuit: true,
 			};
 		}
+		// EmDash's generated plugins module: nothing until a test sets one (globalThis.__setPlugins).
+		if (specifier === "virtual:emdash/plugins") {
+			return { url: "data:text/javascript,export let plugins; globalThis.__setPlugins = (v) => { plugins = v; };", shortCircuit: true };
+		}
 		// The middleware's module list pulls in every module (some need a bundler); tests pass their own handlers.
 		if (specifier === "./modules.js" && context.parentURL?.endsWith("/src/middleware.ts")) {
 			return { url: "data:text/javascript,export const MIDDLEWARE = [];", shortCircuit: true };
@@ -424,4 +428,69 @@ test("the log line names the page and what failed", async (t) => {
 		lines.join("\n"),
 	);
 	await Promise.allSettled(globalThis.__waitUntil);
+});
+
+// ── EmDash 1.5+: plugins start lazily (src/core/ready.ts) ─────────
+
+test("a page rendered before the pack has started (EmDash 1.5's lazy plugins) isn't edge-cached, and the log says so", async (t) => {
+	const ready = await import("../src/core/ready.ts");
+	const lines = [];
+	t.mock.method(console, "error", (...args) => lines.push(args.map(String).join(" ")));
+	await import("virtual:emdash/plugins");
+	ready.resetPackReady();
+	let started = 0;
+	// A plugins() that doesn't get to createPlugin() (the pack missing from it, or another plugin throwing first).
+	globalThis.__setPlugins(() => void started++);
+	try {
+		freshIsolate(d1());
+		const cache = routeCache();
+		await (await coywolfPack({}, [])(context("/early/", cache), page())).text();
+		assert.equal(started, 1, "the middleware asked EmDash to start its plugins");
+		assert.equal(cdnHeader(cache), null, "not edge-cached");
+		assert.ok(lines.some((l) => l.includes("GET /early/ not edge-cached") && l.includes("pack not started")), lines.join("\n"));
+		await Promise.allSettled(globalThis.__waitUntil);
+	} finally {
+		globalThis.__setPlugins(undefined);
+		ready.resetPackReady();
+	}
+});
+
+test("the middleware starts EmDash's plugins itself when the pack hasn't started, and the page is cached as usual", async () => {
+	const ready = await import("../src/core/ready.ts");
+	await import("virtual:emdash/plugins");
+	ready.resetPackReady();
+	let started = 0;
+	// EmDash 1.5's plugins(): runs the factories (createPlugin() marks the pack ready) and caches the list.
+	globalThis.__setPlugins(() => (started++, ready.markPackReady(), []));
+	try {
+		freshIsolate(d1());
+		const cache = routeCache();
+		const before = readFailures();
+		await (await coywolfPack({}, [])(context("/started/", cache), page())).text();
+		assert.equal(started, 1);
+		assert.equal(readFailures(), before);
+		assert.equal(cdnHeader(cache), FULL_LIFETIME);
+		// Once started, later requests don't call plugins() again.
+		await (await coywolfPack({}, [])(context("/again/", routeCache()), page())).text();
+		assert.equal(started, 1);
+		await Promise.allSettled(globalThis.__waitUntil);
+	} finally {
+		globalThis.__setPlugins(undefined);
+		ready.resetPackReady();
+	}
+});
+
+test("ensurePackStarted: EmDash 1.4's array, 1.5's function, no plugins module, and a throwing plugins()", async (t) => {
+	const ready = await import("../src/core/ready.ts");
+	t.mock.method(console, "error", () => {});
+	ready.resetPackReady();
+	assert.equal(await ready.ensurePackStarted(async () => { throw new Error("no module"); }), true, "outside a site build there's nothing to check");
+	assert.equal(await ready.ensurePackStarted(async () => ({})), true, "a module without plugins");
+	assert.equal(await ready.ensurePackStarted(async () => ({ plugins: [] })), false, "1.4: the list exists but createPlugin() never ran");
+	assert.equal(await ready.ensurePackStarted(async () => ({ plugins: () => { throw new Error("boom"); } })), false);
+	assert.equal(await ready.ensurePackStarted(async () => ({ plugins: () => ready.markPackReady() })), true);
+	let loads = 0;
+	assert.equal(await ready.ensurePackStarted(async () => (loads++, {})), true);
+	assert.equal(loads, 0, "once ready, nothing is loaded");
+	ready.resetPackReady();
 });

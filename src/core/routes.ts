@@ -13,8 +13,8 @@
  * ```
  *
  * createPlugin() registers the names of the marked routes with the page cache
- * (registerReadOnlyRoutes) when it composes the plugin, which happens as the
- * Worker isolate starts, before any request. An unmarked route keeps the safe
+ * (registerReadOnlyRoutes) when it composes the plugin, before EmDash routes
+ * any plugin request to it (src/core/ready.ts). An unmarked route keeps the safe
  * default: it clears the cache. src/pageCache/lib.test.mjs lists the marked
  * routes, so adding one is a deliberate change.
  */

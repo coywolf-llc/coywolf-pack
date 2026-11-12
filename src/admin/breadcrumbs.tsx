@@ -120,7 +120,7 @@ function Code({ code, label }: { code: string; label: string }) {
 	}
 	return (
 		<div className="relative min-w-0">
-			<pre className="overflow-x-auto rounded-md border border-kumo-line bg-kumo-tint p-3 pe-24 text-xs leading-5" aria-label={label}>
+			<pre className="overflow-x-auto rounded-md border border-kumo-line bg-kumo-tint p-3 cw-pe-24 text-xs leading-5" aria-label={label}>
 				<code>{code}</code>
 			</pre>
 			<div className="absolute end-2 top-2 flex items-center gap-2">

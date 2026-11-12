@@ -26,10 +26,11 @@
  * EmDash does (getPublicUrl inside the plugin context, url_pattern otherwise).
  *
  * Configuration: coywolfPlugin() options reach createPlugin(), which
- * EmDash's generated plugins module (virtual:emdash/plugins) calls when the
- * Worker isolate starts, so configureContentUrls() runs before any request
- * reaches the middleware or an Astro component. Same pattern as the search
- * module's rate limit options.
+ * EmDash's generated plugins module (virtual:emdash/plugins) calls as the
+ * Worker isolate starts (EmDash 1.4) or on its runtime's first start (1.5+),
+ * so configureContentUrls() runs before a request reaches the middleware or an
+ * Astro component; the pack middleware makes sure of it first
+ * (src/core/ready.ts). Same pattern as the search module's rate limit options.
  *
  * Sources: every resolver takes either the plugin context (hooks and
  * routes) or the site's D1 database (middleware, Astro components). With a

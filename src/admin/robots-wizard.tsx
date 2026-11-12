@@ -126,7 +126,7 @@ function FindingRow(props: { finding: Finding; onFix?: () => void }) {
 function Choice(props: { name: string; value: string; checked: boolean; onSelect: () => void; label: string; hint: string; children?: React.ReactNode }) {
 	const id = `cw-${props.name}-${props.value}`;
 	return (
-		<div className={`rounded-lg border px-3 py-2 ${props.checked ? "border-kumo-brand bg-kumo-tint/40" : "border-kumo-line"}`}>
+		<div className={`rounded-lg border px-3 py-2 ${props.checked ? "border-kumo-brand cw-bg-tint-40" : "border-kumo-line"}`}>
 			<label htmlFor={id} className="flex cursor-pointer items-start gap-2">
 				<input id={id} type="radio" name={props.name} value={props.value} className="mt-1" checked={props.checked} onChange={props.onSelect} />
 				<span>
