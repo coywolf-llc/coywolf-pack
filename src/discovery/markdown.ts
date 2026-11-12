@@ -9,6 +9,7 @@
  * horizontal breaks, and tables. Anything else (embeds, buttons, custom
  * plugin blocks) is skipped rather than guessed at.
  */
+import { cdnOriginalUrl } from "../images/lib.js";
 
 // any: Portable Text is untyped JSON.
 type Node = Record<string, any>;
@@ -110,13 +111,16 @@ function renderCode(block: Node): string | null {
 	return `${filename}${fence}${language}\n${code.replace(/\n+$/, "")}\n${fence}`;
 }
 
-/** The same URL resolution EmDash's image renderer uses for local media. */
+/**
+ * The same URL resolution EmDash's image renderer uses for local media, then the original on the media host
+ * when there is one (as the pack's pages print it), so Markdown readers and crawlers get the public host.
+ */
 function imageUrl(block: Node): string | null {
 	const asset = isRecord(block.asset) ? block.asset : {};
 	const url = typeof asset.url === "string" && asset.url ? asset.url : typeof asset.src === "string" && asset.src ? asset.src : null;
-	if (url) return url;
 	const key = isRecord(asset.meta) && typeof asset.meta.storageKey === "string" ? asset.meta.storageKey : null;
-	return key ? `/_emdash/api/media/file/${key.split("/").map(encodeURIComponent).join("/")}` : null;
+	const local = url ?? (key ? `/_emdash/api/media/file/${key.split("/").map(encodeURIComponent).join("/")}` : null);
+	return local ? (cdnOriginalUrl(local) ?? local) : null;
 }
 
 function renderImage(block: Node, options: MarkdownOptions): string | null {
