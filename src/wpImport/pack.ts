@@ -35,6 +35,7 @@ import { type ConvertOptions, type VideoFact, convertEntryData, mightNeedConvers
 import { type ImportDefaults, defaultsFromWordPress, parseFileRows } from "./sources.js";
 import { findSiteUrls, rewriteSiteUrls, siteUrlPattern } from "./urls.js";
 import { readOnlyRoute } from "../core/routes.js";
+import { isConflict } from "../core/conflict.js";
 
 export const F = { main: "wpImport" } as const;
 
@@ -113,7 +114,7 @@ async function seedVideos(ctx: PluginContext, facts: VideoFact[]): Promise<numbe
 
 // ── Save hook ────────────────────────────────────────────────────
 
-async function beforeSave(event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) {
+export async function beforeSave(event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) {
 	if (!event.content || !mightNeedConversion(event.content)) return undefined;
 	const result = convertEntryData(event.content, await convertOptions(ctx));
 	if (result.videos.length) {
@@ -242,8 +243,13 @@ async function scan(ctx: PluginContext, apply: boolean, state: ScanState | null,
 						const versioned = await content.getVersioned(collection, item.id);
 						// Publish only the draft this update made: exactly one version after the one read.
 						if (versioned && versioned.item.version === (fresh.version ?? 0) + 1) {
-							await content.publish(collection, item.id, { _rev: versioned._rev });
-							entry.result = "published";
+							try {
+								await content.publish(collection, item.id, { _rev: versioned._rev });
+								entry.result = "published";
+							} catch (error) {
+								// Someone saved it in between (co-editing saves every few seconds): the update stays a draft.
+								if (!isConflict(error)) throw error;
+							}
 						}
 					}
 				}

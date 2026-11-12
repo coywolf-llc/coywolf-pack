@@ -19,6 +19,14 @@ A page that isn't in the edge cache yet is built by the Worker, and every D1 rou
 
 EmDash starts its runtime (and so the plugins) synchronously, before its setup probe, so the pack has started by the time its middleware runs. The pack middleware still checks first, defensively, in case a later EmDash changes that order: `ensurePackStarted()` (`src/core/ready.ts`) calls EmDash's `plugins()` itself when the pack hasn't started, which is cached per configuration, so EmDash gets the same instance. A page rendered while the pack still isn't started is kept out of the edge cache like any page rendered after a failed read, and the log names it `pack not started`. A site that adds the pack's middleware without `coywolfPlugin()` in its plugins list never starts the pack, so it sees that on every page: the setup in the README needs both.
 
+## Co-editing
+
+EmDash 1.5 can let several people edit one entry at once (`emdash({ coEditing: true })` and a Durable Object; off by default, and off on the Coywolf sites). An open editor then saves the entry 2 seconds after the last change and at least every 10 seconds while people type, through a path that doesn't pass through the site's middleware.
+
+- **Ready:** `content:beforeSave` gets only the changed fields in a room (as visual-editor saves already did). Headings, Breadcrumbs, Reviews, WordPress Migration and Slug changes change only the fields they were given and return nothing when there's nothing to change.
+- **Ready:** Link Manager's bulk fixes and WordPress Migration's conversion publish only the draft their own edit made, with its `_rev`. If someone saved the entry in between, EmDash answers `CONFLICT` and the edit stays a draft instead of publishing someone else's changes (`isConflict()` in `src/core/conflict.ts`).
+- **Not ready: `content:afterSave` on every room save.** Each save runs every participant (Link Manager's reindex, Videos, Files, AI, Social Images, Discovery, Search, Slug changes) in full. Throttling that needs care: all modules must see saves in order (per-module coalescing let a newer save overtake an older one), the work runs inside EmDash's 5-second hook budget, and a draft save that changes live fields (SEO, bylines) must still count. Do this before turning co-editing on.
+
 ## Shared reads have deadlines
 
 The pack shares work that's under way between the requests of a Worker isolate: the feature switches' read, the redirect rules' index, the robots.txt takeover, a cold llms.txt build. On Workers, a request's I/O and timers belong to that request, and a request that's canceled (Cloudflare ends it at 100 seconds, its client leaves, a background task is cut off at 30 seconds) never settles what it started. Before 0.35.16 a later request waited for that forever, and so did every request after it, until the isolate was replaced: pages answered 524 after 100 seconds with 1–10 ms of CPU (coywolf.com, November 7 and 9, 2026). Now (`src/core/single-flight.ts`):

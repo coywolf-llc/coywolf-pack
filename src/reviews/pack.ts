@@ -44,7 +44,7 @@ export const FEATURES = [
 registerFeatures(FEATURES);
 
 /** Store ratings as the menu's values ("4" → "4.0"), so older reviews show their rating in the editor. */
-async function beforeSave(event: { content: Record<string, unknown> }) {
+export async function beforeSave(event: { content: Record<string, unknown> }) {
 	if (!event.content || !JSON.stringify(event.content).includes(`"${BLOCK_TYPE}"`)) return undefined;
 	return normalizeReviewRatings(event.content) ?? undefined;
 }
