@@ -7,7 +7,7 @@
  * Image Transformations and two URL-rewrite rules
  * (https://media.example.com/s/<w>x<h>/<file>). Images never touch the
  * Worker. It's EmDash's own `r2({ publicUrl })` when that's set, else the host
- * saved on the Clean Image URLs page, else `images: { cdn }` (see lib.ts).
+ * saved on the Clean Image URLs page (see lib.ts; the `images.cdn` option was removed in 0.40.0).
  * Old Worker-route URLs (/media/<id>-<w>x<h>.<format>, from releases that
  * resized in the Worker) answer 301 to the same size on the media host.
  *
@@ -28,7 +28,7 @@ import { WARMER_AGENT, WARM_SETTING, WARM_STATE_OPTION, startWarm } from "../pag
 import type { PackMiddleware, PackModule } from "../core/module.js";
 import { CLOUDFLARE_API_HOST } from "./cloudflare.js";
 import { afterResponse, workerEnv } from "../shared.js";
-import { IMAGE_PATH, cdnOriginalUrl, cdnRedirectUrl, cleanImagePath, imageCdn, mediaFile, parseImagePath, parseCdnUrl, setImageCdn } from "./lib.js";
+import { IMAGE_PATH, cdnOriginalUrl, cdnRedirectUrl, cleanImagePath, imageCdn, mediaFile, parseImagePath, parseCdnUrl } from "./lib.js";
 import { imagesModule } from "./module.js";
 import { markPendingMedia } from "./pending.js";
 import { configureMediaHostDatabase, loadStoragePublicUrl, refreshMediaHost, variantsBulkOn } from "./settings.js";
@@ -70,16 +70,6 @@ export interface ImagesOptions {
 	bucket?: string;
 	/** Images binding, for stored sizes. Default "IMAGES" (the Astro Cloudflare adapter's). */
 	images?: string;
-	/**
-	 * Media host: an https origin serving the media bucket with the /s/ resize
-	 * rules, e.g. "https://media.coywolf.com" (see docs/images.md). The
-	 * fallback: EmDash's `storage: r2({ publicUrl })` wins when it's set, then a
-	 * host saved on the Clean Image URLs page.
-	 *
-	 * @deprecated Since 0.38.0: set EmDash's `storage: r2({ binding: "MEDIA", publicUrl: "https://media.example.com" })`
-	 * instead, which EmDash 1.5 also uses for its own images, the logo, favicon and default social image. Removed in 0.40.0.
-	 */
-	cdn?: string;
 	/** D1 binding of the site database (for the saved media host). Default "DB". */
 	database?: string;
 	/**
@@ -398,8 +388,8 @@ export function variantsAfterMediaWrite(method: string, pathname: string, featur
 export function imagesPack(options: ImagesOptions = {}): PackModule {
 	config = { bucket: options.bucket ?? "MEDIA", images: options.images ?? "IMAGES", database: options.database ?? "DB" };
 	setImageCrops(options.crops);
-	if (options.cdn && !/^https:\/\//i.test(options.cdn.trim())) console.warn("coywolf-pack images: images.cdn must be an https origin like https://media.example.com; ignored.");
-	setImageCdn(options.cdn);
+	// Removed in 0.40.0: the media host is EmDash's r2({ publicUrl }) (or the one saved on the Clean Image URLs page).
+	if ((options as { cdn?: unknown }).cdn) console.warn("coywolf-pack images: images.cdn was removed in 0.40.0 and is ignored. Set storage: r2({ binding: \"MEDIA\", publicUrl: \"https://media.example.com\" }) in astro.config.mjs instead.");
 	configureMediaHostDatabase(options.database);
 	// EmDash's publicUrl, read once per isolate (refreshMediaHost waits for it too).
 	void loadStoragePublicUrl();

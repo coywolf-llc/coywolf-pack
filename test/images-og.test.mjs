@@ -4,7 +4,9 @@ import { test } from "node:test";
 
 import "./ts-resolve.mjs";
 
-const { setImageCdn, setSavedImageCdn, setStoragePublicUrl } = await import("../src/images/lib.ts");
+const { setSavedImageCdn, setStoragePublicUrl } = await import("../src/images/lib.ts");
+// The media host as the sites set it since 0.40.0: EmDash's publicUrl.
+const setImageCdn = setStoragePublicUrl;
 const { cleanDefaultOgImage, ownImageOnMediaHost, mediaHostImageInfo, packOwnsOgImage, ogImageTags } = await import("../src/schema/og-image.ts");
 
 const ORIGIN = "https://example.com";
@@ -99,7 +101,7 @@ test("og:image is output by the pack only for URLs it made (never twice)", () =>
 test("rewriteMediaUrls points every media-library file in a graph at the media host", async () => {
 	const lib = await import("../src/images/lib.ts");
 	const { rewriteMediaUrls } = await import("../src/schema/module.ts");
-	lib.setImageCdn("https://media.example.com");
+	lib.setStoragePublicUrl("https://media.example.com");
 	try {
 		const graph = { "@graph": [{ "@type": "Person", image: ["https://site.test/_emdash/api/media/file/A1.jpeg", "/_emdash/api/media/file/B2.webp", "https://elsewhere.test/x.png"] }, { "@type": "Organization", logo: { "@type": "ImageObject", url: "https://site.test/_emdash/api/media/file/C3.png" }, url: "https://site.test/" }] };
 		rewriteMediaUrls(graph);
@@ -107,6 +109,6 @@ test("rewriteMediaUrls points every media-library file in a graph at the media h
 		assert.equal(graph["@graph"][1].logo.url, "https://media.example.com/C3.png");
 		assert.equal(graph["@graph"][1].url, "https://site.test/");
 	} finally {
-		lib.setImageCdn(null);
+		lib.setStoragePublicUrl(null);
 	}
 });

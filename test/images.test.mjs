@@ -5,17 +5,16 @@ import { test } from "node:test";
 import "./ts-resolve.mjs";
 
 const { cleanImagePath, parseImagePath, mediaFile } = await import("../src/images/lib.ts");
-const { setImageCdn, setSavedImageCdn, setStoragePublicUrl, imageCdn, imageCdnSource, cdnOriginalUrl, parseCdnUrl, cdnRedirectUrl, normalizeMediaHost, mimeForExt } = await import("../src/images/lib.ts");
+const { setSavedImageCdn, setStoragePublicUrl, imageCdn, imageCdnSource, cdnOriginalUrl, parseCdnUrl, cdnRedirectUrl, normalizeMediaHost, mimeForExt } = await import("../src/images/lib.ts");
 const { loadStoragePublicUrl, resetStoragePublicUrl } = await import("../src/images/settings.ts");
 
+// `option` was images.cdn (removed in 0.40.0): the pack's own host is now only the one saved on the page.
 function withHost(option, saved, fn, storage = null) {
-	setImageCdn(option);
-	setSavedImageCdn(saved);
+	setSavedImageCdn(saved ?? option);
 	setStoragePublicUrl(storage);
 	try {
 		fn();
 	} finally {
-		setImageCdn(null);
 		setSavedImageCdn(null);
 		setStoragePublicUrl(null);
 	}
@@ -87,7 +86,8 @@ test("EmDash's storage publicUrl is the media host when the pack has none of its
 		assert.equal(cdnOriginalUrl("https://cdn.example.com/ABC.jpg"), "https://img.example.com/ABC.jpg");
 	}, "https://cdn.example.com/");
 	withHost("https://media.example.com", "https://img.example.com", () => assert.equal(imageCdnSource().from, "saved"));
-	withHost("https://media.example.com", null, () => assert.equal(imageCdnSource().from, "option"));
+	withHost("https://media.example.com", null, () => assert.equal(imageCdnSource().from, "saved"));
+	assert.equal("option" in imageCdnSource(), false, "images.cdn was removed in 0.40.0");
 	withHost(null, null, () => assert.equal(imageCdnSource().from, null));
 	// A publicUrl with a path (or on http) can't take the /s/ rules: the fallback stays the media host.
 	withHost("https://media.example.com", null, () => {

@@ -375,7 +375,7 @@ export const GUIDES: Record<GuideId, Guide> = {
 			])}`,
 			`Turn on Smart Tiered Cache (free): the site's domain → ${b("Caching → Tiered Cache")} → ${b("Smart Tiered Caching")}. A data center that hasn't cached an image yet then asks a nearby Cloudflare cache instead of going back to R2.`,
 			`Use your own host name in place of ${code("media.example.com")} everywhere (keep the names exactly as shown otherwise: Set up media host recognizes its rules by name).`,
-			`Enter the host as the Media host on this page and select ${b("Check")}. When every check passes, save. Or set it in ${code("astro.config.mjs")}: ${code('coywolfPlugin({ images: { cdn: "https://media.example.com" } })')}.`,
+			`Enter the host as the Media host on this page and select ${b("Check")}. When every check passes, save. Or set it in ${code("astro.config.mjs")}, which EmDash uses too: ${code('storage: r2({ binding: "MEDIA", publicUrl: "https://media.example.com" })')}.`,
 		],
 		note: "Cloudflare's Free plan includes 5,000 unique image transformations a month (each new size of each image counts once a month). Beyond that, transformations need a paid Cloudflare Images plan.",
 	},

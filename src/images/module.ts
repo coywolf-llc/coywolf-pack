@@ -105,9 +105,8 @@ async function adminSettings(ctx: PluginContext, mediaBinding: string) {
 	const source = imageCdnSource();
 	return {
 		host: host ?? "",
-		optionHost: source.option ?? "",
 		activeHost: source.host ?? "",
-		/** Where the active host comes from: EmDash's r2({ publicUrl }), this page, or images.cdn. */
+		/** Where the active host comes from: EmDash's r2({ publicUrl }) or this page. */
 		hostSource: source.from ?? "",
 		/** EmDash's publicUrl as written, when it's set (also when it can't be the media host: a path, or http). */
 		storageUrl: source.storageUrl ?? "",

@@ -6,8 +6,8 @@
  *   when set: EmDash's own components print media there too.
  * - The host saved on the Clean Image URLs page, read outside the plugin
  *   context (theme code, middleware, the page:metadata hook) from D1 in the
- *   feature switches' query, sharing their per-isolate cache. It overrides the
- *   astro.config.mjs option (`images.cdn`).
+ *   feature switches' query, sharing their per-isolate cache. It is used while
+ *   EmDash's publicUrl isn't set (or names another host).
  */
 import { invalidateFeatures, readSiteSetting, registerSiteSetting, rememberSiteSetting, siteSetting } from "../core/features.js";
 import { setSavedImageCdn, setStoragePublicUrl } from "./lib.js";
