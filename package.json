@@ -80,23 +80,20 @@
 		}
 	},
 	"devDependencies": {
-		"@cloudflare/kumo": "2.6.0",
-		"@cloudflare/workers-types": "^5.20261102.1",
+		"@cloudflare/kumo": "2.15.0",
+		"@cloudflare/workers-types": "^5.20261112.1",
 		"@phosphor-icons/react": "^2.1.0",
 		"@tanstack/react-query": "^5.107.1",
 		"@types/react": "^19.0.0",
 		"@types/react-dom": "^19.0.0",
-		"astro": "^7.4.7",
-		"emdash": "^1.4.0",
+		"astro": "^7.4.11",
+		"emdash": "^1.5.0",
 		"happy-dom": "^21.0.4",
 		"kysely": "^0.29.8",
 		"react": "^19.3.1",
 		"react-dom": "^19.3.1",
 		"typescript": "^5.9.0",
 		"zod": "^4.6.7"
-	},
-	"overrides": {
-		"zod@4.5.4": "4.6.7"
 	},
 	"publishConfig": {
 		"access": "public"

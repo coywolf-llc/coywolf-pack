@@ -26,6 +26,7 @@ import { MODULES } from "./modules.js";
 import type { CoywolfOptions } from "./options.js";
 import { registerReadOnlyRoutes } from "./pageCache/lib.js";
 import { VERSION } from "./version.js";
+import { markPackReady } from "./core/ready.js";
 
 export type { BackupsOptions } from "./backups/module.js";
 export type { RedirectsOptions } from "./redirects/module.js";
@@ -49,8 +50,9 @@ function sidebar(modules: PackModule[]): AdminPageDef[] {
 }
 
 function buildModules(options: CoywolfOptions): PackModule[] {
-	// Module-level, like the search rate limit: createPlugin() runs when the Worker isolate
-	// starts (virtual:emdash/plugins), so middleware and Astro components see it too.
+	// Module-level, like the search rate limit, so middleware and Astro components see it too. createPlugin()
+	// runs from EmDash's generated plugins module (virtual:emdash/plugins): as the Worker isolate starts up to
+	// EmDash 1.4, on the runtime's first start since 1.5.0 (src/core/ready.ts covers the gap).
 	configureContentUrls({ urls: options.urls, trailingSlash: options.trailingSlash, termParents: options.termParents, pageParents: options.pageParents });
 	return MODULES.map((factory) => factory(options)).filter((m): m is PackModule => m !== null);
 }
@@ -132,6 +134,7 @@ export function createPlugin(options: CoywolfOptions = {}) {
 	const routes: Record<string, unknown> = Object.assign({}, featuresRoutes(modules, tasks), cloudflareTokenRoutes(), ...modules.map((m) => m.routes ?? {}));
 	// Routes that only read (readOnlyRoute): the page cache middleware leaves the cache and the settings generation alone after them.
 	registerReadOnlyRoutes(readOnlyRouteNames(routes));
+	markPackReady();
 
 	return definePlugin({
 		id: PLUGIN_ID,

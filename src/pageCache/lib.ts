@@ -54,7 +54,7 @@ const NO_SETTINGS_CHANGE =
 /**
  * Routes declared read-only where they're defined (readOnlyRoute in
  * src/core/routes.ts: previews, pickers' lists, connection tests…), by name.
- * createPlugin() registers them as the isolate starts. A successful POST to
+ * createPlugin() registers them before the pack's first request (src/core/ready.ts). A successful POST to
  * one clears nothing and records no settings change, like the updates routes.
  */
 const readOnlyRoutes = new Set<string>();

@@ -34,8 +34,8 @@ export interface PageCacheOptions {
 }
 
 /**
- * Options from coywolfPlugin({ pageCache }). EmDash creates the plugin when the Worker
- * isolate starts, before any request reaches the middleware (as with the search rate limit).
+ * Options from coywolfPlugin({ pageCache }). EmDash creates the plugin before a request reaches
+ * the pack middleware, which makes sure of it (src/core/ready.ts), as with the search rate limit.
  */
 let config: PageCacheOptions = {};
 export function configurePageCache(options: PageCacheOptions): void {

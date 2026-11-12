@@ -142,7 +142,7 @@ function BulkRow(props: { kind: "entries" | "media"; label: string; enabled: boo
 		}
 	};
 	return (
-		<div className="flex flex-col gap-3 border-b border-kumo-line py-3 last:border-0 sm:flex-row sm:items-center">
+		<div className="flex flex-col gap-3 border-b border-kumo-line py-3 cw-last-border-0 sm:flex-row sm:items-center">
 			<div className="min-w-0 flex-1">
 				<div className="text-sm font-medium">{props.label}</div>
 				<div className="mt-0.5 text-sm text-kumo-subtle">

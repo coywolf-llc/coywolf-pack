@@ -22,6 +22,7 @@ import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOpti
 import { SETTLE_RETRY_MS, claimSettle, currentGenerationTag, mergeScopes, recordSettingsChange, settleLater } from "./core/generation.js";
 import { invalidateRobotsCache } from "./robots/middleware.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
+import { ensurePackStarted } from "./core/ready.js";
 import { DEADLINES } from "./core/single-flight.js";
 import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
@@ -78,7 +79,8 @@ export interface CoywolfPackMiddlewareOptions {
 	database?: string;
 }
 
-const PASS_THROUGH = /^\/(_astro|_image)\//;
+// Astro's assets and its image endpoint (`/_image?href=…`, no trailing slash) are never pack pages.
+const PASS_THROUGH = /^\/(_astro\/|_image(\/|$))/;
 /** EmDash's site settings API (POST saves General, SEO, Social…). */
 const EMDASH_SETTINGS_API = "/_emdash/api/settings";
 /** Largest redirect save body read for its sources (redirects/import takes up to 2 MiB). */
@@ -107,6 +109,8 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		// Reads that fail from here until the response is rendered keep it out of the edge cache.
 		const failuresBefore = readFailures();
 		const readFailed = () => readFailures() !== failuresBefore;
+		// EmDash 1.5+ starts plugins lazily: a page rendered before the pack has started isn't the site's real page.
+		if (!(await ensurePackStarted())) noteReadFailure("pack not started");
 		const routeCache = (context as unknown as { cache?: Parameters<typeof settlePage>[0] }).cache;
 		const env = workers.env;
 		const waitUntil = (p: Promise<unknown>) => (workers.waitUntil ? workers.waitUntil(p) : void p);

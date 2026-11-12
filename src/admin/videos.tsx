@@ -1104,7 +1104,7 @@ export function VideosPage() {
 						<div className="w-10" />
 					</div>
 					{visible.map((v) => (
-						<div key={v.uid} className="flex items-center gap-4 border-b px-4 py-2 text-sm last:border-0">
+						<div key={v.uid} className="flex items-center gap-4 border-b px-4 py-2 text-sm cw-last-border-0">
 							<div className="w-24 shrink-0">
 								<img src={v.thumbnail} alt="" loading="lazy" width={96} height={54} className="aspect-video w-24 rounded bg-kumo-tint object-cover" />
 							</div>

@@ -31,20 +31,17 @@ jobs:
       fail-fast: false
       matrix:
         # Only valid combinations run: a site's Kumo is the one its EmDash's admin pins (the pack's admin
-        # pages share it), so a row whose Kumo isn't that pin is skipped. 2.15.0 is the pin of EmDash's next
-        # release; until it's out, the "latest, 2.15.0" row is skipped and "latest, 2.6.0" runs.
+        # pages share it). EmDash 1.5.0 moved the pin from 2.6.0 to 2.15.0.
         include:
           # The 8 sites (update this when they move to a new EmDash).
           - emdash: "1.4.0"
-            kumo: "2.6.0"
-          - emdash: latest
             kumo: "2.6.0"
           - emdash: latest
             kumo: "2.15.0"
     env:
       # The Kumo versions of the "latest" rows only (not the sites row's): a latest release is skipped only when
       # another latest row tests its pin, so the newest EmDash can never be skipped untested.
-      LATEST_KUMO_ROWS: "2.6.0 2.15.0"
+      LATEST_KUMO_ROWS: "2.15.0"
     steps:
       - uses: actions/checkout@v7
 

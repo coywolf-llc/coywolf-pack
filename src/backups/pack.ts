@@ -13,7 +13,7 @@ const FEATURES = [
 registerFeatures(FEATURES);
 
 export function backupsPack(options: BackupsOptions): PackModule {
-	// Module-level so the site middleware can find the backup bucket (createPlugin() runs at isolate start).
+	// Module-level so the site middleware can find the backup bucket (createPlugin() runs before its first request: src/core/ready.ts).
 	configureBackupDownloads(options);
 	const backups = backupsModule(options);
 	return {
