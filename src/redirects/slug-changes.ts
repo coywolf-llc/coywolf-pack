@@ -20,7 +20,7 @@ import { REDIRECTS_TAG, purgePageCache } from "../pageCache/lib.js";
 import { workerEnv } from "../shared.js";
 import { noteRedirectsChanged } from "./middleware.js";
 import { type EntrySnapshot, snapshotFromContent, snapshotFromRow } from "./removed-core.js";
-import { deleteRule, ensureTable, normalizePath, saveRule } from "./rules.js";
+import { deleteRule, ensureTable, normalizePath, saveRule, sourceKey, storedForms } from "./rules.js";
 import { type PlanRule, SLUG_NOTE_PREFIX, planSlugChange } from "./slug-core.js";
 
 export const SLUG_CHANGES_FEATURE = "redirects.slugChanges";
@@ -138,9 +138,14 @@ export function slugChangesModule(options: { database?: string }) {
 	async function related(d1: D1Database, a: string, b: string): Promise<PlanRule[]> {
 		await ensureTable(d1);
 		const paths = [normalizePath(a), normalizePath(b)];
+		// Sources in every stored spelling (src/redirects/paths.ts storedForms); targets as written, with or without the slash.
+		const sources = [...new Set([...storedForms(a), ...storedForms(b), ...paths])];
+		const targets = [...new Set([...paths, ...paths.map((p) => sourceKey(p)), ...paths.map((p) => `${p}/`)])];
 		const { results } = await d1
-			.prepare("SELECT id, source, target, note FROM coywolf_redirects WHERE is_regex = 0 AND (source IN (?, ?) OR target IN (?, ?, ?, ?))")
-			.bind(...paths, ...paths, `${paths[0]}/`, `${paths[1]}/`)
+			.prepare(
+				`SELECT id, source, target, note FROM coywolf_redirects WHERE is_regex = 0 AND (source IN (${sources.map(() => "?").join(", ")}) OR target IN (${targets.map(() => "?").join(", ")}))`,
+			)
+			.bind(...sources, ...targets)
 			.all<PlanRule>();
 		return results;
 	}
@@ -182,9 +187,10 @@ export function slugChangesModule(options: { database?: string }) {
 	 */
 	async function freeUrl(ctx: PluginContext, d1: D1Database, url: string) {
 		await ensureTable(d1);
+		const forms = storedForms(url);
 		const { results } = await d1
-			.prepare("SELECT id FROM coywolf_redirects WHERE is_regex = 0 AND source = ? AND note LIKE ?")
-			.bind(normalizePath(url), `${SLUG_NOTE_PREFIX}%`)
+			.prepare(`SELECT id FROM coywolf_redirects WHERE is_regex = 0 AND source IN (${forms.map(() => "?").join(", ")}) AND note LIKE ?`)
+			.bind(...forms, `${SLUG_NOTE_PREFIX}%`)
 			.all<{ id: string }>();
 		if (!results.length) return;
 		for (const row of results) await deleteRule(d1, row.id);

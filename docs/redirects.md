@@ -22,6 +22,8 @@ Left to EmDash, which does them and the pack doesn't: the **404 log** with "crea
 
 Features: exact paths (with or without a trailing slash) or regular expressions with `$1`–`$9` substitution, 301/302/307/308/410, enable/disable, notes, hit counts, a URL tester, bulk import (paste or choose a file: JSON, or tab/comma-separated `source, target, type, is_regex` rows; a Coywolf SEO export from WordPress works as is), and **Export** as CSV or JSON. Rules are stored in the site's D1 database (`coywolf_redirects`), so backups include them.
 
+**Accented and non-Latin paths** (0.38.0, as EmDash 1.5's own redirects). An exact source matches however the path is spelled: typed as `/café`, percent-encoded as `/caf%C3%A9`, or with lowercase escapes. It's saved the way browsers send it (`/caf%C3%A9`). Rules saved earlier in another spelling are rewritten once, the first time the Redirect Manager page opens after the update (a source whose spelling another rule already has is left alone, and saving it says so). A destination with such characters is sent percent-encoded, with an internationalized domain in punycode. A source with a `.` or `..` segment is refused: browsers resolve those before asking. Regular expressions are matched against the percent-encoded path.
+
 A capture group can't send visitors to another site: with a site-path destination such as `/$1`, leading slashes from the capture are collapsed (`/blog//evil.com` → `/evil.com` on your site, never `//evil.com`), and a destination that names its host (`https://coywolf.com$1`) only redirects when the result keeps that host. A destination whose host is itself a capture (`https://$1/`) is followed as written.
 
 ## Setup

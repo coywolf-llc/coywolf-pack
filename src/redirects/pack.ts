@@ -67,13 +67,14 @@ function mergeHooks(parts: Array<{ feature: string; hooks: Record<string, Hook> 
 }
 
 export function redirectsPack(options: RedirectsOptions): PackModule {
+	const manager = redirectsModule(options);
 	const removed = removedModule(options);
 	const slugs = slugChangesModule(options);
 	return {
 		id: "redirects",
 		label: "Redirect Manager",
 		features: FEATURES,
-		routes: { ...redirectsModule(options).routes, ...removed.routes },
+		routes: { ...manager.routes, ...removed.routes },
 		adminPages: [{ path: "/redirects", label: "Redirect Manager", icon: "arrow-bend-up-right" }],
 		hooks: mergeHooks([
 			{ feature: TRASH_PROMPT_FEATURE, hooks: removed.hooks },

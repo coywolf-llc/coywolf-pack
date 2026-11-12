@@ -290,7 +290,7 @@ test("redirects: the rules' index stays in memory until an edit (the settings ep
 	};
 	const count = (re) => db.stats.sql.filter((s) => re.test(s)).length;
 	const PATTERNS = /FROM coywolf_redirects WHERE is_regex = 1/;
-	const EXACT = /FROM coywolf_redirects WHERE source = \?/;
+	const EXACT = /FROM coywolf_redirects WHERE source IN \(\?(?:, \?)?\)/;
 	const SOURCES = /SELECT source FROM coywolf_redirects WHERE is_regex = 0 AND enabled = 1/;
 	assert.deepEqual(await go("/old/?x=1"), [301, "https://example.com/new?x=1"]);
 	assert.deepEqual(await go("/a/42"), [301, "https://example.com/b/42"]);

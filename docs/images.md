@@ -18,9 +18,9 @@ https://media.coywolf.com/s/<w>/<file>         width only, keeps the ratio
 
 **Where the host comes from**:
 
-1. **EmDash's own media setting**: `storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" })` in `astro.config.mjs` (EmDash 1.4+). It has to be a plain `https://` address with no path, on a domain of the site's zone (an `r2.dev` address can't resize, so it's never used as the media host; its URLs are still recognized). With it, EmDash's own components (Image, Gallery, Video) print media at the same host, and newer EmDash releases give the site settings' logo, favicon and default social image there too, so one setting covers EmDash and the pack. The Clean Image URLs page shows the host as coming from EmDash's setting, and it's changed in `astro.config.mjs` only.
+1. **EmDash's own media setting**: `storage: r2({ binding: "MEDIA", publicUrl: "https://media.coywolf.com" })` in `astro.config.mjs`. It has to be a plain `https://` address with no path, on a domain of the site's zone (an `r2.dev` address can't resize, so it's never used as the media host; its URLs are still recognized). With it, EmDash's own components (Image, Gallery, Video) print media at the same host, and since EmDash 1.5 the site settings' logo, favicon and default social image too, so one setting covers EmDash and the pack. The Clean Image URLs page shows the host as coming from EmDash's setting, and it's changed in `astro.config.mjs` only.
 2. **The host saved on the Clean Image URLs page** (takes effect within a minute, no deploy).
-3. **The pack's option**, `coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })`: the fallback, from before EmDash had `publicUrl`.
+3. **The pack's option**, `coywolfPlugin({ images: { cdn: "https://media.coywolf.com" } })`: the fallback, from before EmDash had `publicUrl`. **Deprecated since 0.38.0 and removed in 0.40.0**: move it to `publicUrl` (below). The Clean Image URLs page shows the change to make while the host comes from here or from the page and `publicUrl` isn't set.
 
 `publicUrl` is used when the pack has no host of its own (2 or 3), or the same one. When the pack has a different working host, that one stays in use (`publicUrl` may not have the `/s/` rules), and the Clean Image URLs page says so: make `publicUrl` the same host, or, once **Check** passes on it, remove the pack's own host so `publicUrl` takes over.
 
@@ -30,7 +30,7 @@ https://media.coywolf.com/s/<w>/<file>         width only, keeps the ratio
 
 ## Moving a site to EmDash's publicUrl
 
-A site that sets `images.cdn` (all eight Coywolf sites today) can move the host to EmDash's own setting. Using coywolf.com as the example:
+A site that sets `images.cdn` should move the host to EmDash's own setting before 0.40.0, which removes the option. Using coywolf.com as the example:
 
 1. **Update the pack first** to a release with this change (it reads `publicUrl` and accepts `https://media.coywolf.com/<file>` URLs from EmDash). An older pack doesn't recognize EmDash's media-host URLs, so images EmDash hands it in that form would lose their clean sizes. Updating in the same commit as step 2 is fine.
 2. **In `astro.config.mjs`**, add `publicUrl` to the storage adapter, with the same host the pack uses now:
@@ -47,7 +47,7 @@ A site that sets `images.cdn` (all eight Coywolf sites today) can move the host 
    });
    ```
 
-   Removing `cdn` is optional: with the same host it changes nothing. If a different host is saved on the Clean Image URLs page, clear it there (that page warns while `publicUrl` and the pack's host differ, and keeps the pack's).
+   Remove `cdn` too: with the same host it changes nothing, and 0.40.0 no longer reads it. If a different host is saved on the Clean Image URLs page, clear it there (that page warns while `publicUrl` and the pack's host differ, and keeps the pack's).
 3. **Deploy.** A deploy starts with an empty page cache (Workers Cache is per Worker version), so pages pick up the change at once.
 4. **Check.** Open **Clean Image URLs**: it says the host comes from EmDash's media setting, and **Check** passes. On a page, images EmDash renders itself (its `Image` component, for example) now load from `https://media.coywolf.com/<file>` instead of `/_emdash/api/media/file/<file>`; the theme's images were already on the media host.
 

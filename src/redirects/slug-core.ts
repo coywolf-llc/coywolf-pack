@@ -1,8 +1,9 @@
 /**
  * Pure planning for "Slug changes" (feature "redirects.slugChanges"): what to do
- * with the redirect rules when a published entry's public URL changes. No
- * imports, so `node --test` can load this file.
+ * with the redirect rules when a published entry's public URL changes. Only
+ * imports paths.ts (no imports itself), so `node --test` can load this file.
  */
+import { sourceKey } from "./paths.js";
 
 /** Rules this feature made carry a note starting with this, so it only ever edits its own. */
 export const SLUG_NOTE_PREFIX = "Slug change:";
@@ -28,7 +29,8 @@ export type SlugPlan =
 			keptManual?: PlanRule;
 	  };
 
-const trim = (path: string) => (path.length > 1 ? path.replace(/\/+$/, "") : path);
+/** Paths compared the way rules are stored: without a trailing slash, in one percent-encoding (src/redirects/paths.ts). */
+const trim = (path: string) => sourceKey(path);
 export const isOurs = (rule: Pick<PlanRule, "note">) => (rule.note ?? "").startsWith(SLUG_NOTE_PREFIX);
 
 /**

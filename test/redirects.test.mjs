@@ -239,13 +239,74 @@ test("exact rules match with or without a trailing slash and keep the query stri
 	invalidateRedirectCache();
 });
 
-test("encoded paths match the rule's source as written (no decoding)", async () => {
+test("non-ASCII sources: raw Unicode and any percent-encoding of the same path match (as EmDash 1.5's redirects)", async () => {
 	const db = await seeded();
-	// The URL parser percent-encodes "café", so it reaches the rule written encoded.
+	// Stored as its key, the way the request's path arrives (the URL parser percent-encodes "café").
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) n FROM coywolf_redirects WHERE source = '/caf%C3%A9'").get().n, 1);
 	assert.deepEqual(await serve(db, "https://example.com/café"), [301, "https://example.com/coffee"]);
 	assert.deepEqual(await serve(db, "https://example.com/caf%C3%A9/"), [301, "https://example.com/coffee"]);
-	assert.equal(await serve(db, "https://example.com/caf%c3%a9"), undefined);
+	assert.deepEqual(await serve(db, "https://example.com/caf%c3%a9"), [301, "https://example.com/coffee"], "lowercase escapes are the same path");
 	invalidateRedirectCache();
+});
+
+test("rules saved before 0.38.0 in another spelling: matched, rewritten to one spelling once, and saving again keeps one row", async () => {
+	const { canonicalizeSources } = await import("../src/redirects/rules.ts");
+	const db = await seeded();
+	const add = (id, source, target) => db.sqlite.prepare("INSERT INTO coywolf_redirects (id, source, target, type, is_regex, enabled, created_at, updated_at) VALUES (?, ?, ?, 301, 0, 1, 'x', 'x')").run(id, source, target);
+	add("raw", "/naïve", "/naive");
+	add("lower", "/r%c3%a9sum%c3%a9", "/resume");
+	invalidateRedirectCache();
+	assert.deepEqual(await serve(db, "https://example.com/naïve"), [301, "https://example.com/naive"], "raw Unicode matches before the rewrite");
+	assert.equal(await canonicalizeSources(db), 2);
+	assert.deepEqual(db.sqlite.prepare("SELECT source FROM coywolf_redirects WHERE id IN ('raw', 'lower') ORDER BY id").all().map((r) => r.source), ["/r%C3%A9sum%C3%A9", "/na%C3%AFve"]);
+	assert.equal(await canonicalizeSources(db), 0, "once");
+	invalidateRedirectCache();
+	assert.deepEqual(await serve(db, "https://example.com/résumé"), [301, "https://example.com/resume"]);
+	await saveRule(db, { source: "/naïve", target: "/naive-2" });
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) n FROM coywolf_redirects WHERE target LIKE '/naive%'").get().n, 1, "updated in place");
+	invalidateRedirectCache();
+});
+
+test("both spellings of one source (before 0.38.0): the canonical one wins, the rewrite leaves the other, and a save says so", async () => {
+	const { canonicalizeSources, RedirectValidationError } = await import("../src/redirects/rules.ts");
+	const db = await seeded();
+	const add = (id, source, target) => db.sqlite.prepare("INSERT INTO coywolf_redirects (id, source, target, type, is_regex, enabled, created_at, updated_at) VALUES (?, ?, ?, 301, 0, 1, 'x', 'x')").run(id, source, target);
+	add("twin-raw", "/über", "/raw");
+	add("twin-key", "/%C3%BCber", "/key");
+	invalidateRedirectCache();
+	assert.deepEqual(await serve(db, "https://example.com/über"), [301, "https://example.com/key"]);
+	assert.equal(await canonicalizeSources(db), 0, "its key is taken: left as it is");
+	await assert.rejects(saveRule(db, { id: "twin-raw", source: "/über", target: "/raw-2" }), RedirectValidationError);
+	invalidateRedirectCache();
+});
+
+test("a source with a . or .. segment is refused (browsers resolve those away)", async () => {
+	const db = await seeded();
+	for (const source of ["/.", "/a/../b", "/a/./b", "/a/..", "/a/%2e%2e/b", "/a/%2E/b", "/a\\..\\b"]) await assert.rejects(saveRule(db, { source, target: "/x" }), /\. or \.\. segment/, source);
+	await saveRule(db, { source: "/a.b/c..d/.well", target: "/x" });
+	invalidateRedirectCache();
+});
+
+test("non-ASCII destinations are percent-encoded in Location (a header must be ASCII)", async () => {
+	const db = await seeded();
+	await saveRule(db, { source: "/to-cafe", target: "https://example.org/café?q=thé" });
+	await saveRule(db, { source: "/to-local", target: "/über" });
+	await saveRule(db, { source: "/to-idn", target: "https://bücher.example/ü#teil" });
+	invalidateRedirectCache();
+	assert.deepEqual(await serve(db, "https://example.com/to-cafe"), [301, "https://example.org/caf%C3%A9?q=th%C3%A9"]);
+	assert.deepEqual(await serve(db, "https://example.com/to-idn"), [301, "https://xn--bcher-kva.example/%C3%BC#teil"], "the host in punycode");
+	assert.deepEqual(await serve(db, "https://example.com/to-local"), [301, "https://example.com/%C3%BCber"]);
+	invalidateRedirectCache();
+});
+
+test("sourceKey matches EmDash's normalizeSourcePath, without the trailing slash", async () => {
+	const { sourceKey } = await import("../src/redirects/rules.ts");
+	const samples = ["/café", "/caf%C3%A9", "/caf%c3%a9/", "/a b", "/%E2%82%AC", "/日本語/パス", "/plain/", "/", "/bad%zz", "/x?y=1"];
+	const expected = {
+		"/café": "/caf%C3%A9", "/caf%C3%A9": "/caf%C3%A9", "/caf%c3%a9/": "/caf%C3%A9", "/a b": "/a%20b", "/%E2%82%AC": "/%E2%82%AC",
+		"/日本語/パス": "/%E6%97%A5%E6%9C%AC%E8%AA%9E/%E3%83%91%E3%82%B9", "/plain/": "/plain", "/": "/", "/bad%zz": "/bad%zz", "/x?y=1": "/x?y=1",
+	};
+	for (const sample of samples) assert.equal(sourceKey(sample), expected[sample], sample);
 });
 
 test("hits are counted for exact and pattern matches", async () => {
@@ -267,7 +328,7 @@ test("a request reads its exact rule (indexed) only when its path is an exact so
 	await serve(db, "https://example.com/nothing-here");
 	await serve(db, "https://example.com/old");
 	const reads = db.log.filter((q) => /^SELECT/.test(q.sql) && /coywolf_redirects/.test(q.sql) && !/SELECT \* FROM/.test(q.sql));
-	const exact = reads.filter((q) => /WHERE source = \? AND is_regex = 0 AND enabled = 1$/.test(q.sql));
+	const exact = reads.filter((q) => /WHERE source IN \(\?(?:, \?)?\) AND is_regex = 0 AND enabled = 1$/.test(q.sql));
 	const patterns = reads.filter((q) => /WHERE is_regex = 1 AND enabled = 1 ORDER BY source$/.test(q.sql));
 	const sources = reads.filter((q) => /^SELECT source FROM coywolf_redirects WHERE is_regex = 0 AND enabled = 1 LIMIT/.test(q.sql));
 	assert.deepEqual(exact.map((q) => q.params), [["/old"], ["/old"]], "/nothing-here is no exact source: no read");
@@ -525,4 +586,17 @@ test("a prefetch of a redirect source is declined (503, never stored) and isn't 
 	assert.equal(click.res.status, 301);
 	assert.equal(hitsOf(), before + 1);
 	invalidateRedirectCache();
+});
+
+test("slug changes with a non-ASCII slug: renaming back deletes the old rule instead of making the live page redirect to itself", async () => {
+	const { planSlugChange, SLUG_NOTE_PREFIX } = await import("../src/redirects/slug-core.ts");
+	// café → b made this rule; its source may be stored readable (before 0.38.0) or as its key.
+	for (const source of ["/blog/caf%C3%A9", "/blog/café", "/blog/caf%c3%a9"]) {
+		const rule = { id: "r1", source, target: "/blog/b", note: `${SLUG_NOTE_PREFIX} posts/1` };
+		// Entry URLs are built percent-encoded (src/core/content-url.ts).
+		const plan = planSlugChange("/blog/b/", "/blog/caf%C3%A9/", [rule]);
+		assert.equal(plan.kind, "apply", source);
+		assert.deepEqual(plan.deleteIds, ["r1"], source);
+		assert.deepEqual(plan.retargetIds, [], source);
+	}
 });
