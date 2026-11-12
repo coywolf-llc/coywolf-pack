@@ -9,7 +9,7 @@
  */
 export function isConflict(error: unknown): boolean {
 	if (!error || typeof error !== "object") return false;
-	const e = error as { code?: unknown; status?: unknown; name?: unknown; message?: unknown };
-	if (e.code === "CONFLICT" || e.status === 409 || e.name === "ContentMutationConflictError") return true;
-	return typeof e.message === "string" && /version conflict|modified since last read|\bCONFLICT\b/.test(e.message);
+	// EmDash's plugin content actions throw { code: "CONFLICT" }; the repository's own error is ContentMutationConflictError.
+	const e = error as { code?: unknown; name?: unknown };
+	return e.code === "CONFLICT" || e.name === "ContentMutationConflictError";
 }

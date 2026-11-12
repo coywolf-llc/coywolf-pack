@@ -268,13 +268,7 @@ export function searchModule(options: SearchOptions) {
 	const touch = async (ctx: { settings: { set(key: string, value: unknown): Promise<void> } }) => {
 		await bumpSearchVersion(ctx);
 	};
-	// A save that changes what's live: not a draft save (an autosave, or a co-editing room's save every few seconds) of a published entry.
-	const isPublished = (content: Record<string, unknown> | undefined) => {
-		if (!content) return true;
-		if (content.status !== undefined && content.status !== "published") return false;
-		const draft = content.draftRevisionId;
-		return !(typeof draft === "string" && draft !== "" && draft !== content.liveRevisionId);
-	};
+	const isPublished = (content: Record<string, unknown> | undefined) => !content || content.status === undefined || content.status === "published";
 
 	const hooks = {
 		/**

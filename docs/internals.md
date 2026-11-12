@@ -21,12 +21,11 @@ EmDash starts its runtime (and so the plugins) synchronously, before its setup p
 
 ## Co-editing
 
-EmDash 1.5 can let several people edit one entry at once (`emdash({ coEditing: true })` and a Durable Object; off by default, and off on the Coywolf sites). An open editor then saves the entry 2 seconds after the last change and at least every 10 seconds while people type, through a path that doesn't pass through the site's middleware. The pack's hooks are ready for it:
+EmDash 1.5 can let several people edit one entry at once (`emdash({ coEditing: true })` and a Durable Object; off by default, and off on the Coywolf sites). An open editor then saves the entry 2 seconds after the last change and at least every 10 seconds while people type, through a path that doesn't pass through the site's middleware.
 
-- **One run per entry at a time.** `content:afterSave` runs per module and entry one at a time (`coalesced()` in `src/core/compose.ts`): a save that arrives while the same module is still handling the same entry waits, and the run goes once more with the newest save when it ends, so a burst of saves costs at most two runs and the last one is never lost. A run older than a minute no longer holds saves back.
-- **Draft saves skip what only the live page needs.** Social Images, Search's index version, Discovery and AI Enrichment act only on saves that change the live page; a draft save of a published entry waits for its publish (`content:afterPublish`).
-- **Only the fields a save sends.** In a room, `content:beforeSave` gets only the changed fields (as visual-editor saves already did). Headings, Breadcrumbs, Reviews and WordPress Migration change only the fields they were given and return nothing when there's nothing to change.
-- **Conflicts leave a draft.** Link Manager's bulk fixes and WordPress Migration's conversion publish only the draft their own edit made, with its `_rev`. If someone saved the entry in between, EmDash answers with a version conflict, and the edit stays a draft instead of publishing someone else's changes (`isConflict()` in `src/core/conflict.ts`).
+- **Ready:** `content:beforeSave` gets only the changed fields in a room (as visual-editor saves already did). Headings, Breadcrumbs, Reviews, WordPress Migration and Slug changes change only the fields they were given and return nothing when there's nothing to change.
+- **Ready:** Link Manager's bulk fixes and WordPress Migration's conversion publish only the draft their own edit made, with its `_rev`. If someone saved the entry in between, EmDash answers `CONFLICT` and the edit stays a draft instead of publishing someone else's changes (`isConflict()` in `src/core/conflict.ts`).
+- **Not ready: `content:afterSave` on every room save.** Each save runs every participant (Link Manager's reindex, Videos, Files, AI, Social Images, Discovery, Search, Slug changes) in full. Throttling that needs care: all modules must see saves in order (per-module coalescing let a newer save overtake an older one), the work runs inside EmDash's 5-second hook budget, and a draft save that changes live fields (SEO, bylines) must still count. Do this before turning co-editing on.
 
 ## Shared reads have deadlines
 
