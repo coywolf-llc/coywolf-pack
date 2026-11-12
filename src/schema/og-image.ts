@@ -23,7 +23,7 @@ export const OG_HEIGHT = 630;
 export function cleanDefaultOgImage(defaultOg: ImageInfo | null | undefined, _origin: string): ImageInfo | null {
 	if (!defaultOg || !imageCdn()) return null;
 	const file = mediaFile(defaultOg.url);
-	if (!file || file.ext === "svg") return null;
+	if (!file || file.ext.toLowerCase() === "svg") return null;
 	const url = cleanImagePath(defaultOg.url, { width: OG_WIDTH, height: OG_HEIGHT });
 	return url ? { url, width: OG_WIDTH, height: OG_HEIGHT, alt: defaultOg.alt, mimeType: mimeForExt(file.ext) } : null;
 }

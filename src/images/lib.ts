@@ -174,11 +174,12 @@ const KEY = /^([A-Za-z0-9_.-]+)\.([a-z0-9]{2,5})$/i;
 export function mediaFile(src: string | null | undefined): { id: string; ext: string } | null {
 	const value = String(src ?? "").trim();
 	const m = MEDIA_FILE.exec(value);
-	if (m) return { id: m[1], ext: m[2].toLowerCase() };
+	// The extension keeps its case: R2 keys are case-sensitive (a WordPress import keeps "Photo.JPG" as is).
+	if (m) return { id: m[1], ext: m[2] };
 	for (const base of mediaBases()) {
 		if (!value.startsWith(`${base}/`)) continue;
 		const key = KEY.exec(value.slice(base.length + 1).split(/[?#]/)[0] ?? "");
-		if (key) return { id: key[1], ext: key[2].toLowerCase() };
+		if (key) return { id: key[1], ext: key[2] };
 	}
 	return null;
 }
@@ -208,7 +209,7 @@ export function cleanImagePath(src: string | null | undefined, options: { width:
 	const height = options.height === undefined ? undefined : Math.round(options.height);
 	if (!(width >= 1 && width <= MAX_DIMENSION) || (height !== undefined && !(height >= 1 && height <= MAX_DIMENSION))) return null;
 	// Cloudflare's resizer reads JPEG, PNG, GIF, WebP, SVG and HEIC, not AVIF (it answers 415).
-	if (!CDN_RESIZABLE.has(file.ext)) return null;
+	if (!CDN_RESIZABLE.has(file.ext.toLowerCase())) return null;
 	return `${cdn}/s/${height === undefined ? width : `${width}x${height}`}/${file.id}.${file.ext}`;
 }
 
@@ -241,7 +242,7 @@ export function parseCdnUrl(url: string | null | undefined): { id: string; ext: 
 	const width = m[1] ? Number(m[1]) : undefined;
 	const height = m[2] ? Number(m[2]) : undefined;
 	if ((width !== undefined && !(width >= 1 && width <= MAX_DIMENSION)) || (height !== undefined && !(height >= 1 && height <= MAX_DIMENSION))) return null;
-	return { id: m[3], ext: m[4].toLowerCase(), width, height };
+	return { id: m[3], ext: m[4], width, height };
 }
 
 /**
