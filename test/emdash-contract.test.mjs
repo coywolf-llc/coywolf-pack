@@ -1142,7 +1142,10 @@ test("refreshing the manifest keeps a plugin page mounted and scrolled (src/admi
 	assert.match(layout, /const \{ data: manifest, isLoading, error \} = useQuery\(\{\s*queryKey: \["manifest"\],/);
 	// 1.5.0 also waits for the current user, on first load only (userSettled never goes back to false).
 	assert.match(layout, /if \(isLoading(?: \|\| !userSettled)?\) return \/\* @__PURE__ \*\/ jsx\(ConfigurationLoadingScreen, \{\}\);/);
-	if (layout.includes("userSettled")) assert.match(layout, /if \(!userSettled && !currentUser\.isLoading\) setUserSettled\(true\);/);
+	if (layout.includes("userSettled")) {
+		assert.match(layout, /if \(!userSettled && !currentUser\.isLoading\) setUserSettled\(true\);/);
+		assert.doesNotMatch(layout, /setUserSettled\(false\)/, "the layout can go back to its loading screen after the first load: a refetch may remount the page");
+	}
 	// A refetch that fails (after the admin's one retry) swaps the page for the error screen: the only case a refresh unmounts it.
 	assert.match(layout, /if \(error \|\| !manifest\) return \/\* @__PURE__ \*\/ jsx\(ErrorScreen, \{ error:/);
 	assert.match(admin, /new QueryClient\(\{ defaultOptions: \{ queries: \{\s*staleTime: [^,]+,\s*retry: 1\s*\} \} \}\)/);

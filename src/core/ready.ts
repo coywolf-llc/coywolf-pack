@@ -6,13 +6,18 @@
  * Up to EmDash 1.4, its generated plugins module (virtual:emdash/plugins)
  * called createPlugin() as the Worker isolate started. Since 1.5.0 the module
  * exports a plugins() function that EmDash calls on its runtime's first start,
- * which EmDash's middleware begins before the pack's middleware runs. In one
- * rare path (EmDash's cold-start setup probe fails, so it renders without
- * waiting for its runtime) a page could render before that. The pack
- * middleware calls ensurePackStarted() first: it starts the plugins itself
- * through the same cached plugins() EmDash uses (no second instance), and a
- * page rendered while the pack still isn't started is kept out of the edge
- * cache (noteReadFailure).
+ * which EmDash's middleware begins (synchronously, even when its setup probe
+ * then fails) before the pack's middleware runs. So this is defensive: should
+ * a later EmDash change that order, the pack middleware's ensurePackStarted()
+ * starts the plugins itself through the same cached plugins() EmDash uses (no
+ * second instance), and a page rendered while the pack still isn't started is
+ * kept out of the edge cache (noteReadFailure). On a request where EmDash
+ * skips its runtime (an auth-provider fast route) this runs the plugin
+ * factories once per isolate, as EmDash 1.4 did at isolate start.
+ *
+ * A site that adds the pack's middleware without coywolfPlugin() in its
+ * plugins list never starts the pack, so its pages aren't edge-cached and the
+ * log says "pack not started": the README's setup needs both.
  */
 
 let ready = false;

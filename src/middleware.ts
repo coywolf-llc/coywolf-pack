@@ -79,7 +79,8 @@ export interface CoywolfPackMiddlewareOptions {
 	database?: string;
 }
 
-const PASS_THROUGH = /^\/(_astro|_image)\//;
+// Astro's assets and its image endpoint (`/_image?href=…`, no trailing slash) are never pack pages.
+const PASS_THROUGH = /^\/(_astro\/|_image(\/|$))/;
 /** EmDash's site settings API (POST saves General, SEO, Social…). */
 const EMDASH_SETTINGS_API = "/_emdash/api/settings";
 /** Largest redirect save body read for its sources (redirects/import takes up to 2 MiB). */

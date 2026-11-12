@@ -20,7 +20,7 @@ A page that isn't in the edge cache yet is built by the Worker, and every D1 rou
 - up to EmDash 1.4, as the Worker isolate starts;
 - since EmDash 1.5.0, on its runtime's first start, which EmDash's middleware begins before the pack's middleware runs.
 
-In one rare 1.5 path (EmDash's cold-start setup probe fails, so it renders without waiting for its runtime) a page could render before that. So the pack middleware first calls `ensurePackStarted()` (`src/core/ready.ts`): when the pack hasn't started, it calls EmDash's `plugins()` itself, which is cached per configuration, so EmDash gets the same instance. A page rendered while the pack still isn't started is kept out of the edge cache like any page rendered after a failed read, and the log names it `pack not started`.
+EmDash starts its runtime (and so the plugins) synchronously, before its setup probe, so the pack has started by the time its middleware runs. The pack middleware still checks first, defensively, in case a later EmDash changes that order: `ensurePackStarted()` (`src/core/ready.ts`) calls EmDash's `plugins()` itself when the pack hasn't started, which is cached per configuration, so EmDash gets the same instance. A page rendered while the pack still isn't started is kept out of the edge cache like any page rendered after a failed read, and the log names it `pack not started`. A site that adds the pack's middleware without `coywolfPlugin()` in its plugins list never starts the pack, so it sees that on every page: the setup in the README needs both.
 
 ## Shared reads have deadlines
 
