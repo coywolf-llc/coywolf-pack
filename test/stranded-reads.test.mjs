@@ -49,6 +49,50 @@ async function quietly(level, fn) {
 	return lines;
 }
 
+/**
+ * A mock clock (node:test mock timers for setTimeout and Date) for the cases that check
+ * when a waiting caller gives up: on a busy CI runner, wall-clock bounds flake. `advance`
+ * moves time 1 ms at a time and lets everything due at each ms run (timers, then promise
+ * reactions, then zero-delay timers they set, such as a D1 batch's flush), so each step
+ * happens at the exact mocked time it's due. setImmediate stays real: it drains reactions.
+ */
+function mockClock(t) {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+	const turn = () => new Promise((resolve) => setImmediate(resolve));
+	const settle = async () => {
+		for (let i = 0; i < 10; i++) {
+			t.mock.timers.tick(0);
+			await turn();
+		}
+	};
+	return {
+		settle,
+		async advance(ms) {
+			for (let i = 0; i < ms; i++) {
+				t.mock.timers.tick(1);
+				await settle();
+			}
+		},
+	};
+}
+
+/** Tracks whether `promise` has settled, without awaiting it. */
+function track(promise) {
+	const state = { settled: false, value: undefined, error: undefined };
+	promise.then(
+		(value) => Object.assign(state, { settled: true, value }),
+		(error) => Object.assign(state, { settled: true, error }),
+	);
+	return state;
+}
+
+/** Captures console.warn and console.error for the whole test (restored when it ends). */
+function captureLogs(t) {
+	const logs = { warn: [], error: [] };
+	for (const level of ["warn", "error"]) t.mock.method(console, level, (...args) => logs[level].push(args.map(String).join(" ")));
+	return logs;
+}
+
 /** A D1 stand-in over node:sqlite that counts round trips; `hang` makes the next N calls never answer. */
 function d1(setup = "") {
 	const db = new DatabaseSync(":memory:");
@@ -233,26 +277,41 @@ test("shared read: a failure in time fails every caller waiting for it, and isn'
 
 // ── Feature switches and settings (src/core/features.ts) ─────────
 
-test("feature switches: a read that never answers doesn't hang the next request; it fails closed by its own deadline", LIMIT, async () => {
+test("feature switches: a read that never answers doesn't hang the next request; it fails closed by its own deadline", LIMIT, async (t) => {
 	const features = await import("../src/core/features.ts");
 	const { readFailures } = await import("../src/core/read-failures.ts");
 	features.invalidateFeatures();
 	features.registerSiteSetting("strandTest");
 	const db = d1(`INSERT INTO options (name, value) VALUES ('plugin:coywolf-pack:settings:strandTest', '"value"');`);
 	db.hang = 1; // The first request's read: its request is canceled mid-read, so it never answers.
+	const logs = captureLogs(t);
+	const clock = mockClock(t);
 	const anchoredBefore = globalThis.__anchored?.length ?? 0;
 	const before = readFailures();
-	const first = features.readSiteSetting("strandTest", db);
+	const first = track(features.readSiteSetting("strandTest", db));
 	const anchored = globalThis.__anchored?.length ?? 0;
-	await sleep(5);
-	const started = Date.now();
-	const warnings = await quietly("warn", async () => assert.deepEqual(await features.readSiteSetting("strandTest", db), { value: "value" }));
-	const waited = Date.now() - started;
-	assert.ok(waited >= 30 && waited < 500, `the next request read for itself after the shared-read deadline (${waited} ms)`);
-	assert.match(warnings[0], /shared read stalled: the feature switches and settings/);
+	await clock.settle();
+	await clock.advance(5);
+	const next = track(features.readSiteSetting("strandTest", db));
+	// The next request waits for the shared read until its deadline (counted from when that read started), not a ms longer…
+	await clock.advance(DEADLINES.sharedWaitMs - 5 - 1);
+	assert.equal(next.settled, false, "still waiting for the shared read just before its deadline");
+	assert.deepEqual(logs.warn, []);
+	// …then stops waiting and reads for itself.
+	await clock.advance(1);
+	assert.equal(next.settled, true, "read for itself at the shared-read deadline");
+	assert.deepEqual(next.value, { value: "value" });
+	assert.equal(logs.warn.length, 1);
+	assert.match(logs.warn[0], /shared read stalled: the feature switches and settings/);
 	// The stranded read ends by the D1 read deadline: a noted read failure (that page isn't edge-cached), never a hang.
-	const errors = await quietly("error", async () => assert.equal(await first, null));
-	assert.match(errors[0], /could not read feature switches/);
+	await clock.advance(DEADLINES.d1ReadMs - DEADLINES.sharedWaitMs - 1);
+	assert.equal(first.settled, false, "the stranded read is still pending just before the D1 read deadline");
+	assert.deepEqual(logs.error, []);
+	await clock.advance(1);
+	assert.equal(first.settled, true, "the stranded read failed closed at the D1 read deadline");
+	assert.equal(first.value, null);
+	assert.equal(logs.error.length, 1);
+	assert.match(logs.error[0], /could not read feature switches/);
 	assert.ok(readFailures() > before);
 	// The fresh read was cached; nothing else is read.
 	const queries = db.stats.roundTrips;
@@ -264,7 +323,7 @@ test("feature switches: a read that never answers doesn't hang the next request;
 
 // ── Redirects (src/redirects/middleware.ts, rules.ts) ────────────
 
-test("redirects: a pattern load that never answers doesn't hang later requests; concurrent requests still share one load", LIMIT, async () => {
+test("redirects: a pattern load that never answers doesn't hang later requests; concurrent requests still share one load", LIMIT, async (t) => {
 	const { serveRedirect, invalidateRedirectCache } = await import("../src/redirects/middleware.ts");
 	const { saveRule } = await import("../src/redirects/rules.ts");
 	const db = d1();
@@ -273,18 +332,35 @@ test("redirects: a pattern load that never answers doesn't hang later requests; 
 	const go = (path, env = { DB: db }) => serveRedirect(new URL(`https://example.com${path}`), env, () => {}).then((res) => res && [res.status, res.headers.get("Location")]);
 
 	db.hang = 1; // The first request's batch (its exact lookup and the shared pattern load) never answers.
-	const first = go("/a/1");
-	await sleep(5);
-	const warnings = await quietly("warn", async () => assert.deepEqual(await go("/a/2"), [301, "https://example.com/b/2"]));
-	assert.match(warnings[0], /shared read stalled: the redirect rules/);
+	const logs = captureLogs(t);
+	const clock = mockClock(t);
+	const first = track(go("/a/1"));
+	await clock.settle();
+	await clock.advance(5);
+	const next = track(go("/a/2"));
+	await clock.advance(DEADLINES.sharedWaitMs - 5 - 1);
+	assert.equal(next.settled, false, "still waiting for the shared pattern load just before its deadline");
+	await clock.advance(1);
+	assert.deepEqual(next.value, [301, "https://example.com/b/2"], "loaded the rules itself at the shared-read deadline");
+	assert.equal(logs.warn.length, 1);
+	assert.match(logs.warn[0], /shared read stalled: the redirect rules/);
 	// The stranded request fails closed by the D1 read deadline (the page renders instead; not edge-cached).
-	const errors = await quietly("error", async () => assert.equal(await first, undefined));
-	assert.match(errors[0], /could not load rules/);
+	await clock.advance(DEADLINES.d1ReadMs - DEADLINES.sharedWaitMs - 1);
+	assert.equal(first.settled, false, "the stranded request is still pending just before the D1 read deadline");
+	assert.deepEqual(logs.error, []);
+	await clock.advance(1);
+	assert.equal(first.settled, true, "the stranded request failed closed at the D1 read deadline");
+	assert.equal(first.value, undefined);
+	assert.equal(logs.error.length, 1);
+	assert.match(logs.error[0], /could not load rules/);
 
 	const PATTERNS = /FROM coywolf_redirects WHERE is_regex = 1/;
 	invalidateRedirectCache();
 	db.stats.sql = [];
-	assert.deepEqual(await Promise.all([go("/a/3"), go("/a/4"), go("/a/5")]), [
+	// The first starts the load; the other two find it under way and see its result on their next check.
+	const all = Promise.all([go("/a/3"), go("/a/4"), go("/a/5")]);
+	await clock.advance(DEADLINES.sharedPollMs);
+	assert.deepEqual(await all, [
 		[301, "https://example.com/b/3"],
 		[301, "https://example.com/b/4"],
 		[301, "https://example.com/b/5"],
