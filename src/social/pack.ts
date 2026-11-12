@@ -57,6 +57,13 @@ type Item = { id: string; slug: string | null; status: string; data: Record<stri
 const nonEmpty = (v: unknown) => typeof v === "string" && v.trim() !== "";
 
 /** Whether an entry has an image of its own (an SEO image or an image field): then it keeps that. */
+/** Whether a save event leaves the live page as it was: the entry isn't published, or the save went to a draft revision. */
+export function draftSave(content: Record<string, unknown>): boolean {
+	if (content.status !== "published") return true;
+	const draft = content.draftRevisionId;
+	return typeof draft === "string" && draft !== "" && draft !== content.liveRevisionId;
+}
+
 export function hasOwnImage(item: Item, schema: Pick<CollectionSchemaInfo, "fields">): boolean {
 	if (nonEmpty(item.seo?.image)) return true;
 	for (const f of schema.fields) {
@@ -270,6 +277,9 @@ export function socialImagesPack(options: SocialImagesOptions = {}): PackModule 
 	const onSaved = async (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => {
 		const id = (event.content as { id?: unknown })?.id;
 		if (typeof id !== "string" || !id) return;
+		// Only a save that changes the live page: not an unpublished entry, nor a draft save (an autosave, or a
+		// co-editing room's save every few seconds) of a published one. Publishing the draft fires afterPublish.
+		if (draftSave(event.content)) return;
 		const key = docId(event.collection, id);
 		const running = inFlight.get(key);
 		if (running) {

@@ -41,6 +41,7 @@ import {
 	startScan,
 	urls,
 } from "./store.js";
+import { isConflict } from "../core/conflict.js";
 
 /** No build-time options yet; settings live on the Link Manager page. */
 // An empty type: reserved for future options.
@@ -345,8 +346,13 @@ async function applyEdits(ctx: PluginContext, plan: Map<string, LinkEdit>, ids: 
 						// Publish only the draft this edit created: exactly one version after the one read.
 						if (versioned && versioned.item.version === (fresh.version ?? 0) + 1) {
 							ops.spend(5);
-							await content.publish(collection, id, { _rev: versioned._rev });
-							published = true;
+							try {
+								await content.publish(collection, id, { _rev: versioned._rev });
+								published = true;
+							} catch (error) {
+								// Someone saved it in between (co-editing saves every few seconds): the edit stays a draft.
+								if (!isConflict(error)) throw error;
+							}
 						}
 					}
 					if (published) result.published++;

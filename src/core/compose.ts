@@ -104,6 +104,48 @@ function hookFeature(module: PackModule, hook: string): string {
 // any: events differ per hook.
 type Handler = (event: any, ctx: PluginContext) => Promise<unknown>;
 
+/**
+ * content:afterSave per module and entry, one run at a time. With co-editing on (EmDash 1.5+) an open editor saves
+ * the entry every 2 to 10 seconds, and each save fires afterSave: a save that arrives while the same module is still
+ * handling the same entry doesn't start a second run; that run goes once more when it ends, with the newest event,
+ * so the last save is never lost and a burst costs at most two runs. Per isolate (saves of one room land in one).
+ */
+const afterSaveRuns = new Map<string, { again: boolean; latest: unknown; startedAt: number }>();
+/**
+ * A run older than this no longer holds later saves back: on Workers a request that's canceled never settles what it
+ * started, and its entry must not stop being handled in this isolate (src/core/single-flight.ts has the same rule).
+ */
+export const AFTER_SAVE_HOLD_MS = 60_000;
+
+export async function coalesced<E>(moduleId: string, event: E, run: (event: E) => Promise<unknown>): Promise<void> {
+	const content = (event as { content?: { id?: unknown }; collection?: unknown }).content;
+	const collection = (event as { collection?: unknown }).collection;
+	const id = content?.id;
+	if (typeof id !== "string" || !id || typeof collection !== "string") {
+		await run(event);
+		return;
+	}
+	const key = `${moduleId}\u0000${collection}\u0000${id}`;
+	const running = afterSaveRuns.get(key);
+	if (running && Date.now() - running.startedAt < AFTER_SAVE_HOLD_MS) {
+		running.again = true;
+		running.latest = event;
+		return;
+	}
+	const state = { again: false, latest: event as unknown, startedAt: Date.now() };
+	afterSaveRuns.set(key, state);
+	try {
+		await run(event);
+		while (state.again && afterSaveRuns.get(key) === state) {
+			state.again = false;
+			await run(state.latest as E);
+		}
+	} finally {
+		// Only its own entry: a stale run that ends late mustn't remove the one that replaced it.
+		if (afterSaveRuns.get(key) === state) afterSaveRuns.delete(key);
+	}
+}
+
 /** Discovery's daily Bing task from 0.35.17, cleaned up by 0.35.18–0.37.x; cancelled if it still fires. */
 const LEGACY_BING_TASK = "discovery-bing-drain";
 
@@ -175,11 +217,12 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 			}
 			for (const module of participants) {
 				if (!isOn(features, hookFeature(module, name))) continue;
-				try {
-					await module.hooks?.[name as "content:afterSave"]?.(event, ctx);
-				} catch (error) {
-					ctx.log.error(`${module.id}: ${name} failed`, { error: String(error) });
-				}
+				const call = (latest: typeof event) =>
+					Promise.resolve(module.hooks?.[name as "content:afterSave"]?.(latest, ctx)).catch((error: unknown) => {
+						ctx.log.error(`${module.id}: ${name} failed`, { error: String(error) });
+					});
+				if (name === "content:afterSave") await coalesced(module.id, event, call);
+				else await call(event);
 			}
 			return undefined;
 		};
