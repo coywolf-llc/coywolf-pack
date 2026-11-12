@@ -282,7 +282,7 @@ test("both spellings of one source (before 0.38.0): the canonical one wins, the 
 
 test("a source with a . or .. segment is refused (browsers resolve those away)", async () => {
 	const db = await seeded();
-	for (const source of ["/.", "/a/../b", "/a/./b", "/a/.."]) await assert.rejects(saveRule(db, { source, target: "/x" }), /\. or \.\. segment/, source);
+	for (const source of ["/.", "/a/../b", "/a/./b", "/a/..", "/a/%2e%2e/b", "/a/%2E/b", "/a\\..\\b"]) await assert.rejects(saveRule(db, { source, target: "/x" }), /\. or \.\. segment/, source);
 	await saveRule(db, { source: "/a.b/c..d/.well", target: "/x" });
 	invalidateRedirectCache();
 });

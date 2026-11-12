@@ -77,7 +77,6 @@ export function redirectsPack(options: RedirectsOptions): PackModule {
 		routes: { ...manager.routes, ...removed.routes },
 		adminPages: [{ path: "/redirects", label: "Redirect Manager", icon: "arrow-bend-up-right" }],
 		hooks: mergeHooks([
-			{ feature: "redirects", hooks: manager.hooks },
 			{ feature: TRASH_PROMPT_FEATURE, hooks: removed.hooks },
 			{ feature: SLUG_CHANGES_FEATURE, hooks: slugs.hooks },
 		]),

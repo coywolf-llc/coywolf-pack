@@ -213,6 +213,15 @@ function ImportDialog(props: { open: boolean; onClose: () => void; onImported: (
 	);
 }
 
+/** A stored path as it reads (`/caf%C3%A9` → `/café`), for search. */
+function readable(path: string): string {
+	try {
+		return decodeURI(path);
+	} catch {
+		return path;
+	}
+}
+
 export function RedirectsPage() {
 	const [confirm, confirmDialog] = useConfirm();
 	const [rules, setRules] = React.useState<Rule[]>();
@@ -283,7 +292,7 @@ export function RedirectsPage() {
 
 	const q = query.trim().toLowerCase();
 	const visible = (rules ?? []).filter(
-		(r) => !q || r.source.toLowerCase().includes(q) || r.target.toLowerCase().includes(q) || r.note?.toLowerCase().includes(q),
+		(r) => !q || readable(r.source).toLowerCase().includes(q) || r.source.toLowerCase().includes(q) || readable(r.target).toLowerCase().includes(q) || r.note?.toLowerCase().includes(q),
 	);
 
 	return (

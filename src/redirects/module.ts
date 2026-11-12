@@ -6,6 +6,7 @@ import { type PluginContext, PluginRouteError, definePluginRoute } from "emdash"
 import { z } from "zod";
 
 import { parseInput, workerEnv } from "../shared.js";
+import { VERSION } from "../version.js";
 import { invalidateRedirectCache } from "./middleware.js";
 import { readOnlyRoute } from "../core/routes.js";
 import {
@@ -35,6 +36,27 @@ const ruleInput = z.object({
 	note: z.string().max(500).nullish(),
 });
 
+/** The pack version whose spelling rewrite ran (KV), so the Redirect Manager page runs it once per update. */
+const CANONICAL_MARKER = "state:redirects:canonicalVersion";
+
+/**
+ * Exact sources saved in another spelling before 0.38.0 get their key (src/redirects/paths.ts), once per pack
+ * version, when the Redirect Manager page lists the rules (EmDash runs plugin:activate only at first install).
+ */
+async function canonicalizeOnce(ctx: PluginContext, database: D1Database): Promise<void> {
+	try {
+		if ((await ctx.kv.get<string>(CANONICAL_MARKER)) === VERSION) return;
+		const rewritten = await canonicalizeSources(database);
+		if (rewritten) {
+			invalidateRedirectCache();
+			ctx.log.info("Redirects: rewrote exact sources to one spelling", { rewritten });
+		}
+		await ctx.kv.set(CANONICAL_MARKER, VERSION);
+	} catch (error) {
+		ctx.log.warn("Redirects: couldn't rewrite exact sources to one spelling; tried again next time", { error: String(error).slice(0, 200) });
+	}
+}
+
 export function redirectsModule(options: RedirectsOptions) {
 	async function db() {
 		const env = await workerEnv();
@@ -56,7 +78,11 @@ export function redirectsModule(options: RedirectsOptions) {
 	const routes = {
 		"redirects/list": {
 			permission: "plugins:manage" as const,
-			handler: async () => ({ items: await listRules(await db()), types: REDIRECT_TYPES }),
+			handler: async (ctx: PluginContext) => {
+				const database = await db();
+				await canonicalizeOnce(ctx, database);
+				return { items: await listRules(database), types: REDIRECT_TYPES };
+			},
 		},
 
 		"redirects/save": definePluginRoute({
@@ -124,13 +150,5 @@ export function redirectsModule(options: RedirectsOptions) {
 		})),
 	};
 
-	const hooks = {
-		/** Once per version: exact sources saved in another spelling before 0.38.0 get their key (src/redirects/paths.ts). */
-		"plugin:activate": async (_event: unknown, ctx: PluginContext) => {
-			const rewritten = await canonicalizeSources(await db());
-			if (rewritten) ctx.log.info("Redirects: rewrote exact sources to one spelling", { rewritten });
-		},
-	};
-
-	return { routes, hooks };
+	return { routes };
 }

@@ -444,22 +444,24 @@ const canonicalFirst = (forms: string[]) => (forms.length > 1 ? " ORDER BY sourc
 const canonicalParam = (forms: string[]) => (forms.length > 1 ? [forms[0]] : []);
 
 /**
- * Rewrite exact sources saved in another spelling (raw Unicode, lowercase escapes) to their key, once per version
- * (plugin:activate). A source whose key another rule already has is left as it is. Returns how many were rewritten.
+ * Rewrite exact sources saved in another spelling (raw Unicode, lowercase escapes) to their key (run once per pack
+ * version from the Redirect Manager page). A source whose key another rule already has is left as it is. Returns how
+ * many were rewritten.
  */
 export async function canonicalizeSources(db: D1Database): Promise<number> {
 	try {
 		const { results } = await db.prepare(`SELECT id, source FROM ${TABLE} WHERE is_regex = 0`).all<{ id: string; source: string }>();
 		const taken = new Set(results.map((r) => r.source));
-		let rewritten = 0;
+		const updates: D1PreparedStatement[] = [];
 		for (const row of results) {
 			const key = sourceKey(row.source);
 			if (key === row.source || taken.has(key) || hasDotSegment(row.source)) continue;
-			await db.prepare(`UPDATE ${TABLE} SET source = ? WHERE id = ?`).bind(key, row.id).run();
+			updates.push(db.prepare(`UPDATE ${TABLE} SET source = ? WHERE id = ?`).bind(key, row.id));
 			taken.add(key);
-			rewritten++;
 		}
-		return rewritten;
+		// In batches: a site with many old spellings stays well inside D1's queries per invocation.
+		for (let i = 0; i < updates.length; i += 50) await db.batch(updates.slice(i, i + 50));
+		return updates.length;
 	} catch (error) {
 		if (isMissingTable(error)) return 0;
 		throw error;

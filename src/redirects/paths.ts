@@ -65,5 +65,8 @@ export function encodeLocation(location: string): string {
 
 /** Whether a path has a "." or ".." segment, which the URL parser would resolve away (an exact source can't have one). */
 export function hasDotSegment(path: string): boolean {
-	return /(^|\/)\.{1,2}(\/|$)/.test(path.split(/[?#]/)[0]);
+	let p = path.split(/[?#]/)[0].replaceAll("\\", "/");
+	// Percent-encoded dots (%2e) are dot segments too: the URL parser resolves them the same way.
+	p = p.replace(/%2e/gi, ".");
+	return /(^|\/)\.{1,2}(\/|$)/.test(p);
 }
