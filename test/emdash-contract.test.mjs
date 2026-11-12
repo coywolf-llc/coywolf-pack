@@ -689,6 +689,16 @@ function regionModule(file, src, local) {
 	return pathToFileURL(out).href;
 }
 
+test("the Redirect Manager normalizes exact sources the way EmDash's redirects do (src/redirects/rules.ts sourceKey)", async () => {
+	const normalizeSourcePath = await distFunction("normalizeSourcePath");
+	const { sourceKey } = await import("../src/redirects/rules.ts");
+	for (const sample of ["/café", "/caf%C3%A9", "/caf%c3%a9", "/a b", "/日本語/パス", "/%E2%82%AC", "/bad%zz", "/x?y=1", "/plain", "/"]) {
+		assert.equal(sourceKey(sample), normalizeSourcePath(sample), sample);
+	}
+	// EmDash keeps a trailing slash in the source; the pack matches with or without one, so it drops it.
+	assert.equal(sourceKey("/café/"), normalizeSourcePath("/café/").replace(/\/$/, ""));
+});
+
 test("ctx.redirects (redirects:write): Slug changes delete EmDash's own slug-change redirect through it, matched by auto, group, source and destination (src/redirects/slug-changes.ts)", async () => {
 	const { dropEmDashAuto, EMDASH_AUTO_GROUP } = await import("../src/redirects/slug-changes.ts");
 	const { redirectsPack } = await import("../src/redirects/pack.ts");

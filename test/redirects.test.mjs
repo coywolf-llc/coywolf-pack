@@ -239,13 +239,46 @@ test("exact rules match with or without a trailing slash and keep the query stri
 	invalidateRedirectCache();
 });
 
-test("encoded paths match the rule's source as written (no decoding)", async () => {
+test("non-ASCII sources: raw Unicode and any percent-encoding of the same path match (as EmDash 1.5's redirects)", async () => {
 	const db = await seeded();
-	// The URL parser percent-encodes "café", so it reaches the rule written encoded.
+	// Saved as "/caf%C3%A9" and kept readable ("/café"); the URL parser percent-encodes the request.
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) n FROM coywolf_redirects WHERE source = '/café'").get().n, 1, "stored the way it reads");
 	assert.deepEqual(await serve(db, "https://example.com/café"), [301, "https://example.com/coffee"]);
 	assert.deepEqual(await serve(db, "https://example.com/caf%C3%A9/"), [301, "https://example.com/coffee"]);
-	assert.equal(await serve(db, "https://example.com/caf%c3%a9"), undefined);
+	assert.deepEqual(await serve(db, "https://example.com/caf%c3%a9"), [301, "https://example.com/coffee"], "lowercase escapes are the same path");
 	invalidateRedirectCache();
+});
+
+test("a rule saved before 0.38.0 with an encoded source still matches, and saving it again keeps one row", async () => {
+	const db = await seeded();
+	db.sqlite.prepare("INSERT INTO coywolf_redirects (id, source, target, type, is_regex, enabled, created_at, updated_at) VALUES ('legacy', '/na%C3%AFve', '/naive', 301, 0, 1, 'x', 'x')").run();
+	invalidateRedirectCache();
+	assert.deepEqual(await serve(db, "https://example.com/naïve"), [301, "https://example.com/naive"]);
+	await saveRule(db, { source: "/naïve", target: "/naive-2" });
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) n FROM coywolf_redirects WHERE target LIKE '/naive%'").get().n, 1, "found by its other form, updated in place");
+	invalidateRedirectCache();
+	assert.deepEqual(await serve(db, "https://example.com/na%C3%AFve"), [301, "https://example.com/naive-2"]);
+	invalidateRedirectCache();
+});
+
+test("non-ASCII destinations are percent-encoded in Location (a header must be ASCII)", async () => {
+	const db = await seeded();
+	await saveRule(db, { source: "/to-cafe", target: "https://example.org/café?q=thé" });
+	await saveRule(db, { source: "/to-local", target: "/über" });
+	invalidateRedirectCache();
+	assert.deepEqual(await serve(db, "https://example.com/to-cafe"), [301, "https://example.org/caf%C3%A9?q=th%C3%A9"]);
+	assert.deepEqual(await serve(db, "https://example.com/to-local"), [301, "https://example.com/%C3%BCber"]);
+	invalidateRedirectCache();
+});
+
+test("sourceKey matches EmDash's normalizeSourcePath, without the trailing slash", async () => {
+	const { sourceKey } = await import("../src/redirects/rules.ts");
+	const samples = ["/café", "/caf%C3%A9", "/caf%c3%a9/", "/a b", "/%E2%82%AC", "/日本語/パス", "/plain/", "/", "/bad%zz", "/x?y=1"];
+	const expected = {
+		"/café": "/caf%C3%A9", "/caf%C3%A9": "/caf%C3%A9", "/caf%c3%a9/": "/caf%C3%A9", "/a b": "/a%20b", "/%E2%82%AC": "/%E2%82%AC",
+		"/日本語/パス": "/%E6%97%A5%E6%9C%AC%E8%AA%9E/%E3%83%91%E3%82%B9", "/plain/": "/plain", "/": "/", "/bad%zz": "/bad%zz", "/x?y=1": "/x?y=1",
+	};
+	for (const sample of samples) assert.equal(sourceKey(sample), expected[sample], sample);
 });
 
 test("hits are counted for exact and pattern matches", async () => {
@@ -267,7 +300,7 @@ test("a request reads its exact rule (indexed) only when its path is an exact so
 	await serve(db, "https://example.com/nothing-here");
 	await serve(db, "https://example.com/old");
 	const reads = db.log.filter((q) => /^SELECT/.test(q.sql) && /coywolf_redirects/.test(q.sql) && !/SELECT \* FROM/.test(q.sql));
-	const exact = reads.filter((q) => /WHERE source = \? AND is_regex = 0 AND enabled = 1$/.test(q.sql));
+	const exact = reads.filter((q) => /WHERE source IN \(\?(?:, \?)?\) AND is_regex = 0 AND enabled = 1$/.test(q.sql));
 	const patterns = reads.filter((q) => /WHERE is_regex = 1 AND enabled = 1 ORDER BY source$/.test(q.sql));
 	const sources = reads.filter((q) => /^SELECT source FROM coywolf_redirects WHERE is_regex = 0 AND enabled = 1 LIMIT/.test(q.sql));
 	assert.deepEqual(exact.map((q) => q.params), [["/old"], ["/old"]], "/nothing-here is no exact source: no read");

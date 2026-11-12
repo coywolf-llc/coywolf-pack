@@ -714,6 +714,27 @@ export function ImagesPage() {
 								description={`EmDash's storage publicUrl is ${saved.storageConflict}, but the pack uses ${saved.activeHost}, which it knows serves resized images. EmDash's own components print media at ${saved.storageConflict}. Make publicUrl ${saved.activeHost} in astro.config.mjs, or, after Check passes on ${saved.storageConflict}, remove the pack's own host (images.cdn, or the one saved here) so publicUrl takes over.`}
 							/>
 						)}
+						{saved.activeHost && !hostFromStorage && !saved.storageUrl && (
+							<Banner
+								variant="default"
+								title="Move the media host to EmDash's own setting"
+								description={
+									<>
+										EmDash 1.5 uses its storage publicUrl for its own images, the site logo, the favicon and the default social image,
+										so one setting can cover EmDash and the pack. In astro.config.mjs, change the storage line to{" "}
+										<code className="text-xs">{`storage: r2({ binding: "MEDIA", publicUrl: "${saved.activeHost}" })`}</code>
+										{saved.optionHost ? (
+											<>
+												{" "}
+												and remove <code className="text-xs">cdn</code> from <code className="text-xs">coywolfPlugin({"{"} images {"}"})</code>
+											</>
+										) : null}
+										, then deploy. Nothing changes for visitors. The <code className="text-xs">images.cdn</code> option is deprecated and is removed in
+										Coywolf Pack 0.40.0.
+									</>
+								}
+							/>
+						)}
 						{saved.storageUrl && !hostFromStorage && !saved.storageConflict && (
 							<Banner
 								variant="default"

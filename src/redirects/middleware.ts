@@ -28,7 +28,7 @@ import { sharedRead, sharedSlot } from "../core/single-flight.js";
 import { createBatchedCounter } from "../files/counts.js";
 import { REDIRECTS_TAG } from "../pageCache/lib.js";
 import { afterResponse } from "../shared.js";
-import { type CompiledRules, compile, findExactRule, hitStatement, loadExactSources, loadPatternRules, match, normalizePath } from "./rules.js";
+import { type CompiledRules, compile, encodeLocation, findExactRule, hitStatement, loadExactSources, loadPatternRules, match, sourceKey } from "./rules.js";
 
 export interface CoywolfRedirectsOptions {
 	/** D1 binding of the site database. Default "DB". */
@@ -114,7 +114,7 @@ function ruleIndex(db: D1Database, ttl: number): Promise<RuleIndex> {
 			const version = siteOption(REDIRECTS_VERSION_OPTION);
 			// Both in the same tick: one D1 batch (with the switches, on a cold isolate).
 			return Promise.all([loadPatternRules(db), loadExactSources(db, MAX_EXACT_IN_MEMORY)]).then(([list, sources]) => {
-				const index: RuleIndex = { patterns: compile(list).patterns, exact: sources.length > MAX_EXACT_IN_MEMORY ? null : new Set(sources) };
+				const index: RuleIndex = { patterns: compile(list).patterns, exact: sources.length > MAX_EXACT_IN_MEMORY ? null : new Set(sources.map(sourceKey)) };
 				if (seen === edits && epoch === settingsEpoch()) cache = { index, at: Date.now(), epoch, version };
 				return index;
 			});
@@ -128,7 +128,7 @@ const lookups = new WeakMap<URL, Promise<CompiledRules>>();
 /** Request URLs whose exact rule wasn't read, because this isolate's index has no such source (see serveLateRedirect). */
 const skippedExact = new WeakSet<URL>();
 
-const exactMap = (exact: Awaited<ReturnType<typeof findExactRule>>): CompiledRules["exact"] => new Map(exact ? [[exact.source, exact]] : []);
+const exactMap = (exact: Awaited<ReturnType<typeof findExactRule>>): CompiledRules["exact"] => new Map(exact ? [[sourceKey(exact.source), exact]] : []);
 
 function rulesFor(url: URL, db: D1Database, ttl: number): Promise<CompiledRules> {
 	let found = lookups.get(url);
@@ -136,7 +136,7 @@ function rulesFor(url: URL, db: D1Database, ttl: number): Promise<CompiledRules>
 		const held = currentIndex(ttl);
 		if (held) {
 			// Most requests: no exact rule for this path, so no D1 read at all.
-			const known = held.exact === null || held.exact.has(normalizePath(url.pathname));
+			const known = held.exact === null || held.exact.has(sourceKey(url.pathname));
 			if (!known) skippedExact.add(url);
 			const lookup = known ? findExactRule(db, url.pathname) : Promise.resolve(null);
 			found = lookup.then((exact) => ({ exact: exactMap(exact), patterns: held.patterns }));
@@ -241,7 +241,8 @@ function redirectFor(url: URL, db: D1Database, compiled: CompiledRules, waitUnti
 		// path and query), so a cached redirect stays on whichever host was asked.
 		location = edge ? resolved.pathname + resolved.search + resolved.hash : resolved.href;
 	}
-	return new Response(null, { status: found.rule.type, headers: { Location: location, ...caching } });
+	// A header value must be ASCII: a destination typed with accented or non-Latin characters is percent-encoded.
+	return new Response(null, { status: found.rule.type, headers: { Location: encodeLocation(location), ...caching } });
 }
 
 /** Astro's per-request cache controls (route caching), as far as redirects use them. */

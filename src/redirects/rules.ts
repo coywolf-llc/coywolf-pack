@@ -94,6 +94,51 @@ export function normalizePath(path: string): string {
 	return path.length > 1 ? path.replace(/\/+$/, "") : path;
 }
 
+/**
+ * The key an exact source is stored and looked up by: normalized the way Astro normalizes a request's pathname
+ * (decode, then re-encode through the URL parser, as EmDash 1.5's own redirects do: normalizeSourcePath in
+ * emdash/src/redirects/patterns.ts), so a source typed with raw Unicode (`/café`) and the request's
+ * percent-encoded path (`/caf%C3%A9`) compare equal. Without a trailing slash, as normalizePath.
+ */
+export function sourceKey(path: string): string {
+	if (path.includes("?") || path.includes("#")) return normalizePath(path);
+	try {
+		const url = new URL("http://placeholder.invalid");
+		url.pathname = decodeURI(path);
+		return normalizePath(url.pathname);
+	} catch {
+		return normalizePath(path);
+	}
+}
+
+/**
+ * The forms an exact rule may be stored under for a request path: its key, and (for rules saved before 0.38.0,
+ * which kept raw Unicode as typed) the key decoded. One or two values.
+ */
+export function storedForms(pathname: string): string[] {
+	const key = sourceKey(pathname);
+	let decoded = key;
+	try {
+		decoded = decodeURI(key);
+	} catch {
+		// A malformed escape: the key is the only form.
+	}
+	return decoded === key ? [key] : [key, decoded];
+}
+
+/**
+ * How an exact source is saved: its key decoded back to readable characters (`/café`, as typed, rather than
+ * `/caf%C3%A9`), so the Redirects page shows it the way it was entered. Lookups try both forms (storedForms).
+ */
+export function storedSource(path: string): string {
+	return storedForms(path).at(-1) ?? sourceKey(path);
+}
+
+/** Non-ASCII characters in a redirect's Location, percent-encoded (a header value must be ASCII), as EmDash 1.5 does. */
+export function encodeLocation(location: string): string {
+	return location.replace(/[^\p{ASCII}]+/gu, encodeURIComponent);
+}
+
 export class RedirectValidationError extends Error {}
 
 /** Longest request path tried against pattern rules; longer paths match exact rules only (bounds a slow pattern's cost per request). */
@@ -260,12 +305,12 @@ export function validate(input: RedirectInput, options: { unchangedPattern?: boo
 		if (!sitePath && !/^https?:\/\/[^\s]+$/i.test(target)) {
 			throw new RedirectValidationError("The destination must be a path starting with / or an http(s) URL.");
 		}
-		if (!isRegex && sitePath && normalizePath(target.split("?")[0]) === normalizePath(source)) {
+		if (!isRegex && sitePath && sourceKey(target.split(/[?#]/)[0]) === sourceKey(source)) {
 			throw new RedirectValidationError("A redirect can't point to itself.");
 		}
 	}
 	return {
-		source: isRegex ? source : normalizePath(source),
+		source: isRegex ? source : storedSource(source),
 		target: type === 410 ? "" : target,
 		type,
 		isRegex,
@@ -341,9 +386,10 @@ const MATCH_COLUMNS = "id, source, target, type, is_regex";
 
 /** The enabled exact rule for a request path, if any: one row through the (source, is_regex) index. */
 export async function findExactRule(db: D1Database, pathname: string): Promise<RedirectRule | null> {
+	const forms = storedForms(pathname);
 	const statement = db
-		.prepare(`SELECT ${MATCH_COLUMNS} FROM ${TABLE} WHERE source = ? AND is_regex = 0 AND enabled = 1`)
-		.bind(normalizePath(pathname));
+		.prepare(`SELECT ${MATCH_COLUMNS} FROM ${TABLE} WHERE source IN (${forms.map(() => "?").join(", ")}) AND is_regex = 0 AND enabled = 1`)
+		.bind(...forms);
 	return (await readMatchRules(db, statement))[0] ?? null;
 }
 
@@ -371,11 +417,12 @@ export async function saveRule(db: D1Database, input: RedirectInput & { id?: str
 	await ensureTable(db);
 	const isRegex = input.isRegex === true;
 	const trimmed = (input.source ?? "").trim();
+	const forms = isRegex ? [trimmed] : storedForms(trimmed);
 	const existing = input.id
 		? await db.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE id = ?`).bind(input.id).first<{ id: string; source: string; is_regex: number }>()
 		: await db
-				.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE source = ? AND is_regex = ?`)
-				.bind(isRegex ? trimmed : normalizePath(trimmed), isRegex ? 1 : 0)
+				.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE source IN (${forms.map(() => "?").join(", ")}) AND is_regex = ?`)
+				.bind(...forms, isRegex ? 1 : 0)
 				.first<{ id: string; source: string; is_regex: number }>();
 	const rule = validate(input, { unchangedPattern: isRegex && existing?.is_regex === 1 && existing.source === trimmed });
 	const now = new Date().toISOString();
@@ -413,7 +460,8 @@ export async function getRule(db: D1Database, id: string): Promise<RedirectRule 
 /** The exact (non-pattern) rule for a path, enabled or not, or null (also when the table doesn't exist yet). */
 export async function findExactRuleAny(db: D1Database, pathname: string): Promise<RedirectRule | null> {
 	try {
-		const row = await db.prepare(`SELECT * FROM ${TABLE} WHERE source = ? AND is_regex = 0`).bind(normalizePath(pathname)).first<Row>();
+		const forms = storedForms(pathname);
+		const row = await db.prepare(`SELECT * FROM ${TABLE} WHERE source IN (${forms.map(() => "?").join(", ")}) AND is_regex = 0`).bind(...forms).first<Row>();
 		return row ? toRule(row) : null;
 	} catch (error) {
 		if (isMissingTable(error)) return null;
@@ -446,7 +494,7 @@ export function compile(rules: RedirectRule[]): CompiledRules {
 				// Saved rules are validated; skip anything unparseable rather than fail every request.
 			}
 		} else {
-			exact.set(rule.source, rule);
+			exact.set(sourceKey(rule.source), rule);
 		}
 	}
 	return { exact, patterns };
@@ -487,7 +535,7 @@ export interface Match {
  * capture groups. The request's query string is kept unless the target has one.
  */
 export function match(compiled: CompiledRules, pathname: string, search: string): Match | null {
-	let rule = compiled.exact.get(normalizePath(pathname));
+	let rule = compiled.exact.get(sourceKey(pathname));
 	let location = rule?.target ?? "";
 	if (!rule && pathname.length <= MAX_PATTERN_PATH) {
 		for (const candidate of compiled.patterns) {

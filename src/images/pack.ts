@@ -75,6 +75,9 @@ export interface ImagesOptions {
 	 * rules, e.g. "https://media.coywolf.com" (see docs/images.md). The
 	 * fallback: EmDash's `storage: r2({ publicUrl })` wins when it's set, then a
 	 * host saved on the Clean Image URLs page.
+	 *
+	 * @deprecated Since 0.38.0: set EmDash's `storage: r2({ binding: "MEDIA", publicUrl: "https://media.example.com" })`
+	 * instead, which EmDash 1.5 also uses for its own images, the logo, favicon and default social image. Removed in 0.40.0.
 	 */
 	cdn?: string;
 	/** D1 binding of the site database (for the saved media host). Default "DB". */
