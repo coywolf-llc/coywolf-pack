@@ -36,6 +36,8 @@ import { type ImportDefaults, defaultsFromWordPress, parseFileRows } from "./sou
 import { findSiteUrls, rewriteSiteUrls, siteUrlPattern } from "./urls.js";
 import { readOnlyRoute } from "../core/routes.js";
 import { isConflict } from "../core/conflict.js";
+import { cdnOriginalUrl, imageCdn } from "../images/lib.js";
+import { refreshMediaHost } from "../images/settings.js";
 
 export const F = { main: "wpImport" } as const;
 
@@ -155,6 +157,8 @@ const scanInput = z.object({
 	state: stateInput,
 	/** Old-site URL → media library URL, to rewrite in content (see ./urls.ts). */
 	urlMap: z.record(z.string().max(2000), z.string().max(2000)).optional(),
+	/** Point the site's own media file URLs inside HTML (/_emdash/api/media/file/<key>) at the media host. */
+	mediaHost: z.boolean().optional(),
 });
 
 const findInput = z.object({
@@ -178,6 +182,48 @@ function rewriteEntryUrls(data: Record<string, unknown>, urlMap: Record<string, 
 	return { value: out ?? data, count };
 }
 
+/**
+ * The site's own media file URLs (/_emdash/api/media/file/<key>, relative or absolute on `origin`) inside
+ * HTML strings (HTML blocks, embeds: strings with a tag), pointed at the original on the media host. Only
+ * strings with HTML: image blocks' own asset URLs (which EmDash's media usage tracking reads) are left alone.
+ */
+export function rewriteHtmlMediaUrls<T>(value: T, origin: string | null, toHost: (fileUrl: string) => string | null): { value: T; count: number } {
+	let count = 0;
+	const site = origin ? origin.replace(/\/+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : null;
+	// The site's own origin, or a site path (not preceded by another host's name).
+	const re = new RegExp(`(?:${site ? `${site}|` : ""}(?<![\\w.:/-]))\\/_emdash\\/api\\/media\\/file\\/([A-Za-z0-9._~%-]+(?:\\/[A-Za-z0-9._~%-]+)*)`, "g");
+	const walk = (v: unknown, depth: number): unknown => {
+		if (depth > 40) return v;
+		if (typeof v === "string") {
+			if (!v.includes("<") || !v.includes("/_emdash/api/media/file/")) return v;
+			return v.replace(re, (match, key: string) => {
+				const to = toHost(`/_emdash/api/media/file/${key}`);
+				if (!to || to === match) return match;
+				count++;
+				return to;
+			});
+		}
+		if (Array.isArray(v)) {
+			let out: unknown[] | null = null;
+			v.forEach((item, i) => {
+				const next = walk(item, depth + 1);
+				if (next !== item) (out ??= v.slice())[i] = next;
+			});
+			return out ?? v;
+		}
+		if (v && typeof v === "object") {
+			let out: Record<string, unknown> | null = null;
+			for (const [k, item] of Object.entries(v)) {
+				const next = walk(item, depth + 1);
+				if (next !== item) (out ??= { ...(v as Record<string, unknown>) })[k] = next;
+			}
+			return out ?? v;
+		}
+		return v;
+	};
+	return { value: walk(value, 0) as T, count };
+}
+
 type Content = NonNullable<PluginContext["content"]>;
 type Writable = Content & Required<Pick<Content, "update">>;
 
@@ -186,7 +232,7 @@ const versionOf = (item: { version?: number; updatedAt?: string; draftRevisionId
 
 const PAGE_MS = 12_000;
 
-async function scan(ctx: PluginContext, apply: boolean, state: ScanState | null, urlMap: Record<string, string> | null = null) {
+async function scan(ctx: PluginContext, apply: boolean, state: ScanState | null, urlMap: Record<string, string> | null = null, mediaHost = false) {
 	if (!ctx.content || !ctx.schema) throw PluginRouteError.internal("Content access is unavailable.");
 	if (apply && !ctx.content.update) throw PluginRouteError.internal("WordPress import needs the content:write capability.");
 	const content = ctx.content as Writable;
@@ -196,6 +242,9 @@ async function scan(ctx: PluginContext, apply: boolean, state: ScanState | null,
 	let index = state?.index ?? 0;
 	let cursor = state?.cursor ?? null;
 	const opts = await convertOptions(ctx);
+	if (mediaHost) await refreshMediaHost();
+	const host = mediaHost ? imageCdn() : null;
+	if (mediaHost && !host) throw PluginRouteError.badRequest("There's no media host: set EmDash's storage publicUrl (or one on the Clean Image URLs page) first.");
 	const entries: ScanEntry[] = [];
 	const leftovers: Record<string, number> = {};
 	let scanned = 0;
@@ -209,16 +258,20 @@ async function scan(ctx: PluginContext, apply: boolean, state: ScanState | null,
 			scanned++;
 			const data = await latestData(ctx, collection, item as unknown as { id: string; data: Record<string, unknown>; draftRevisionId?: string | null });
 			const convertible = mightNeedConversion(data);
-			const rewritable = urlMap !== null && JSON.stringify(data).includes("/wp-content/");
-			if (!convertible && !rewritable) continue;
+			const serialized = JSON.stringify(data);
+			const rewritable = urlMap !== null && serialized.includes("/wp-content/");
+			const hostable = host !== null && serialized.includes("/_emdash/api/media/file/");
+			if (!convertible && !rewritable && !hostable) continue;
 			const result = convertible ? convertEntryData(data, opts) : { value: data, changed: false, changes: [], videos: [], leftovers: {} };
 			for (const [k, v] of Object.entries(result.leftovers)) leftovers[k] = (leftovers[k] ?? 0) + v;
 			const urls = rewritable ? rewriteEntryUrls(result.value, urlMap) : { value: result.value, count: 0 };
-			if (!result.changed && !urls.count) continue;
-			result.value = urls.value;
+			const hosted = hostable ? rewriteHtmlMediaUrls(urls.value, ctx.site?.url ?? null, cdnOriginalUrl) : { value: urls.value, count: 0 };
+			if (!result.changed && !urls.count && !hosted.count) continue;
+			result.value = hosted.value;
 			const changes: Record<string, number> = {};
 			for (const c of result.changes) changes[c.to] = (changes[c.to] ?? 0) + 1;
 			if (urls.count) changes["media URL"] = urls.count;
+			if (hosted.count) changes["media host URL"] = hosted.count;
 			const schema = info.get(collection);
 			const titleField = schema?.titleField ?? "title";
 			const title = String(data[titleField] ?? data.title ?? item.slug ?? item.id).slice(0, 200);
@@ -377,7 +430,7 @@ export function wpImportPack(): PackModule {
 					await requireFeature(ctx, F.main);
 					const input = parseInput(scanInput, ctx.input ?? {});
 					const urlMap = input.urlMap && Object.keys(input.urlMap).length ? input.urlMap : null;
-					return scan(ctx, input.apply, input.state ?? null, urlMap);
+					return scan(ctx, input.apply, input.state ?? null, urlMap, input.mediaHost === true);
 				},
 			}),
 			"wpImport/urls": readOnlyRoute(definePluginRoute({
