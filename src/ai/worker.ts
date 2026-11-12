@@ -303,8 +303,7 @@ async function imageArticleContext(ctx: PluginContext, mediaId: string): Promise
 		const title = typeof data[titleField] === "string" ? (data[titleField] as string) : (used.title ?? "");
 		const fields = (info?.fields ?? []).filter((f) => f.type === "portableText").map((f) => data[f.slug]);
 		// Image blocks name the media item by id; ones added by URL only (/_emdash/api/media/file/<key>) by its key.
-		const keyRow = await db.prepare("SELECT storage_key FROM media WHERE id = ? LIMIT 1").bind(mediaId).first<{ storage_key: string | null }>();
-		const storageKey = keyRow?.storage_key ?? null;
+		const storageKey = used.storageKey;
 		return buildImageContext(title, fields.length ? fields : Object.values(data).filter(Array.isArray), mediaId, storageKey);
 	} catch (error) {
 		ctx.log.warn("AI: couldn't read the article an image is used in; it's described on its own", { media: mediaId, error: String(error).slice(0, 200) });

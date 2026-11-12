@@ -21,14 +21,28 @@ const isRecord = (v: unknown): v is Node => typeof v === "object" && v !== null 
 const squash = (s: string) => s.replace(/\s+/gu, " ").trim();
 const stripTags = (html: string) => squash(html.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'"));
 
-/** Whether a Portable Text image block shows this media item (by id, or by its storage key in the URL). */
+/** The storage key a media URL names (its last path segment, query and fragment dropped, decoded), as EmDash reads them. */
+function keyOfUrl(url: string): string | null {
+	const path = url.split(/[?#]/)[0] ?? "";
+	const last = path.slice(path.lastIndexOf("/") + 1);
+	if (!last) return null;
+	try {
+		return decodeURIComponent(last);
+	} catch {
+		return last;
+	}
+}
+
+/** Whether a Portable Text image block shows this media item: by id, or by its storage key in `_ref` or `url` (as EmDash's usage extractor reads them). */
 function isTarget(node: Node, mediaId: string, storageKey: string | null): boolean {
 	if (node._type !== "image" || !isRecord(node.asset)) return false;
 	const asset = node.asset;
 	if (asset._ref === mediaId || asset.id === mediaId) return true;
 	if (!storageKey) return false;
-	const url = typeof asset.url === "string" ? asset.url : typeof asset.src === "string" ? asset.src : "";
-	return url.endsWith(`/${storageKey}`);
+	for (const v of [asset._ref, asset.url, asset.src]) {
+		if (typeof v === "string" && v.includes("/") && keyOfUrl(v) === storageKey) return true;
+	}
+	return false;
 }
 
 interface WalkState {
@@ -102,19 +116,26 @@ export function buildImageContext(title: string, fields: unknown[], mediaId: str
 	return `${out}${out ? "\n\n" : ""}${text.trim()}`;
 }
 
-/** The published, not deleted entry that uses a media item (EmDash's media usage index), or null. */
-export async function findImageEntry(db: D1Database, mediaId: string): Promise<{ collection: string; id: string; title: string | null } | null> {
+/**
+ * The published, not deleted entry that uses a media item (EmDash's media usage index), with the item's storage key,
+ * or null. Only the current generation of each source (EmDash keeps old rows until cleanup) and its live columns (not
+ * an unpublished draft). Images placed in the body come first (the WP plugin only looked there), then other fields.
+ */
+export async function findImageEntry(db: D1Database, mediaId: string): Promise<{ collection: string; id: string; title: string | null; storageKey: string | null } | null> {
 	try {
 		const row = await db
 			.prepare(
-				`SELECT s.collection_slug AS collection, s.content_id AS id, s.content_title AS title
-				FROM _emdash_media_usage u JOIN _emdash_media_usage_sources s ON s.source_key = u.source_key
-				WHERE u.media_id = ? AND s.source_type = 'content' AND s.content_status = 'published' AND s.content_deleted_at IS NULL
-				ORDER BY s.created_at ASC LIMIT 1`,
+				`SELECT s.collection_slug AS collection, s.content_id AS id, s.content_title AS title, m.storage_key AS storageKey
+				FROM _emdash_media_usage u
+				JOIN _emdash_media_usage_sources s ON s.source_key = u.source_key AND s.current_generation = u.generation
+				LEFT JOIN media m ON m.id = u.media_id
+				WHERE u.media_id = ? AND s.source_type = 'content' AND s.source_variant = 'columns'
+					AND s.content_status = 'published' AND s.content_deleted_at IS NULL
+				ORDER BY (u.reference_type = 'portable_text_image') DESC, s.created_at ASC, s.source_key ASC LIMIT 1`,
 			)
 			.bind(mediaId)
-			.first<{ collection: string | null; id: string | null; title: string | null }>();
-		return row?.collection && row.id ? { collection: row.collection, id: row.id, title: row.title } : null;
+			.first<{ collection: string | null; id: string | null; title: string | null; storageKey: string | null }>();
+		return row?.collection && row.id ? { collection: row.collection, id: row.id, title: row.title, storageKey: row.storageKey } : null;
 	} catch {
 		// No usage index (EmDash before 1.5, or a site that never built it): no article context.
 		return null;

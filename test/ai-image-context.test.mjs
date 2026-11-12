@@ -34,7 +34,7 @@ test("the window is capped on each side; only the first use is marked; HTML bloc
 	const out = buildImageContext("T", [[block(long), image("M1"), { _type: "htmlBlock", _key: "h", html: "<p>After <strong>this</strong>.</p>" }, image("M1"), block(long)]], "M1", null);
 	const [before, after] = out.split(CONTEXT_MARKER);
 	assert.ok(before.startsWith("Article title: T\n\n…"), "trimmed before");
-	assert.ok([...before.split("\n\n")[1]].length <= CONTEXT_WINDOW_CHARS + 1);
+	assert.equal([...before.split("\n\n")[1]].length, CONTEXT_WINDOW_CHARS + 1, "900 characters plus the ellipsis");
 	assert.ok(after.endsWith("…"));
 	assert.ok(after.includes("After this ."), "HTML stripped to text");
 	assert.equal(out.split(CONTEXT_MARKER).length, 2, "one marker");
@@ -60,3 +60,17 @@ test("the prompt: article context switches the intro and is appended with the ma
 	assert.ok(withIt.endsWith(ctx));
 	assert.match(withIt, /Add editorial context a sighted reader would value/);
 });
+
+test("URL-only image blocks match by storage key in _ref or url, with a query string or percent-encoding, as EmDash reads them", () => {
+	const at = (asset) => buildImageContext("T", [[block("Before."), { _type: "image", _key: "x", asset }]], "M9", "01KEY Ü.webp");
+	for (const asset of [{ _ref: "/_emdash/api/media/file/01KEY%20%C3%9C.webp" }, { url: "https://media.example.com/01KEY%20%C3%9C.webp?w=800" }, { src: "/_emdash/api/media/file/01KEY Ü.webp#x" }]) {
+		assert.match(at(asset), new RegExp(CONTEXT_MARKER), JSON.stringify(asset));
+	}
+	assert.equal(at({ url: "/_emdash/api/media/file/OTHER.webp" }), "Article title: T");
+});
+
+test("an image nested in another block (a Details body) is found, with the text before it", () => {
+	const details = { _type: "coywolf-details", _key: "d", summary: "More", body: [block("Inside the details."), image("M1")] };
+	assert.match(buildImageContext("T", [[block("Top."), details]], "M1", null), new RegExp(`Inside the details\\.\\n${CONTEXT_MARKER}`));
+});
+
