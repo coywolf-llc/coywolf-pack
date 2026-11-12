@@ -89,55 +89,8 @@ const toRule = (r: Row): RedirectRule => ({
 	updatedAt: r.updated_at,
 });
 
-/** Exact sources match with or without a trailing slash, so store them without one. */
-export function normalizePath(path: string): string {
-	return path.length > 1 ? path.replace(/\/+$/, "") : path;
-}
-
-/**
- * The key an exact source is stored and looked up by: normalized the way Astro normalizes a request's pathname
- * (decode, then re-encode through the URL parser, as EmDash 1.5's own redirects do: normalizeSourcePath in
- * emdash/src/redirects/patterns.ts), so a source typed with raw Unicode (`/café`) and the request's
- * percent-encoded path (`/caf%C3%A9`) compare equal. Without a trailing slash, as normalizePath.
- */
-export function sourceKey(path: string): string {
-	if (path.includes("?") || path.includes("#")) return normalizePath(path);
-	try {
-		const url = new URL("http://placeholder.invalid");
-		url.pathname = decodeURI(path);
-		return normalizePath(url.pathname);
-	} catch {
-		return normalizePath(path);
-	}
-}
-
-/**
- * The forms an exact rule may be stored under for a request path: its key, and (for rules saved before 0.38.0,
- * which kept raw Unicode as typed) the key decoded. One or two values.
- */
-export function storedForms(pathname: string): string[] {
-	const key = sourceKey(pathname);
-	let decoded = key;
-	try {
-		decoded = decodeURI(key);
-	} catch {
-		// A malformed escape: the key is the only form.
-	}
-	return decoded === key ? [key] : [key, decoded];
-}
-
-/**
- * How an exact source is saved: its key decoded back to readable characters (`/café`, as typed, rather than
- * `/caf%C3%A9`), so the Redirects page shows it the way it was entered. Lookups try both forms (storedForms).
- */
-export function storedSource(path: string): string {
-	return storedForms(path).at(-1) ?? sourceKey(path);
-}
-
-/** Non-ASCII characters in a redirect's Location, percent-encoded (a header value must be ASCII), as EmDash 1.5 does. */
-export function encodeLocation(location: string): string {
-	return location.replace(/[^\p{ASCII}]+/gu, encodeURIComponent);
-}
+export { encodeLocation, normalizePath, sourceKey, storedForms } from "./paths.js";
+import { hasDotSegment, normalizePath, sourceKey, storedForms } from "./paths.js";
 
 export class RedirectValidationError extends Error {}
 
@@ -298,6 +251,8 @@ export function validate(input: RedirectInput, options: { unchangedPattern?: boo
 		if (slow) throw new RedirectValidationError(`This pattern could make some requests very slow: ${slow}. Write it another way, for example ^/blog/[a-z0-9/-]+$ instead of ^/blog(/[a-z0-9-]+)+$, or (?:[^/]+/)* for any number of path segments.`);
 	} else if (!source.startsWith("/") || source.startsWith("//")) {
 		throw new RedirectValidationError("The source must be a path starting with /.");
+	} else if (hasDotSegment(source)) {
+		throw new RedirectValidationError("The source can't have a . or .. segment: browsers resolve those before asking, so it would never match.");
 	}
 	if (type !== 410) {
 		if (!target) throw new RedirectValidationError("Enter a destination.");
@@ -310,7 +265,7 @@ export function validate(input: RedirectInput, options: { unchangedPattern?: boo
 		}
 	}
 	return {
-		source: isRegex ? source : storedSource(source),
+		source: isRegex ? source : sourceKey(source),
 		target: type === 410 ? "" : target,
 		type,
 		isRegex,
@@ -388,8 +343,8 @@ const MATCH_COLUMNS = "id, source, target, type, is_regex";
 export async function findExactRule(db: D1Database, pathname: string): Promise<RedirectRule | null> {
 	const forms = storedForms(pathname);
 	const statement = db
-		.prepare(`SELECT ${MATCH_COLUMNS} FROM ${TABLE} WHERE source IN (${forms.map(() => "?").join(", ")}) AND is_regex = 0 AND enabled = 1`)
-		.bind(...forms);
+		.prepare(`SELECT ${MATCH_COLUMNS} FROM ${TABLE} WHERE source IN (${forms.map(() => "?").join(", ")}) AND is_regex = 0 AND enabled = 1${canonicalFirst(forms)}`)
+		.bind(...forms, ...canonicalParam(forms));
 	return (await readMatchRules(db, statement))[0] ?? null;
 }
 
@@ -421,12 +376,13 @@ export async function saveRule(db: D1Database, input: RedirectInput & { id?: str
 	const existing = input.id
 		? await db.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE id = ?`).bind(input.id).first<{ id: string; source: string; is_regex: number }>()
 		: await db
-				.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE source IN (${forms.map(() => "?").join(", ")}) AND is_regex = ?`)
-				.bind(...forms, isRegex ? 1 : 0)
+				.prepare(`SELECT id, source, is_regex FROM ${TABLE} WHERE source IN (${forms.map(() => "?").join(", ")}) AND is_regex = ?${canonicalFirst(forms)}`)
+				.bind(...forms, isRegex ? 1 : 0, ...canonicalParam(forms))
 				.first<{ id: string; source: string; is_regex: number }>();
 	const rule = validate(input, { unchangedPattern: isRegex && existing?.is_regex === 1 && existing.source === trimmed });
 	const now = new Date().toISOString();
 	const id = existing?.id ?? input.id ?? crypto.randomUUID();
+	try {
 	if (existing) {
 		await db
 			.prepare(
@@ -441,6 +397,11 @@ export async function saveRule(db: D1Database, input: RedirectInput & { id?: str
 			)
 			.bind(id, rule.source, rule.target, rule.type, rule.isRegex ? 1 : 0, rule.enabled ? 1 : 0, rule.note, now, now)
 			.run();
+	}
+	} catch (error) {
+		// The (source, is_regex) unique index: another rule already has this source (in another spelling before 0.38.0).
+		if (/UNIQUE constraint failed/i.test(String(error))) throw new RedirectValidationError("Another redirect already has this source. Edit that one instead.");
+		throw error;
 	}
 	const saved = await db.prepare(`SELECT * FROM ${TABLE} WHERE id = ?`).bind(id).first<Row>();
 	return toRule(saved!);
@@ -461,7 +422,10 @@ export async function getRule(db: D1Database, id: string): Promise<RedirectRule 
 export async function findExactRuleAny(db: D1Database, pathname: string): Promise<RedirectRule | null> {
 	try {
 		const forms = storedForms(pathname);
-		const row = await db.prepare(`SELECT * FROM ${TABLE} WHERE source IN (${forms.map(() => "?").join(", ")}) AND is_regex = 0`).bind(...forms).first<Row>();
+		const row = await db
+			.prepare(`SELECT * FROM ${TABLE} WHERE source IN (${forms.map(() => "?").join(", ")}) AND is_regex = 0${canonicalFirst(forms)}`)
+			.bind(...forms, ...canonicalParam(forms))
+			.first<Row>();
 		return row ? toRule(row) : null;
 	} catch (error) {
 		if (isMissingTable(error)) return null;
@@ -473,6 +437,33 @@ export async function deleteRule(db: D1Database, id: string): Promise<boolean> {
 	await ensureTable(db);
 	const result = await db.prepare(`DELETE FROM ${TABLE} WHERE id = ?`).bind(id).run();
 	return result.meta.changes > 0;
+}
+
+/** With two stored forms, prefer the canonical one (a site with both spellings from before 0.38.0). */
+const canonicalFirst = (forms: string[]) => (forms.length > 1 ? " ORDER BY source = ? DESC" : "");
+const canonicalParam = (forms: string[]) => (forms.length > 1 ? [forms[0]] : []);
+
+/**
+ * Rewrite exact sources saved in another spelling (raw Unicode, lowercase escapes) to their key, once per version
+ * (plugin:activate). A source whose key another rule already has is left as it is. Returns how many were rewritten.
+ */
+export async function canonicalizeSources(db: D1Database): Promise<number> {
+	try {
+		const { results } = await db.prepare(`SELECT id, source FROM ${TABLE} WHERE is_regex = 0`).all<{ id: string; source: string }>();
+		const taken = new Set(results.map((r) => r.source));
+		let rewritten = 0;
+		for (const row of results) {
+			const key = sourceKey(row.source);
+			if (key === row.source || taken.has(key) || hasDotSegment(row.source)) continue;
+			await db.prepare(`UPDATE ${TABLE} SET source = ? WHERE id = ?`).bind(key, row.id).run();
+			taken.add(key);
+			rewritten++;
+		}
+		return rewritten;
+	} catch (error) {
+		if (isMissingTable(error)) return 0;
+		throw error;
+	}
 }
 
 // ─── Matching ───────────────────────────────────────────────────────────────

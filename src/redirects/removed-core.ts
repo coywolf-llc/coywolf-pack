@@ -5,6 +5,7 @@
  * mark it 410 Gone, or dismiss it.
  */
 import { type CollectionInfo, interpolateUrlPattern } from "../core/content-url.js";
+import { sourceKey } from "./paths.js";
 
 export type RemovalReason = "deleted" | "unpublished";
 
@@ -115,7 +116,8 @@ export interface AppliedRule {
 	at: string;
 }
 
-const samePath = (a: string, b: string) => (a.length > 1 ? a.replace(/\/+$/, "") : a) === (b.length > 1 ? b.replace(/\/+$/, "") : b);
+/** Paths compared the way rules are stored: without a trailing slash, in one percent-encoding (src/redirects/paths.ts). */
+const samePath = (a: string, b: string) => sourceKey(a) === sourceKey(b);
 
 /** Whether the rule is still the one a removal decision made: same source, our "Removed:" note. Edited, replaced, or deleted since: false. */
 export function appliedStillOurs(applied: Pick<AppliedRule, "url">, rule: { source: string; note: string | null } | null): boolean {

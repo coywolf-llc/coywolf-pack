@@ -729,8 +729,15 @@ export function ImagesPage() {
 												and remove <code className="text-xs">cdn</code> from <code className="text-xs">coywolfPlugin({"{"} images {"}"})</code>
 											</>
 										) : null}
-										, then deploy. Nothing changes for visitors. The <code className="text-xs">images.cdn</code> option is deprecated and is removed in
-										Coywolf Pack 0.40.0.
+										, then deploy. Nothing changes for visitors.
+										{saved.optionHost ? (
+											<>
+												{" "}
+												The <code className="text-xs">images.cdn</code> option is deprecated and is removed in Coywolf Pack 0.40.0.
+											</>
+										) : (
+											" The host saved here keeps working; EmDash's setting covers more."
+										)}
 									</>
 								}
 							/>

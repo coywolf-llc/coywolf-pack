@@ -87,6 +87,9 @@ test("republishing drops the rule only when the entry is back at the same URL", 
 
 test("a rule is still ours only with the same source and our Removed: note", () => {
 	assert.equal(appliedStillOurs({ url: "/a/" }, { source: "/a", note: "Removed: A" }), true);
+	// An entry URL is built percent-encoded; the rule's source may be stored in another spelling.
+	assert.equal(appliedStillOurs({ url: "/blog/caf%C3%A9/" }, { source: "/blog/café", note: "Removed: Café" }), true);
+	assert.equal(appliedStillOurs({ url: "/blog/caf%C3%A9" }, { source: "/blog/caf%c3%a9", note: "Removed: Café" }), true);
 	assert.equal(appliedStillOurs({ url: "/a" }, { source: "/a", note: "Moved" }), false);
 	assert.equal(appliedStillOurs({ url: "/a" }, { source: "/b", note: "Removed: A" }), false);
 	assert.equal(appliedStillOurs({ url: "/a" }, null), false);

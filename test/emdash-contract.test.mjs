@@ -321,6 +321,8 @@ const EXPRESSIONS = {
 	"src/search/title-index.ts::title": ['c."title"', "c.title"],
 	"src/search/title-index.ts::where": "c.status = 'published' AND c.deleted_at IS NULL AND c.slug IS NOT NULL AND c.locale = ? COLLATE NOCASE",
 	// src/search/engine.ts: matchQuery and excerptQuery
+	// src/redirects/rules.ts: with two stored forms of a source, the canonical one first
+	"canonicalFirst(forms)": ["", " ORDER BY source = ? DESC"],
 	"titleExpression(meta)": ['c."title"', "c.title", "NULL"],
 	snippet: ["", `, snippet("_emdash_fts_posts", 2, '<mark>', '</mark>', '...', 32) AS snippet`],
 	bm25: ['bm25("_emdash_fts_posts")', 'bm25("_emdash_fts_posts", 0, 0, 5, 1)'],

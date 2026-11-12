@@ -2,7 +2,7 @@
  * Redirects module: the admin side of Coywolf redirects (rules are served by
  * the middleware in ./middleware.ts).
  */
-import { PluginRouteError, definePluginRoute } from "emdash";
+import { type PluginContext, PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
 import { parseInput, workerEnv } from "../shared.js";
@@ -15,6 +15,7 @@ import {
 	deleteRule,
 	listRules,
 	match,
+	canonicalizeSources,
 	saveRule,
 	validate,
 } from "./rules.js";
@@ -123,5 +124,13 @@ export function redirectsModule(options: RedirectsOptions) {
 		})),
 	};
 
-	return { routes };
+	const hooks = {
+		/** Once per version: exact sources saved in another spelling before 0.38.0 get their key (src/redirects/paths.ts). */
+		"plugin:activate": async (_event: unknown, ctx: PluginContext) => {
+			const rewritten = await canonicalizeSources(await db());
+			if (rewritten) ctx.log.info("Redirects: rewrote exact sources to one spelling", { rewritten });
+		},
+	};
+
+	return { routes, hooks };
 }
