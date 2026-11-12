@@ -36,7 +36,7 @@ import { type ImportDefaults, defaultsFromWordPress, parseFileRows } from "./sou
 import { findSiteUrls, rewriteSiteUrls, siteUrlPattern } from "./urls.js";
 import { readOnlyRoute } from "../core/routes.js";
 import { isConflict } from "../core/conflict.js";
-import { cdnOriginalUrl, imageCdn } from "../images/lib.js";
+import { imageCdn } from "../images/lib.js";
 import { refreshMediaHost } from "../images/settings.js";
 
 export const F = { main: "wpImport" } as const;
@@ -183,21 +183,24 @@ function rewriteEntryUrls(data: Record<string, unknown>, urlMap: Record<string, 
 }
 
 /**
- * The site's own media file URLs (/_emdash/api/media/file/<key>, relative or absolute on `origin`) inside
- * HTML strings (HTML blocks, embeds: strings with a tag), pointed at the original on the media host. Only
- * strings with HTML: image blocks' own asset URLs (which EmDash's media usage tracking reads) are left alone.
+ * The site's own media file URLs (/_emdash/api/media/file/<key>, relative or absolute on `origin`) in an entry's
+ * text and Portable Text fields, pointed at the media host: inside HTML blocks and other blocks' HTML or URL
+ * strings (a converted How-To step's image src, a Details block's body). The key is kept verbatim (R2 keys are
+ * case-sensitive). Left alone: code blocks (example code), image and file blocks' `asset` (EmDash's media usage
+ * tracking reads it), link `markDefs`, and media fields (objects: callers pass only string and array fields).
  */
-export function rewriteHtmlMediaUrls<T>(value: T, origin: string | null, toHost: (fileUrl: string) => string | null): { value: T; count: number } {
+export function rewriteHtmlMediaUrls<T>(value: T, origin: string | null, toHost: (key: string) => string | null): { value: T; count: number } {
 	let count = 0;
 	const site = origin ? origin.replace(/\/+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : null;
 	// The site's own origin, or a site path (not preceded by another host's name).
 	const re = new RegExp(`(?:${site ? `${site}|` : ""}(?<![\\w.:/-]))\\/_emdash\\/api\\/media\\/file\\/([A-Za-z0-9._~%-]+(?:\\/[A-Za-z0-9._~%-]+)*)`, "g");
+	const SKIP_KEYS = new Set(["asset", "markDefs", "_ref"]);
 	const walk = (v: unknown, depth: number): unknown => {
 		if (depth > 40) return v;
 		if (typeof v === "string") {
-			if (!v.includes("<") || !v.includes("/_emdash/api/media/file/")) return v;
+			if (!v.includes("/_emdash/api/media/file/")) return v;
 			return v.replace(re, (match, key: string) => {
-				const to = toHost(`/_emdash/api/media/file/${key}`);
+				const to = toHost(key);
 				if (!to || to === match) return match;
 				count++;
 				return to;
@@ -212,8 +215,10 @@ export function rewriteHtmlMediaUrls<T>(value: T, origin: string | null, toHost:
 			return out ?? v;
 		}
 		if (v && typeof v === "object") {
+			if ((v as { _type?: unknown })._type === "code") return v;
 			let out: Record<string, unknown> | null = null;
 			for (const [k, item] of Object.entries(v)) {
+				if (SKIP_KEYS.has(k)) continue;
 				const next = walk(item, depth + 1);
 				if (next !== item) (out ??= { ...(v as Record<string, unknown>) })[k] = next;
 			}
@@ -222,6 +227,21 @@ export function rewriteHtmlMediaUrls<T>(value: T, origin: string | null, toHost:
 		return v;
 	};
 	return { value: walk(value, 0) as T, count };
+}
+
+/** rewriteHtmlMediaUrls on an entry's string and array fields only (media fields are objects, read by EmDash's usage tracking). */
+function rewriteEntryMediaHost(data: Record<string, unknown>, origin: string | null, toHost: (key: string) => string | null): { value: Record<string, unknown>; count: number } {
+	let out: Record<string, unknown> | null = null;
+	let count = 0;
+	for (const [field, value] of Object.entries(data)) {
+		if (typeof value !== "string" && !Array.isArray(value)) continue;
+		const r = rewriteHtmlMediaUrls(value, origin, toHost);
+		if (!r.count) continue;
+		out ??= { ...data };
+		out[field] = r.value;
+		count += r.count;
+	}
+	return { value: out ?? data, count };
 }
 
 type Content = NonNullable<PluginContext["content"]>;
@@ -265,7 +285,9 @@ async function scan(ctx: PluginContext, apply: boolean, state: ScanState | null,
 			const result = convertible ? convertEntryData(data, opts) : { value: data, changed: false, changes: [], videos: [], leftovers: {} };
 			for (const [k, v] of Object.entries(result.leftovers)) leftovers[k] = (leftovers[k] ?? 0) + v;
 			const urls = rewritable ? rewriteEntryUrls(result.value, urlMap) : { value: result.value, count: 0 };
-			const hosted = hostable ? rewriteHtmlMediaUrls(urls.value, ctx.site?.url ?? null, cdnOriginalUrl) : { value: urls.value, count: 0 };
+			const hosted = hostable ? rewriteEntryMediaHost(urls.value, ctx.site?.url ?? null, (key) => `${host}/${key}`) : { value: urls.value, count: 0 };
+			// Media host only: save just the entries whose media addresses change (no conversions on their own).
+			if (host !== null && urlMap === null && !hosted.count) continue;
 			if (!result.changed && !urls.count && !hosted.count) continue;
 			result.value = hosted.value;
 			const changes: Record<string, number> = {};

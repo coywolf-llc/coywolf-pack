@@ -1,12 +1,12 @@
 // Run: node --test test/wp-media-host.test.mjs
-// WordPress Migration → "Media host URLs in HTML": the site's own /_emdash/api/media/file/<key> URLs inside HTML strings
-// (imported HTML blocks) point at the media host; image blocks' asset URLs and plain links are left alone.
+// WordPress Migration → "Media host addresses": the site's own /_emdash/api/media/file/<key> URLs in content point at the
+// media host; image blocks' asset URLs, link markDefs and code blocks are left alone; keys keep their case.
 import "./ts-resolve.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 const { rewriteHtmlMediaUrls } = await import("../src/wpImport/pack.ts");
-const toHost = (u) => u.replace("/_emdash/api/media/file/", "https://media.example.com/");
+const toHost = (key) => `https://media.example.com/${key}`;
 
 test("HTML blocks: relative and same-site absolute file URLs go to the media host; other strings and other sites stay", () => {
 	const html = '<figure><img src="/_emdash/api/media/file/01ABC.webp" alt="A"><img srcset="https://example.com/_emdash/api/media/file/02DEF.png 2x"><a href="https://other.example/_emdash/api/media/file/X.png">x</a></figure>';
@@ -32,3 +32,16 @@ test("nothing to change: the same value back, no count", () => {
 	assert.equal(out.value.content, content);
 	assert.equal(rewriteHtmlMediaUrls({ content }, "https://example.com", () => null).count, 0);
 });
+
+test("converted blocks' URL strings (a How-To step's image src) are rewritten; code blocks and uppercase keys are safe", () => {
+	const content = [
+		{ _type: "coywolf-howto", _key: "h", steps: [{ jsonText: 'Click <strong>Speed</strong><img src="/_emdash/api/media/file/A.png">', image: { props: { src: "/_emdash/api/media/file/B.PNG" } } }] },
+		{ _type: "code", _key: "c", code: '<img src="/_emdash/api/media/file/EXAMPLE.png">' },
+	];
+	const { value, count } = rewriteHtmlMediaUrls(content, "https://example.com", toHost);
+	assert.equal(count, 2);
+	assert.equal(value[0].steps[0].jsonText, 'Click <strong>Speed</strong><img src="https://media.example.com/A.png">');
+	assert.equal(value[0].steps[0].image.props.src, "https://media.example.com/B.PNG", "the key keeps its case (R2 keys are case-sensitive)");
+	assert.equal(value[1], content[1], "example code is untouched");
+});
+

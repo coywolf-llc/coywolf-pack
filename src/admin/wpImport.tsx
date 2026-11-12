@@ -1118,16 +1118,17 @@ function MediaUrlsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrI
 						)}
 					</div>
 					<div className="space-y-2">
-						<h3 className="text-sm font-medium">Media host addresses in HTML blocks</h3>
+						<h3 className="text-sm font-medium">Media host addresses in content</h3>
 						<p className="text-xs text-kumo-subtle">
-							Points this site's own media file addresses (/_emdash/api/media/file/…) inside HTML blocks at the media host, so they load from
-							there like the rest of the site's images (and crawlers that can't fetch /_emdash/ still reach them). Image blocks and theme code
-							aren't changed. It also converts anything step 2 would.
+							Points this site's own media file addresses (/_emdash/api/media/file/…) in HTML blocks and other blocks' HTML (imported How-To
+							steps, Details) at the media host, so they load from there like the rest of the site's images, and crawlers kept out of
+							/_emdash/ still reach them. Image and file blocks, links, code blocks and theme code aren't changed. Only entries with such
+							addresses are saved.
 						</p>
 						<ScanPanel
 							mediaHost
 							applyLabel="Rewrite to media host"
-							confirmTitle="Point the media addresses listed in the dry run at the media host?"
+							confirmTitle="Point the media addresses in the entries listed in the dry run at the media host?"
 							confirmText="Each entry is saved (published entries are republished). Make a backup first."
 						/>
 					</div>
