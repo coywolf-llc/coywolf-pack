@@ -273,37 +273,78 @@ let avatarDatabase = "DB";
 
 /** EmDash's plugin API media URL (/_emdash/api/media/asset/<id>/<file>): served to signed-in users only. */
 const ASSET_URL = /^\/_emdash\/api\/media\/asset\/([^/?#]+)\//;
+/** The same, anywhere in a string (absolute on the site, or a site path). */
+const ASSET_URL_ANY = /^(https?:\/\/[^/]+)?\/_emdash\/api\/media\/asset\/([^/?#]+)\/[^?#]*$/;
+
+/** Storage keys by media id, per isolate (an avatar or logo is on every page). */
+const keyCache = new Map<string, { at: number; key: string | null }>();
 
 /**
  * A byline avatar's public URL: the original on the media host, else EmDash's public file route
  * (/_emdash/api/media/file/<key>). Never the plugin API's media URL, which EmDash serves to signed-in users
- * only (401 for everyone else, crawlers included): for that one the storage key is looked up.
+ * only (401 for everyone else, crawlers included). One cached read of the storage key; without a database
+ * (Node tests) the plugin API's URL is used when it's a public one.
  */
 export async function publicAvatarUrl(
 	ctx: PluginContext,
 	mediaId: string | null | undefined,
-	lookup: (id: string) => Promise<string | null> = storageKeyOf,
+	lookup: (id: string) => Promise<string | null | undefined> = storageKeyOf,
 ): Promise<string | null> {
 	if (!mediaId) return null;
+	const key = await lookup(mediaId);
+	if (key) {
+		const file = `/_emdash/api/media/file/${key}`;
+		return cdnOriginalUrl(file) ?? file;
+	}
+	if (key === null) return null;
 	const url = (await orNull(ctx.media?.get(mediaId)))?.url ?? null;
-	if (!url) return null;
-	if (!ASSET_URL.test(url)) return cdnOriginalUrl(url) ?? url;
-	const key = await lookup(decodeURIComponent(ASSET_URL.exec(url)?.[1] ?? mediaId));
-	if (!key) return null;
-	const file = `/_emdash/api/media/file/${key}`;
-	return cdnOriginalUrl(file) ?? file;
+	if (!url || ASSET_URL.test(url)) return null;
+	return cdnOriginalUrl(url) ?? url;
 }
 
-async function storageKeyOf(mediaId: string): Promise<string | null> {
+/** The storage key of a ready media item: a string, null when there's none, undefined when it can't be read here. */
+async function storageKeyOf(mediaId: string): Promise<string | null | undefined> {
+	const hit = keyCache.get(mediaId);
+	if (hit && Date.now() - hit.at < MEDIA_TTL_MS) return hit.key;
+	let db: D1Database | undefined;
 	try {
-		const env = await workerEnv();
-		const db = env[avatarDatabase] as D1Database | undefined;
-		if (!db) return null;
-		const row = await batchedFirst<{ storage_key: string | null }>(db, db.prepare("SELECT storage_key FROM media WHERE id = ? LIMIT 1").bind(mediaId));
-		return row?.storage_key ?? null;
+		db = (await workerEnv())[avatarDatabase] as D1Database | undefined;
+	} catch {
+		return undefined;
+	}
+	if (!db) return undefined;
+	try {
+		const row = await batchedFirst<{ storage_key: string | null }>(db, db.prepare("SELECT storage_key FROM media WHERE id = ? AND status = 'ready' LIMIT 1").bind(mediaId));
+		const key = row?.storage_key ?? null;
+		if (keyCache.size >= MEDIA_MAX) keyCache.delete(keyCache.keys().next().value as string);
+		keyCache.set(mediaId, { at: Date.now(), key });
+		return key;
 	} catch {
 		noteReadFailure("schema: avatar");
 		return null;
+	}
+}
+
+/**
+ * EmDash's sign-in-only media URLs anywhere in a JSON-LD value (an image picked on the Schema page before
+ * 0.40.0 saved one), replaced in place with the public file route on the same origin. Only reads when one is there.
+ */
+export async function resolveAssetUrls(value: unknown, lookup: (id: string) => Promise<string | null | undefined> = storageKeyOf): Promise<void> {
+	const found: Array<{ holder: Record<string, unknown> | unknown[]; key: string | number; origin: string; id: string }> = [];
+	const walk = (node: unknown) => {
+		if (Array.isArray(node)) node.forEach((v, i) => visit(node, i, v));
+		else if (node && typeof node === "object") for (const [k, v] of Object.entries(node)) visit(node as Record<string, unknown>, k, v);
+	};
+	const visit = (holder: Record<string, unknown> | unknown[], key: string | number, v: unknown) => {
+		if (typeof v === "string") {
+			const m = ASSET_URL_ANY.exec(v);
+			if (m) found.push({ holder, key, origin: m[1] ?? "", id: decodeURIComponent(m[2]) });
+		} else walk(v);
+	};
+	walk(value);
+	for (const f of found) {
+		const storageKey = await lookup(f.id);
+		if (storageKey) (f.holder as Record<string | number, unknown>)[f.key] = `${f.origin}/_emdash/api/media/file/${storageKey}`;
 	}
 }
 
@@ -316,7 +357,7 @@ async function storageKeysOf(ids: string[]): Promise<Map<string, string>> {
 		const db = env[avatarDatabase] as D1Database | undefined;
 		if (!db) return out;
 		const { results } = await db
-			.prepare(`SELECT id, storage_key FROM media WHERE id IN (${ids.map(() => "?").join(", ")})`)
+			.prepare(`SELECT id, storage_key FROM media WHERE id IN (${ids.map(() => "?").join(", ")}) AND status = 'ready'`)
 			.bind(...ids)
 			.all<{ id: string; storage_key: string | null }>();
 		for (const row of results) if (row.storage_key) out.set(row.id, row.storage_key);
@@ -718,6 +759,7 @@ async function customContributions(
 				if (typeof subject === "string" && subject !== output.mainEntityId) dropUnreferenced(pack.graph, subject);
 			}
 		}
+		await resolveAssetUrls(output.contribution.graph);
 		if (pack.cleanImages && imageCdn()) rewriteMediaUrls(output.contribution.graph);
 		return [output.contribution];
 	} catch (error) {
@@ -864,6 +906,7 @@ export async function schemaContributions(
 		for (const step of [videosStep, reviewsStep, entityStep]) step(graph as { "@graph": Node[] });
 		// Same id as EmDash's own JSON-LD, so this graph replaces it (first contribution wins).
 		// With a media host, every media-library file in the graph (author images, logo, …) points at it.
+		await resolveAssetUrls(graph);
 		if (cleanImages && imageCdn()) rewriteMediaUrls(graph);
 		packGraph = (graph as { "@graph": Node[] })["@graph"];
 		packPublisherId = String(publisher["@id"]);

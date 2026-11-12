@@ -6,19 +6,19 @@ import "./ts-resolve.mjs";
 
 const { setSavedImageCdn, setStoragePublicUrl } = await import("../src/images/lib.ts");
 // The media host as the sites set it since 0.40.0: EmDash's publicUrl.
-const setImageCdn = setStoragePublicUrl;
+const setMediaHost = setStoragePublicUrl;
 const { cleanDefaultOgImage, ownImageOnMediaHost, mediaHostImageInfo, packOwnsOgImage, ogImageTags } = await import("../src/schema/og-image.ts");
 
 const ORIGIN = "https://example.com";
 const def = { url: `${ORIGIN}/_emdash/api/media/file/DEF.jpg`, width: 2000, height: 1000, alt: "Default" };
 
 function withHost(host, fn) {
-	setImageCdn(host);
+	setMediaHost(host);
 	setSavedImageCdn(null);
 	try {
 		fn();
 	} finally {
-		setImageCdn(null);
+		setMediaHost(null);
 	}
 }
 

@@ -394,10 +394,10 @@ test("imageInfo: one statement for all of a page's images, cached, read again af
 	put(db, "imageVariants", "01A", { v: 1, w: [400, 640, 800, 1200], c: ["600x315"], k: "600x315", at: "" });
 	globalThis.__testEnv = { DB: db };
 	const { imageInfo, imageDimensions, responsiveImage, croppedImage } = await import("../src/images/pack.ts");
-	const { setStoragePublicUrl: setImageCdn } = await import("../src/images/lib.ts");
+	const { setStoragePublicUrl: setMediaHost } = await import("../src/images/lib.ts");
 	const { setImageCrops } = await import("../src/images/variants.ts");
 	const { PENDING_MEDIA_LOCAL } = await import("../src/images/pending.ts");
-	setImageCdn("https://media.example.com");
+	setMediaHost("https://media.example.com");
 	setImageCrops([[600, 315], [2000, 1000]]);
 	features.invalidateFeatures();
 	await features.siteFeatures();
@@ -435,6 +435,6 @@ test("imageInfo: one statement for all of a page's images, cached, read again af
 	const later = {};
 	assert.equal(await inRequest(() => croppedImage(srcs[2], [[2000, 1000, "1x"]], { locals: later })), null);
 	assert.equal(later[PENDING_MEDIA_LOCAL], undefined, "a crop the image is too small for isn't a stopgap");
-	setImageCdn(null);
+	setMediaHost(null);
 	setImageCrops([]);
 });
