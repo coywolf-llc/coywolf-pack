@@ -4,6 +4,7 @@
  * admin's "Run now"), never inside a save: hooks only enqueue.
  */
 import { siteName } from "../core/site.js";
+import { workerEnv } from "../shared.js";
 import type { CollectionSchemaInfo, PluginContext } from "emdash";
 
 import { type FeatureMap, ctxFeatures, isOn } from "../core/features.js";
@@ -26,6 +27,7 @@ import {
 	userAgent,
 	verifyEntities,
 } from "./logic.js";
+import { buildImageContext, findImageEntry } from "./image-context.js";
 import { DESCRIBE_SYSTEM, DISAMBIGUATE_SYSTEM, EXTRACT_SYSTEM, IMAGE_SYSTEM, articlePrompt, disambiguatePrompt, imagePrompt } from "./prompts.js";
 import { type ChatRequest, chat } from "./providers.js";
 import {
@@ -282,6 +284,34 @@ async function imagePayload(ctx: PluginContext, options: AiOptions, media: { id:
 	return { mimeType, base64: base64(bytes) };
 }
 
+/**
+ * The article an image is used in, as context for its alt text and caption (src/ai/image-context.ts): the earliest
+ * published entry that uses it, from EmDash's media usage index. "" when it isn't used in one, or can't be read.
+ */
+async function imageArticleContext(ctx: PluginContext, mediaId: string): Promise<string> {
+	try {
+		const env = await workerEnv();
+		const db = env.DB as D1Database | undefined;
+		if (!db || !ctx.content) return "";
+		const used = await findImageEntry(db, mediaId);
+		if (!used) return "";
+		const item = await ctx.content.get(used.collection, used.id);
+		if (!item || (item as { status?: string }).status !== "published") return "";
+		const data = (item.data ?? {}) as Record<string, unknown>;
+		const info = (await ctx.schema?.listCollections())?.find((c) => c.slug === used.collection);
+		const titleField = info?.titleField ?? "title";
+		const title = typeof data[titleField] === "string" ? (data[titleField] as string) : (used.title ?? "");
+		const fields = (info?.fields ?? []).filter((f) => f.type === "portableText").map((f) => data[f.slug]);
+		// Image blocks name the media item by id; ones added by URL only (/_emdash/api/media/file/<key>) by its key.
+		const keyRow = await db.prepare("SELECT storage_key FROM media WHERE id = ? LIMIT 1").bind(mediaId).first<{ storage_key: string | null }>();
+		const storageKey = keyRow?.storage_key ?? null;
+		return buildImageContext(title, fields.length ? fields : Object.values(data).filter(Array.isArray), mediaId, storageKey);
+	} catch (error) {
+		ctx.log.warn("AI: couldn't read the article an image is used in; it's described on its own", { media: mediaId, error: String(error).slice(0, 200) });
+		return "";
+	}
+}
+
 export async function analyzeMedia(ctx: PluginContext, options: AiOptions, s: Settings, job: QueueJob, budget: Budget): Promise<"done" | "skipped"> {
 	const id = job.mediaId!;
 	const media = await ctx.media?.get(id);
@@ -314,7 +344,7 @@ export async function analyzeMedia(ctx: PluginContext, options: AiOptions, s: Se
 		"imageText",
 		{
 			system: IMAGE_SYSTEM,
-			user: imagePrompt({ filename: media.filename, site: await siteName(ctx), locale: ctx.site?.locale || "en", extra: s.imageInstructions }),
+			user: imagePrompt({ filename: media.filename, site: await siteName(ctx), locale: ctx.site?.locale || "en", extra: s.imageInstructions, articleContext: await imageArticleContext(ctx, id) }),
 			image: payload,
 			maxTokens: 1024,
 		},

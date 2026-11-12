@@ -2,6 +2,7 @@
  * AI Enrichment prompts, ported from Coywolf SEO for WordPress
  * (class-coywolf-seo-ai.php and class-coywolf-seo-image-ai.php).
  */
+import { CONTEXT_MARKER } from "./image-context.js";
 import type { Candidate, GroundedMention } from "./logic.js";
 import { DESCRIPTION_MAX } from "./logic.js";
 
@@ -50,10 +51,14 @@ export function disambiguatePrompt(ambiguous: GroundedMention[], title: string, 
 	return lines.join("\n");
 }
 
-export function imagePrompt(opts: { filename: string; site: string; locale: string; extra?: string }): string {
+export function imagePrompt(opts: { filename: string; site: string; locale: string; extra?: string; articleContext?: string }): string {
+	const articleContext = opts.articleContext?.trim() ?? "";
+	const intro = articleContext
+		? "This metadata becomes the default for the file; it appears in the article shown below, so make the alternative text and caption fit how it is used there while still reading well on their own.\n\n"
+		: "This metadata becomes the default for every future use of the file, and you are given no specific post context, so it must stand on its own.\n\n";
 	let prompt =
 		"Analyze the image and write accessibility-first media library metadata for it, following the rules below. " +
-		"This metadata becomes the default for every future use of the file, and you are given no specific post context, so it must stand on its own.\n\n" +
+		intro +
 		"Respond with a JSON object:\n" +
 		'{"alt_text": string, "title": string, "caption": string}\n\n' +
 		"Write alt_text only when the image warrants it (an empty string for a purely decorative image); always provide a title and a caption.\n\n" +
@@ -74,13 +79,20 @@ export function imagePrompt(opts: { filename: string; site: string; locale: stri
 		"title — an internal media library label:\n" +
 		'- A short, human-readable identifier of three to eight words in title case, e.g. "Barista Pouring Latte Art". Never a filename, never keywords, and never a copy of alt_text.\n\n' +
 		"caption — visible to everyone, shown as the figure caption:\n" +
-		"- One concise, informative sentence suitable to display beneath the image, phrased differently from alt_text.\n\n" +
+		"- One concise, informative sentence suitable to display beneath the image, phrased differently from alt_text.\n" +
+		"- Add editorial context a sighted reader would value when you can infer it (names, place, date, or why it matters); otherwise a clear descriptive sentence is fine.\n\n" +
 		`- Write every field in the language of locale "${opts.locale}".\n` +
 		"- Plain text only: no HTML and no markdown. Write for human readers; never write for SEO.\n";
 	const context: string[] = [];
 	if (opts.filename) context.push(`filename "${opts.filename}"`);
 	if (opts.site) context.push(`site "${opts.site}"`);
 	if (context.length) prompt += `\nContext that may help (ignore it if misleading): ${context.join(", ")}.`;
+	if (articleContext) {
+		prompt +=
+			`\n\nThe image appears in the article below. The marker ${CONTEXT_MARKER} shows exactly where it sits. ` +
+			"Use this only to make the alternative text and caption fit how the image is used here — describe the image itself, and never restate or summarize the article text:\n\n" +
+			articleContext;
+	}
 	const extra = opts.extra?.trim();
 	if (extra) prompt += `\n\nAdditional site-specific instructions:\n${extra}`;
 	return prompt;
