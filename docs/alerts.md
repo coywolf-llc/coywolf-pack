@@ -52,7 +52,7 @@ Alerts send through EmDash's email provider (`ctx.email`), the one selected unde
 4. Deploy. In the admin, activate the Cloudflare Email plugin under **Plugins**, then select it under **Settings → Email**.
 5. Send a test from **Settings → Email**, then **Send test email** on the Alerts page.
 
-Any other EmDash email provider plugin (SMTP, for example) works the same way. In `astro dev`, EmDash's console provider logs emails instead of sending them.
+Any other provider selected under **Settings → Email** works the same way, including the SMTP provider built into EmDash 1.5+ (set its host, user and password in **Settings → Email** or with the `EMAIL_SMTP_*` variables; saving them in the admin needs `EMDASH_ENCRYPTION_KEY`). A site with one email plugin selects it automatically. In `astro dev`, EmDash's console provider logs emails instead of sending them.
 
 ## Digest sources
 

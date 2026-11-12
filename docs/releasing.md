@@ -17,10 +17,10 @@ Each release is a version tag, a GitHub release and an npm version of `@coywolf/
 
 | Job | EmDash | Kumo | Runs |
 | --- | --- | --- | --- |
-| The sites | 1.4.0 | 2.6.0 | Always |
+| The sites | 1.5.0 | 2.15.0 | Always |
 | Latest EmDash | the newest release | 2.15.0 | While the newest release pins Kumo 2.15.0 (EmDash 1.5.0 does) |
 
-A latest job whose Kumo isn't the newest release's pin ends early with a notice, and a pin that no job covers fails the run. The lockfile installs the newest release (EmDash 1.5.0, Kumo 2.15.0), so the latest job tests what `npm ci` installed and the sites job installs 1.4.0 over it.
+A latest job whose Kumo isn't the newest release's pin ends early with a notice, and a pin that no job covers fails the run. While the sites run the newest release, the two jobs test the same versions.
 
 **Versions and the lockfile.** `npm ci` fails when `package-lock.json` doesn't match `package.json`. The lockfile must install a valid combination too: the next step fails if its Kumo isn't the one its EmDash's admin pins. Each job then installs its EmDash and Kumo with `npm install --no-save` (skipped when the lockfile already has them) and checks that `package.json` and `package-lock.json` are unchanged.
 

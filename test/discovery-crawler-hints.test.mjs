@@ -8,8 +8,6 @@ import { test } from "node:test";
 const { crawlerHintsDashboardUrl, readCrawlerHints, zoneCandidates } = await import("../src/discovery/crawler-hints.ts");
 const { DEADLINES } = await import("../src/core/single-flight.ts");
 const { discoveryPack, discoveryMiddleware } = await import("../src/discovery/pack.ts");
-const { RETIRED_BING_TASK, retireIndexNow } = await import("../src/discovery/module.ts");
-const { composeHooks } = await import("../src/core/compose.ts");
 const { SECRET_SETTINGS } = await import("../src/core/secrets.ts");
 const { GUIDES } = await import("../src/core/guide-content.ts");
 
@@ -216,7 +214,7 @@ test("IndexNow and Bing submission are gone: no switch, routes, key file or host
 	assert.deepEqual(pack.allowedHosts, ["api.cloudflare.com"]);
 	for (const name of ["discovery/public/key", "discovery/regenerate-key", "discovery/submit", "discovery/bing-key", "discovery/bing-check"]) assert.equal(pack.routes[name], undefined, name);
 	assert.equal(pack.tasks.length, 0);
-	assert.deepEqual(Object.keys(pack.retiredTasks), [RETIRED_BING_TASK]);
+	assert.equal(pack.retiredTasks, undefined, "the old daily task's clean-up was removed in 0.38.0");
 	assert.equal(SECRET_SETTINGS.discoveryBingApiKey, undefined);
 	assert.equal(GUIDES.bing, undefined);
 	assert.match(GUIDES["crawler-hints-token"].steps.join(" "), /Here it needs <strong[^>]*>Zone → Read<\/strong>\./);
@@ -284,94 +282,10 @@ test("the route without a token, and with Discovery off", async () => {
 	await assert.rejects(pack.routes["discovery/crawler-hints"].handler(fakeCtx({ features: { discovery: false }, settings: { usageApiToken: TOKEN } })));
 });
 
-const leftovers = () => ({
-	settings: { discoveryIndexnowKey: "7f8c4466cdb78749188a0a083451cc76", discoveryBingApiKey: { $emdash: "plugin-setting", v: 1, ciphertext: "…" }, discoverySettings: { news: { collections: ["posts"] } } },
-	kv: {
-		"state:discovery:indexnowLog": [{ at: "2026-11-09T00:00:00Z" }],
-		"state:discovery:bingQuota": { daily: 10 },
-		"state:discovery:bingPending": ["https://coywolf.com/a/"],
-		"state:discovery:url:posts:1": "https://coywolf.com/a/",
-		"state:discovery:url:pages:2": "https://coywolf.com/b/",
-		"cache:discovery:llms": { count: 3 },
-	},
-});
-
-test("the cleanup deletes IndexNow and Bing's settings, state and task once, and leaves the rest", async () => {
-	const ctx = fakeCtx(leftovers());
-	await retireIndexNow(ctx);
-	assert.deepEqual([...ctx.settingsMap.keys()].sort(), ["discoverySettings", "features"]);
-	assert.deepEqual([...ctx.kvMap.keys()].sort(), ["cache:discovery:llms", "state:discovery:indexnowRetired"]);
-	assert.deepEqual(ctx.cancelled, [RETIRED_BING_TASK]);
-	assert.ok(ctx.logs.some((l) => l.level === "info" && /removed IndexNow and Bing/.test(l.message)));
-	// Once: the marker stops it.
-	ctx.settingsMap.set("discoveryIndexnowKey", "x");
-	await retireIndexNow(ctx);
-	assert.equal(ctx.settingsMap.get("discoveryIndexnowKey"), "x");
-	assert.deepEqual(ctx.cancelled, [RETIRED_BING_TASK]);
-});
-
-test("many remembered entry URLs are all deleted, in batches", async () => {
-	const kv = Object.fromEntries(Array.from({ length: 130 }, (_, i) => [`state:discovery:url:posts:${i}`, `https://coywolf.com/p/${i}/`]));
-	const ctx = fakeCtx({ kv: { ...kv, "cache:discovery:llms": { count: 1 } } });
-	let inFlight = 0;
-	let peak = 0;
-	const del = ctx.kv.delete;
-	ctx.kv.delete = async (k) => {
-		inFlight++;
-		peak = Math.max(peak, inFlight);
-		await new Promise((r) => setTimeout(r, 1));
-		inFlight--;
-		return del(k);
-	};
-	await retireIndexNow(ctx);
-	assert.deepEqual([...ctx.kvMap.keys()].sort(), ["cache:discovery:llms", "state:discovery:indexnowRetired"]);
-	assert.ok(peak > 1 && peak <= 25, `deleted up to 25 at a time (${peak})`);
-});
-
-test("a cleanup step that fails is logged, the rest still runs, and it's tried again next time", async () => {
-	const ctx = fakeCtx({ ...leftovers(), failDelete: "discoveryBingApiKey" });
-	await retireIndexNow(ctx);
-	assert.ok(ctx.settingsMap.has("discoveryBingApiKey"));
-	assert.equal(ctx.kvMap.has("state:discovery:bingPending"), false, "the other steps ran");
-	assert.equal(ctx.kvMap.has("state:discovery:indexnowRetired"), false, "no marker");
-	assert.ok(ctx.logs.some((l) => l.level === "warn" && /setting discoveryBingApiKey/.test(l.message)));
-	const retry = { ...ctx, settings: { ...ctx.settings, delete: async (k) => ctx.settingsMap.delete(k) } };
-	await retireIndexNow(retry);
-	assert.equal(ctx.settingsMap.has("discoveryBingApiKey"), false);
-	assert.equal(ctx.kvMap.get("state:discovery:indexnowRetired"), true);
-});
-
-test("the old daily task runs the cleanup when it fires, whatever the switches say; opening Discovery runs it too", async () => {
-	const { hooks } = composeHooks([pack], { tasks: [] });
-	const ctx = fakeCtx({ ...leftovers(), features: { discovery: false } });
-	await hooks.cron.handler({ name: RETIRED_BING_TASK }, ctx);
-	assert.deepEqual(ctx.cancelled, [RETIRED_BING_TASK, RETIRED_BING_TASK], "cancelled by the cleanup, then by the task itself (harmless twice)");
-	assert.equal(ctx.settingsMap.has("discoveryBingApiKey"), false);
-	// An unknown task still does nothing.
-	await hooks.cron.handler({ name: "no-such-task" }, fakeCtx());
-	// Cleaned up before (from a context without cron access): the task still cancels itself when it fires.
-	const earlier = fakeCtx(leftovers());
-	const { cron } = earlier;
-	delete earlier.cron;
-	await retireIndexNow(earlier);
-	assert.equal(earlier.kvMap.get("state:discovery:indexnowRetired"), true);
-	earlier.cron = cron;
-	await hooks.cron.handler({ name: RETIRED_BING_TASK }, earlier);
-	assert.deepEqual(earlier.cancelled, [RETIRED_BING_TASK]);
-
-	// Opening Discovery: the page answers first, and the cleanup runs after the response.
-	const opened = fakeCtx(leftovers());
-	let release;
-	const held = new Promise((resolve) => (release = resolve));
-	const slowList = opened.kv.list;
-	opened.kv.list = async (prefix) => (await held, slowList(prefix));
-	const status = await pack.routes["discovery/status"].handler(opened);
-	assert.equal(opened.kvMap.has("state:discovery:url:posts:1"), true, "the page didn't wait for the cleanup");
-	release();
-	for (let i = 0; i < 50 && !opened.kvMap.get("state:discovery:indexnowRetired"); i++) await new Promise((r) => setTimeout(r, 2));
-	assert.equal(opened.settingsMap.has("discoveryBingApiKey"), false);
-	assert.equal(opened.kvMap.has("state:discovery:url:posts:1"), false);
+test("the Discovery page answers with its status (IndexNow and Bing's clean-up, 0.35.18–0.37.x, is gone)", async () => {
+	const status = await pack.routes["discovery/status"].handler(fakeCtx({ settings: { discoverySettings: { news: { collections: ["posts"] } } } }));
 	assert.deepEqual(Object.keys(status).sort(), ["cache", "collections", "features", "origin", "settings", "urls"]);
 	assert.equal(status.settings.indexnow, undefined, "the old settings part is dropped");
 	assert.deepEqual(status.features, { news: false, llms: false, feed: false, securityTxt: false });
+	assert.equal(pack.hooks["plugin:activate"], undefined, "Discovery has nothing to do at activation");
 });

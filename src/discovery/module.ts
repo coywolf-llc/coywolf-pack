@@ -11,7 +11,7 @@ import { z } from "zod";
 import { siteName } from "../core/site.js";
 import { cachedCtxFeatures, ctxFeatures, invalidateFeatures, isOn, readSiteSetting, registerSiteSetting, requireFeature } from "../core/features.js";
 import type { TaskDef } from "../core/module.js";
-import { afterResponse, parseInput, workerEnv } from "../shared.js";
+import { parseInput, workerEnv } from "../shared.js";
 import { LLMS_CACHE, LLMS_TAG, NEWS_CACHE, NEWS_TAG, type CachedDocument, type DocKind, buildMarkdown, readDoc, rebuildNow, scheduleRebuild } from "./build.js";
 import { type CrawlerHintsZone, crawlerHintsDashboardUrl, readCrawlerHints } from "./crawler-hints.js";
 import { buildFeed } from "./feed-build.js";
@@ -21,7 +21,7 @@ import { UNREADABLE_TOKEN_MESSAGE, tokenName } from "../core/cloudflare-token.js
 import { readCloudflareToken } from "../pageCache/usage.js";
 import { markdownUrl } from "./markdown.js";
 import { SECURITY_TXT_PATH, SECURITY_TXT_TAG, securityTxtProblems } from "./security-txt.js";
-import { RETIRED_SETTINGS, SETTINGS_KEY, type DiscoverySettings, loadSettings, selected, settingsSchema } from "./settings.js";
+import { SETTINGS_KEY, type DiscoverySettings, loadSettings, selected, settingsSchema } from "./settings.js";
 import { siteOrigin } from "./urls.js";
 
 export const FEATURE = {
@@ -35,64 +35,6 @@ export const FEATURE = {
 export interface DiscoveryOptions {
 	/** D1 binding of the site database (term feeds read EmDash's taxonomy tables). Default "DB". */
 	database?: string;
-}
-
-// ── Retired: IndexNow and Bing submission (removed in 0.35.18) ──
-//
-// REMOVE IN 0.38.0: everything in this section (retireIndexNow, the RETIRED_* constants), the
-// retiredTasks entry and the two calls below (plugin:activate, discovery/status), RETIRED_SETTINGS in
-// settings.ts, and the marker in HOUSEKEEPING_KEYS (src/core/features.ts). By then every site has run a
-// release that cleans up (0.35.18 to 0.37.x). test/indexnow-removal.test.mjs fails once package.json
-// reaches 0.38.0 while any of it is still here. See docs/discovery.md.
-
-/**
- * The daily task that sent Bing's queue. Its cron row stays scheduled on sites that ran 0.35.17, so it's
- * kept as a retired task: the next time it fires, it cleans up (retireIndexNow) and cancels itself.
- */
-export const RETIRED_BING_TASK = "discovery-bing-drain";
-/** Marks a site whose IndexNow and Bing leftovers are gone. */
-const RETIRED_MARKER = "state:discovery:indexnowRetired";
-/** KV state of IndexNow and Bing submission: the log, Bing's quota and queue, and each entry's last submitted URL. */
-const RETIRED_KV = ["state:discovery:indexnowLog", "state:discovery:bingQuota", "state:discovery:bingPending"];
-const RETIRED_URL_PREFIX = "state:discovery:url:";
-const RETIRED_DELETE_BATCH = 25;
-
-/**
- * Delete what IndexNow and Bing submission left behind: the IndexNow key, the encrypted Bing Webmaster
- * API key, the submission log, Bing's quota and queue, the remembered entry URLs, and the daily task.
- * Runs once per site (a KV marker), from the retired task, Discovery's admin page (after its response)
- * and plugin:activate.
- * Never throws: a step that fails is logged and the rest still runs; the marker is set only when every
- * step worked, so a failed step is tried again next time.
- */
-export async function retireIndexNow(ctx: PluginContext): Promise<void> {
-	try {
-		if (await ctx.kv.get<boolean>(RETIRED_MARKER)) return;
-	} catch {
-		return;
-	}
-	let ok = true;
-	const step = async (what: string, task: () => Promise<unknown>) => {
-		try {
-			await task();
-		} catch (error) {
-			ok = false;
-			ctx.log.warn(`Discovery: couldn't remove the old ${what}`, { error: String(error).slice(0, 200) });
-		}
-	};
-	for (const key of RETIRED_SETTINGS) await step(`setting ${key}`, () => ctx.settings.delete(key));
-	for (const key of RETIRED_KV) await step(`state ${key}`, () => ctx.kv.delete(key));
-	// One row per entry submitted while IndexNow was on: deleted RETIRED_DELETE_BATCH at a time.
-	await step("entry URLs", async () => {
-		const keys = (await ctx.kv.list(RETIRED_URL_PREFIX)).map((row) => row.key);
-		for (let i = 0; i < keys.length; i += RETIRED_DELETE_BATCH) await Promise.all(keys.slice(i, i + RETIRED_DELETE_BATCH).map((key) => ctx.kv.delete(key)));
-	});
-	// Without cron access here (a route's context may have none), the task cancels itself when it next fires.
-	const cron = ctx.cron;
-	if (cron) await step(`task ${RETIRED_BING_TASK}`, () => cron.cancel(RETIRED_BING_TASK));
-	if (!ok) return;
-	await ctx.kv.set(RETIRED_MARKER, true).catch(() => undefined);
-	ctx.log.info("Discovery: removed IndexNow and Bing submission's settings and state (Crawler Hints replaces them)");
 }
 
 // ── Crawler Hints ────────────────────────────────────────────────
@@ -174,8 +116,6 @@ export function discoveryModule(options: DiscoveryOptions) {
 			await onContentChange(ctx);
 		},
 		"content:afterDelete": async (_event: { id: string; collection: string; permanent: boolean }, ctx: PluginContext) => onContentChange(ctx),
-		/** Cleans up after IndexNow and Bing submission (removed in 0.35.18) once the plugin is activated. */
-		"plugin:activate": async (_event: unknown, ctx: PluginContext) => retireIndexNow(ctx),
 		/**
 		 * Head links (page:metadata links can't carry a type): the RSS feed on every page, so feed
 		 * readers and apps find it, and the entry's Markdown source on content pages.
@@ -253,9 +193,6 @@ export function discoveryModule(options: DiscoveryOptions) {
 		"discovery/status": {
 			permission: "plugins:manage" as const,
 			handler: async (ctx: PluginContext) => {
-				// IndexNow and Bing submission's leftovers, the first time Discovery is opened after the update. After the
-				// response: a site may have a row per entry to delete, and the page shouldn't wait for them.
-				afterResponse(retireIndexNow(ctx));
 				const features = await ctxFeatures(ctx);
 				const settings = await loadSettings(ctx);
 				const collections = ((await ctx.schema?.listCollections()) ?? [])
@@ -334,15 +271,7 @@ export function discoveryModule(options: DiscoveryOptions) {
 		}),
 	};
 
-	/** IndexNow and Bing submission's daily task, from 0.35.17: cleans up and cancels itself when it next fires. Remove in 0.38.0 (see above). */
-	const retiredTasks: Record<string, (ctx: PluginContext) => Promise<void>> = {
-		[RETIRED_BING_TASK]: async (ctx) => {
-			await retireIndexNow(ctx);
-			// Even when the cleanup already ran elsewhere (the marker is set), the task itself has to go.
-			await ctx.cron?.cancel(RETIRED_BING_TASK).catch((error: unknown) => ctx.log.warn(`Discovery: couldn't cancel the old task ${RETIRED_BING_TASK}`, { error: String(error) }));
-		},
-	};
 	const tasks: TaskDef[] = [];
 
-	return { routes, hooks, tasks, retiredTasks };
+	return { routes, hooks, tasks };
 }

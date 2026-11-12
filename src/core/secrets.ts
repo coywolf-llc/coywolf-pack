@@ -8,7 +8,7 @@
  * stays declared here whatever the feature switches or module options say,
  * and the keys never change (stored values must keep working). A secret is
  * removed only with its feature, and only once nothing reads it: its stored
- * value is deleted (as discoveryBingApiKey is by retireIndexNow), and no
+ * value is deleted (as discoveryBingApiKey was by 0.35.18–0.37.x), and no
  * schema-checked read covers its key until then. ctx.settings.get/list decode
  * against this schema and throw on an undeclared encrypted value; the pack
  * lists settings only under prefixes that don't cover a removed key

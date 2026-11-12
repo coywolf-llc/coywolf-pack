@@ -11,15 +11,6 @@ import { SECURITY_TXT_DEFAULTS } from "./security-txt.js";
 
 export const SETTINGS_KEY = "discoverySettings";
 
-/**
- * Settings of IndexNow and Bing submission, which 0.35.18 removed (Crawler Hints took their place):
- * the IndexNow key and the Bing Webmaster API key (stored encrypted). Deleted by retireIndexNow
- * (module.ts); nothing reads them. The old `indexnow` part of discoverySettings is dropped by the
- * schema below when it's parsed, and from the stored value at the next save. Remove in 0.38.0, with
- * retireIndexNow (module.ts).
- */
-export const RETIRED_SETTINGS = ["discoveryIndexnowKey", "discoveryBingApiKey"] as const;
-
 export const settingsSchema = z.object({
 	news: z
 		.object({
