@@ -15,10 +15,7 @@ A page that isn't in the edge cache yet is built by the Worker, and every D1 rou
 
 ## When the pack starts
 
-`createPlugin()` sets module-level state that the site middleware and Astro components read: content URLs (`urls`, `termParents`, `pageParents`), the Page cache options, the backup bucket and the list of read-only routes. EmDash calls it from its generated plugins module (`virtual:emdash/plugins`):
-
-- up to EmDash 1.4, as the Worker isolate starts;
-- since EmDash 1.5.0, on its runtime's first start, which EmDash's middleware begins before the pack's middleware runs.
+`createPlugin()` sets module-level state that the site middleware and Astro components read: content URLs (`urls`, `termParents`, `pageParents`), the Page cache options, the backup bucket and the list of read-only routes. EmDash calls it from its generated plugins module (`virtual:emdash/plugins`) on its runtime's first start, which EmDash's middleware begins before the pack's middleware runs.
 
 EmDash starts its runtime (and so the plugins) synchronously, before its setup probe, so the pack has started by the time its middleware runs. The pack middleware still checks first, defensively, in case a later EmDash changes that order: `ensurePackStarted()` (`src/core/ready.ts`) calls EmDash's `plugins()` itself when the pack hasn't started, which is cached per configuration, so EmDash gets the same instance. A page rendered while the pack still isn't started is kept out of the edge cache like any page rendered after a failed read, and the log names it `pack not started`. A site that adds the pack's middleware without `coywolfPlugin()` in its plugins list never starts the pack, so it sees that on every page: the setup in the README needs both.
 
@@ -97,7 +94,7 @@ Redirect Manager, its Slug changes part and Backups were on by default until 0.3
 
 `recordDefaults` (`src/core/features.ts`) records them once, by compare-and-set on the switches:
 
-- In `plugin:install`, which EmDash runs only when it first records the plugin on a site: if the pack has nothing stored (no switches, no setting or KV row other than its housekeeping rows, no storage document), it's a new site, so only the marker is stored and the new defaults apply. Install first leaves a flag (`state:freshInstall`, and one in the isolate), so if its recording fails, a later call still records the site as new while it has no pack data; the flag goes once the defaults are recorded. The housekeeping rows, which the pack writes on any site by itself, are the flag, `pageCache:version`, `pageCache:warmState` and `state:discovery:indexnowRetired`.
+- In `plugin:install`, which EmDash runs only when it first records the plugin on a site: if the pack has nothing stored (no switches, no setting or KV row other than its housekeeping rows, no storage document), it's a new site, so only the marker is stored and the new defaults apply. Install first leaves a flag (`state:freshInstall`, and one in the isolate), so if its recording fails, a later call still records the site as new while it has no pack data; the flag goes once the defaults are recorded. The housekeeping rows, which the pack writes on any site by itself, are the flag, `pageCache:version`, `pageCache:warmState` and `state:discovery:indexnowRetired` (Discovery's IndexNow clean-up marker, 0.35.18–0.37.x, still stored on sites that ran it).
 - Everywhere else (`plugin:activate`, the Features page's list, a save of the switches), and on any doubt (stored switches, any pack data, a read that fails): it's an existing site, so `legacyDefault` is stored for each of those features the site hadn't chosen, then the marker.
 
 A new feature that starts off needs none of this. Use `legacyDefault` only when changing a default an existing feature already had.

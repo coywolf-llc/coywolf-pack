@@ -27,7 +27,8 @@ Sites that used Coywolf's WordPress plugins (Video Manager, Coywolf SEO, Custom 
 | Old slugs (`_wp_old_slug`, which WordPress redirects by itself) and redirect plugins' rules (Redirection, Rank Math, Yoast SEO Premium, Coywolf SEO) | Not in the export | Step 6, **Redirects from WordPress** |
 | `/wp-content/uploads/` URLs that other sites and image search link to | 404 | Step 5 adds a redirect for every old file URL it matched |
 | Image width and height | Not recorded on imported image blocks | Theme: `imageDimensions(srcs)` from `@coywolf/emdash/astro` (see [In theme code](images.md#in-theme-code)) |
-| Shortcodes, widgets, menus, theme settings, forms | Shortcodes stay as plain text; the rest isn't content | Rebuild by hand (see [Gaps to close by hand](#gaps-to-close-by-hand)) |
+| Menus | EmDash 1.5+ imports them from the WXR file | Check them under **Menus** after the import |
+| Shortcodes, widgets, theme settings, forms | Shortcodes stay as plain text; the rest isn't content | Rebuild by hand (see [Gaps to close by hand](#gaps-to-close-by-hand)) |
 
 ## Before you import
 
@@ -51,7 +52,7 @@ Every step is on the **WordPress Migration** page, in this order. Steps that cha
    ```
 
    The report lists what changed per block (`core/heading → anchor`, `core/block → inlined`, …) and, separately, **Blocks EmDash will drop**: note those to rebuild after importing.
-3. **Import** the prepared file under **Settings → Import** with EmDash's importer, including its media (attachments) and its URL rewrite. Map WordPress authors to users as you like.
+3. **Import** the prepared file under **Settings → Import** with EmDash's importer, including its media (attachments) and its URL rewrite. Map WordPress authors to users as you like. (EmDash 1.5+ also has `npx emdash import wordpress`, which converts an export into JSON files on your computer instead of importing it into the site. It has its own `--prepare` step, which isn't this one: these steps assume the admin importer.)
 4. **Convert imported content** (step 2) → **Dry run**. It should list nothing, because entries convert as they're imported. If the module (or a block) was off during the import, run **Convert**.
 5. **Co-authors and guest authors** (step 3) → **Dry run**, then **Create bylines and credit posts**.
 6. **Category and page parents** (step 4) → **Dry run**, then **Set category parents**. Paste the `pageParents` it shows into `coywolfPlugin()`, and use `{termpath:category}` and `{pagepath}` in `urls`.
@@ -139,7 +140,8 @@ Old-slug rules point at the URLs WordPress used. If EmDash serves different URLs
 - **Image width and height**: imported image blocks have no size. In the theme, get sizes from the media library with `imageDimensions(srcs)` (one query per page), and set `width`/`height` (and `srcset`) on content images.
 - **Shortcodes** stay as plain text (`[gallery …]`). Search content for each shortcode's name and replace it with a block.
 - **Forms** (`gravity-form` markers, other form plugins): rebuild with the EmDash forms plugin or the theme.
-- **Menus, widgets, theme settings**: not content; rebuild them in the theme and EmDash's menus.
+- **Widgets, theme settings**: not content; rebuild them in the theme. Menus come with EmDash's import (1.5+): check each one under **Menus**, since links to pages that weren't imported point at the old site.
+- **Password-protected posts** arrive as drafts (EmDash 1.5+): EmDash has no post passwords. Publish them, or protect them in the theme.
 - **Theme assets used by the theme itself** (CSS backgrounds, fonts): step 5 only finds those linked from content. Move the rest into the new theme.
 
 ## Verifying the move

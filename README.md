@@ -47,7 +47,7 @@ Coywolf Pack is a native (trusted) EmDash plugin: you add it to your site's code
 
 ### What you need
 
-- An EmDash site (1.4 or later) on Cloudflare Workers, using EmDash's Cloudflare adapter with a D1 database bound as `DB` and an R2 media bucket bound as `MEDIA`. That's the setup EmDash's own Cloudflare starter creates.
+- An EmDash site (1.5 or later) on Cloudflare Workers, using EmDash's Cloudflare adapter with a D1 database bound as `DB` and an R2 media bucket bound as `MEDIA`. That's the setup EmDash's own Cloudflare starter creates.
 - The site's code in a folder (or Git repository) you can edit and deploy, with Node.js and Wrangler.
 
 ### 1. Install the package
@@ -160,7 +160,7 @@ A good first set for most sites:
 - **Features** (**Coywolf Pack → Features**) turns modules and their parts on or off: flip the switches, then **Save** (or Ctrl/⌘+S). A module's page also has switches for its parts, which apply right away.
 - **Each module's page** holds its settings, grouped into sections, with step-by-step guides. A feature that needs an API key or a binding shows a setup card until it's there.
 - **API keys and tokens** go on the plugin's **Settings** page ([Keys](#keys)). EmDash stores them encrypted.
-- **In the entry editor and content lists** (EmDash 1.4+, admins only): sections in a saved entry's sidebar for **Schema & Social**, **AI suggestions** and **Link status**, and a **Links** column in content lists, each while its module is on.
+- **In the entry editor and content lists** (admins only): sections in a saved entry's sidebar for **Schema & Social**, **AI suggestions** and **Link status**, and a **Links** column in content lists, each while its module is on.
 - **Saving:** a bar appears at the bottom of a settings page when there are unsaved changes, with **Discard** and **Save** (also Ctrl/⌘+S). The result shows as a notice at the bottom of the screen. Leaving the page with unsaved changes asks first.
 - **Hiding EmDash's own pages:** a site that uses Redirect Manager or WordPress Migration instead of EmDash's Redirects or Import can hide those with EmDash's `admin.hiddenNavItems` option in `astro.config.mjs` (for example `emdash({ admin: { hiddenNavItems: ["redirects"] } })`).
 - **Language:** the pack's admin pages and docs are in English only; they don't follow EmDash's admin language setting.

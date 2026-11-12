@@ -104,6 +104,9 @@ function hookFeature(module: PackModule, hook: string): string {
 // any: events differ per hook.
 type Handler = (event: any, ctx: PluginContext) => Promise<unknown>;
 
+/** Discovery's daily Bing task from 0.35.17, cleaned up by 0.35.18–0.37.x; cancelled if it still fires. */
+const LEGACY_BING_TASK = "discovery-bing-drain";
+
 export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] }) {
 	const names = new Set<string>();
 	for (const module of modules) for (const name of Object.keys(module.hooks ?? {})) names.add(name);
@@ -239,6 +242,8 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 				// A task an earlier version scheduled: its module cleans up and cancels it.
 				const retired = modules.find((m) => m.retiredTasks?.[event.name])?.retiredTasks?.[event.name];
 				if (retired) await retired(ctx);
+				// Discovery's Bing task (0.35.17) on a site that skipped the releases that cleaned it up: it only goes.
+				else if (event.name === LEGACY_BING_TASK) await ctx.cron?.cancel(event.name).catch(() => undefined);
 				return;
 			}
 			const features: FeatureMap = await ctxFeatures(ctx);

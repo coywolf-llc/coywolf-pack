@@ -216,6 +216,18 @@ const CONFIG_TTL_MS = 10 * 60_000;
 const MAX_CACHED_AUTHORS = 500;
 let configCache: { at: number; epoch: number; config: Config } | null = null;
 
+/**
+ * EmDash's system date columns, which a collection's `dateField` may name since 1.5.0 (Date column source). Only a
+ * custom date field makes a collection "dated" (articles): Pages set to Published would otherwise turn into articles.
+ */
+const SYSTEM_DATE_FIELDS = new Set(["publishedAt", "createdAt", "updatedAt"]);
+
+/** Whether a collection's entries are dated (articles): it has a custom date field. */
+export function isDatedCollection(collection: { dateField?: string | null } | null | undefined): boolean {
+	const field = collection?.dateField;
+	return !!field && !SYSTEM_DATE_FIELDS.has(field);
+}
+
 export function invalidateSchemaConfig(): void {
 	configCache = null;
 }
@@ -1004,7 +1016,7 @@ export function schemaModule(options: SchemaOptions) {
 					types: config.types,
 					collections: collections
 						.filter((c) => !c.hidden)
-						.map((c) => ({ slug: c.slug, label: c.label, routable: c.routable, dated: !!c.dateField })),
+						.map((c) => ({ slug: c.slug, label: c.label, routable: c.routable, dated: isDatedCollection(c) })),
 					features: Object.fromEntries(Object.values(SCHEMA_FEATURES).map((id) => [id, isOn(features, id)])),
 					catalog: {
 						pageTypes: PAGE_TYPES,
@@ -1424,7 +1436,7 @@ export function schemaModule(options: SchemaOptions) {
 						path: URL.canParse(url) ? new URL(url).pathname : "/",
 						locale: item.locale,
 						kind: "content",
-						pageType: info?.dateField ? "article" : "website",
+						pageType: isDatedCollection(info) ? "article" : "website",
 						title,
 						pageTitle: title,
 						description: item.seo?.description || (typeof item.data.excerpt === "string" ? item.data.excerpt : null),

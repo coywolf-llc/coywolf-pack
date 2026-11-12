@@ -72,14 +72,11 @@ function surfaces(modules: PackModule[]) {
 	};
 }
 
-/** `displayName` and `description` arrived in EmDash's descriptor after 1.4; declared here until its types have them. */
-type Descriptor = PluginDescriptor<CoywolfOptions> & { displayName?: string; description?: string };
-
 export function coywolfPlugin(options: CoywolfOptions = {}): PluginDescriptor<CoywolfOptions> {
 	const s = surfaces(buildModules(options));
-	const descriptor: Descriptor = {
+	const descriptor: PluginDescriptor<CoywolfOptions> = {
 		id: PLUGIN_ID,
-		// Shown in EmDash's Plugins list (EmDash 1.5+; earlier versions ignore them).
+		// Shown in EmDash's Plugins list.
 		displayName: "Coywolf Pack",
 		description: "Enhances EmDash's features and adds ones it doesn't have: performance, backups, redirects, schema, discovery, robots.txt and more.",
 		version: VERSION,

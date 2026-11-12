@@ -141,10 +141,9 @@ test("an existing site that never saved a switch but has pack data (a setting, a
 	}
 });
 
-test("the pack's own housekeeping rows (the deployed version, the IndexNow clean-up marker) don't make a site existing", async () => {
+test("the pack's own housekeeping rows (the deployed version) don't make a site existing", async () => {
 	const s = await site(async (db, sql) => {
 		await sql`INSERT INTO options (name, value) VALUES ('plugin:coywolf-pack:pageCache:version', '{"current":"v1"}')`.execute(db);
-		await sql`INSERT INTO options (name, value) VALUES ('plugin:coywolf-pack:state:discovery:indexnowRetired', 'true')`.execute(db);
 	});
 	try {
 		await s.boot();
@@ -267,11 +266,9 @@ test("the real switches: Redirect Manager, Slug changes and Backups default off,
 	// The housekeeping rows are the modules' own keys.
 	const lib = readFileSync(new URL("../src/pageCache/lib.ts", import.meta.url), "utf8");
 	const warm = readFileSync(new URL("../src/pageCache/warm.ts", import.meta.url), "utf8");
-	const discovery = readFileSync(new URL("../src/discovery/module.ts", import.meta.url), "utf8");
 	assert.match(lib, /VERSION_OPTION = "plugin:coywolf-pack:pageCache:version"/);
 	assert.match(warm, /WARM_STATE_OPTION = "plugin:coywolf-pack:pageCache:warmState"/);
-	assert.match(discovery, /RETIRED_MARKER = "state:discovery:indexnowRetired"/);
-	for (const key of ["pageCache:version", "pageCache:warmState", "state:discovery:indexnowRetired", FRESH_INSTALL_KEY]) assert.ok(HOUSEKEEPING_KEYS.has(key), key);
+	for (const key of ["pageCache:version", "pageCache:warmState", FRESH_INSTALL_KEY]) assert.ok(HOUSEKEEPING_KEYS.has(key), key);
 	const routes = readFileSync(new URL("../src/core/features-module.ts", import.meta.url), "utf8");
 	assert.match(routes, /"features\/list"[\s\S]*?recordDefaults\(ctx\)/);
 	assert.match(routes, /"features\/save"[\s\S]*?recordDefaults\(ctx\)[\s\S]*?withRecordedDefaults\(await ctx\.settings\.get<FeatureMap>\(FEATURES_SETTING\), true\)/);

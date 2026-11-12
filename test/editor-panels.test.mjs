@@ -106,3 +106,12 @@ test("custom markup's types for the Schema panel's summary", async () => {
 	assert.deepEqual(markupTypes('{"@context":"https://schema.org","@graph":[{"@type":"Event"},{"@type":"Place"}]}'), ["Event", "Place"]);
 	assert.deepEqual(markupTypes("not json"), []);
 });
+
+test("a collection is dated (its entries are articles) only with a custom date field, not EmDash 1.5's system date columns", async () => {
+	const { isDatedCollection } = await import("../src/schema/module.ts");
+	assert.equal(isDatedCollection({ dateField: "eventDate" }), true);
+	for (const system of ["publishedAt", "createdAt", "updatedAt"]) assert.equal(isDatedCollection({ dateField: system }), false, system);
+	assert.equal(isDatedCollection({ dateField: null }), false);
+	assert.equal(isDatedCollection({}), false);
+	assert.equal(isDatedCollection(undefined), false);
+});

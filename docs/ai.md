@@ -11,7 +11,7 @@ Ported from Coywolf SEO's AI features, with the same prompts and validation:
 
 All four are off by default, under the **AI Enrichment** switch on the **Features** page (**Coywolf Pack → Features** in the sidebar).
 
-**In the entry editor.** While AI Enrichment is on, a saved entry's sidebar has an **AI suggestions** section (EmDash 1.4+, admins only): the suggested meta description with **Copy** and **Dismiss**, the entities found (main subjects highlighted), and **Analyze again**, which queues the entry. It doesn't write the description itself: paste it into the SEO section, or apply it on the AI page, so it can't clash with the editor's own save. It says so when the entry's collection isn't one AI Enrichment analyzes.
+**In the entry editor.** While AI Enrichment is on, a saved entry's sidebar has an **AI suggestions** section (admins only): the suggested meta description with **Copy** and **Dismiss**, the entities found (main subjects highlighted), and **Analyze again**, which queues the entry. It doesn't write the description itself: paste it into the SEO section, or apply it on the AI page, so it can't clash with the editor's own save. It says so when the entry's collection isn't one AI Enrichment analyzes.
 
 ## How it runs
 

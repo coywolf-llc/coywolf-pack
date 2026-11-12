@@ -42,8 +42,8 @@ test("the known secrets keep their stored keys", () => {
 	assert.match(read("images/settings.ts"), /token: "imagesApiToken"/);
 	assert.match(read("pageCache/usage.ts"), /USAGE_TOKEN_SETTING = "usageApiToken"/);
 	assert.match(read("backups/module.ts"), /token: "backupsCloudflareToken"/);
-	// Removed with Bing submission (0.35.18): no longer declared, and deleted from storage (retireIndexNow).
-	assert.match(read("discovery/settings.ts"), /RETIRED_SETTINGS = \["discoveryIndexnowKey", "discoveryBingApiKey"\]/);
+	// Removed with Bing submission (0.35.18) and deleted from every site's storage by 0.35.18–0.37.x: no longer declared.
+	assert.equal(SECRET_SETTINGS.discoveryBingApiKey, undefined);
 });
 
 test("the Settings page's older fields are exactly the tokens the Cloudflare API token replaces, plus the R2 key", async () => {

@@ -730,7 +730,6 @@ test("secret settings: encrypted at rest, decrypted for a declared secret, refus
 	const handlePluginSettingsGet = await distFunction("handlePluginSettingsGet");
 	const handlePluginSettingsUpdate = await distFunction("handlePluginSettingsUpdate");
 	const { SECRET_SETTINGS, secretSettingsSchema } = await import("../src/core/secrets.ts");
-	const { RETIRED_SETTINGS } = await import("../src/discovery/settings.ts");
 
 	await ctx.settings.set("aiApiKey", "sk-contract");
 	const stored = JSON.parse((await option("plugin:coywolf-pack:settings:aiApiKey")).value);
@@ -744,7 +743,7 @@ test("secret settings: encrypted at rest, decrypted for a declared secret, refus
 	await assert.rejects(withoutIt.list("ai"), PluginSettingEncryptionError, "list decodes every value under the prefix");
 
 	// So the pack lists settings only under "schema", which no secret (current or retired) starts with.
-	for (const key of [...Object.keys(SECRET_SETTINGS), ...RETIRED_SETTINGS]) assert.ok(!key.startsWith("schema"), key);
+	for (const key of [...Object.keys(SECRET_SETTINGS), "discoveryIndexnowKey", "discoveryBingApiKey"]) assert.ok(!key.startsWith("schema"), key);
 
 	// EmDash's Settings page (GET and save) with the pack's schema: labels as declared (the guides script looks fields up by label),
 	// secrets reported as set, never returned, and a save there is what ctx.settings reads.
