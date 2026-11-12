@@ -183,10 +183,13 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		const afterWrite = async (response: Response): Promise<Response> => {
 			const settingsKeys = await savedKeys(response);
 			const seoSave = settingsKeys.seo;
-			// EmDash's SEO settings include "Disallow AI training", whose lines the pack's robots.txt carries: clear it,
-			// here now and (settling purge) again once every isolate's robots.txt cache has expired.
-			if (seoSave && response.status < 400 && isOn(features, "robots")) {
-				invalidateRobotsCache();
+			// EmDash's SEO settings change /robots.txt whichever file serves it: the pack's (Robots.txt Rules on) carries
+			// their "Disallow AI training" lines, and EmDash's own (Robots.txt Rules off) is built from their robots.txt
+			// setting. Both are kept at the edge for a day, and Cloudflare's purge by URL doesn't reach Workers Cache: clear
+			// it here now and (settling purge) again once every isolate's robots.txt rules cache has expired.
+			if (seoSave && response.status < 400) {
+				// Only the pack's file has a rules cache in this isolate (EmDash reads its settings on every render).
+				if (isOn(features, "robots")) invalidateRobotsCache();
 				const scope: PurgeScope = { pathPrefixes: ["/robots.txt"] };
 				waitUntil(
 					(db ? recordSettingsChange(db, scope) : Promise.resolve())

@@ -244,6 +244,95 @@ test("a refused redirect save or settings save isn't parsed (EmDash checks permi
 	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }], "going live still clears every page");
 });
 
+// ── robots.txt after EmDash's SEO saves and the pack's robots.txt rules saves ──
+
+/** Run `fn` with the clock at `time` (the settling purge is due minutes after a save). */
+async function atTime(time, fn) {
+	const real = Date.now;
+	Date.now = () => time;
+	try {
+		return await fn();
+	} finally {
+		Date.now = real;
+	}
+}
+
+/** A request in another isolate once the settling purge is due: it claims it and purges. Returns those purges. */
+async function settleLaterRequest(db, savedAt) {
+	freshIsolate(db);
+	await atTime(savedAt + TTL + 20_000, async () => (await coywolfPack({}, [])(context("/post/", cacheable()), html)).text());
+	await settled();
+	return globalThis.__purges;
+}
+
+const acceptedSettingsSave = async (json) => {
+	const save = trackedPost("/_emdash/api/settings", json);
+	await coywolfPack({}, [])(save.ctx, async () => {
+		await save.ctx.request.json();
+		return Response.json({ ok: true });
+	});
+	await settled();
+};
+
+test("an SEO save clears /robots.txt with Robots.txt Rules off too (EmDash's own file, kept at the edge for a day), and settles it", async () => {
+	const db = d1();
+	freshIsolate(db);
+	await features.siteFeatures();
+	assert.equal(features.isOn(await features.siteFeatures(), "robots"), false, "Robots.txt Rules off (the default)");
+	const savedAt = Date.now();
+	await acceptedSettingsSave({ seo: { robotsTxt: "User-agent: *\nDisallow: /_emdash/\n" } });
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }], "Cloudflare's purge by URL doesn't reach Workers Cache");
+	assert.deepEqual(row(db).settle, { pathPrefixes: ["/robots.txt"] });
+	assert.deepEqual(await settleLaterRequest(db, savedAt), [{ pathPrefixes: ["/robots.txt"] }], "cleared again once every isolate has the new settings");
+	// Other settings saves (General, Social…) don't touch robots.txt.
+	const other = d1();
+	freshIsolate(other);
+	await features.siteFeatures();
+	await acceptedSettingsSave({ title: "A new title" });
+	assert.deepEqual(globalThis.__purges, []);
+	assert.equal(row(other), null, "no settings change recorded");
+});
+
+test("with Robots.txt Rules on, an SEO save also drops this isolate's robots.txt rules cache", async () => {
+	const { serveRobots, CONFIG_OPTION } = await import("../src/robots/middleware.ts");
+	const { DEFAULT_CONFIG } = await import("../src/robots/rules.ts");
+	const db = d1();
+	const put = (name, value) => db.sqlite.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value").run(name, JSON.stringify(value));
+	put("plugin:coywolf-pack:settings:features", { robots: true });
+	put(CONFIG_OPTION, DEFAULT_CONFIG);
+	put("site:seo", { disallowAiTraining: false });
+	freshIsolate(db);
+	await features.siteFeatures();
+	const served = async () => (await serveRobots(new URL("https://example.com/robots.txt"), "GET", { DB: db })).text();
+	assert.ok(!(await served()).includes("Content-Signal"));
+	// EmDash's settings route writes "Disallow AI training"; the rules cache still has the old value.
+	put("site:seo", { disallowAiTraining: true });
+	assert.ok(!(await served()).includes("Content-Signal"), "cached for a minute");
+	await acceptedSettingsSave({ seo: { disallowAiTraining: true } });
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }]);
+	assert.ok((await served()).includes("Content-Signal"), "read again after the save");
+});
+
+test("a robots.txt rules save clears /robots.txt now and again once settled (other isolates keep their rules up to a minute)", async () => {
+	const db = d1();
+	freshIsolate(db);
+	await features.siteFeatures();
+	const savedAt = Date.now();
+	await coywolfPack({}, [])(context("/_emdash/api/plugins/coywolf-pack/robots/save", undefined, "POST"), async () => Response.json({ saved: true }));
+	await settled();
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }]);
+	assert.deepEqual(row(db).settle, { pathPrefixes: ["/robots.txt"] });
+	// Not before every isolate's caches have expired…
+	freshIsolate(db);
+	await atTime(savedAt + 60_000, async () => (await coywolfPack({}, [])(context("/post/", cacheable()), html)).text());
+	await settled();
+	assert.deepEqual(globalThis.__purges, [], "not due yet");
+	// …then the first request in any isolate clears it again, once.
+	assert.deepEqual(await settleLaterRequest(db, savedAt), [{ pathPrefixes: ["/robots.txt"] }]);
+	assert.equal(row(db).settle, undefined, "claimed");
+	assert.deepEqual(await settleLaterRequest(db, savedAt), [], "only one isolate purges");
+});
+
 // ── Refused purges (the account's purge rate limit) ──
 
 test("a full save whose first purge is refused settles by clearing everything, not just generation tags", async () => {
