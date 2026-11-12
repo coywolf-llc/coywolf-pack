@@ -268,11 +268,68 @@ const orNull = <T,>(read: Promise<T> | undefined): Promise<T | null> =>
 			})
 		: Promise.resolve(null);
 
+/** D1 binding of the site database for the avatar lookup (set by schemaModule and schemaMetadataHook). */
+let avatarDatabase = "DB";
+
+/** EmDash's plugin API media URL (/_emdash/api/media/asset/<id>/<file>): served to signed-in users only. */
+const ASSET_URL = /^\/_emdash\/api\/media\/asset\/([^/?#]+)\//;
+
+/**
+ * A byline avatar's public URL: the original on the media host, else EmDash's public file route
+ * (/_emdash/api/media/file/<key>). Never the plugin API's media URL, which EmDash serves to signed-in users
+ * only (401 for everyone else, crawlers included): for that one the storage key is looked up.
+ */
+export async function publicAvatarUrl(
+	ctx: PluginContext,
+	mediaId: string | null | undefined,
+	lookup: (id: string) => Promise<string | null> = storageKeyOf,
+): Promise<string | null> {
+	if (!mediaId) return null;
+	const url = (await orNull(ctx.media?.get(mediaId)))?.url ?? null;
+	if (!url) return null;
+	if (!ASSET_URL.test(url)) return cdnOriginalUrl(url) ?? url;
+	const key = await lookup(decodeURIComponent(ASSET_URL.exec(url)?.[1] ?? mediaId));
+	if (!key) return null;
+	const file = `/_emdash/api/media/file/${key}`;
+	return cdnOriginalUrl(file) ?? file;
+}
+
+async function storageKeyOf(mediaId: string): Promise<string | null> {
+	try {
+		const env = await workerEnv();
+		const db = env[avatarDatabase] as D1Database | undefined;
+		if (!db) return null;
+		const row = await batchedFirst<{ storage_key: string | null }>(db, db.prepare("SELECT storage_key FROM media WHERE id = ? LIMIT 1").bind(mediaId));
+		return row?.storage_key ?? null;
+	} catch {
+		noteReadFailure("schema: avatar");
+		return null;
+	}
+}
+
+/** Storage keys for media ids, in one read (the Schema page's image picker). */
+async function storageKeysOf(ids: string[]): Promise<Map<string, string>> {
+	const out = new Map<string, string>();
+	if (!ids.length) return out;
+	try {
+		const env = await workerEnv();
+		const db = env[avatarDatabase] as D1Database | undefined;
+		if (!db) return out;
+		const { results } = await db
+			.prepare(`SELECT id, storage_key FROM media WHERE id IN (${ids.map(() => "?").join(", ")})`)
+			.bind(...ids)
+			.all<{ id: string; storage_key: string | null }>();
+		for (const row of results) if (row.storage_key) out.set(row.id, row.storage_key);
+	} catch {
+		// The picker still lists them, with EmDash's URLs.
+	}
+	return out;
+}
+
 async function bylineFacts(ctx: PluginContext, id: string): Promise<BylineFacts | null> {
 	const byline = await orNull(ctx.bylines?.get(id));
 	if (!byline) return null;
-	let avatarUrl: string | null = null;
-	if (byline.avatarMediaId) avatarUrl = (await orNull(ctx.media?.get(byline.avatarMediaId)))?.url ?? null;
+	const avatarUrl = await publicAvatarUrl(ctx, byline.avatarMediaId);
 	return { id: byline.id, slug: byline.slug, displayName: byline.displayName, bio: byline.bio, websiteUrl: byline.websiteUrl, avatarUrl };
 }
 
@@ -497,7 +554,7 @@ async function authorNodes(ctx: PluginContext, credited: Promise<EntryBylines>, 
 		bylines.map(async (b) => {
 			const rows = rowsById.get(b.id)?.rows ?? null;
 			const hasImage = rows?.some((r) => r.prop === "image" && r.value);
-			const avatarUrl = !hasImage && b.avatarMediaId ? ((await orNull(ctx.media?.get(b.avatarMediaId)))?.url ?? null) : null;
+			const avatarUrl = !hasImage ? await publicAvatarUrl(ctx, b.avatarMediaId) : null;
 			const path = authorPath(config.settings.schemaAuthorUrlPattern, b.slug);
 			const authorUrl = path ? absolute(path, site.origin) : null;
 			return personNode({
@@ -996,6 +1053,7 @@ function entryTitle(data: Record<string, unknown>, titleField: string | null | u
 const MAIN = SCHEMA_FEATURES.main;
 
 export function schemaModule(options: SchemaOptions) {
+	avatarDatabase = options.database ?? "DB";
 	const routes = {
 		/** Everything the admin page needs to render. */
 		"schema/config": {
@@ -1392,8 +1450,16 @@ export function schemaModule(options: SchemaOptions) {
 				const { cursor } = parseInput(z.object({ cursor: z.string().max(500).optional() }), ctx.input);
 				if (!ctx.media) return { items: [], hasMore: false };
 				const result = await ctx.media.list({ limit: 30, cursor, mimeType: "image/" });
+				// The public address (what gets saved and printed in JSON-LD), not the plugin API's sign-in-only one.
+				const keys = await storageKeysOf(result.items.map((m) => m.id));
+				const publicUrl = (m: { id: string; url: string }) => {
+					const key = keys.get(m.id);
+					if (!key) return m.url;
+					const file = `/_emdash/api/media/file/${key}`;
+					return cdnOriginalUrl(file) ?? file;
+				};
 				return {
-					items: result.items.map((m) => ({ id: m.id, url: m.url, filename: m.filename, alt: m.alt ?? null, width: m.width ?? null, height: m.height ?? null })),
+					items: result.items.map((m) => ({ id: m.id, url: publicUrl(m), filename: m.filename, alt: m.alt ?? null, width: m.width ?? null, height: m.height ?? null })),
 					cursor: result.cursor,
 					hasMore: result.hasMore,
 				};
@@ -1506,6 +1572,7 @@ export function markupTypes(markup: string): string[] {
 
 /** The hook EmDash calls for each rendered page. */
 export function schemaMetadataHook(options: SchemaOptions) {
+	avatarDatabase = options.database ?? "DB";
 	return async (event: { page: PublicPageContext }, ctx: PluginContext) => schemaContributions(ctx, event.page, options);
 }
 

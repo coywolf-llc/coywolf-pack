@@ -115,3 +115,16 @@ test("a collection is dated (its entries are articles) only with a custom date f
 	assert.equal(isDatedCollection({}), false);
 	assert.equal(isDatedCollection(undefined), false);
 });
+
+test("byline avatars in JSON-LD use the public media address, never EmDash's sign-in-only asset URL", async () => {
+	const { publicAvatarUrl } = await import("../src/schema/module.ts");
+	const ctx = (url) => ({ media: { get: async () => (url ? { url } : null) } });
+	// EmDash's plugin API gives /_emdash/api/media/asset/<id>/<file> (401 without a session): the storage key is looked up.
+	const asset = ctx("/_emdash/api/media/asset/01M41A5F7JYHVSYM3JAXFDJZ4Z/jon-henshaw.png");
+	assert.equal(await publicAvatarUrl(asset, "01M41A5F7JYHVSYM3JAXFDJZ4Z", async (id) => (id === "01M41A5F7JYHVSYM3JAXFDJZ4Z" ? "01M41A5F7JYHVSYM3JAXFDJZ4Z.png" : null)), "/_emdash/api/media/file/01M41A5F7JYHVSYM3JAXFDJZ4Z.png");
+	assert.equal(await publicAvatarUrl(asset, "01M41A5F7JYHVSYM3JAXFDJZ4Z", async () => null), null, "no key: no image rather than a broken one");
+	// A public URL is used as it is.
+	assert.equal(await publicAvatarUrl(ctx("/_emdash/api/media/file/m1.jpg"), "m1", async () => assert.fail("no lookup")), "/_emdash/api/media/file/m1.jpg");
+	assert.equal(await publicAvatarUrl(ctx(null), "gone"), null);
+	assert.equal(await publicAvatarUrl(ctx("/x"), null), null);
+});
