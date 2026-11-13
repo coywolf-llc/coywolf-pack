@@ -20,7 +20,6 @@ import type { MiddlewareHandler } from "astro";
 
 import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOption, siteFeatures, siteOption, siteSetting, isOn } from "./core/features.js";
 import { SETTLE_RETRY_MS, claimSettle, currentGenerationTag, mergeScopes, recordSettingsChange, settleLater } from "./core/generation.js";
-import { invalidateRobotsCache } from "./robots/middleware.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
 import { ensurePackStarted } from "./core/ready.js";
 import { DEADLINES } from "./core/single-flight.js";
@@ -186,10 +185,8 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			const seoSave = settingsKeys.seo;
 			// EmDash's SEO settings change /robots.txt whichever file serves it: the pack's (Robots.txt Rules on) carries
 			// their "Disallow AI training" lines, and EmDash's own (Robots.txt Rules off) is built from their robots.txt
-			// setting. Both are kept at the edge for a day, and Cloudflare's purge by URL doesn't reach Workers Cache: clear
-			// it here now and (settling purge) again once every isolate's robots.txt rules cache has expired.
-			// Only the pack's file has a rules cache in this isolate (EmDash reads its settings on every render).
-			if (seoSave && response.status < 400 && isOn(features, "robots")) invalidateRobotsCache();
+			// setting. Both files read their settings on every render and are kept at the edge for a day, and Cloudflare's purge
+			// by URL doesn't reach Workers Cache: clear /robots.txt here now and (settling purge) again five minutes later.
 			// Going live (or back to staging) changes every page's robots tag: EmDash renders noindex, nofollow on every page
 			// while the site is in staging, and only clears pages tagged with its settings. Clear every cached page (which
 			// restarts warming), and again once every isolate has the new settings (settling purge).

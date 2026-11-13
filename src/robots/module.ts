@@ -13,7 +13,7 @@ import { parseInput, workerEnv } from "../shared.js";
 import { type BotOverride, applyOverrides, customSlug, mergeDirectory } from "./bots.js";
 import { baselineBots, baselineDate } from "./directory.js";
 import { ADDITIONS_NOTES, emdashRobots, importRobots } from "./importer.js";
-import { CONFIG_SETTING, invalidateRobotsCache, readEmdashAiTraining, readEmdashCustomRobots } from "./middleware.js";
+import { CONFIG_SETTING, readEmdashAiTraining, readEmdashCustomRobots } from "./middleware.js";
 import { RADAR_TOKEN_SETTING, SYNC_STATE_KEY, type SyncState, radarTokenStatus, readOverlays, syncRadar } from "./radar.js";
 import { type GroupChange, PRESETS, RULE_KINDS, type RobotsConfig, automaticFrom, generate, isValidToken, normalizeConfig, refreshGroups } from "./rules.js";
 import { checkConfig, extraLineWarnings } from "./validate.js";
@@ -167,7 +167,6 @@ async function loadOrImport(ctx: PluginContext, database: string): Promise<Robot
 		// Saved before 0.7.0: store the migrated shape once, and say what's new.
 		const migrated = { ...normalizeConfig(stored), importNotes: [...ADDITIONS_NOTES] };
 		await ctx.settings.set(CONFIG_SETTING, migrated);
-		invalidateRobotsCache();
 		return migrated;
 	}
 	if (stored) return normalizeConfig(stored);
@@ -176,7 +175,6 @@ async function loadOrImport(ctx: PluginContext, database: string): Promise<Robot
 	const { config } = importRobots(text, siteUrl || "https://example.com");
 	const result = await ctx.settings.compareAndSet(CONFIG_SETTING, null, config);
 	if (result.applied) {
-		invalidateRobotsCache();
 		await pushHistory(ctx, { at: new Date().toISOString(), label: "Imported from EmDash's robots.txt", config }).catch(() => undefined);
 		ctx.log.info("Robots: imported EmDash's robots.txt", { rules: config.rules.length, mode: config.importMode });
 		return config;
@@ -195,7 +193,6 @@ async function persist(ctx: PluginContext, database: string, config: RobotsConfi
 		throw PluginRouteError.badRequest("That robots.txt would be over 500 KiB, the most Google reads. Remove some rules.");
 	}
 	await ctx.settings.set(CONFIG_SETTING, stored);
-	invalidateRobotsCache();
 	await pushHistory(ctx, { at: new Date().toISOString(), by, label, config: stored }).catch((error) => ctx.log.warn("Robots: history not saved", { error: String(error) }));
 	ctx.log.info("Robots.txt rules saved", { rules: config.rules.length, label });
 	return { config: live, preview, saved: true, warnings: extraLineWarnings(live, siteUrl || undefined) };
@@ -242,7 +239,6 @@ export function robotsModule(options: RobotsOptions) {
 				let groupChanges: GroupChange[] = [];
 				if (JSON.stringify(refreshed.config.rules) !== JSON.stringify(loaded.rules)) {
 					await ctx.settings.set(CONFIG_SETTING, refreshed.config);
-					invalidateRobotsCache();
 					groupChanges = refreshed.changes;
 					if (groupChanges.length) {
 						await pushHistory(ctx, { at: new Date().toISOString(), label: "Updated crawler groups", config: refreshed.config }).catch(() => undefined);

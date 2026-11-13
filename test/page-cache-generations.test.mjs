@@ -310,27 +310,29 @@ test("a settings save with SEO settings and a staging change clears everything o
 	assert.equal(recorded, 1, "one settings change recorded, not two rewriting the row from the same read");
 });
 
-test("with Robots.txt Rules on, an SEO save also drops this isolate's robots.txt rules cache", async () => {
+test("robots.txt reads its rules on every render: a save in another isolate shows on the next one, so the purge isn't undone", async () => {
 	const { serveRobots, CONFIG_OPTION } = await import("../src/robots/middleware.ts");
-	const { DEFAULT_CONFIG } = await import("../src/robots/rules.ts");
+	const { DEFAULT_CONFIG, EMDASH_MEDIA_PATH } = await import("../src/robots/rules.ts");
 	const db = d1();
 	const put = (name, value) => db.sqlite.prepare("INSERT INTO options (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value").run(name, JSON.stringify(value));
 	put("plugin:coywolf-pack:settings:features", { robots: true });
-	put(CONFIG_OPTION, DEFAULT_CONFIG);
+	put(CONFIG_OPTION, { ...DEFAULT_CONFIG, allowMedia: true });
 	put("site:seo", { disallowAiTraining: false });
 	freshIsolate(db);
 	await features.siteFeatures();
 	const served = async () => (await serveRobots(new URL("https://example.com/robots.txt"), "GET", { DB: db })).text();
-	assert.ok(!(await served()).includes("Content-Signal"));
-	// EmDash's settings route writes "Disallow AI training"; the rules cache still has the old value.
+	const before = await served();
+	assert.ok(before.includes(`Allow: ${EMDASH_MEDIA_PATH}`) && !before.includes("Content-Signal"));
+	// robots/save in another isolate (coywolf.com, 2026-11-12: the media line removed). This isolate renders next,
+	// after that save's purge: it must not put the old file back in the edge cache.
+	put(CONFIG_OPTION, { ...DEFAULT_CONFIG, allowMedia: false });
+	assert.ok(!(await served()).includes(`Allow: ${EMDASH_MEDIA_PATH}`), "the saved rules, not a copy from before the save");
+	// EmDash's "Disallow AI training" (an SEO save, wherever it ran) shows at once too.
 	put("site:seo", { disallowAiTraining: true });
-	assert.ok(!(await served()).includes("Content-Signal"), "cached for a minute");
-	await acceptedSettingsSave({ seo: { disallowAiTraining: true } });
-	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }]);
-	assert.ok((await served()).includes("Content-Signal"), "read again after the save");
+	assert.ok((await served()).includes("Content-Signal"));
 });
 
-test("a robots.txt rules save clears /robots.txt now and again once settled (other isolates keep their rules up to a minute)", async () => {
+test("a robots.txt rules save clears /robots.txt now and again once settled", async () => {
 	const db = d1();
 	freshIsolate(db);
 	await features.siteFeatures();
@@ -339,7 +341,7 @@ test("a robots.txt rules save clears /robots.txt now and again once settled (oth
 	await settled();
 	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }]);
 	assert.deepEqual(row(db).settle, { pathPrefixes: ["/robots.txt"] });
-	// Not before every isolate's caches have expired…
+	// Not before every isolate has the new settings generation…
 	freshIsolate(db);
 	await atTime(savedAt + 60_000, async () => (await coywolfPack({}, [])(context("/post/", cacheable()), html)).text());
 	await settled();

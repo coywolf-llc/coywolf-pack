@@ -7,6 +7,12 @@
  * first request (or the first admin page load, whichever comes first) turns
  * the robots.txt EmDash was serving into equivalent rules and saves them
  * with an insert-if-absent, so concurrent first requests can't import twice.
+ *
+ * The rules are read on every render, with no per-isolate cache. The Worker
+ * renders /robots.txt only when the edge copy is missing (it's kept a day and
+ * cleared after every save), so a cache would save little, and after a save it
+ * let other isolates put the old rules back at the edge within seconds of the
+ * purge, until the settling purge five minutes later (coywolf.com, 2026-11-12).
  */
 import { PLUGIN_ID, siteFeatures } from "../core/features.js";
 import { noteReadFailure } from "../core/read-failures.js";
@@ -17,16 +23,8 @@ import { type RobotsConfig, automaticFrom, generate, normalizeConfig } from "./r
 
 export const CONFIG_SETTING = "robots.config";
 export const CONFIG_OPTION = `plugin:${PLUGIN_ID}:settings:${CONFIG_SETTING}`;
-const TTL_MS = 60_000;
-
-let cache: { config: RobotsConfig | null; siteUrl: string | null; aiTraining: boolean; at: number } | null = null;
 /** The import under way, shared by concurrent first requests for a bounded time (src/core/single-flight.ts). */
 const importing = sharedSlot<RobotsConfig | null>();
-
-/** Drop the cached rules so the next request reloads them (called after saving). */
-export function invalidateRobotsCache(): void {
-	cache = null;
-}
 
 async function readOption<T>(db: D1Database, name: string): Promise<T | null> {
 	const row = await db.prepare("SELECT value FROM options WHERE name = ?").bind(name).first<{ value: string }>();
@@ -102,46 +100,44 @@ export async function serveRobots(url: URL, method: string, env: Record<string, 
 	const db = env[database] as D1Database | undefined;
 	if (!db) return undefined;
 
-	if (!cache || Date.now() - cache.at > TTL_MS) {
-		try {
-			// Both rows in one query. The rules can be large and are only needed here, so they
-			// stay out of the feature switches' per-request read (core/features.ts).
-			const { results } = await db
-				.prepare("SELECT name, value FROM options WHERE name IN (?, ?, ?)")
-				.bind(CONFIG_OPTION, "site:url", "site:seo")
-				.all<{ name: string; value: string }>();
-			const parse = (name: string): unknown => {
-				const value = results.find((r) => r.name === name)?.value;
-				if (!value) return null;
-				try {
-					return JSON.parse(value);
-				} catch (error) {
-					// An unreadable Site URL falls back to the request origin; unreadable rules fail the load.
-					if (name === CONFIG_OPTION) throw error;
-					return null;
-				}
-			};
-			const stored = parse(CONFIG_OPTION) as Partial<RobotsConfig> | null;
-			const siteUrl = parse("site:url");
-			const site = typeof siteUrl === "string" ? siteUrl : null;
-			// EmDash's "Disallow AI training" (Settings > SEO) adds its lines here too, as it does to EmDash's own file.
-			const seo = parse("site:seo") as { disallowAiTraining?: boolean } | null;
-			const config = stored ? normalizeConfig(stored) : await importOnce(db, siteOrigin(site, url));
-			// Import deferred (it failed, and said so): EmDash's robots.txt is served, and nothing is cached, here or at the edge.
-			if (!config) return undefined;
-			cache = { config, siteUrl: site, aiTraining: seo?.disallowAiTraining === true, at: Date.now() };
-		} catch (error) {
-			console.error("coywolf robots: could not load rules", error);
-			// EmDash's own robots.txt answers instead: keep it out of the edge cache.
-			noteReadFailure("robots.txt rules");
-			return undefined;
-		}
+	let loaded: { config: RobotsConfig; siteUrl: string | null; aiTraining: boolean };
+	try {
+		// The rules, the Site URL and EmDash's SEO settings in one query. The rules can be large and are only needed
+		// here, so they stay out of the feature switches' per-request read (core/features.ts).
+		const { results } = await db
+			.prepare("SELECT name, value FROM options WHERE name IN (?, ?, ?)")
+			.bind(CONFIG_OPTION, "site:url", "site:seo")
+			.all<{ name: string; value: string }>();
+		const parse = (name: string): unknown => {
+			const value = results.find((r) => r.name === name)?.value;
+			if (!value) return null;
+			try {
+				return JSON.parse(value);
+			} catch (error) {
+				// An unreadable Site URL falls back to the request origin; unreadable rules fail the load.
+				if (name === CONFIG_OPTION) throw error;
+				return null;
+			}
+		};
+		const stored = parse(CONFIG_OPTION) as Partial<RobotsConfig> | null;
+		const siteUrl = parse("site:url");
+		const site = typeof siteUrl === "string" ? siteUrl : null;
+		// EmDash's "Disallow AI training" (Settings > SEO) adds its lines here too, as it does to EmDash's own file.
+		const seo = parse("site:seo") as { disallowAiTraining?: boolean } | null;
+		const config = stored ? normalizeConfig(stored) : await importOnce(db, siteOrigin(site, url));
+		// Import deferred (it failed, and said so): EmDash's robots.txt is served, and nothing is cached, here or at the edge.
+		if (!config) return undefined;
+		loaded = { config, siteUrl: site, aiTraining: seo?.disallowAiTraining === true };
+	} catch (error) {
+		console.error("coywolf robots: could not load rules", error);
+		// EmDash's own robots.txt answers instead: keep it out of the edge cache.
+		noteReadFailure("robots.txt rules");
+		return undefined;
 	}
-	if (!cache.config) return undefined;
 
 	// Discovery and Videos add lines (llms.txt/Markdown allowances, their sitemaps) while their features are on.
-	const automatic = automaticFrom(await siteFeatures(database).catch(() => ({})), cache.aiTraining);
-	const body = generate({ ...cache.config, automatic }, { siteUrl: siteOrigin(cache.siteUrl, url) });
+	const automatic = automaticFrom(await siteFeatures(database).catch(() => ({})), loaded.aiTraining);
+	const body = generate({ ...loaded.config, automatic }, { siteUrl: siteOrigin(loaded.siteUrl, url) });
 	return new Response(method === "HEAD" ? null : body, {
 		status: 200,
 		headers: {

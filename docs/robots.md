@@ -50,7 +50,7 @@ Feature switches: **Robots.txt** (`robots`) and **Weekly crawler list from Cloud
 
 ## Setup
 
-Uses the same `coywolfPack()` middleware as Redirects, and the `DB` binding. A static `public/robots.txt` in the site would be served by Workers static assets before the Worker runs, so remove it. Rules are read at most once a minute per Worker isolate; history and bot changes live in plugin storage (`robots_history`, `robots_bot_overrides`), the dismissed sitemap note in KV; the response is cached for an hour (`Cache-Control: public, max-age=3600`).
+Uses the same `coywolfPack()` middleware as Redirects, and the `DB` binding. A static `public/robots.txt` in the site would be served by Workers static assets before the Worker runs, so remove it. History and bot changes live in plugin storage (`robots_history`, `robots_bot_overrides`), the dismissed sitemap note in KV. The file is kept in the edge cache for a day and cleared after every save (see [Performance](performance.md#robotstxt-and-the-live-search-script-at-the-edge)); its `Cache-Control` header (`public, max-age=3600`) is for browsers and other caches. The Worker renders it only when the edge copy is missing, and then reads the rules, the Site URL and EmDash's SEO settings in one query. There is no per-isolate copy of the rules, so a save shows on the next render: no isolate still holds the old rules to put back in the edge cache.
 
 ## The crawler directory
 
