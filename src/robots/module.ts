@@ -9,6 +9,10 @@ import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
 import { ctxFeatures, requireFeature } from "../core/features.js";
+import { settleLater } from "../core/generation.js";
+import { readOnlyRoute } from "../core/routes.js";
+import { DEADLINES, withDeadline } from "../core/single-flight.js";
+import { type PurgeScope, purgeOutcome } from "../pageCache/lib.js";
 import { parseInput, workerEnv } from "../shared.js";
 import { type BotOverride, applyOverrides, customSlug, mergeDirectory } from "./bots.js";
 import { baselineBots, baselineDate } from "./directory.js";
@@ -159,17 +163,18 @@ async function readBotOverrides(ctx: PluginContext): Promise<BotOverride[]> {
 /**
  * The saved config, importing EmDash's robots.txt first when nothing is saved
  * yet. compareAndSet(null) only creates when absent, so a concurrent import
- * from the middleware (or another admin tab) wins cleanly.
+ * from the middleware (or another admin tab) wins cleanly. `changed`: this
+ * call stored the rules (an import or a migration), so the served file may differ.
  */
-async function loadOrImport(ctx: PluginContext, database: string): Promise<RobotsConfig> {
+async function loadOrImport(ctx: PluginContext, database: string): Promise<{ config: RobotsConfig; changed: boolean }> {
 	const stored = await ctx.settings.get<Partial<RobotsConfig>>(CONFIG_SETTING);
 	if (stored && !stored.version) {
 		// Saved before 0.7.0: store the migrated shape once, and say what's new.
 		const migrated = { ...normalizeConfig(stored), importNotes: [...ADDITIONS_NOTES] };
 		await ctx.settings.set(CONFIG_SETTING, migrated);
-		return migrated;
+		return { config: migrated, changed: true };
 	}
-	if (stored) return normalizeConfig(stored);
+	if (stored) return { config: normalizeConfig(stored), changed: false };
 	const siteUrl = siteUrlOf(ctx);
 	const { text } = await emdashServed(database, siteUrl);
 	const { config } = importRobots(text, siteUrl || "https://example.com");
@@ -177,9 +182,34 @@ async function loadOrImport(ctx: PluginContext, database: string): Promise<Robot
 	if (result.applied) {
 		await pushHistory(ctx, { at: new Date().toISOString(), label: "Imported from EmDash's robots.txt", config }).catch(() => undefined);
 		ctx.log.info("Robots: imported EmDash's robots.txt", { rules: config.rules.length, mode: config.importMode });
-		return config;
+		return { config, changed: true };
 	}
-	return normalizeConfig(await ctx.settings.get<Partial<RobotsConfig>>(CONFIG_SETTING));
+	// Another import won (the middleware's, or another admin tab's): it served or cleared its own result.
+	return { config: normalizeConfig(await ctx.settings.get<Partial<RobotsConfig>>(CONFIG_SETTING)), changed: false };
+}
+
+const ROBOTS_TXT: PurgeScope = { pathPrefixes: ["/robots.txt"] };
+
+/**
+ * Clear /robots.txt at the edge after robots/get stored new rules (a crawler
+ * preset's members changed, the first import, a migration). robots/get is
+ * declared read-only: the admin page loads it with GET, which the middleware
+ * never counts as a save, and a POST to it isn't one either. So it clears what
+ * it changed itself, as the video routes do (src/videos/module.ts
+ * clearVideoPages). The rules are read on every render (src/robots/middleware.ts),
+ * so one purge is enough; a refused one (the account's purge rate limit, or a
+ * timeout) is kept for the settling purge. Never fails the caller.
+ */
+async function clearServedRobots(ctx: PluginContext, database: string): Promise<void> {
+	try {
+		const outcome = await withDeadline(purgeOutcome(ROBOTS_TXT), DEADLINES.purgeMs, "clearing robots.txt").catch(() => "refused" as const);
+		if (outcome !== "refused") return;
+		const db = (await workerEnv().catch(() => ({}) as Record<string, unknown>))[database] as D1Database | undefined;
+		if (db) await settleLater(db, ROBOTS_TXT);
+		ctx.log.warn("Robots: clearing robots.txt at the edge was refused; it's kept for the settling purge");
+	} catch (error) {
+		ctx.log.warn("Robots: couldn't clear robots.txt at the edge", { error: String(error) });
+	}
 }
 
 async function persist(ctx: PluginContext, database: string, config: RobotsConfig, label: string, by: string | undefined) {
@@ -227,17 +257,21 @@ export function robotsModule(options: RobotsOptions) {
 	const database = options.database ?? "DB";
 
 	const routes = {
-		/** Saved rules (importing EmDash's file on first load), the served file, EmDash's original, history and sync status. */
-		"robots/get": {
+		/**
+		 * Saved rules (importing EmDash's file on first load), the served file, EmDash's original, history and sync status.
+		 * Read-only for the page cache (the admin page loads it on every visit); it clears /robots.txt itself when it stores new rules.
+		 */
+		"robots/get": readOnlyRoute({
 			permission: "plugins:manage" as const,
 			handler: async (ctx: PluginContext) => {
 				await requireFeature(ctx, "robots");
-				const loaded = await loadOrImport(ctx, database);
+				const { config: loaded, changed: imported } = await loadOrImport(ctx, database);
 				// Rules made from a crawler preset follow the preset's current members.
 				const [overlays, overrides] = await Promise.all([readOverlays(ctx), readBotOverrides(ctx)]);
 				const refreshed = refreshGroups(loaded, applyOverrides(mergeDirectory(await baselineBots(), overlays), overrides));
 				let groupChanges: GroupChange[] = [];
-				if (JSON.stringify(refreshed.config.rules) !== JSON.stringify(loaded.rules)) {
+				const regrouped = JSON.stringify(refreshed.config.rules) !== JSON.stringify(loaded.rules);
+				if (regrouped) {
 					await ctx.settings.set(CONFIG_SETTING, refreshed.config);
 					groupChanges = refreshed.changes;
 					if (groupChanges.length) {
@@ -245,6 +279,7 @@ export function robotsModule(options: RobotsOptions) {
 						ctx.log.info("Robots: rules updated to the current crawler groups", { rules: groupChanges.length });
 					}
 				}
+				if (imported || regrouped) await clearServedRobots(ctx, database);
 				const config: RobotsConfig = { ...refreshed.config, automatic: automaticFrom(await ctxFeatures(ctx), await emdashAiTraining(database)) };
 				const siteUrl = siteUrlOf(ctx);
 				const { tokenSource, tokenUnreadable } = await radarTokenStatus(ctx);
@@ -276,10 +311,10 @@ export function robotsModule(options: RobotsOptions) {
 					},
 				};
 			},
-		},
+		}),
 
-		/** Close the "your sitemap isn't listed" note for good. */
-		"robots/dismiss-sitemap-note": definePluginRoute({
+		/** Close the "your sitemap isn't listed" note for good (an admin note: no page shows it). */
+		"robots/dismiss-sitemap-note": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -287,17 +322,17 @@ export function robotsModule(options: RobotsOptions) {
 				await ctx.kv.set(SITEMAP_NOTE_KEY, true);
 				return { dismissed: true };
 			},
-		}),
+		})),
 
 		/** The crawler directory (bundled baseline + Radar overlay + this site's verifications, renames and custom bots). */
-		"robots/bots": {
+		"robots/bots": readOnlyRoute({
 			permission: "plugins:manage" as const,
 			handler: async (ctx: PluginContext) => {
 				await requireFeature(ctx, "robots");
 				const [overlays, overrides] = await Promise.all([readOverlays(ctx), readBotOverrides(ctx)]);
 				return { bots: applyOverrides(mergeDirectory(await baselineBots(), overlays), overrides) };
 			},
-		},
+		}),
 
 		"robots/save": definePluginRoute({
 			permission: "plugins:manage",
@@ -340,8 +375,11 @@ export function robotsModule(options: RobotsOptions) {
 			},
 		}),
 
-		/** Verify, rename, add, edit or delete crawler directory entries for this site. */
-		"robots/bot": definePluginRoute({
+		/**
+		 * Verify, rename, add, edit or delete crawler directory entries for this site. The served file doesn't change:
+		 * rules made from a preset follow it on the next robots/get, which clears /robots.txt itself.
+		 */
+		"robots/bot": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -403,10 +441,10 @@ export function robotsModule(options: RobotsOptions) {
 				const [overlays, overrides] = await Promise.all([readOverlays(ctx), readBotOverrides(ctx)]);
 				return { bots: applyOverrides(mergeDirectory(await baselineBots(), overlays), overrides) };
 			},
-		}),
+		})),
 
-		/** Save (or remove) the Radar API token. It's a secret setting, so EmDash stores it encrypted. */
-		"robots/radar-token": definePluginRoute({
+		/** Save (or remove) the Radar API token. It's a secret setting, so EmDash stores it encrypted (no page shows it). */
+		"robots/radar-token": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -420,10 +458,10 @@ export function robotsModule(options: RobotsOptions) {
 				const { tokenSource, tokenUnreadable } = await radarTokenStatus(ctx);
 				return { tokenSource, tokenConfigured: Boolean(tokenSource), tokenUnreadable };
 			},
-		}),
+		})),
 
-		/** Refresh the crawler directory from Cloudflare Radar now. */
-		"robots/refresh": definePluginRoute({
+		/** Refresh the crawler directory from Cloudflare Radar now (like robots/bot, it changes the directory, not the served file). */
+		"robots/refresh": readOnlyRoute(definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
 			request: { body: "json" },
@@ -435,7 +473,7 @@ export function robotsModule(options: RobotsOptions) {
 					throw PluginRouteError.badRequest(error instanceof Error ? error.message : "Radar sync failed");
 				}
 			},
-		}),
+		})),
 	};
 
 	return { routes };

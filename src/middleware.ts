@@ -82,6 +82,8 @@ export interface CoywolfPackMiddlewareOptions {
 const PASS_THROUGH = /^\/(_astro\/|_image(\/|$))/;
 /** EmDash's site settings API (POST saves General, SEO, Social…). */
 const EMDASH_SETTINGS_API = "/_emdash/api/settings";
+/** EmDash's Change domain (Settings → General) when it checks the new address first: it saves the Site URL. */
+const EMDASH_DOMAIN_API = "/_emdash/api/settings/domain";
 /** Largest redirect save body read for its sources (redirects/import takes up to 2 MiB). */
 const REDIRECT_BODY_MAX = 2 * 1024 * 1024 + 64 * 1024;
 /** EmDash admin pages (not its API): the pack adds its admin enhancements (step-by-step guides on the plugin Settings page). */
@@ -167,33 +169,36 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			method !== "GET" && method !== "HEAD" && context.url.pathname.startsWith("/_emdash/api/")
 				? watchInvalidation((context as unknown as { cache?: Parameters<typeof watchInvalidation>[0] }).cache)
 				: null;
-		// A save with SEO settings can change /robots.txt; one without them doesn't touch the settings generation. (EmDash's
-		// General, SEO and Social pages each send every setting but staging, so all three carry `seo` once it's set.)
+		// A save with SEO settings or the Site URL can change /robots.txt; one without them doesn't touch the settings
+		// generation. (EmDash's General, SEO and Social pages each send every setting but staging, so all three carry `seo`
+		// and `url` once they're set; Change domain sends `url` alone, or goes through EMDASH_DOMAIN_API.)
 		// A staging change (EmDash's Site Status: Go live, or back to staging, sent on its own) changes every page's robots tag.
 		// A copy of the body, read only after EmDash has accepted the save (it checks permissions after this middleware).
 		const settingsLength = Number(context.request.headers.get("content-length"));
 		const settingsCopy = method === "POST" && context.url.pathname === EMDASH_SETTINGS_API && settingsLength > 0 && settingsLength <= 64 * 1024 ? context.request.clone() : null;
-		const savedKeys = async (response: Response): Promise<{ seo: boolean; staging: boolean }> => {
-			if (!settingsCopy || response.status >= 400) return { seo: false, staging: false };
+		const savedKeys = async (response: Response): Promise<{ robots: boolean; staging: boolean }> => {
+			if (response.status >= 400) return { robots: false, staging: false };
+			if (method === "POST" && context.url.pathname === EMDASH_DOMAIN_API) return { robots: true, staging: false };
+			if (!settingsCopy) return { robots: false, staging: false };
 			return settingsCopy
 				.json()
-				.then((body: unknown) => (body && typeof body === "object" ? { seo: "seo" in body, staging: "staging" in body } : { seo: false, staging: false }))
-				.catch(() => ({ seo: false, staging: false }));
+				.then((body: unknown) => (body && typeof body === "object" ? { robots: "seo" in body || "url" in body, staging: "staging" in body } : { robots: false, staging: false }))
+				.catch(() => ({ robots: false, staging: false }));
 		};
 		const afterWrite = async (response: Response): Promise<Response> => {
 			const settingsKeys = await savedKeys(response);
-			const seoSave = settingsKeys.seo;
-			// EmDash's SEO settings change /robots.txt whichever file serves it: the pack's (Robots.txt Rules on) carries
-			// their "Disallow AI training" lines, and EmDash's own (Robots.txt Rules off) is built from their robots.txt
-			// setting. Both files read their settings on every render and are kept at the edge for a day, and Cloudflare's purge
-			// by URL doesn't reach Workers Cache: clear /robots.txt here now and (settling purge) again five minutes later.
+			// EmDash's SEO settings and Site URL change /robots.txt whichever file serves it: the pack's (Robots.txt Rules on)
+			// carries the SEO settings' "Disallow AI training" lines, EmDash's own (Robots.txt Rules off) is built from their
+			// robots.txt setting, and both name the sitemap at the Site URL. Both files read their settings on every render and
+			// are kept at the edge for a day, and Cloudflare's purge by URL doesn't reach Workers Cache: clear /robots.txt here
+			// now and (settling purge) again five minutes later.
 			// Going live (or back to staging) changes every page's robots tag: EmDash renders noindex, nofollow on every page
 			// while the site is in staging, and only clears pages tagged with its settings. Clear every cached page (which
 			// restarts warming), and again once every isolate has the new settings (settling purge).
 			// One scope for both, recorded and purged once: two recordSettingsChange calls at once would each rewrite the
 			// row from the same read, and the last one could drop the other's settling purge.
 			const settingsScope =
-				response.status < 400 ? mergeScopes(seoSave ? { pathPrefixes: ["/robots.txt"] } : null, settingsKeys.staging ? { purgeEverything: true } : null) : null;
+				response.status < 400 ? mergeScopes(settingsKeys.robots ? { pathPrefixes: ["/robots.txt"] } : null, settingsKeys.staging ? { purgeEverything: true } : null) : null;
 			if (settingsScope) {
 				waitUntil(
 					(db ? recordSettingsChange(db, settingsScope) : Promise.resolve())
