@@ -8,15 +8,17 @@
  * the robots.txt EmDash was serving into equivalent rules and saves them
  * with an insert-if-absent, so concurrent first requests can't import twice.
  *
- * The rules are read on every render, with no per-isolate cache. The Worker
- * renders /robots.txt only when the edge copy is missing (it's kept a day and
- * cleared after every save), so a cache would save little, and after a save it
- * let other isolates put the old rules back at the edge within seconds of the
- * purge, until the settling purge five minutes later (coywolf.com, 2026-11-12).
+ * The rules are read on every render, with no per-isolate cache. With route
+ * caching on, the Worker renders /robots.txt only when the edge copy is missing
+ * (it's kept a day and cleared after every save), so a cache would save little,
+ * and after a save it let other isolates put the old rules back at the edge
+ * within seconds of the purge, until the settling purge five minutes later
+ * (coywolf.com, 2026-11-12). Without route caching, each request costs one
+ * small indexed read, less than any page render.
  */
 import { PLUGIN_ID, siteFeatures } from "../core/features.js";
 import { noteReadFailure } from "../core/read-failures.js";
-import { sharedRead, sharedSlot } from "../core/single-flight.js";
+import { DEADLINES, sharedRead, sharedSlot, withDeadline } from "../core/single-flight.js";
 import { afterResponse } from "../shared.js";
 import { emdashRobots, importRobots } from "./importer.js";
 import { type RobotsConfig, automaticFrom, generate, normalizeConfig } from "./rules.js";
@@ -104,10 +106,12 @@ export async function serveRobots(url: URL, method: string, env: Record<string, 
 	try {
 		// The rules, the Site URL and EmDash's SEO settings in one query. The rules can be large and are only needed
 		// here, so they stay out of the feature switches' per-request read (core/features.ts).
-		const { results } = await db
-			.prepare("SELECT name, value FROM options WHERE name IN (?, ?, ?)")
-			.bind(CONFIG_OPTION, "site:url", "site:seo")
-			.all<{ name: string; value: string }>();
+		// Bounded like the pack's other D1 reads: a read that never answers serves EmDash's file (off the edge) instead.
+		const { results } = await withDeadline(
+			db.prepare("SELECT name, value FROM options WHERE name IN (?, ?, ?)").bind(CONFIG_OPTION, "site:url", "site:seo").all<{ name: string; value: string }>(),
+			DEADLINES.d1ReadMs,
+			"robots.txt rules",
+		);
 		const parse = (name: string): unknown => {
 			const value = results.find((r) => r.name === name)?.value;
 			if (!value) return null;

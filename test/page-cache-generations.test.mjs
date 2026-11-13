@@ -310,7 +310,7 @@ test("a settings save with SEO settings and a staging change clears everything o
 	assert.equal(recorded, 1, "one settings change recorded, not two rewriting the row from the same read");
 });
 
-test("robots.txt reads its rules on every render: a save in another isolate shows on the next one, so the purge isn't undone", async () => {
+test("robots.txt reads its rules on every render: a save in another isolate shows on the very next render", async () => {
 	const { serveRobots, CONFIG_OPTION } = await import("../src/robots/middleware.ts");
 	const { DEFAULT_CONFIG, EMDASH_MEDIA_PATH } = await import("../src/robots/rules.ts");
 	const db = d1();
