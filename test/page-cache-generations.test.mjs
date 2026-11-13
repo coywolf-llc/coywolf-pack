@@ -293,6 +293,31 @@ test("an SEO save clears /robots.txt with Robots.txt Rules off too (EmDash's own
 	assert.equal(row(other), null, "no settings change recorded");
 });
 
+test("a Site URL change clears /robots.txt (both files name the sitemap at it): a settings save with `url`, or Change domain", async () => {
+	const db = d1();
+	freshIsolate(db);
+	await features.siteFeatures();
+	const savedAt = Date.now();
+	await acceptedSettingsSave({ url: "https://new.example.com" }); // Change domain without the check, or a General save.
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }]);
+	assert.deepEqual(row(db).settle, { pathPrefixes: ["/robots.txt"] });
+	assert.deepEqual(await settleLaterRequest(db, savedAt), [{ pathPrefixes: ["/robots.txt"] }]);
+	// Change domain with the check (its own route): cleared when EmDash accepts it, untouched when it doesn't.
+	const domain = d1();
+	freshIsolate(domain);
+	await features.siteFeatures();
+	const change = () => trackedPost("/_emdash/api/settings/domain", { domain: "new.example.com" });
+	const refused = change();
+	await coywolfPack({}, [])(refused.ctx, async () => Response.json({ error: "Could not verify" }, { status: 400 }));
+	await settled();
+	assert.deepEqual(globalThis.__purges, []);
+	const accepted = change();
+	await coywolfPack({}, [])(accepted.ctx, async () => Response.json({ url: "https://new.example.com" }));
+	await settled();
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }]);
+	assert.equal(accepted.state.pulled, false, "no body to read for it");
+});
+
 test("a settings save with SEO settings and a staging change clears everything once, and settles everything", async () => {
 	const db = d1();
 	// Count the settings generation's writes (recordSettingsChange's upsert).
@@ -330,6 +355,49 @@ test("robots.txt reads its rules on every render: a save in another isolate show
 	// EmDash's "Disallow AI training" (an SEO save, wherever it ran) shows at once too.
 	put("site:seo", { disallowAiTraining: true });
 	assert.ok((await served()).includes("Content-Signal"));
+});
+
+test("Robots page loads aren't saves: robots/get clears /robots.txt itself only when it stores rules (here, the first import)", async () => {
+	const { robotsModule } = await import("../src/robots/module.ts");
+	const { readOnlyRouteNames } = await import("../src/core/routes.ts");
+	const { purgesAfter, registerReadOnlyRoutes } = await import("../src/pageCache/lib.ts");
+	const { routes } = robotsModule({});
+	registerReadOnlyRoutes(readOnlyRouteNames(routes));
+	const pack = "/_emdash/api/plugins/coywolf-pack/";
+	// A POST to them (a script, an agent) isn't a save either; the rules saves still are.
+	for (const route of ["robots/get", "robots/bots", "robots/bot", "robots/dismiss-sitemap-note", "robots/radar-token", "robots/refresh"]) assert.equal(purgesAfter("POST", pack + route), false, route);
+	for (const route of ["robots/save", "robots/restore", "robots/reset"]) assert.equal(purgesAfter("POST", pack + route), true, route);
+	const db = d1();
+	freshIsolate(db);
+	const store = new Map([["features", { robots: true }]]);
+	const ctx = {
+		settings: {
+			get: async (key) => store.get(key) ?? null,
+			set: async (key, value) => void store.set(key, value),
+			delete: async (key) => void store.delete(key),
+			compareAndSet: async (key, expected, value) => ((store.get(key) ?? null) === expected ? (store.set(key, value), { applied: true }) : { applied: false }),
+		},
+		storage: {},
+		kv: { get: async () => null, set: async () => undefined },
+		log: { info() {}, warn() {}, error() {} },
+		site: { url: "https://example.com" },
+	};
+	const load = () => routes["robots/get"].handler(ctx);
+	await load();
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }], "the import changed the rules: cleared once");
+	assert.equal(row(db), null, "no settings change recorded (no settling purge: the rules are read on every render)");
+	globalThis.__purges = [];
+	await load();
+	assert.deepEqual(globalThis.__purges, [], "a load that changes nothing clears nothing");
+	// A refused purge (the account's rate limit) is kept for the settling purge.
+	store.delete("robots.config");
+	globalThis.__purgeOk = false;
+	try {
+		await load();
+	} finally {
+		globalThis.__purgeOk = true;
+	}
+	assert.deepEqual(row(db).settle, { pathPrefixes: ["/robots.txt"] });
 });
 
 test("a robots.txt rules save clears /robots.txt now and again once settled", async () => {
