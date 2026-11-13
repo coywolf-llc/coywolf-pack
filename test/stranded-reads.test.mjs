@@ -395,6 +395,24 @@ test("robots.txt: an import of EmDash's file that never answers doesn't hang the
 	assert.match(warnings[0], /shared read stalled: importing EmDash's robots.txt/);
 });
 
+test("robots.txt: a rules read that never answers gives up at its deadline (EmDash's file answers, kept off the edge)", async (t) => {
+	const { serveRobots } = await import("../src/robots/middleware.ts");
+	const { readFailures } = await import("../src/core/read-failures.ts");
+	const db = d1();
+	db.hangOn = { re: /WHERE name IN/, times: 1 }; // The rules read (every render reads it) never answers.
+	const clock = mockClock(t);
+	const logs = captureLogs(t);
+	const before = readFailures();
+	const served = track(serveRobots(new URL("https://example.com/robots.txt"), "GET", { DB: db }));
+	await clock.advance(DEADLINES.d1ReadMs - 1);
+	assert.equal(served.settled, false, "still waiting 1 ms before the deadline");
+	await clock.advance(1);
+	assert.equal(served.settled, true);
+	assert.equal(served.value, undefined, "EmDash's own robots.txt answers instead");
+	assert.ok(readFailures() > before, "noted, so the middleware keeps it off the edge");
+	assert.match(logs.error[0], /could not load rules/);
+});
+
 // ── Update check (src/updates/check.ts) ──────────────────────────
 
 test("update check: a check whose npm request never answers doesn't hang the next admin page", LIMIT, async () => {

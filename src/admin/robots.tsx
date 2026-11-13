@@ -634,7 +634,7 @@ export function RobotsPage() {
 			const result = await post<{ config: RobotsConfig; preview: string; warnings: Finding[] }>("save", { config: next, label });
 			const page = await get<PageData>("get", "Could not reload");
 			setData({ ...page, config: result.config, preview: result.preview, warnings: result.warnings ?? [] });
-			setNotice(message ?? "Saved. /robots.txt now serves this version (other Worker instances pick it up within a minute).");
+			setNotice(message ?? "Saved. /robots.txt now serves this version.");
 			setError(undefined);
 		} finally {
 			setBusy(false);
