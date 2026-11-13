@@ -315,6 +315,7 @@ test("a Site URL change clears /robots.txt (both files name the sitemap at it): 
 	await coywolfPack({}, [])(accepted.ctx, async () => Response.json({ url: "https://new.example.com" }));
 	await settled();
 	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }]);
+	assert.deepEqual(row(domain).settle, { pathPrefixes: ["/robots.txt"] }, "and settled, like other settings saves");
 	assert.equal(accepted.state.pulled, false, "no body to read for it");
 });
 
@@ -357,7 +358,7 @@ test("robots.txt reads its rules on every render: a save in another isolate show
 	assert.ok((await served()).includes("Content-Signal"));
 });
 
-test("Robots page loads aren't saves: robots/get clears /robots.txt itself only when it stores rules (here, the first import)", async () => {
+test("Robots page loads aren't saves: robots/get clears /robots.txt itself only when it stores rules (the first import, a preset update)", async () => {
 	const { robotsModule } = await import("../src/robots/module.ts");
 	const { readOnlyRouteNames } = await import("../src/core/routes.ts");
 	const { purgesAfter, registerReadOnlyRoutes } = await import("../src/pageCache/lib.ts");
@@ -389,6 +390,16 @@ test("Robots page loads aren't saves: robots/get clears /robots.txt itself only 
 	globalThis.__purges = [];
 	await load();
 	assert.deepEqual(globalThis.__purges, [], "a load that changes nothing clears nothing");
+	// A crawler preset's members changed: a rule made from it lists fewer crawlers than the preset now does.
+	const { DEFAULT_CONFIG, PRESETS } = await import("../src/robots/rules.ts");
+	const preset = PRESETS.find((p) => p.group === "ai_search");
+	store.set("robots.config", { ...DEFAULT_CONFIG, rules: [{ ...preset, id: "ai", enabled: true, agents: preset.agents.slice(0, 1) }] });
+	const page = await load();
+	assert.ok(page.groupChanges.length > 0, "the rule follows the preset");
+	assert.deepEqual(globalThis.__purges, [{ pathPrefixes: ["/robots.txt"] }], "and robots.txt is cleared");
+	globalThis.__purges = [];
+	await load();
+	assert.deepEqual(globalThis.__purges, [], "once: the next load finds the rule up to date");
 	// A refused purge (the account's rate limit) is kept for the settling purge.
 	store.delete("robots.config");
 	globalThis.__purgeOk = false;
