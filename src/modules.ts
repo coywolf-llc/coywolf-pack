@@ -21,6 +21,7 @@ import { filesMiddleware, filesPack } from "./files/pack.js";
 import { formUploadsPack } from "./formUploads/pack.js";
 import { discoveryMiddleware, discoveryPack } from "./discovery/pack.js";
 import { linksPack } from "./links/pack.js";
+import { paginationMiddleware, paginationPack } from "./pagination/pack.js";
 import { redirectsMiddleware, redirectsPack } from "./redirects/pack.js";
 import { schemaPack } from "./schema/pack.js";
 import { searchLiveMiddleware, searchPack, searchRateLimitMiddleware } from "./search/pack.js";
@@ -43,6 +44,7 @@ export const MODULES: Factory[] = [
 	(o) => (o.wpImport === false ? null : wpImportPack()),
 	(o) => (o.headings === false ? null : headingsPack(o.headings ?? {})),
 	(o) => (o.breadcrumbs === false ? null : breadcrumbsPack(o.breadcrumbs ?? {})),
+	(o) => (o.pagination === false ? null : paginationPack()),
 	(o) => (o.codeBlocks === false ? null : codeBlocksPack(o.codeBlocks ?? {})),
 	(o) => (o.schema === false ? null : schemaPack(o.schema ?? {})),
 	(o) => (o.files === false ? null : filesPack(o.files ?? {})),
@@ -67,4 +69,4 @@ export const MODULES: Factory[] = [
 	(o) => (o.socialImages === false ? null : socialImagesPack(o.socialImages ?? {})),
 ];
 
-export const MIDDLEWARE: PackMiddleware[] = [pageCacheMiddleware, strayRobotsMiddleware, imagesMiddleware, backupsDownloadMiddleware, redirectsMiddleware, robotsMiddleware, filesMiddleware, searchLiveMiddleware, searchRateLimitMiddleware, ...discoveryMiddleware, videosSitemapMiddleware, videosCaptionsMiddleware];
+export const MIDDLEWARE: PackMiddleware[] = [pageCacheMiddleware, strayRobotsMiddleware, imagesMiddleware, backupsDownloadMiddleware, redirectsMiddleware, paginationMiddleware, robotsMiddleware, filesMiddleware, searchLiveMiddleware, searchRateLimitMiddleware, ...discoveryMiddleware, videosSitemapMiddleware, videosCaptionsMiddleware];

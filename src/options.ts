@@ -24,6 +24,8 @@ export interface CoywolfOptions {
 	redirects?: RedirectsOptions | false;
 	headings?: HeadingsOptions | false;
 	breadcrumbs?: BreadcrumbsOptions | false;
+	/** Pagination: numbered page links and /N/ page URLs for the theme's archives (no options; see docs/pagination.md). `false` leaves the module out. */
+	pagination?: Record<string, never> | false;
 	codeBlocks?: CodeBlocksOptions | false;
 	schema?: SchemaOptions | false;
 	files?: FilesOptions | false;
