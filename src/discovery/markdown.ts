@@ -8,7 +8,9 @@
  * depth, with strong/em/code/strike-through and link marks), images, code,
  * horizontal breaks, and tables. Anything else (embeds, buttons, custom
  * plugin blocks) is skipped rather than guessed at, unless the caller passes
- * `unknownBlock` (Buttondown Drafts does, for its email bodies).
+ * `unknownBlock` (Buttondown Drafts does, for its email bodies). `rendered`
+ * lets a caller change a block's finished Markdown (Buttondown Drafts
+ * escapes template code there); without it the output is as before.
  */
 import { cdnOriginalUrl } from "../images/lib.js";
 
@@ -25,6 +27,11 @@ export interface MarkdownOptions {
 	image?: (url: string, block: Node) => string;
 	/** Markdown for a block type this converter doesn't know (null: left out). Default: every such block is left out. */
 	unknownBlock?: (block: Node) => string | null;
+	/**
+	 * Called with each block's finished Markdown (each list item on its own) and the block. What it returns is used.
+	 * Default: the Markdown as it is. Buttondown Drafts escapes template code with it.
+	 */
+	rendered?: (markdown: string, block: Node) => string;
 }
 
 export interface Frontmatter {
@@ -228,7 +235,8 @@ export function portableTextToMarkdown(value: unknown, options: MarkdownOptions 
 		if (!isRecord(block)) continue;
 		if (block._type === "block" && typeof block.listItem === "string") {
 			list ??= [];
-			list.push(renderListItem(block, listState, options));
+			const item = renderListItem(block, listState, options);
+			list.push(options.rendered ? options.rendered(item, block) : item);
 			continue;
 		}
 		closeList();
@@ -253,6 +261,7 @@ export function portableTextToMarkdown(value: unknown, options: MarkdownOptions 
 				// Unknown block types are skipped, unless the caller renders them.
 				rendered = options.unknownBlock ? options.unknownBlock(block) : null;
 		}
+		if (rendered && options.rendered) rendered = options.rendered(rendered, block);
 		if (rendered) parts.push(rendered);
 	}
 	closeList();

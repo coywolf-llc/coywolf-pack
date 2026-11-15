@@ -2,7 +2,7 @@
 //
 // The email Buttondown Drafts writes for a post (src/buttondown/body.ts, src/buttondown/blocks.ts): the
 // plaintext editor-mode comment and no frontmatter, email-safe images, absolute links, the Pack's blocks as
-// Markdown (a placeholder and a warning for anything else), the footer link, the template-code warning, the
+// Markdown (a placeholder and a warning for anything else), the footer link, template code escaped for Buttondown (verbatim), the
 // fields' rules and a hash that changes with any of them.
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -202,10 +202,210 @@ test("rich text keeps bold and italic: **bold**, <strong>, <b>, <em>, <i>; every
 	assert.equal(richToMarkdown('a<br>b <img src="x"> \u0001c\u0002', abs), "a  \nb c");
 });
 
-test("template code gets a warning", async () => {
-	const built = await buildEmail(source({ bodyFields: [[{ _type: "code", _key: "c", code: "{{ example }} and {% if x %}" }]] }));
-	assert.ok(built.warnings.some((w) => w.startsWith("Contains template code")));
+// What Buttondown's Django templating does to a body, as far as the escape goes (django.template.base Lexer): a tag
+// never crosses a line; inside a verbatim block everything is text until the one tag that closes it; `templatetag`
+// prints a bracket pair. A variable or comment outside verbatim is "run": `ran` collects it. Any other tag throws.
+function django(body, ran = []) {
+	const names = { openvariable: "{{", closevariable: "}}", openblock: "{%", closeblock: "%}", opencomment: "{#", closecomment: "#}", openbrace: "{", closebrace: "}" };
+	let out = "";
+	let verbatim = "";
+	let last = 0;
+	const text = (t) => (out += t);
+	for (const m of body.matchAll(/\{%[^\n]*?%\}|\{\{[^\n]*?\}\}|\{#[^\n]*?#\}/g)) {
+		text(body.slice(last, m.index));
+		last = m.index + m[0].length;
+		const token = m[0];
+		const content = token.slice(2, -2).trim();
+		if (verbatim) {
+			if (token.startsWith("{%") && content === verbatim) verbatim = "";
+			else text(token);
+		} else if (!token.startsWith("{%")) ran.push(token);
+		else if (content === "verbatim" || content.startsWith("verbatim ")) verbatim = `end${content}`;
+		else if (/^templatetag \w+$/.test(content) && names[content.slice(12)]) text(names[content.slice(12)]);
+		else throw new Error(`Django would run ${token}`);
+	}
+	assert.equal(verbatim, "", "a verbatim block is never left open");
+	return out + body.slice(last);
+}
+const V = (text) => `{% verbatim pack %}${text}{% endverbatim pack %}`;
+const noFooter = (bodyFields, extra = {}) => source({ bodyFields: [bodyFields], footerLink: false, ...extra });
+/** The email body for the blocks, the same body as Buttondown prints it, and whether Django ran anything. */
+async function escaped(blocks) {
+	const built = await buildEmail(noFooter(blocks));
+	const ran = [];
+	const printed = django(built.fields.body, ran);
+	assert.deepEqual(ran, [], "nothing is run");
+	assert.deepEqual(built.warnings, [], "no warning: it's handled");
+	return { body: built.fields.body.slice(MODE_COMMENT.length + 1, -1), printed: printed.slice(MODE_COMMENT.length + 1, -1), hash: built.hash };
+}
+
+test("template code: a code block with {{ x }} has its code wrapped in verbatim, first line to last, inside the fence", async () => {
+	// The live case (2026-11-15): Buttondown printed this line without "{{ example }}".
+	const one = await escaped([{ _type: "code", _key: "c", language: "html", code: "<!-- Template code test: {{ example }} -->" }]);
+	assert.equal(one.body, "```html\n{% verbatim pack %}<!-- Template code test: {{ example }} -->{% endverbatim pack %}\n```");
+	assert.equal(one.printed, "```html\n<!-- Template code test: {{ example }} -->\n```", "Buttondown prints the code as written");
+	const many = await escaped([{ _type: "code", _key: "c", filename: "page.html", code: "<ul>\n{% for x in list %}\n\n  <li>{{ x }}</li>\n{% endfor %}\n</ul>\n" }]);
+	assert.equal(many.body, "page.html\n\n```\n{% verbatim pack %}<ul>\n{% for x in list %}\n\n  <li>{{ x }}</li>\n{% endfor %}\n</ul>{% endverbatim pack %}\n```", "one block around the code: the fence lines, the blank line and the indent stay");
+	assert.equal(many.printed, "page.html\n\n```\n<ul>\n{% for x in list %}\n\n  <li>{{ x }}</li>\n{% endfor %}\n</ul>\n```");
+	// A longer fence (the code has ``` in it) is still the fence.
+	const fenced = await escaped([{ _type: "code", _key: "c", code: "```\n{{ x }}\n```" }]);
+	assert.equal(fenced.body, "````\n{% verbatim pack %}```\n{{ x }}\n```{% endverbatim pack %}\n````");
+});
+
+test("template code: a paragraph with {% if %}, and one with {# c #}, are wrapped on their own line (no line added)", async () => {
+	const tag = await escaped([block([span("Before.")]), block([span("Use {% if user %}hi{% endif %} here.")]), block([span("After.")])]);
+	assert.equal(tag.body, `Before.\n\n${V("Use {% if user %}hi{% endif %} here.")}\n\nAfter.`);
+	assert.equal(tag.printed, "Before.\n\nUse {% if user %}hi{% endif %} here.\n\nAfter.");
+	const comment = await escaped([block([span("A comment is {# c #}.")])]);
+	assert.equal(comment.body, V("A comment is {# c #}."));
+	assert.equal(comment.printed, "A comment is {# c #}.");
+	// A hard break: each line with template code is wrapped by itself, and the break's two spaces stay at the line's end.
+	const lines = await escaped([block([span("One {{ a }}\nTwo\nThree {{ b }}")])]);
+	assert.equal(lines.body, `${V("One {{ a }}")}  \nTwo  \n${V("Three {{ b }}")}`);
+	assert.equal(lines.printed, "One {{ a }}  \nTwo  \nThree {{ b }}");
+});
+
+test("template code: inline code, a heading, a quote line and an image's alt text", async () => {
+	const code = await escaped([block([span("Type "), span("{{ x }}", ["code"]), span(" to print "), span("it", ["strong"]), span(".")])]);
+	assert.equal(code.body, V("Type `{{ x }}` to print **it**."));
+	assert.equal(code.printed, "Type `{{ x }}` to print **it**.");
+	const heading = await escaped([block([span("The {% url %} tag")], { style: "h2" })]);
+	assert.equal(heading.body, `## ${V("The {% url %} tag")}`, "the hashes stay in front");
+	const quote = await escaped([block([span("Plain\n{{ x }} quoted")], { style: "blockquote" })]);
+	assert.equal(quote.body, `> Plain  \n> ${V("{{ x }} quoted")}`, "the quote mark stays in front");
+	assert.equal(quote.printed, "> Plain  \n> {{ x }} quoted");
+	const img = await escaped([image("https://x.example/a.jpg", { alt: "{{ x }}" })]);
+	assert.equal(img.printed, "![{{ x }}](https://x.example/a.jpg)");
+});
+
+test("template code: a table cell is wrapped between its pipes; the other cells and the rule row are untouched", async () => {
+	const cell = (text, marks = []) => ({ _type: "tableCell", _key: text, content: [span(text, marks)] });
+	const table = { _type: "table", _key: "t", rows: [{ _type: "tableRow", cells: [cell("Tag"), cell("Prints")] }, { _type: "tableRow", cells: [cell("{{ a|upper }}", ["code"]), cell("A")] }, { _type: "tableRow", cells: [cell("x"), cell("{% now %} and {")] }] };
+	const out = await escaped([table]);
+	assert.equal(out.body, ["| Tag | Prints |", "| --- | --- |", `| ${V("`{{ a\\|upper }}`")} | A |`, `| x | ${"{% templatetag openblock %} now {% templatetag closeblock %} and {% templatetag openbrace %}"} |`].join("\n"));
+	assert.equal(out.printed, ["| Tag | Prints |", "| --- | --- |", "| `{{ a\\|upper }}` | A |", "| x | {% now %} and { |"].join("\n"), "the pipes are where they were");
+});
+
+test("template code: a list item is wrapped after its marker, nested and numbered ones too", async () => {
+	const item = (text, extra = {}) => block([span(text)], { listItem: "bullet", level: 1, ...extra });
+	const out = await escaped([item("Plain"), item("{{ a }} first"), item("Nested {% b %}\nsecond line {# c #}", { level: 2 }), item("One {{ n }}", { listItem: "number" })]);
+	assert.equal(out.body, ["- Plain", `- ${V("{{ a }} first")}`, `   - ${V("Nested {% b %}")}  `, `     ${V("second line {# c #}")}`, `1. ${V("One {{ n }}")}`].join("\n"));
+	assert.equal(out.printed, ["- Plain", "- {{ a }} first", "   - Nested {% b %}  ", "     second line {# c #}", "1. One {{ n }}"].join("\n"));
+});
+
+test("template code: a note fallback (and the other block fallbacks) is wrapped on its text line, inside the quote", async () => {
+	const out = await escaped([{ _type: "coywolf-note", _key: "n", variant: "tip", body: "Use **{{ x }}** here.\nSecond line." }, { _type: "coywolf-review", _key: "r", itemName: "Jinja {% raw %}", pros: "Has {{ vars }}\nFast" }, { _type: "button", _key: "b", url: "/x/", text: "Get {{ it }}" }]);
+	assert.equal(out.body, ["> **Tip**", ">", `> ${V("Use **{{ x }}** here.")}  `, "> Second line.", "", V("**Jinja {% raw %}**"), "", "**What I liked most**", "", `- ${V("Has {{ vars }}")}`, "- Fast", "", V("[Get {{ it }}](https://coywolf.com/x/)")].join("\n"));
+	assert.equal(out.printed, ["> **Tip**", ">", "> Use **{{ x }}** here.  ", "> Second line.", "", "**Jinja {% raw %}**", "", "**What I liked most**", "", "- Has {{ vars }}", "- Fast", "", "[Get {{ it }}](https://coywolf.com/x/)"].join("\n"));
+});
+
+test("template code: text without it stays unwrapped, and a variable added in Buttondown still runs", async () => {
+	const plain = [block([span("A plain paragraph with { one brace }, a closing }} and 100%.")]), { _type: "code", _key: "c", code: "const a = { b: 1 };" }, block([span("Item")], { listItem: "bullet", level: 1 })];
+	const built = await buildEmail(noFooter(plain));
+	assert.equal(built.fields.body, `${MODE_COMMENT}\nA plain paragraph with { one brace }, a closing }} and 100%.\n\n\`\`\`\nconst a = { b: 1 };\n\`\`\`\n\n- Item\n`);
+	assert.doesNotMatch(built.fields.body, /verbatim|templatetag/);
+	// Only the piece with template code is wrapped: the paragraphs around it are as they were.
+	const mixed = await buildEmail(noFooter([block([span("Hello.")]), block([span("Print {{ x }}.")]), block([span("Bye.")])]));
+	assert.equal(mixed.fields.body, `${MODE_COMMENT}\nHello.\n\n${V("Print {{ x }}.")}\n\nBye.\n`);
+	// What Jon adds to the draft in Buttondown is outside every wrap: Django still runs it.
+	const ran = [];
+	django(`${mixed.fields.body}\nHi {{ subscriber.metadata.first_name }}!\n`, ran);
+	assert.deepEqual(ran, ["{{ subscriber.metadata.first_name }}"]);
+});
+
+test("template code: content with {% endverbatim pack %} in it, or a tag opening nothing closes, is rewritten with templatetag instead", async () => {
+	const { escapeTemplateText } = await import("../src/buttondown/template.ts");
+	const breakout = await escaped([{ _type: "code", _key: "c", code: "{% endverbatim pack %}\n{{ secret }} {# c #}" }]);
+	assert.equal(
+		breakout.body,
+		"```\n{% templatetag openblock %} endverbatim pack {% templatetag closeblock %}\n{% templatetag openvariable %} secret {% templatetag closevariable %} {% templatetag opencomment %} c {% templatetag closecomment %}\n```",
+	);
+	assert.doesNotMatch(breakout.body, /\{% (end)?verbatim/, "no verbatim block to break out of");
+	assert.equal(breakout.printed, "```\n{% endverbatim pack %}\n{{ secret }} {# c #}\n```");
+	// Other spellings of the closing tag, and the word alone, take the same road.
+	for (const text of ["{%endverbatim pack%} {{ x }}", "{%  endverbatim   pack  %}{{ x }}", "{% endverbatim %} {{ x }}", "endverbatim {{ x }}"]) {
+		assert.doesNotMatch(escapeTemplateText(text), /\{% (end)?verbatim/, text);
+		assert.equal(django(escapeTemplateText(text)), text, text);
+	}
+	// A tag that opens and never closes would take the closing verbatim tag as its own end: the block would stay open.
+	for (const text of ["Use {% to open a tag", "Print with {{", "A comment starts with {#", "{{ a }} then {", "{{ a }} and {% b", "{{{", "{}} {{ a"]) {
+		const out = (await escaped([block([span(text)])]));
+		assert.doesNotMatch(out.body, /verbatim/, text);
+		assert.equal(out.printed, text, text);
+	}
+	// Whole tags are fine in verbatim, on the last line of a code block too; an opening on an earlier line can't reach the end.
+	assert.equal(escapeTemplateText("{% a\n{{ b }}"), V("{% a\n{{ b }}"));
+	assert.equal(escapeTemplateText("{{ b }}\n{% a"), "{% templatetag openvariable %} b {% templatetag closevariable %}\n{% templatetag openblock %} a");
+	// Whatever is on the rest of the line can't join an escaped piece: a cell ending in "{{" next to a cell with "}}".
+	const cell = (text) => ({ _type: "tableCell", _key: text, content: [span(text)] });
+	const row = await escaped([{ _type: "table", _key: "t", rows: [{ _type: "tableRow", cells: [cell("a {{"), cell("b }}"), cell("{{ c }}")] }] }]);
+	assert.equal(row.printed, "| a {{ | b }} | {{ c }} |\n| --- | --- | --- |");
+	// The same for a cell that ends with "{" (with verbatim, "{" + the closing tag + a later "}}" would read as one variable),
+	// and for a lone "{" in a rewritten cell (the same, with the templatetag after it).
+	for (const cells of [["{{ a }} then {", "b }}"], ["{}} {{ a", "b }}"], ["{# a #} {", "b #}"]]) {
+		const out = await escaped([{ _type: "table", _key: "t", rows: [{ _type: "tableRow", cells: cells.map(cell) }] }]);
+		assert.equal(out.printed, `| ${cells.join(" | ")} |\n| --- | --- |`, cells[0]);
+	}
+});
+
+test("template code: any mix of it comes out of Buttondown as it was written, with nothing run", async () => {
+	const bits = ["{{", "}}", "{%", "%}", "{#", "#}", "{", "}", " x ", "endverbatim pack", "verbatim pack", "|", "`", "\n", "- ", "> "];
+	let seed = 20261115;
+	// mulberry32: the same mixes every run.
+	const next = (n) => {
+		seed = (seed + 0x6d2b79f5) | 0;
+		let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) % n;
+	};
+	let fallbacks = 0;
+	for (let i = 0; i < 600; i++) {
+		const code = Array.from({ length: 1 + next(8) }, () => bits[next(bits.length)]).join("");
+		if (!code.trim()) continue;
+		for (const blocks of [[{ _type: "code", _key: "c", code }], [block([span("a "), span(code, ["code"]), span(` b ${code}`)])], [block([span(code)], { listItem: "bullet", level: 1 })]]) {
+			const escapedBody = (await buildEmail(noFooter(blocks))).fields.body;
+			const { portableTextToMarkdown } = await import("../src/discovery/markdown.ts");
+			const ran = [];
+			assert.equal(django(escapedBody, ran), `${MODE_COMMENT}\n${portableTextToMarkdown(blocks)}\n`, JSON.stringify(code));
+			assert.deepEqual(ran, [], JSON.stringify(code));
+			if (escapedBody.includes("templatetag")) fallbacks++;
+		}
+	}
+	assert.ok(fallbacks > 50, `the mixes reach the templatetag road (${fallbacks})`);
+});
+
+test("template code: the subject and the description aren't escaped, so they keep a warning; the body alone gets none", async () => {
+	const body = await buildEmail(source({ bodyFields: [[{ _type: "code", _key: "c", code: "{{ example }} and {% if x %}" }]] }));
+	assert.deepEqual(body.warnings, [], "the old 'Contains template code' warning is gone: the body is escaped");
+	const subject = await buildEmail(source({ title: "The {{ x }} tag" }));
+	assert.equal(subject.fields.subject, "The {{ x }} tag", "as written");
+	assert.deepEqual(subject.warnings, ["The subject contains template code ({{, {% or {#). The Pack escapes it in the body only: check the subject in Buttondown before sending."]);
+	const both = await buildEmail(source({ title: "The {{ x }} tag", excerpt: "About {% y %}." }));
+	assert.equal(both.fields.description, "About {% y %}.");
+	assert.deepEqual(both.warnings, ["The subject and the description contain template code ({{, {% or {#). The Pack escapes it in the body only: check the subject and the description in Buttondown before sending."]);
 	assert.deepEqual((await buildEmail(source())).warnings, []);
+});
+
+test("template code: the hash is what it was for a post without it, and changes with the escape for a post with it", async () => {
+	// The hash of this post's email before the escape was added (4fcf408): a post without template code gets no new write.
+	assert.equal((await buildEmail(source())).hash, "d8d9140584140192554fb38af32720d8df9077d9fcfd6af7970797dee200ebf4");
+	// The same post with a code block: its hash before the escape, and now (the body is the only field that differs).
+	const post = () => source({ bodyFields: [[{ _type: "code", _key: "c", language: "html", code: "<!-- Template code test: {{ example }} -->" }, block([span("A plain paragraph.")])]] });
+	const withCode = await buildEmail(post());
+	assert.equal((await buildEmail(post())).hash, withCode.hash, "the same every time");
+	assert.notEqual(withCode.hash, "6f04dbb93f759925f52678407e7699fce33b3238877dcd44bd4fa3685a59eec4", "the untouched draft of such a post is written once more");
+	const footer = "\n\n---\n\n[Read it on coywolf.com](https://coywolf.com/newsletter/why-claude-has-my-attention/)\n";
+	assert.equal(withCode.fields.body, `${MODE_COMMENT}\n\`\`\`html\n${V("<!-- Template code test: {{ example }} -->")}\n\`\`\`\n\nA plain paragraph.${footer}`);
+	const { emailHash } = await import("../src/buttondown/body.ts");
+	const { metadata: _metadata, ...shown } = withCode.fields;
+	assert.equal(withCode.hash, await emailHash(shown), "the hash is of the escaped body: what Buttondown holds");
+	assert.equal(await emailHash({ ...shown, body: django(shown.body) }), "6f04dbb93f759925f52678407e7699fce33b3238877dcd44bd4fa3685a59eec4", "and without the tags it's the old body, byte for byte");
+});
+
+test("template code: the escape is the email's alone (the public .md converter adds nothing), and a first line in verbatim is still checked for frontmatter", async () => {
+	const { portableTextToMarkdown } = await import("../src/discovery/markdown.ts");
+	assert.equal(portableTextToMarkdown([{ _type: "code", _key: "c", code: "{{ x }}" }, block([span("{% y %}")])]), "```\n{{ x }}\n```\n\n{% y %}");
+	await assert.rejects(buildEmail(noFooter([block([span("--- {{ x }}")])])), /frontmatter/);
 });
 
 test("fields: the subject, the excerpt or SEO description, the canonical URL, the image, a slug only when Buttondown takes it, and the metadata", async () => {

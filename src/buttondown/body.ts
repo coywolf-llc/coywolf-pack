@@ -12,6 +12,9 @@
  * - holds each Portable Text field of the collection in field order, with
  *   relative links made absolute, images resized and in a format email apps
  *   show, and the Pack's blocks as Markdown (src/buttondown/blocks.ts);
+ * - has its template code ({{, {% or {#) escaped piece by piece, so Buttondown
+ *   prints it instead of running it (src/buttondown/template.ts). The public
+ *   .md pages don't get this: it's for Buttondown only;
  * - ends with a rule and "Read it on <site>" linking to the post (footerLink);
  *   a post with no content gets the link alone (a rule at the top would read
  *   as frontmatter).
@@ -24,12 +27,13 @@ import type { DisclosureSettings, PodcastSettings } from "../customBlocks/render
 import { type EmailFile, markdownUrl, renderUnknownBlock } from "./blocks.js";
 import type { DraftFields } from "./client.js";
 import { BUTTONDOWN_LIMITS } from "./keys.js";
+import { TEMPLATE_CODE, VERBATIM_OPEN, escapeTemplateBlock, escapeTemplateLines } from "./template.js";
+
+export { TEMPLATE_CODE };
 
 export const MODE_COMMENT = "<!-- buttondown-editor-mode: plaintext -->";
 /** Buttondown's slug rule. A slug that doesn't fit is left out (Buttondown makes its own). */
 export const SLUG = /^[a-zA-Z0-9_-]{1,100}$/;
-/** Django template syntax, which Buttondown runs at send time. */
-export const TEMPLATE_CODE = /\{\{|\{%|\{#/;
 export const METADATA_VERSION = 1;
 
 /**
@@ -177,7 +181,7 @@ export async function buildEmail(source: EmailSource): Promise<BuiltEmail> {
 	};
 
 	let content = source.bodyFields
-		.map((value) => portableTextToMarkdown(value, { absolute, image: (url) => image(url), unknownBlock: (block) => renderUnknownBlock(block, ctx) }))
+		.map((value) => portableTextToMarkdown(value, { absolute, image: (url) => image(url), unknownBlock: (block) => renderUnknownBlock(block, ctx), rendered: (markdown, block) => escapeTemplateBlock(markdown, block._type) }))
 		.filter(Boolean)
 		.join("\n\n");
 	// A leading horizontal rule would read as the start of frontmatter: it says nothing at the top of an email anyway.
@@ -185,9 +189,11 @@ export async function buildEmail(source: EmailSource): Promise<BuiltEmail> {
 	if (source.footerLink) {
 		const href = markdownUrl(source.postUrl, absolute);
 		// With nothing above it, the rule would be the body's first line (frontmatter to Buttondown): the link goes alone.
-		if (href) content = content ? `${content}\n\n---\n\n[Read it on ${host}](${href})` : `[Read it on ${host}](${href})`;
+		const footer = href ? escapeTemplateLines(`[Read it on ${host}](${href})`) : "";
+		if (footer) content = content ? `${content}\n\n---\n\n${footer}` : footer;
 	}
-	if (/^\s*---/.test(content)) throw new Error("The email body would start with frontmatter.");
+	// Checked as Buttondown reads it: the verbatim tag in front of a first line is gone by then.
+	if (/^\s*---/.test(content.startsWith(VERBATIM_OPEN) ? content.slice(VERBATIM_OPEN.length) : content)) throw new Error("The email body would start with frontmatter.");
 	const body = `${MODE_COMMENT}\n${content}\n`;
 
 	const subject = plainLine(source.title, 2000) || plainLine(source.slug, 2000) || "Untitled post";
@@ -212,7 +218,9 @@ export async function buildEmail(source: EmailSource): Promise<BuiltEmail> {
 	}
 	if (counts.original) warnings.push(`${plural(counts.original, "image")} can't be resized for email (an AVIF or SVG file, or no media host), so the original is used. Check ${counts.original === 1 ? "it" : "them"} in Buttondown's preview.`);
 	if (counts.risky) warnings.push(`${plural(counts.risky, "image")} ${counts.risky === 1 ? "is" : "are"} WebP, AVIF or SVG, which some email apps don't show.`);
-	if (TEMPLATE_CODE.test(content) || TEMPLATE_CODE.test(subject) || TEMPLATE_CODE.test(description)) warnings.push("Contains template code ({{, {% or {#). Buttondown runs it when the email is sent: check the preview in Buttondown before sending.");
+	// The body's template code is escaped. The subject and the description go as they are: a verbatim tag there isn't proved to work.
+	const unescaped = [TEMPLATE_CODE.test(subject) ? "subject" : "", TEMPLATE_CODE.test(description) ? "description" : ""].filter(Boolean);
+	if (unescaped.length) warnings.push(`The ${unescaped.join(" and the ")} ${unescaped.length === 1 ? "contains" : "contain"} template code ({{, {% or {#). The Pack escapes it in the body only: check the ${unescaped.join(" and the ")} in Buttondown before sending.`);
 
 	return { fields: { ...shown, metadata: packMetadata(source, hash) }, hash, warnings };
 }

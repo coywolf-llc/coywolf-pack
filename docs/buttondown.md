@@ -162,11 +162,24 @@ The body:
 
 The text of a Note, Details, Affiliate disclosure, Quote or Testimonial block keeps its links, its bold (`**bold**`, `<strong>`, `<b>`) and its italic (`<em>`, `<i>`). Other markup is dropped. A single `*star*` stays plain text, as it does on the site.
 
+**Template code.** Buttondown runs Django templating over the body when it sends, inside code blocks too. So a post that shows `{{ example }}` would lose it. The Pack wraps each piece of the body that has `{{`, `{%` or `{#` in Django's verbatim tags:
+
+```
+{% verbatim pack %}<!-- {{ example }} -->{% endverbatim pack %}
+```
+
+- Buttondown removes the two tags and prints what's between them as you wrote it.
+- A piece is the code inside a code block, a table cell, or one line of text. Text without template code is never wrapped.
+- A piece that verbatim can't hold safely (it has `endverbatim` in it, or a `{{`, `{%` or `{#` that nothing closes) is written with `{% templatetag … %}` tags instead. It prints the same.
+- The Markdown versions in [Discovery](discovery.md) don't get the tags. They're for Buttondown only.
+
+To use one of Buttondown's own variables, such as `{{ subscriber.metadata.first_name }}`, add it to the draft in Buttondown. Written in the post, it would be printed as text.
+
 **Warnings** show in the panel and on the page. They don't stop the draft. You see one when:
 
 - a block can't be shown in email;
 - an image can't be resized, or is WebP, AVIF or SVG from another site;
-- the post contains template code (`{{`, `{%` or `{#`). Buttondown runs Django templating when it sends. Check the preview in Buttondown;
+- the subject or the description contains template code (`{{`, `{%` or `{#`). The Pack escapes it in the body only. Check that field in Buttondown;
 - Buttondown has more than one draft for the post (the Pack uses the oldest; delete the others).
 
 ## What the Pack never does
