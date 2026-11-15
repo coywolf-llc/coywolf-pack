@@ -110,7 +110,7 @@ To choose page parents in the editor from then on, move them into a **Parent pag
 2. Turn on **Child Pages** (with **Redirect Manager** and **Slug changes**) on the **Features** page.
 3. On the **Child Pages** page, click **Set up** next to **Pages**.
 4. Under **Import parents from configuration**, click **Dry run**, check the list, then click **Set parents**.
-5. Remove the pages that were set from `pageParents` at your next deploy.
+5. Remove the pages that were set from `pageParents` at your next deploy. Keep the ones listed as **Stays in the option**: their parent is a category, not a page. Drafts and scheduled pages are skipped: set their **Parent page** in the editor.
 
 ## Old-site media URLs
 
