@@ -33,6 +33,7 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 - [Content Audit](content-audit.md)
 - [Headings & TOC](headings.md)
 - [Breadcrumb Nav](breadcrumbs.md)
+- [Pagination](pagination.md): numbered page links for archives, on one line at every width, and short page URLs (`/3/`)
 - [Code Blocks](code-blocks.md)
 - [File Downloads](files.md)
 - [Private Form Uploads](form-uploads.md)
