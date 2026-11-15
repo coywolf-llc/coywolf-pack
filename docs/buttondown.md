@@ -12,9 +12,12 @@ When a post with a chosen category is published, the Pack makes one [Buttondown]
 ## Set up
 
 1. **Make a key in Buttondown** that can only write drafts:
-   - Sign in to Buttondown and switch to the newsletter this site's drafts go to. Each site uses its own newsletter's key.
-   - Open [Settings → API keys](https://buttondown.com/keys) and create a key. Name it after the site, for example `Coywolf Pack drafts (coywolf.com)`.
-   - Set **Emails and drafts** to **Write**, and every other area to **None** (**Sending** included). Save it.
+   - Sign in to Buttondown and switch to the newsletter this site's drafts go to. A key belongs to the newsletter that was selected when it was made, so check which one is selected first. Each site uses its own newsletter's key.
+   - Open Buttondown's API keys page ([buttondown.com/keys](https://buttondown.com/keys)) and create a key. Name it after the site, for example `Coywolf Pack drafts (coywolf.com)`.
+   - Set the permissions, then save the key:
+     - **Emails**: **Read & write**. Drafts are part of Emails.
+     - **Sending**: **Disabled**.
+     - Every other area (Subscribers, Automations, Forms, Surveys, Settings and Styling): **None**.
 2. **Save the key** as **Buttondown API key** on the plugin's Settings page (`https://coywolf.com/_emdash/admin/plugins-manager/coywolf-pack/settings`). It's stored encrypted, and no page shows it again. The field's guide has the same steps.
 3. **Turn on Buttondown Drafts** on the Features page. Turn on **Update drafts** too if you want republished posts to update their drafts.
 4. **Check the key**: on the Buttondown Drafts page, select **Check key**. It should say the key works, can read drafts, and can't read your newsletters or subscribers. The check only reads. The first draft the Pack makes shows the key can write.
@@ -33,7 +36,9 @@ From then on, publishing a post with one of the rule's terms (or a child term of
 
 ## The key
 
-The Pack needs only **Emails and drafts → Write**. With **Sending → None**, a key that leaks can't send or schedule an email.
+The Pack needs only **Emails → Read & write**. Set **Sending** to **Disabled** and every other area to **None**. With **Sending → Disabled**, a key that leaks can't send or schedule an email.
+
+A key belongs to the newsletter that was selected in Buttondown when the key was made. If drafts show up in the wrong newsletter, make a new key with the right newsletter selected.
 
 **Check key** makes four reads and looks only at their status codes. It never parses, keeps or returns the answers. EmDash's fetch does download each answer into the Worker's memory before the Pack can drop it. With a key that's too broad, that includes the newsletter and subscriber lists, which is one more reason to replace such a key.
 
@@ -64,6 +69,7 @@ The key is read only in the Worker. It's never logged, never returned to a page,
 | Republish, the email was scheduled or sent | Leaves it alone. It's checked again on the next event |
 | Republish, the draft was edited in Buttondown | Leaves it alone. **Refresh draft from post** overwrites it |
 | Republish, the draft was deleted in Buttondown | Leaves it deleted. **Create draft now** makes a new one |
+| The draft was edited in Buttondown, then deleted there | A republish doesn't read an edited draft, so the post still says "Edited in Buttondown". Select **Refresh draft from post**: the panel reads the draft, finds it deleted, and shows **Create draft now** |
 | A create is retried, and Buttondown already has the post's email as a draft nobody changed | Uses that draft. No second one |
 | A create is retried, and that draft was edited in Buttondown | Keeps it as it is and marks it "Edited in Buttondown" |
 | A create is retried, and that email was scheduled or sent | Points at that email and leaves it alone. No second draft |
@@ -99,6 +105,8 @@ A draft the Pack finds already changed is recorded with no date of the Pack's ow
 3. The Pack writes only if Buttondown still shows that exact `modification_date`, and the email still has the Pack's key for this post in its metadata. If the draft changed in between, or the key was removed or changed in Buttondown, nothing is written and the panel says so.
 
 If the write fails, it is over. No retry, republish or hourly run overwrites the draft because of it. Select **Refresh draft from post** to try again.
+
+If step 1 finds the draft deleted in Buttondown, the Pack marks the post "Deleted in Buttondown" and the panel shows **Create draft now** right away. Nothing is made until you select it. A deleted draft is still never made again on its own.
 
 **A read that fails is never a "no", and never a default.** The Pack reads these on the site:
 
@@ -148,9 +156,11 @@ The body:
 | Quote, Testimonial | A block quote, then who said it |
 | Podcast links | The heading, then a list of the services |
 | Review | The item, the rating ("4.5 / 5"), the pros and the cons |
-| Embed, button | Its label (or URL) as a link |
+| Embed, button | Its label (or URL) as a link. A YouTube player embed (`youtube.com/embed/<id>` or `youtube-nocookie.com/embed/<id>`) links to `https://www.youtube.com/watch?v=<id>`. A Vimeo one (`player.vimeo.com/video/<id>`) links to `https://vimeo.com/<id>`. Other embeds keep their URL |
 | Table of contents, breadcrumbs | Left out: they're navigation |
 | Anything else | "Part of this post isn't shown in email. Read it on coywolf.com.", linking to the post, and a warning naming the block |
+
+The text of a Note, Details, Affiliate disclosure, Quote or Testimonial block keeps its links, its bold (`**bold**`, `<strong>`, `<b>`) and its italic (`<em>`, `<i>`). Other markup is dropped. A single `*star*` stays plain text, as it does on the site.
 
 **Warnings** show in the panel and on the page. They don't stop the draft. You see one when:
 

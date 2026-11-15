@@ -13,9 +13,16 @@ test("five fields get guides: the Cloudflare API token, the AI key, Fathom, Goog
 	const html = settingsGuideHtml();
 	const { cloudflareApiToken, aiApiKey, insightsFathomApiKey, insightsGoogleServiceAccount, buttondownApiKey } = SECRET_SETTINGS;
 	assert.deepEqual(Object.keys(html).sort(), [cloudflareApiToken.label, aiApiKey.label, insightsFathomApiKey.label, insightsGoogleServiceAccount.label, buttondownApiKey.label].sort());
-	// Buttondown's guide asks for the least-privilege key: Emails and drafts → Write, everything else None.
-	assert.match(html[buttondownApiKey.label], /Emails and drafts<\/strong>: Write/);
-	assert.match(html[buttondownApiKey.label], /Sending<\/strong> included\): None/);
+	// Buttondown's guide asks for the least-privilege key, in Buttondown's own labels: Emails → Read & write, Sending
+	// Disabled, every other area None. There's no "Emails and drafts" area, and no menu path to the keys page.
+	const buttondown = html[buttondownApiKey.label];
+	assert.match(buttondown, /Emails<\/strong>: Read &amp; write/);
+	assert.match(buttondown, /Sending<\/strong>: Disabled/);
+	assert.match(buttondown, /Every other area \(Subscribers, Automations, Forms, Surveys, Settings and Styling\): None/);
+	assert.match(buttondown, /<a href="https:\/\/buttondown\.com\/keys"[^>]*>Buttondown's API keys page<\/a> \(buttondown\.com\/keys\)/);
+	assert.match(buttondown, /A key belongs to the newsletter that was selected when it was made/);
+	assert.doesNotMatch(buttondown, /Emails and drafts|Settings → API keys|: Write\b/);
+	assert.match(SECRET_SETTINGS.buttondownApiKey.description, /only Emails → Read & write \(Sending Disabled, every other area None\)/);
 	assert.equal((html[aiApiKey.label].match(/<details/g) ?? []).length, 3);
 	// The token's guide is the one pre-filled form, with the zone policy advice.
 	const token = html[cloudflareApiToken.label];

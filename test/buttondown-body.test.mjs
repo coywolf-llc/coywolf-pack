@@ -10,7 +10,7 @@ import { test } from "node:test";
 import "./ts-resolve.mjs";
 
 const { buildEmail, emailImage, imageValueUrl, MODE_COMMENT, siteHost, entryKey, packMetadata } = await import("../src/buttondown/body.ts");
-const { renderUnknownBlock, richToMarkdown } = await import("../src/buttondown/blocks.ts");
+const { renderUnknownBlock, richToMarkdown, watchUrl } = await import("../src/buttondown/blocks.ts");
 const lib = await import("../src/images/lib.ts");
 
 const span = (text, marks = []) => ({ _type: "span", _key: Math.random().toString(36).slice(2), text, marks });
@@ -115,7 +115,13 @@ test("the Pack's blocks as Markdown", () => {
 	assert.equal(renderUnknownBlock({ _type: "coywolf-video" }, c), "[▶ Watch the video](https://coywolf.com/newsletter/p/)");
 	assert.equal(renderUnknownBlock({ _type: "coywolf-file", id: "01FILE", title: "The guide" }, c), "[Download: The guide (2.4 MB)](https://coywolf.com/files/01FILE/guide.pdf)");
 	assert.equal(renderUnknownBlock({ _type: "coywolf-file", id: "01MISSING" }, c), "[Download: the file](https://coywolf.com/newsletter/p/)");
-	assert.equal(renderUnknownBlock({ _type: "coywolf-note", variant: "tip", body: "Use **this** [link](/x/)." }, c), "> **Tip**\n>\n> Use this [link](https://coywolf.com/x/).");
+	assert.equal(renderUnknownBlock({ _type: "coywolf-note", variant: "tip", body: "Use **this** [link](/x/)." }, c), "> **Tip**\n>\n> Use **this** [link](https://coywolf.com/x/).");
+	// Found live (2026-11-15): a note's bold was dropped. Bold and italic stay in the note, details, disclosure and quote fallbacks.
+	assert.equal(renderUnknownBlock({ _type: "coywolf-note", variant: "tip", body: "A **tip** note block" }, c), "> **Tip**\n>\n> A **tip** note block");
+	assert.equal(renderUnknownBlock({ _type: "coywolf-details", summary: "More", body: "<strong>Bold</strong> and <em>italic</em>" }, c), "> **More**\n>\n> **Bold** and *italic*");
+	assert.equal(renderUnknownBlock({ _type: "coywolf-disclosure", kind: "affiliate", text: "Some links **pay** me." }, c), "> _Some links **pay** me._");
+	assert.equal(renderUnknownBlock({ _type: "coywolf-quote", quote: "To **be**, or <i>not</i>.", citation: "<b>Someone</b>" }, c), "> To **be**, or *not*.\n>\n> — **Someone**");
+	assert.equal(renderUnknownBlock({ _type: "coywolf-testimonial", quote: "**Great.**", name: "Ana" }, c), "> **Great.**\n>\n> — Ana");
 	assert.equal(renderUnknownBlock({ _type: "coywolf-note", title: "Heads up", hideTitle: true, body: "Body" }, c), "> Body");
 	assert.equal(renderUnknownBlock({ _type: "coywolf-details", summary: "More", body: "Line one\nLine two" }, c), "> **More**\n>\n> Line one  \n> Line two");
 	assert.equal(renderUnknownBlock({ _type: "coywolf-disclosure", kind: "amazon" }, c), "> _As an Amazon Associate I earn from qualifying purchases._");
@@ -133,6 +139,24 @@ test("the Pack's blocks as Markdown", () => {
 	assert.equal(renderUnknownBlock({ _type: "embed", url: "https://www.youtube.com/watch?v=1", title: "A talk" }, c), "[A talk](https://www.youtube.com/watch?v=1)");
 	assert.equal(renderUnknownBlock({ _type: "button", url: "/signup/", text: "Sign up" }, c), "[Sign up](https://coywolf.com/signup/)");
 	assert.deepEqual(c.warnings, [], "nothing above is a warning");
+});
+
+test("a video player embed links to the video's own page: YouTube (and youtube-nocookie) to watch?v=, Vimeo to vimeo.com/<id>; other embeds stay", () => {
+	const c = ctx();
+	const embed = (url, extra = {}) => renderUnknownBlock({ _type: "iframe", src: url, ...extra }, c);
+	// Found live (2026-11-15): an iframe of YouTube came out as a link to /embed/<id>.
+	assert.equal(embed("https://www.youtube.com/embed/dQw4w9WgXcQ"), "[https://www.youtube.com/watch?v=dQw4w9WgXcQ](https://www.youtube.com/watch?v=dQw4w9WgXcQ)");
+	assert.equal(embed("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?rel=0", { title: "A talk" }), "[A talk](https://www.youtube.com/watch?v=dQw4w9WgXcQ)");
+	assert.equal(embed("//youtube.com/embed/dQw4w9WgXcQ?start=90&autoplay=1", { title: "A talk" }), "[A talk](https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s)");
+	assert.equal(renderUnknownBlock({ _type: "embed", url: "https://player.vimeo.com/video/76979871?h=8272103f6e&title=0", title: "A film" }, c), "[A film](https://vimeo.com/76979871/8272103f6e)");
+	assert.equal(embed("https://player.vimeo.com/video/76979871"), "[https://vimeo.com/76979871](https://vimeo.com/76979871)");
+	assert.equal(watchUrl("https://m.youtube.com/embed/dQw4w9WgXcQ/"), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+	// Left as they are: a playlist player, a watch link, another host (also one that only looks like YouTube), a button.
+	for (const url of ["https://www.youtube.com/embed/videoseries?list=PL123", "https://www.youtube.com/embed/live_stream?channel=UC1", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "https://vimeo.com/76979871", "https://player.vimeo.com/video/abc", "https://youtube.com.evil.example/embed/dQw4w9WgXcQ", "https://open.spotify.com/embed/episode/1", "not a url"]) assert.equal(watchUrl(url), url, url);
+	assert.equal(embed("https://open.spotify.com/embed/episode/1", { title: "Listen" }), "[Listen](https://open.spotify.com/embed/episode/1)");
+	assert.equal(renderUnknownBlock({ _type: "button", url: "https://www.youtube.com/embed/dQw4w9WgXcQ", text: "Player" }, c), "[Player](https://www.youtube.com/embed/dQw4w9WgXcQ)", "a button's link is the author's own");
+	assert.equal(embed("javascript:alert(1)").startsWith("_[Part of"), true);
+	assert.deepEqual(c.warnings, ["block:iframe"]);
 });
 
 test("navigation blocks are left out quietly; anything else is a placeholder linking to the post, and a warning naming it", () => {
@@ -156,9 +180,26 @@ test("rich text keeps links and paragraphs, and stays text (no stray Markdown)",
 	const abs = { absolute: (u) => new URL(u, "https://coywolf.com/").href };
 	assert.equal(richToMarkdown('<p>One <a href="/a/">two</a> &amp; <script>x</script>three</p><p># not a heading</p>', abs), "One [two](https://coywolf.com/a/) & three\n\n\\# not a heading");
 	// A javascript: link isn't a link (and its text stays escaped text).
-	assert.equal(richToMarkdown("**Bold** and *stars* and [x](javascript:alert(1))", abs), "Bold and \\*stars\\* and \\[x\\](javascript:alert(1))");
+	// Bold stays bold. A single *star* is text on the site too (its rich text reads only **bold** and links), so it stays text.
+	assert.equal(richToMarkdown("**Bold** and *stars* and [x](javascript:alert(1))", abs), "**Bold** and \\*stars\\* and \\[x\\](javascript:alert(1))");
 	assert.equal(richToMarkdown("[x](javascript:alert)", abs), "x");
 	assert.equal(richToMarkdown("", abs), "");
+});
+
+test("rich text keeps bold and italic: **bold**, <strong>, <b>, <em>, <i>; everything else stays escaped text", () => {
+	const abs = { absolute: (u) => new URL(u, "https://coywolf.com/").href };
+	assert.equal(richToMarkdown("A **tip** note block", abs), "A **tip** note block");
+	assert.equal(richToMarkdown('<strong class="x">Bold</strong>, <b>bold</b>, <em>italic</em> and <i>italic</i>', abs), "**Bold**, **bold**, *italic* and *italic*");
+	assert.equal(richToMarkdown("<strong><em>Both</em></strong> and **a [link](/x/)**", abs), "***Both*** and **a [link](https://coywolf.com/x/)**");
+	// Spaces just inside a pair move outside it (Markdown wouldn't read "** x **" as bold).
+	assert.equal(richToMarkdown("one<strong> two </strong>three", abs), "one **two** three");
+	// Characters inside stay escaped; a mark without its pair, an empty pair and other tags leave nothing behind.
+	assert.equal(richToMarkdown("**a_b [c]** <strong>open <em></em> <u>under</u> **", abs), "**a\\_b \\[c\\]** open under \\*\\*");
+	// Bold doesn't cross a paragraph; within one, it crosses a line break.
+	assert.equal(richToMarkdown("<p><strong>One</p><p>Two</strong></p>", abs), "One\n\nTwo");
+	assert.equal(richToMarkdown("<strong>One<br>Two</strong>", abs), "**One  \nTwo**");
+	// <br>, <blockquote> and <img> aren't bold or italic; control characters in the text can't forge a mark.
+	assert.equal(richToMarkdown('a<br>b <img src="x"> \u0001c\u0002', abs), "a  \nb c");
 });
 
 test("template code gets a warning", async () => {

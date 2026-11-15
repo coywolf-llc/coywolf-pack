@@ -24,7 +24,7 @@ import { ButtondownError, createButtondownClient } from "./client.js";
 import { BUTTONDOWN_FEATURES as F, BUTTONDOWN_HOST, BUTTONDOWN_SETTINGS_KEY, BUTTONDOWN_TASK } from "./keys.js";
 import { loadSettings, normalizeSettings, ruleFor, settingsInput, stampRules } from "./settings.js";
 import { BUTTONDOWN_STORAGE_CONFIG, recentRecords, recordView, records } from "./store.js";
-import { type ManualAction, type SyncDeps, defaultDeps, handleEvent, manualRefusal, matchesRule, readKey, refreshDraft, retryDue, runManual } from "./sync.js";
+import { type ManualAction, type SyncDeps, defaultDeps, handleEvent, manualRefusal, matchesRule, readKey, refreshDraft, retryDue, runManual, settleGone } from "./sync.js";
 import { type EventKind, readRecord, recordId } from "./sync-core.js";
 
 export interface ButtondownOptions {
@@ -148,6 +148,8 @@ export function buttondownPack(options: ButtondownOptions = {}, overrides: Parti
 	const remoteNow = async (ctx: PluginContext, emailId: string, key: string): Promise<{ remote: { status: string; modifiedAt: string | null } | null; remoteError?: string }> => {
 		try {
 			const email = await createButtondownClient({ key, fetch: contextFetch(ctx) }).getEmail(emailId);
+			// Still returned, but marked deleted: the same as a 404.
+			if (email.status === "deleted") return { remote: { status: "deleted", modifiedAt: null } };
 			return { remote: { status: email.status, modifiedAt: email.modificationDate } };
 		} catch (error) {
 			if (error instanceof ButtondownError && error.status === 404) return { remote: { status: "deleted", modifiedAt: null } };
@@ -215,6 +217,8 @@ export function buttondownPack(options: ButtondownOptions = {}, overrides: Parti
 		/**
 		 * The entry editor panel: the entry's record and what can be done with it. With `remote`, also the email's
 		 * status and modification date as Buttondown has them now, which Refresh draft from post sends back as `seen`.
+		 * When that read finds the email gone, the record is settled as `gone` (its only write), and the answer already
+		 * offers Create draft now.
 		 */
 		"buttondown/entry": readOnlyRoute(
 			definePluginRoute({
@@ -233,16 +237,20 @@ export function buttondownPack(options: ButtondownOptions = {}, overrides: Parti
 						unread = true;
 						return null;
 					};
-					const [record, item, key] = await Promise.all([records(ctx).get(recordId(collection, id)).then(readRecord), ctx.content ? ctx.content.get(collection, id).catch(failedRead) : failedRead(), readKey(ctx)]);
+					const [stored, item, key] = await Promise.all([records(ctx).get(recordId(collection, id)).then(readRecord), ctx.content ? ctx.content.get(collection, id).catch(failedRead) : failedRead(), readKey(ctx)]);
 					const published = (item as { status?: string } | null)?.status === "published";
 					const matches = published ? ((await matchesRule(ctx, deps, rule, collection, id).catch(failedRead)) ?? false) : false;
+					const now = remote && stored?.emailId && key.key ? await remoteNow(ctx, stored.emailId, key.key) : null;
+					// The email is gone from Buttondown: the record says so from here on (gone), so Create draft now is offered
+					// in this same answer. Nothing is made: only Create draft now makes a new draft.
+					const record = now?.remote?.status === "deleted" && stored?.emailId ? await settleGone(ctx, deps, collection, id, stored.emailId) : stored;
 					const state = record?.state ?? null;
 					return {
 						covered: true,
 						published,
 						matches,
 						unread,
-						...(remote && record?.emailId && key.key ? await remoteNow(ctx, record.emailId, key.key) : {}),
+						...(now ?? {}),
 						keySaved: Boolean(key.key),
 						record: record ? recordView(record) : null,
 						canCreate: published && matches && (!record || state === "gone" || state === "stopped" || state === "removed" || (state === "error" && !record.emailId)),

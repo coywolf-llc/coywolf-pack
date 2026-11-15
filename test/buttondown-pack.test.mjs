@@ -223,6 +223,102 @@ test("Refresh draft from post through the routes: the date the admin saw goes ba
 	assert.deepEqual(fake.violations, []);
 });
 
+// Found live (2026-11-15): a draft edited in Buttondown, then deleted there, left the post with no way to a new draft.
+test("the entry route: a remote read that finds the email gone settles the record as gone, so Create draft now is offered; nothing is made until it's asked", async () => {
+	let clock = Date.parse("2026-11-15T12:00:00Z");
+	const pack = buttondownPack({}, { now: () => clock, terms: async () => ["n"], termParents: async () => new Map(), postUrl: async () => "https://coywolf.com/newsletter/one/", files: async () => new Map(), background: () => {} });
+	const { routes, hooks } = pack;
+	const rules = { buttondownSettings: { rules: [{ collection: "posts", taxonomy: "category", terms: ["n"], since: "2026-11-01T00:00:00.000Z" }] } };
+	const base = context({ settings: { ...rules, features: { _defaults036: true, buttondown: true, "buttondown.updates": true } } });
+	const item = { id: "1", slug: "one", status: "published", publishedAt: "2026-11-15T10:00:00.000Z", draftRevisionId: null, data: { title: "One", content: [{ _type: "block", _key: "b", style: "normal", markDefs: [], children: [{ _type: "span", _key: "s", text: "First.", marks: [] }] }] } };
+	base.content = { get: async () => structuredClone(item) };
+	base.schema = { ...base.schema, getCollection: async (slug) => ({ slug, label: "Posts", titleField: "title", fields: [{ slug: "title", type: "string", sortOrder: 0 }, { slug: "content", type: "portableText", sortOrder: 1 }] }) };
+	const call = (route, input) => routes[`buttondown/${route}`].handler({ ...base, input: { collection: "posts", id: "1", ...input } });
+	const stored = async () => core.readRecord(await base.storage[BUTTONDOWN_STORAGE].get("posts:1"));
+	const fake = base.fake;
+	const { settleJobsForTests } = await import("../src/buttondown/sync.ts");
+
+	assert.equal((await call("sync", { action: "create" })).record.state, "draft");
+	const first = fake.drafts()[0].id;
+	// Edited in Buttondown, and the Pack has seen that (a republish).
+	fake.edit(first, { body: "Mine" });
+	item.data.title = "One, changed";
+	await hooks["content:afterPublish"]({ collection: "posts", content: structuredClone(item) }, base);
+	await settleJobsForTests();
+	assert.equal((await stored()).state, "edited");
+	// Then deleted in Buttondown. The plain read (the panel's first) makes no call and still says edited.
+	fake.emails.delete(first);
+	const before = fake.calls.length;
+	const plain = await call("entry", {});
+	assert.equal(fake.calls.length, before, "no call to Buttondown without `remote`");
+	assert.deepEqual([plain.record.state, plain.canCreate, plain.canRefresh], ["edited", false, true]);
+	// A republish makes no read of an edited draft, so it can't find out.
+	await hooks["content:afterPublish"]({ collection: "posts", content: structuredClone(item) }, base);
+	await settleJobsForTests();
+	assert.equal(fake.calls.length, before);
+	// The read before Refresh finds it gone: the record is settled, and the same answer offers Create draft now.
+	clock += 60_000;
+	const read = await call("entry", { remote: true });
+	assert.deepEqual(read.remote, { status: "deleted", modifiedAt: null });
+	assert.deepEqual([read.record.state, read.canCreate, read.canRefresh, read.canRetry], ["gone", true, false, false]);
+	assert.equal(read.record.appUrl, null, "no link to an email that's gone");
+	assert.match(read.record.text, /Deleted in Buttondown/);
+	const gone = await stored();
+	assert.deepEqual([gone.state, gone.job, gone.nextRetryAt, gone.claimToken, gone.remoteStatus], ["gone", null, null, null, null]);
+	assert.equal(gone.updatedAt, new Date(clock).toISOString());
+	assert.deepEqual(fake.calls.slice(before).map((c) => `${c.method} ${c.path}`), [`GET /v1/emails/${first}`], "one read, and nothing written to Buttondown");
+	// Still never made again on its own: a republish and the hourly task make nothing.
+	await hooks["content:afterPublish"]({ collection: "posts", content: structuredClone(item) }, base);
+	await settleJobsForTests();
+	clock += 2 * 3_600_000;
+	await pack.tasks[0].handler(base);
+	assert.equal(fake.count("POST /v1/emails"), 1, "not recreated");
+	assert.equal((await stored()).state, "gone");
+	// Create draft now makes the new one, as a draft.
+	const made = await call("sync", { action: "create" });
+	assert.equal(made.record.state, "draft");
+	assert.notEqual(made.record.emailId, first);
+	assert.deepEqual(fake.drafts().map((e) => e.status), ["draft"]);
+	assert.match(fake.drafts()[0].subject, /One, changed/);
+	assert.deepEqual(fake.violations, []);
+});
+
+test("the entry route's remote read settles only a record at rest: a draft or a sent email found gone; an email marked deleted counts as gone; a waiting job is left to itself", async () => {
+	const pack = buttondownPack({}, { terms: async () => ["n"], termParents: async () => new Map(), background: () => {} });
+	const rules = { buttondownSettings: { rules: [{ collection: "posts", taxonomy: "category", terms: ["n"], since: "2026-11-01T00:00:00.000Z" }] } };
+	const EMAIL = "em_0000000000000000000000000a";
+	const read = async (record, { marked = false } = {}) => {
+		const base = context({ settings: rules });
+		base.content = { get: async () => ({ id: "1", slug: "one", status: "published", data: {} }) };
+		await base.storage[BUTTONDOWN_STORAGE].put("posts:1", { ...core.newRecord("posts", "1", 0), job: null, emailId: EMAIL, ...record });
+		// Marked deleted: Buttondown still returns the email, with status "deleted".
+		if (marked) base.fake.emails.set(EMAIL, { id: EMAIL, status: "deleted", source: "api", subject: "", body: "", metadata: {}, creation_date: "2026-11-15T12:00:00.000Z", modification_date: "2026-11-15T12:05:00.000Z" });
+		const out = await pack.routes["buttondown/entry"].handler({ ...base, input: { collection: "posts", id: "1", remote: true } });
+		assert.deepEqual(base.fake.calls.map((c) => c.method), ["GET"]);
+		assert.deepEqual(base.fake.violations, []);
+		return { out, stored: core.readRecord(await base.storage[BUTTONDOWN_STORAGE].get("posts:1")) };
+	};
+	for (const state of ["draft", "edited", "left"]) {
+		const { out, stored } = await read({ state, remoteStatus: state === "left" ? "sent" : "draft" });
+		assert.deepEqual([out.remote.status, out.record.state, out.canCreate, out.canRefresh, stored.state], ["deleted", "gone", true, false, "gone"], state);
+	}
+	const marked = await read({ state: "edited" }, { marked: true });
+	assert.deepEqual([marked.out.remote, marked.out.record.state, marked.out.canCreate], [{ status: "deleted", modifiedAt: null }, "gone", true]);
+	// Left to their own job, which reads the email itself (and can tell the Pack's own delete from one made in Buttondown).
+	for (const [name, record] of [
+		["an update waiting", { state: "draft", job: "sync" }],
+		["a job under way", { state: "draft", claimToken: "t", claimedAt: new Date().toISOString() }],
+		["a delete waiting", { state: "removing", job: "remove" }],
+		["a failed delete of the Pack's own that may have landed", { state: "error", job: "remove", deleteSentAt: "2026-11-15T12:00:00.000Z" }],
+		["not watched", { state: "stopped" }],
+	]) {
+		const { out, stored } = await read(record);
+		assert.equal(out.remote.status, "deleted", name);
+		assert.equal(stored.state, record.state, name);
+		assert.equal(out.record.state, record.state, name);
+	}
+});
+
 test("the entry route says when the post can't be read, instead of \"not published\"", async () => {
 	const { routes } = buttondownPack();
 	const ctx = context({ input: { collection: "posts", id: "1" }, settings: { buttondownSettings: { rules: [{ collection: "posts", taxonomy: "category", terms: ["n"], since: "2026-11-01T00:00:00.000Z" }] } } });

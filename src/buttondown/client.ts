@@ -341,6 +341,8 @@ export function createButtondownClient(options: ButtondownClientOptions) {
 				if (error instanceof ButtondownError && error.status === 404) return { outcome: "gone" };
 				throw error;
 			}
+			// Still returned, but marked deleted: gone, like a 404.
+			if (email.status === "deleted") return { outcome: "gone" };
 			if (email.status !== "draft") return { outcome: "left", status: email.status };
 			if (!expectedModified || email.modificationDate !== expectedModified || packKeyOf(email) !== expectedKey) return { outcome: "edited", email };
 			// Out of time before anything is sent: a plain failure, not a delete that may have landed.

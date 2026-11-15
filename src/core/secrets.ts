@@ -61,7 +61,7 @@ export const SECRET_SETTINGS = {
 	buttondownApiKey: {
 		type: "secret",
 		label: "Buttondown API key",
-		description: "For Buttondown Drafts. Use a key with only Emails and drafts → Write. The rules are on the Buttondown Drafts page.",
+		description: "For Buttondown Drafts. Use a key with only Emails → Read & write (Sending Disabled, every other area None). The rules are on the Buttondown Drafts page.",
 	},
 	// The older tokens, one per feature: still read (after the Cloudflare API token), hidden on the Settings page when empty.
 	usageApiToken: { type: "secret", label: "Older: Cloudflare usage token", description: OLDER_DESCRIPTION },

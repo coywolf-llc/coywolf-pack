@@ -62,12 +62,37 @@ const link = (text: string, url: string, ctx: BlockContext) => {
 	return href ? `[${escapeText(text)}](${href})` : escapeText(text);
 };
 
+/** Marks in rich text while it's escaped: bold opens and closes, italic opens and closes. Never in the input (control characters are removed first). */
+const B_OPEN = "\u0001";
+const B_CLOSE = "\u0002";
+const I_OPEN = "\u0003";
+const I_CLOSE = "\u0004";
+
+/** One paragraph's bold and italic marks as Markdown. The spaces just inside a pair move outside (Markdown needs that); a mark without its pair is dropped (and the double space that can leave). */
+function emphasis(paragraph: string): string {
+	const pair = (text: string, open: string, close: string, mark: string) =>
+		text.replace(new RegExp(`${open}([^${open}${close}]*)${close}`, "g"), (_m, inner: string) => {
+			const core = inner.trim();
+			if (!core) return inner;
+			const lead = inner.slice(0, inner.length - inner.trimStart().length);
+			const tail = inner.slice(inner.trimEnd().length);
+			return `${lead}${mark}${core}${mark}${tail}`;
+		});
+	return pair(pair(paragraph, I_OPEN, I_CLOSE, "*"), B_OPEN, B_CLOSE, "**")
+		.replace(/[\u0001-\u0004]/g, "")
+		.replace(/ {2,}/g, " ");
+}
+
 /**
  * The Custom Blocks' rich text (plain text with `[text](url)` links, `**bold**`, and a few HTML tags) as Markdown:
- * links and paragraphs kept, other markup dropped, everything else escaped so it stays text.
+ * links, paragraphs, bold (`**bold**`, `<strong>`, `<b>`) and italic (`<em>`, `<i>`) kept, other markup dropped,
+ * everything else escaped so it stays text. A single `*star*` stays text, as on the site (src/customBlocks/rich.ts
+ * reads only `**bold**` and links as Markdown).
  */
 export function richToMarkdown(input: unknown, ctx: Pick<BlockContext, "absolute">): string {
-	let text = str(input).slice(0, 100_000);
+	let text = str(input)
+		.slice(0, 100_000)
+		.replace(/[\u0000-\u0008]/g, "");
 	if (!text.trim()) return "";
 	const links: Array<{ text: string; url: string }> = [];
 	const keep = (label: string, url: string) => `\u0000${links.push({ text: label, url }) - 1}\u0000`;
@@ -78,8 +103,11 @@ export function richToMarkdown(input: unknown, ctx: Pick<BlockContext, "absolute
 		.replace(/<br\s*\/?>/gi, "\n")
 		.replace(/<\/?(p|div|ul|ol|h[1-6]|blockquote)\b[^>]*>/gi, "\n\n")
 		.replace(/<li\b[^>]*>/gi, "\n")
+		.replace(/<(\/?)(strong|b)(?:\s[^>]*)?>/gi, (_m, close: string) => (close ? B_CLOSE : B_OPEN))
+		.replace(/<(\/?)(em|i)(?:\s[^>]*)?>/gi, (_m, close: string) => (close ? I_CLOSE : I_OPEN))
 		.replace(/<[^>]*>/g, "")
-		.replace(/\*\*([^*\n]+)\*\*/g, "$1");
+		// The site's own rule for bold (src/customBlocks/rich.ts markdownLite).
+		.replace(/\*\*(?=\S)([^*\n]{1,1000}?)\*\*/g, `${B_OPEN}$1${B_CLOSE}`);
 	text = decodeEntities(text);
 	const lines = text
 		.split("\n")
@@ -90,7 +118,7 @@ export function richToMarkdown(input: unknown, ctx: Pick<BlockContext, "absolute
 	// Single line breaks stay line breaks (two spaces), blank lines stay paragraphs.
 	return lines
 		.split("\n\n")
-		.map((p) => p.split("\n").join("  \n"))
+		.map((p) => emphasis(p).split("\n").join("  \n"))
 		.join("\n\n")
 		.replace(/\u0000(\d+)\u0000/g, (_m, n: string) => {
 			const l = links[Number(n)];
@@ -200,10 +228,42 @@ function fileCard(block: Node, ctx: BlockContext): string {
 	return link(`Download: ${title}${size}`, file.href, ctx);
 }
 
-/** An embed, button, iframe or core file block: its label (or URL) as a link. Null when it has no usable URL. */
+/**
+ * A video player's address as the page a reader can open: a YouTube embed (youtube.com or youtube-nocookie.com,
+ * /embed/<id>) as its watch page, a Vimeo one (player.vimeo.com/video/<id>) as its video page. Anything else as it is.
+ */
+export function watchUrl(url: string): string {
+	let u: URL;
+	try {
+		u = new URL(url);
+	} catch {
+		return url;
+	}
+	if (!/^https?:$/.test(u.protocol)) return url;
+	const host = u.hostname.toLowerCase().replace(/^(www|m)\./, "");
+	if (host === "youtube.com" || host === "youtube-nocookie.com") {
+		const id = /^\/embed\/([A-Za-z0-9_-]{6,20})\/?$/.exec(u.pathname)?.[1];
+		// A playlist or live-stream player has no video id of its own.
+		if (!id || id === "videoseries" || id === "live_stream") return url;
+		const start = u.searchParams.get("start") ?? "";
+		return `https://www.youtube.com/watch?v=${id}${/^[1-9]\d{0,6}$/.test(start) ? `&t=${start}s` : ""}`;
+	}
+	if (host === "player.vimeo.com") {
+		const id = /^\/video\/(\d{1,20})\/?$/.exec(u.pathname)?.[1];
+		if (!id) return url;
+		// An unlisted video's key.
+		const h = u.searchParams.get("h") ?? "";
+		return `https://vimeo.com/${id}${/^[0-9a-f]{6,40}$/i.test(h) ? `/${h}` : ""}`;
+	}
+	return url;
+}
+
+/** An embed, button, iframe or core file block: its label (or URL) as a link. Null when it has no usable URL. An embed or iframe of a video player links to the video's own page (watchUrl). */
 function linkBlock(block: Node, ctx: BlockContext): string | null {
-	const url = [block.url, block.href, block.src, typeof block.link === "string" ? block.link : block.link?.href].map(str).find((u) => u.trim());
-	if (!url || !markdownUrl(url, ctx.absolute)) return null;
+	const raw = [block.url, block.href, block.src, typeof block.link === "string" ? block.link : block.link?.href].map(str).find((u) => u.trim());
+	if (!raw || !markdownUrl(raw, ctx.absolute)) return null;
+	const type = str(block._type);
+	const url = type === "embed" || type === "iframe" ? watchUrl(ctx.absolute(raw.trim())) : raw;
 	const label = [block.text, block.label, block.title, block.name, block.caption].map(str).find((t) => t.trim())?.replace(/\s+/g, " ").trim();
 	return link(label || url.trim(), url, ctx);
 }

@@ -126,7 +126,7 @@ test("no key: a setup card that points to the Settings page, and the rest of the
 	const page = await render(h(ButtondownPage));
 	try {
 		assert.match(page.text(), /Add a Buttondown API key/);
-		assert.match(page.text(), /only Emails and drafts → Write/);
+		assert.match(page.text(), /only Emails → Read & write \(Sending Disabled, every other area None\), made while the newsletter this site's drafts go to is selected/);
 		assert.ok([...page.main.querySelectorAll("a")].some((a) => a.getAttribute("href")?.endsWith("/plugins-manager/coywolf-pack/settings")));
 		assert.equal(page.button("Check key"), undefined);
 		assert.match(page.text(), /When to create a draft/);
@@ -273,6 +273,56 @@ test("the panel says so when no rule covers the collection (if EmDash shows it a
 	const panel = await render(h(ButtondownPanel, { collection: "pages", entry: { id: "X", updatedAt: "u9" } }));
 	try {
 		assert.match(panel.text(), /No Buttondown rule covers this collection/);
+	} finally {
+		await panel.unmount();
+	}
+});
+
+// Found live (2026-11-15): a draft edited in Buttondown and then deleted there left the panel with Refresh only.
+test("the panel: Refresh finds the draft deleted in Buttondown, and Create draft now shows at once (no reload, no other click)", async () => {
+	const edited = view({ state: "edited", text: "Edited in Buttondown, so the Pack doesn't change it." });
+	const gone = view({ state: "gone", text: "Deleted in Buttondown. The Pack doesn't make it again on its own.", appUrl: null });
+	// The server's record: edited until the remote read settles it as gone (src/buttondown/pack.ts, the entry route).
+	let entry = { covered: true, published: true, matches: true, keySaved: true, record: edited, canCreate: false, canRefresh: true, canRetry: false };
+	const calls = server({
+		entry: (body) => {
+			if (body.remote) entry = { ...entry, record: gone, canCreate: true, canRefresh: false };
+			return body.remote ? { ...entry, remote: { status: "deleted", modifiedAt: null } } : entry;
+		},
+		sync: () => {
+			entry = { ...entry, record: view(), canCreate: false, canRefresh: true };
+			return { record: view() };
+		},
+	});
+	const panel = await render(h(ButtondownPanel, { collection: "posts", entry: { id: "P7", updatedAt: "u1" } }));
+	try {
+		assert.match(panel.text(), /Edited in Buttondown/);
+		assert.equal(panel.button("Create draft now"), undefined, "stuck before the read: Refresh is the only button");
+		await panel.click("Refresh draft from post");
+		assert.match(panel.text(), /The draft was deleted in Buttondown, so there's nothing to refresh\. Create draft now makes a new one\./);
+		assert.match(panel.text(), /Deleted in Buttondown/);
+		assert.ok(panel.button("Create draft now"), "offered without another click");
+		assert.equal(panel.button("Refresh draft from post"), undefined);
+		assert.ok(![...panel.main.querySelectorAll("a")].some((a) => a.textContent.includes("Open in Buttondown")), "no link to an email that's gone");
+		assert.ok(!/Refresh the draft from the post\?/.test(window.document.body.textContent), "nothing to confirm");
+		assert.equal(calls.filter((c) => c.url.endsWith("/buttondown/sync")).length, 0, "nothing is made until Create draft now is selected");
+		await panel.click("Create draft now");
+		assert.deepEqual(calls.filter((c) => c.url.endsWith("/buttondown/sync")).map((c) => c.body), [{ collection: "posts", id: "P7", action: "create" }]);
+		assert.match(panel.text(), /Draft in Buttondown\./);
+	} finally {
+		await panel.unmount();
+	}
+});
+
+test("the panel: a deleted draft whose record a job still holds gets the plain notice, and no promise of Create draft now", async () => {
+	const entry = { covered: true, published: true, matches: true, keySaved: true, record: view({ state: "draft" }), canCreate: false, canRefresh: true, canRetry: false };
+	server({ entry: (body) => (body.remote ? { ...entry, remote: { status: "deleted", modifiedAt: null } } : entry) });
+	const panel = await render(h(ButtondownPanel, { collection: "posts", entry: { id: "P8", updatedAt: "u1" } }));
+	try {
+		await panel.click("Refresh draft from post");
+		assert.match(panel.text(), /The draft was deleted in Buttondown, so there's nothing to refresh\./);
+		assert.ok(!/Create draft now makes a new one/.test(panel.text()));
+		assert.equal(panel.button("Create draft now"), undefined);
 	} finally {
 		await panel.unmount();
 	}

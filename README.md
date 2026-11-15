@@ -178,7 +178,7 @@ The plugin's **Settings** page (`https://coywolf.com/_emdash/admin/plugins-manag
 | **AI API key** | AI Enrichment (Anthropic, OpenAI or Gemini) |
 | **Fathom API key** | Insights' Fathom card |
 | **Google service account key** | Insights' Search Console card |
-| **Buttondown API key** | Buttondown Drafts (a key with only Emails and drafts → Write) |
+| **Buttondown API key** | Buttondown Drafts (a key with only Emails → Read & write) |
 
 Create the Cloudflare API token with the pre-filled form in its guide, and add the few permissions Cloudflare's form can't pre-select ([the list](docs/README.md#the-cloudflare-api-token)). For the domains policy, **Specified Domains → this site's domain** is recommended; choose **All Domains** to use one token on every site in the account. Or set it as a Worker secret: `npx wrangler secret put CLOUDFLARE_API_TOKEN`. The token never needs D1: restores keep their own token (`BACKUPS_API_TOKEN`).
 

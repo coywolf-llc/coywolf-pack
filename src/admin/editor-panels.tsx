@@ -479,7 +479,11 @@ export function ButtondownPanel(props: PanelProps) {
 					return;
 				}
 				if (now.remote.status !== "draft" || !now.remote.modifiedAt) {
-					setNotice(now.remote.status === "deleted" ? "The draft was deleted in Buttondown, so there's nothing to refresh." : "The email isn't a draft in Buttondown any more, so the Pack leaves it alone.");
+					if (now.remote.status === "deleted") {
+						// The route settled the record as deleted in Buttondown: read it again, so Create draft now shows at once.
+						setNotice(now.canCreate ? "The draft was deleted in Buttondown, so there's nothing to refresh. Create draft now makes a new one." : "The draft was deleted in Buttondown, so there's nothing to refresh.");
+						setFresh((n) => n + 1);
+					} else setNotice("The email isn't a draft in Buttondown any more, so the Pack leaves it alone.");
 					return;
 				}
 				seen = now.remote.modifiedAt;

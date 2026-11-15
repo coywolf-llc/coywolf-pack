@@ -312,7 +312,8 @@ export type RemoteVerdict = "update" | "gone" | "left" | "edited";
  * for this post in the email's metadata: an email whose key was removed or changed there is never written.
  */
 export function classifyRemote(remote: { status: string; modificationDate: string | null; key: string | null } | null, record: Pick<ButtondownRecord, "remoteModifiedAt">, expectedKey: string, seenModifiedAt: string | null = null): RemoteVerdict {
-	if (!remote) return "gone";
+	// No email (404), or one Buttondown still returns marked deleted: gone either way.
+	if (!remote || remote.status === "deleted") return "gone";
 	if (remote.status !== "draft") return "left";
 	if (seenModifiedAt !== null) return seenModifiedAt !== "" && remote.modificationDate === seenModifiedAt && remote.key === expectedKey ? "update" : "edited";
 	if (!record.remoteModifiedAt || remote.modificationDate !== record.remoteModifiedAt || remote.key !== expectedKey) return "edited";
@@ -375,6 +376,17 @@ export function failure(input: FailureInput, record: Pick<ButtondownRecord, "att
 		return { kind: "temporary", nextRetryAt: new Date(now + step).toISOString() };
 	}
 	return { kind: "fatal", nextRetryAt: null };
+}
+
+/**
+ * Whether a read made outside a job (the panel's, before Refresh draft from post) that found the record's email gone
+ * from Buttondown may settle the record as `gone`, so Create draft now is offered. Only a record at rest that names
+ * that email: a draft, one edited there, or one that left draft there. A record with a job waiting or under way, or
+ * with a delete of the Pack's own that got no answer, is left to its job, which reads the email itself (and can tell
+ * the Pack's own delete from one made in Buttondown).
+ */
+export function settlesGone(record: Pick<ButtondownRecord, "state" | "emailId" | "job" | "claimToken" | "deleteSentAt">, emailId: string): boolean {
+	return record.emailId === emailId && (record.state === "draft" || record.state === "edited" || record.state === "left") && !record.job && !record.claimToken && !record.deleteSentAt;
 }
 
 /** The hourly task's to finish: queued or claimed but untouched for 5 minutes (its job was dropped or cut off). */

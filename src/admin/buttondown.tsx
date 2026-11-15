@@ -64,7 +64,7 @@ function KeyCheckResults(props: { result: KeyCheck }) {
 	const refused = (s: number) => s === 401 || s === 403;
 	const lines: Array<{ ok: boolean; text: string }> = [
 		{ ok: c.ping === 200, text: c.ping === 200 ? "The key works." : c.ping ? `Buttondown refused the key (${c.ping}).` : "Buttondown didn't answer. Try again in a minute." },
-		{ ok: c.emails === 200, text: c.emails === 200 ? "It can read drafts. The first draft the Pack makes shows it can write them." : `It can't read drafts (${c.emails || "no answer"}). Give it Emails and drafts → Write.` },
+		{ ok: c.emails === 200, text: c.emails === 200 ? "It can read drafts. The first draft the Pack makes shows it can write them." : `It can't read drafts (${c.emails || "no answer"}). Give it Emails → Read & write.` },
 		{ ok: refused(c.newsletters), text: refused(c.newsletters) ? "It can't read your newsletters or their keys." : c.newsletters === 200 ? "It can read your newsletters, and with them every newsletter's API key." : `Newsletters answered ${c.newsletters || "nothing"}.` },
 		{ ok: refused(c.subscribers), text: refused(c.subscribers) ? "It can't read your subscribers." : c.subscribers === 200 ? "It can read your subscribers." : `Subscribers answered ${c.subscribers || "nothing"}.` },
 	];
@@ -78,7 +78,7 @@ function KeyCheckResults(props: { result: KeyCheck }) {
 					</li>
 				))}
 			</ul>
-			{props.result.tooBroad && <Banner variant="error" role="alert" description="This key can do more than it needs. Make a key with only Emails and drafts → Write (every other area None), save it on the Settings page, and delete this one in Buttondown." />}
+			{props.result.tooBroad && <Banner variant="error" role="alert" description="This key can do more than it needs. Make a key with only Emails → Read & write (Sending Disabled, every other area None), save it on the Settings page, and delete this one in Buttondown." />}
 		</div>
 	);
 }
@@ -113,7 +113,7 @@ function Connection(props: { status: Status }) {
 						<>The saved Buttondown API key can't be decrypted: EMDASH_ENCRYPTION_KEY is missing or has changed. Save the key again on {settingsLink}.</>
 					) : (
 						<>
-							Paste it as Buttondown API key on {settingsLink}, where its step-by-step guide is. Use a key with only Emails and drafts → Write, from the newsletter this site's drafts go to.
+							Paste it as Buttondown API key on {settingsLink}, where its step-by-step guide is. Use a key with only Emails → Read & write (Sending Disabled, every other area None), made while the newsletter this site's drafts go to is selected in Buttondown.
 						</>
 					)
 				}
@@ -124,7 +124,7 @@ function Connection(props: { status: Status }) {
 		<SettingsSection
 			id="cw-bd-connection"
 			title="Connection"
-			description={<>A Buttondown API key is saved on {settingsLink}. Check what it can reach: the Pack needs only Emails and drafts.</>}
+			description={<>A Buttondown API key is saved on {settingsLink}. Check what it can reach: the Pack needs only Emails → Read & write.</>}
 			actions={
 				<Button type="button" variant="secondary" icon={<Key aria-hidden="true" />} disabled={checking} onClick={() => void check()}>
 					{checking ? "Checking…" : "Check key"}

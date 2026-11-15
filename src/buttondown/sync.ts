@@ -16,6 +16,10 @@
  *   afterwards counts as the Pack's own delete, so the next publish makes a
  *   new draft (deleteSentAt). Any other missing email was deleted in
  *   Buttondown, and is never made again on its own.
+ * - A draft deleted in Buttondown that no job read since (the record still says
+ *   draft, edited or left): the panel's read before Refresh draft from post
+ *   finds it gone and settles the record (settleGone), so Create draft now is
+ *   offered. Without that, an edited record would never be read again.
  * - A job that was dropped, or that ran out of passes: its record has a time
  *   for the hourly task (nextRetryAt), which finishes it.
  * - A create Buttondown answered with a 2xx the Pack couldn't read: the draft
@@ -83,6 +87,7 @@ import {
 	newRecord,
 	readRecord,
 	recordId,
+	settlesGone,
 } from "./sync-core.js";
 
 // ── Dependencies (replaced in tests) ─────────────────────────────
@@ -725,7 +730,7 @@ async function failed(run: Run, error: unknown): Promise<Outcome> {
 		plan = failure({ status, code, retryAfter: error.retryAfter }, record, now);
 		message =
 			plan.kind === "auth"
-				? `Buttondown refused the key (${status}). It needs Emails and drafts → Write. ${AUTH_RETRY}${plan.nextRetryAt ? ` The Pack tries once more at ${plan.nextRetryAt.slice(11, 16)} UTC, because Buttondown also answers 403 when it's busy.` : ""}${error.detail ? ` Buttondown said: ${error.detail}` : ""}`
+				? `Buttondown refused the key (${status}). It needs Emails → Read & write. ${AUTH_RETRY}${plan.nextRetryAt ? ` The Pack tries once more at ${plan.nextRetryAt.slice(11, 16)} UTC, because Buttondown also answers 403 when it's busy.` : ""}${error.detail ? ` Buttondown said: ${error.detail}` : ""}`
 				: plan.kind === "rate"
 					? `Buttondown asked the Pack to slow down (429). It tries again ${plan.nextRetryAt ? `after ${new Date(plan.nextRetryAt).toISOString().slice(11, 16)} UTC` : "later"}.`
 					: error.message;
@@ -949,6 +954,16 @@ export async function runManual(ctx: PluginContext, deps: SyncDeps, action: Manu
 		return runEntry(ctx, deps, collection, id, now + 20_000);
 	}
 	return out;
+}
+
+/**
+ * A read made outside a job (the panel's, before Refresh draft from post) found the record's email gone from
+ * Buttondown: the record settles as `gone`, as a job's own read would settle it, so the panel offers Create draft
+ * now. Nothing is made here, and `gone` is still never made again on its own. A record a job holds or is waiting
+ * for stays as it is (settlesGone). Returns the record as it is afterwards.
+ */
+export async function settleGone(ctx: Pick<PluginContext, "storage">, deps: Pick<SyncDeps, "now">, collection: string, id: string, emailId: string): Promise<ButtondownRecord | null> {
+	return updateRecord(ctx, recordId(collection, id), (current) => (current && settlesGone(current, emailId) ? { ...current, ...settled({ state: "gone", remoteStatus: null }), updatedAt: iso(deps.now()) } : null));
 }
 
 // ── The hourly task ──────────────────────────────────────────────

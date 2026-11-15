@@ -69,6 +69,9 @@ test("the state machine, row by row (docs/buttondown.md, What happens when)", ()
 test("Buttondown's answer for an update: only an untouched draft with the Pack's key is written (unless Refresh asks)", () => {
 	const r = { remoteModifiedAt: "m1" };
 	assert.equal(classifyRemote(null, r, "k"), "gone");
+	// Still returned, but marked deleted: gone like a 404, never "left" (which would leave no way to a new draft), also for Refresh.
+	assert.equal(classifyRemote({ status: "deleted", modificationDate: "m1", key: "k" }, r, "k"), "gone");
+	assert.equal(classifyRemote({ status: "deleted", modificationDate: "m1", key: "k" }, r, "k", "m1"), "gone");
 	assert.equal(classifyRemote({ status: "scheduled", modificationDate: "m1", key: "k" }, r, "k"), "left");
 	assert.equal(classifyRemote({ status: "sent", modificationDate: "m1", key: "k" }, r, "k", "m1"), "left", "Refresh never writes a sent email");
 	assert.equal(classifyRemote({ status: "draft", modificationDate: "m2", key: "k" }, r, "k"), "edited");
@@ -293,6 +296,70 @@ test("D2: unpublish deletes an untouched draft (removed); publishing again makes
 	assert.equal(r.unpublished, false);
 	assert.equal(s.fake.drafts().length, 1);
 	assert.deepEqual(s.fake.violations, []);
+});
+
+test("a read outside a job that finds the email gone settles only a record at rest that names it (settlesGone)", () => {
+	const { settlesGone } = core;
+	const EMAIL = "em_0000000000000000000000000a";
+	for (const state of ["draft", "edited", "left"]) assert.equal(settlesGone(rec(state), EMAIL), true, state);
+	// Nothing to settle, or their own job's to read: every other state, another email, a job waiting or under way, the Pack's own unanswered delete.
+	for (const state of ["pending", "creating", "gone", "removing", "removed", "error", "stopped"]) assert.equal(settlesGone(rec(state), EMAIL), false, state);
+	assert.equal(settlesGone(rec("edited"), "em_0000000000000000000000000b"), false, "another email");
+	assert.equal(settlesGone(rec("edited", { emailId: null }), ""), false, "no email");
+	assert.equal(settlesGone(rec("draft", { job: "sync" }), EMAIL), false, "an update is waiting");
+	assert.equal(settlesGone(rec("draft", { claimToken: "t" }), EMAIL), false, "a job holds it");
+	assert.equal(settlesGone(rec("draft", { deleteSentAt: new Date(T0).toISOString() }), EMAIL), false, "the Pack's own delete may have landed");
+});
+
+test("edited in Buttondown, then deleted there: settleGone makes the record gone (kept, with its flags), it's never made again on its own, and Create draft now makes a new one", async () => {
+	const s = site();
+	s.post("P1");
+	await s.event("publish", "P1");
+	const first = s.fake.drafts()[0].id;
+	s.fake.edit(first, { subject: "Mine" });
+	await s.republish("P1", { title: "Changed" });
+	assert.equal((await s.record("P1")).state, "edited");
+	s.fake.emails.delete(first);
+	// No event reads an edited draft: unpublish and republish leave it edited, with no call.
+	const calls = s.fake.calls.length;
+	await s.unpublish("P1");
+	await s.republish("P1");
+	assert.equal((await s.record("P1")).state, "edited");
+	assert.equal(s.fake.calls.length, calls);
+	assert.match(await manualRefusal(s.ctx, s.deps, "create", "posts", "P1", await s.record("P1")), /already has a draft/);
+	// Another email's id settles nothing.
+	assert.equal((await sync.settleGone(s.ctx, s.deps, "posts", "P1", "em_0000000000000000000000000z")).state, "edited");
+	s.advance(1000);
+	const gone = await sync.settleGone(s.ctx, s.deps, "posts", "P1", first);
+	assert.deepEqual([gone.state, gone.job, gone.nextRetryAt, gone.lastError, gone.remoteStatus, gone.emailId], ["gone", null, null, null, null, first]);
+	assert.deepEqual(gone, await s.record("P1"));
+	assert.equal(s.fake.calls.length, calls, "settling makes no call");
+	// Gone: not made again by a republish or the hourly task.
+	await s.republish("P1", { title: "Again" });
+	s.advance(2 * 3_600_000);
+	await retryDue(s.ctx, s.deps);
+	assert.equal(s.fake.count("POST /v1/emails"), 1, "not recreated");
+	assert.equal(await manualRefusal(s.ctx, s.deps, "create", "posts", "P1", await s.record("P1")), null);
+	const r = await runManual(s.ctx, s.deps, "create", "posts", "P1");
+	assert.equal(r.state, "draft");
+	assert.notEqual(r.emailId, first);
+	assert.deepEqual(s.fake.drafts().map((e) => [e.status, e.subject]), [["draft", "Again"]]);
+});
+
+test("an email Buttondown still returns but marks deleted is gone, not \"left\": on a republish and on an unpublish (no DELETE)", async () => {
+	for (const how of ["republish", "unpublish"]) {
+		const s = site();
+		s.post("P1");
+		await s.event("publish", "P1");
+		const id = s.fake.drafts()[0].id;
+		s.fake.setStatus(id, "deleted");
+		if (how === "republish") await s.republish("P1", { title: "Changed" });
+		else await s.unpublish("P1");
+		const r = await s.record("P1");
+		assert.equal(r.state, "gone", how);
+		assert.equal(s.fake.count("DELETE") + s.fake.count("PATCH"), 0, how);
+		assert.equal(s.fake.count("POST /v1/emails"), 1, how);
+	}
 });
 
 test("D2: an edited draft is kept on unpublish, with a note; a sent one is left; a deleted one is gone", async () => {
