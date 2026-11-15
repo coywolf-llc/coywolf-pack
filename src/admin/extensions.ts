@@ -22,6 +22,7 @@ const PACK_ID = "coywolf-pack";
 
 interface ManifestLike {
 	plugins?: Record<string, { enabled?: boolean; adminPages?: Array<{ path?: string }> } | undefined>;
+	collections?: Record<string, { fields?: Record<string, { kind?: string } | undefined> } | undefined>;
 }
 
 /** The admin's manifest, from its React Query cache (["manifest"]), or null. */
@@ -54,6 +55,21 @@ export function packPageOn(page: string, scope?: { __TSR_ROUTER__?: unknown }): 
 	return plugin.adminPages.some((p) => p?.path === page);
 }
 
+/** Whether a collection has a reference field `field` in the admin's manifest (Child Pages: parent_page). */
+export function collectionHasField(collection: string, field: string, scope?: { __TSR_ROUTER__?: unknown }): boolean {
+	return adminManifest(scope)?.collections?.[collection]?.fields?.[field]?.kind === "reference";
+}
+
+/** The field a panel or column needs on the collection, besides its module's page in the sidebar. */
+export const NEEDS_FIELD: Readonly<Record<string, string>> = { childPages: "parent_page", parent: "parent_page" };
+
+/** Whether a panel or column shows for a collection: its module is on and the collection has the field it needs. */
+export function extensionShows(id: string, page: string, collection: string, scope?: { __TSR_ROUTER__?: unknown }): boolean {
+	if (!packPageOn(page, scope)) return false;
+	const field = NEEDS_FIELD[id];
+	return !field || collectionHasField(collection, field, scope);
+}
+
 /** EmDash's admin role for plugins:manage, which the pack's routes need: the panels and the column show to admins only. */
 export const ADMIN_ROLE = 50;
 
@@ -63,10 +79,17 @@ export const ADMIN_ROLE = 50;
  * The components are in editor-panels.tsx.
  */
 export const EDITOR_PANELS = [
+	{ id: "childPages", title: "Child pages", page: "/child-pages", minRole: ADMIN_ROLE, order: 49 },
 	{ id: "schema", title: "Schema & Social", page: "/schema", minRole: ADMIN_ROLE, order: 50 },
 	{ id: "ai", title: "AI suggestions", page: "/ai", minRole: ADMIN_ROLE, order: 51 },
 	{ id: "links", title: "Link status", page: "/links", minRole: ADMIN_ROLE, order: 52 },
 ] as const;
 
-/** The content-list column: each listed entry's broken and blocked links (Link Manager). */
-export const LIST_COLUMNS = [{ id: "links", label: "Links", page: "/links", minRole: ADMIN_ROLE, order: 50, align: "end" }] as const;
+/**
+ * The content-list columns: each listed entry's parent page (Child Pages, in collections with the
+ * Parent page field), and its broken and blocked links (Link Manager).
+ */
+export const LIST_COLUMNS = [
+	{ id: "parent", label: "Parent", page: "/child-pages", minRole: ADMIN_ROLE, order: 49, align: "start" },
+	{ id: "links", label: "Links", page: "/links", minRole: ADMIN_ROLE, order: 50, align: "end" },
+] as const;

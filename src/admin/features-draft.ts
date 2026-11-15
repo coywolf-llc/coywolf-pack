@@ -34,6 +34,8 @@ export interface Feature {
 	enabled: boolean;
 	/** Its own switch (src/core/features.ts featureChoices). */
 	choice?: boolean;
+	/** Features it needs to do its whole job (FeatureDef.requires): the page warns while one is off. */
+	requires?: string[];
 }
 
 export interface ModuleState {
@@ -53,6 +55,16 @@ export function switchesOf(modules: ModuleState[]): Switches {
 /** The switches in `draft` that differ from `saved`: what Save sends. */
 export function changedSwitches(draft: Switches, saved: Switches): Switches {
 	return Object.fromEntries(Object.entries(draft).filter(([id, on]) => saved[id] !== on));
+}
+
+/**
+ * The features `feature` needs that would be off with these switches (a part counts as off
+ * while its module is), as labels, for the warning under a module that's on.
+ */
+export function missingRequirements(feature: Pick<Feature, "requires">, draft: Switches, modules: ModuleState[]): string[] {
+	const labels = new Map(modules.flatMap((m) => m.features.map((f) => [f.id, f.label] as const)));
+	const on = (id: string) => Boolean(draft[id]) && (!id.includes(".") || Boolean(draft[id.slice(0, id.indexOf("."))]));
+	return (feature.requires ?? []).filter((id) => labels.has(id) && !on(id)).map((id) => labels.get(id) as string);
 }
 
 /** A module's main switch (no "." in its id): it adds or removes the module's pages in the sidebar. */

@@ -789,6 +789,7 @@ function ParentsStep({ wxr, onWxr }: { wxr: WxrInfo | null; onWxr: (info: WxrInf
 					(<Code>/news/local/a-post/</Code>) or parent pages (<Code>/about/team/</Code>) are lost. This sets each category's parent the way WordPress had
 					it, with EmDash's own taxonomy API and your account, a dry run first. Running it again changes nothing. EmDash pages have no parent, so page
 					parents are listed as a <Code>pageParents</Code> option to paste into <Code>coywolfPlugin()</Code> (see <DocsLink doc="content-urls">Content URLs</DocsLink>).
+					With Child Pages, they can then move into each page's Parent page field (see <DocsLink doc="child-pages">Child Pages</DocsLink>).
 				</>
 			}
 		>

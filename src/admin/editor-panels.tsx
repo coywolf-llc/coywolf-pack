@@ -2,15 +2,20 @@
  * The pack's sections in EmDash's entry editor sidebar (contentEditorPanels)
  * and its column in the content lists (contentListColumns), EmDash 1.4+:
  *
+ * - Child pages: the page's URL, its parent and children, a parent waiting
+ *   to be published, and what to watch out for (loops, a parent that isn't
+ *   published, Slug changes off).
  * - Schema & Social: the entry's page and article types (its own or its
  *   collection's), main subject and custom markup, with a link to edit them.
  * - AI suggestions: the entry's AI description and entities (AI Enrichment).
  * - Link status: the entry's links, worst first (Link Manager).
- * - Links column: each listed entry's broken and blocked links, read for the
+ * - Parent column: each listed entry's parent page (Child Pages), and Links
+ *   column: each listed entry's broken and blocked links; each read for the
  *   whole page in one request.
  *
- * Each shows only while its module is on (src/admin/extensions.ts) and to
- * admins only (the routes need plugins:manage). They only read: changes are
+ * Each shows only while its module is on (src/admin/extensions.ts; the Child
+ * Pages ones only in collections with the Parent page field) and to admins
+ * only (the routes need plugins:manage). They only read: changes are
  * made on the module pages, so nothing here races the editor's own save.
  */
 import { Badge, Button } from "@cloudflare/kumo";
@@ -18,7 +23,7 @@ import { ArrowsClockwise, Copy } from "@phosphor-icons/react";
 import * as React from "react";
 
 import { PACK_API, apiPost, errorText } from "./api.js";
-import { EDITOR_PANELS, LIST_COLUMNS, packPageOn } from "./extensions.js";
+import { EDITOR_PANELS, LIST_COLUMNS, extensionShows } from "./extensions.js";
 import { AdminLink, PackLink } from "./page.js";
 import { packPagePath } from "./router.js";
 
@@ -40,6 +45,7 @@ interface CellProps {
 const schemaPost = apiPost(`${PACK_API}/schema`);
 const aiPost = apiPost(`${PACK_API}/ai`);
 const linksPost = apiPost(`${PACK_API}/links`);
+const childPagesPost = apiPost(`${PACK_API}/childPages`);
 
 /** Load `fetcher` for an entry (again when it's saved), with a loading and an error state. */
 function useEntryData<T>(fetcher: () => Promise<T>, deps: React.DependencyList) {
@@ -314,6 +320,136 @@ export function LinksPanel(props: PanelProps) {
 	);
 }
 
+// ── Child pages ──────────────────────────────────────────────────
+
+interface PageSummary {
+	id: string;
+	title: string;
+	slug: string | null;
+	url: string | null;
+	status: string;
+}
+
+interface ChildPagesEntry {
+	enabled: boolean;
+	redirects: boolean;
+	slugChanges: boolean;
+	field: boolean;
+	found: boolean;
+	nested: boolean;
+	url?: string | null;
+	published?: boolean;
+	digitSlug?: boolean;
+	parent?: PageSummary | null;
+	pendingParent?: { parent: PageSummary | null; loop: boolean } | null;
+	ancestors?: PageSummary[];
+	children?: Array<PageSummary & { nested: boolean }>;
+	warnings?: string[];
+}
+
+const SHOWN_CHILDREN = 10;
+
+/** What each warning from childPages/entry means for the editor. */
+export const PAGE_WARNINGS: Record<string, string> = {
+	loop: "This page is in a loop of parent pages (it's its own ancestor), so its URL is at the top level. Choose another parent page.",
+	parentUnpublished: "Its parent page isn't published, so this page's URL is at the top level until the parent is published.",
+	parentMissing: "Its parent page was deleted. Choose another parent page, or none.",
+	deep: "This page is 8 or more levels deep. Long URLs are harder to read and share.",
+	digitSlug: "The slug is only digits, which a theme can mistake for a page number (/page/2/). Use a slug with letters.",
+};
+
+/** A link to edit an entry in the admin. */
+function EntryLink(props: { collection: string; page: PageSummary }) {
+	return (
+		<AdminLink to={`/content/${encodeURIComponent(props.collection)}/${encodeURIComponent(props.page.id)}`} className="text-kumo-link underline">
+			{props.page.title}
+		</AdminLink>
+	);
+}
+
+export function ChildPagesPanel(props: PanelProps) {
+	const { collection, entry } = props;
+	const { data, error, loading } = useEntryData(() => childPagesPost<ChildPagesEntry>("entry", { collection, id: entry.id }, "Couldn't read the page's parents"), [collection, entry.id, entry.updatedAt]);
+	if (loading && !data) return <Muted>Loading…</Muted>;
+	if (error || !data) return <Muted>{error ?? "Couldn't read the page's parents."}</Muted>;
+	if (!data.field || !data.found) return <Muted>Save the page to see its place in the page tree.</Muted>;
+	const warnings = [...(data.warnings ?? [])];
+	const children = data.children ?? [];
+	const pending = data.pendingParent;
+	return (
+		<div className="space-y-3">
+			{!data.enabled && (
+				<Muted>
+					Child Pages is off, so the Parent page field doesn't change URLs. Turn it on on <PackLink page="/features">the Features page</PackLink>.
+				</Muted>
+			)}
+			<dl className="space-y-2">
+				<Row label={data.published ? "URL" : "URL once published"}>
+					{data.url ? (
+						data.published ? (
+							<a href={data.url} target="_blank" rel="noreferrer noopener" className="break-all text-kumo-link underline">
+								{data.url}
+							</a>
+						) : (
+							<span className="break-all">{data.url}</span>
+						)
+					) : (
+						<span className="text-kumo-subtle">None</span>
+					)}
+				</Row>
+				<Row label="Parent page">{data.parent ? <EntryLink collection={collection} page={data.parent} /> : <span className="text-kumo-subtle">None (top level)</span>}</Row>
+				{pending && (
+					<Row label="When you publish">
+						{pending.parent ? (
+							<>
+								Parent page: <EntryLink collection={collection} page={pending.parent} />
+							</>
+						) : (
+							"No parent page (top level)"
+						)}
+						{pending.loop && <span className="block text-kumo-danger">That parent would put this page under itself, so publishing is refused. Choose another parent page.</span>}
+					</Row>
+				)}
+				{(data.ancestors?.length ?? 0) > 0 && <Row label="Under">{data.ancestors?.map((a) => a.title).join(" › ")}</Row>}
+				<Row label="Child pages">
+					{children.length ? (
+						<ul role="list" className="space-y-1">
+							{children.slice(0, SHOWN_CHILDREN).map((child) => (
+								<li key={child.id} className="min-w-0">
+									<EntryLink collection={collection} page={child} />
+									{child.status !== "published" && <span className="text-kumo-subtle"> ({child.status})</span>}
+								</li>
+							))}
+							{children.length > SHOWN_CHILDREN && <li className="text-kumo-subtle">And {children.length - SHOWN_CHILDREN} more.</li>}
+						</ul>
+					) : (
+						<span className="text-kumo-subtle">None</span>
+					)}
+				</Row>
+			</dl>
+			{warnings.length > 0 && (
+				<ul role="list" className="space-y-1.5">
+					{warnings.map((w) => (
+						<li key={w} className="flex items-start gap-1.5 text-sm">
+							<Badge variant="warning">Check</Badge>
+							<span>{PAGE_WARNINGS[w] ?? w}</span>
+						</li>
+					))}
+				</ul>
+			)}
+			{data.enabled && (!data.redirects || !data.slugChanges) && (
+				<Muted>
+					{!data.redirects ? "Redirect Manager is off" : "Slug changes (Redirect Manager) is off"}, so if this page or its parent moves, the old URL won't redirect. Turn it on on{" "}
+					<PackLink page="/features">the Features page</PackLink>.
+				</Muted>
+			)}
+			<PackLink page="/child-pages" className="text-sm text-kumo-link underline">
+				Open Child Pages
+			</PackLink>
+		</div>
+	);
+}
+
 // ── Links column ─────────────────────────────────────────────────
 
 type PageLinks = Record<string, LinkSummary | null>;
@@ -368,10 +504,61 @@ export function LinksCell(props: CellProps) {
 	return <span className="text-kumo-subtle">{summary.total} OK</span>;
 }
 
+// ── Parent column ────────────────────────────────────────────────
+
+type PageParents = Record<string, { id: string; title: string; counts: boolean } | null>;
+
+const parentRequests = new Map<string, { at: number; promise: Promise<PageParents> }>();
+
+/** The parents of one list page, requested once for all its rows (like pageLinks), kept for a minute. */
+export function pageParents(collection: string, ids: string[], now = Date.now()): Promise<PageParents> {
+	const key = `${collection}\n${ids.join(",")}`;
+	const hit = parentRequests.get(key);
+	if (hit && now - hit.at < PAGE_LINKS_MS) return hit.promise;
+	if (parentRequests.size > 50) parentRequests.clear();
+	const promise = childPagesPost<{ entries: PageParents }>("parents", { collection, ids }, "Couldn't read the parent pages").then((r) => r.entries);
+	promise.catch(() => parentRequests.delete(key));
+	parentRequests.set(key, { at: now, promise });
+	return promise;
+}
+
+export function ParentCell(props: CellProps) {
+	const ids = props.visibleItems.map((i) => i.id);
+	const key = `${props.collection}\n${ids.join(",")}`;
+	const [state, setState] = React.useState<{ key: string; entries?: PageParents; failed?: boolean }>();
+	React.useEffect(() => {
+		let live = true;
+		pageParents(props.collection, ids)
+			.then((entries) => live && setState({ key, entries }))
+			.catch(() => live && setState({ key, failed: true }));
+		return () => {
+			live = false;
+		};
+		// The ids are in `key`.
+	}, [key]);
+	if (!state || state.key !== key) return <span className="text-kumo-subtle" aria-label="Loading">…</span>;
+	const parent = state.entries?.[props.item.id];
+	if (!parent) {
+		return (
+			<span className="text-kumo-subtle">
+				<span aria-hidden="true">-</span>
+				<span className="sr-only">{state.failed ? "Parent page unavailable" : "No parent page"}</span>
+			</span>
+		);
+	}
+	return (
+		<span className={parent.counts ? undefined : "text-kumo-subtle"} title={parent.counts ? undefined : "Not in the URL: the parent isn't published, or the pages form a loop"}>
+			{parent.title}
+			{!parent.counts && <span className="sr-only"> (not in the URL)</span>}
+		</span>
+	);
+}
+
 // ── What EmDash reads from the admin module ──────────────────────
 
-const PANEL_COMPONENTS: Record<(typeof EDITOR_PANELS)[number]["id"], React.ComponentType<PanelProps>> = { schema: SchemaPanel, ai: AiPanel, links: LinksPanel };
+const PANEL_COMPONENTS: Record<(typeof EDITOR_PANELS)[number]["id"], React.ComponentType<PanelProps>> = { childPages: ChildPagesPanel, schema: SchemaPanel, ai: AiPanel, links: LinksPanel };
+const COLUMN_CELLS: Record<(typeof LIST_COLUMNS)[number]["id"], React.ComponentType<CellProps>> = { parent: ParentCell, links: LinksCell };
 
-export const contentEditorPanels = EDITOR_PANELS.map(({ page, ...panel }) => ({ ...panel, component: PANEL_COMPONENTS[panel.id], collections: () => packPageOn(page) }));
+export const contentEditorPanels = EDITOR_PANELS.map(({ page, ...panel }) => ({ ...panel, component: PANEL_COMPONENTS[panel.id], collections: (collection: string) => extensionShows(panel.id, page, collection) }));
 
-export const contentListColumns = LIST_COLUMNS.map(({ page, ...column }) => ({ ...column, cell: LinksCell, collections: () => packPageOn(page) }));
+export const contentListColumns = LIST_COLUMNS.map(({ page, ...column }) => ({ ...column, cell: COLUMN_CELLS[column.id], collections: (collection: string) => extensionShows(column.id, page, collection) }));
