@@ -68,6 +68,7 @@ The key is read only in the Worker. It's never logged, never returned to a page,
 | A create is retried, and that draft was edited in Buttondown | Keeps it as it is and marks it "Edited in Buttondown" |
 | A create is retried, and that email was scheduled or sent | Points at that email and leaves it alone. No second draft |
 | The category is removed, then the post is saved or published | Stops watching the post. The draft is left as it is |
+| The category is removed after a create got no answer | Stops watching the post and keeps its record. If the category comes back, the next publish finds the draft that create may have made, and makes no second one |
 | Unpublish or trash, the draft is untouched | Deletes the draft (decision D2). Publishing again makes a new one |
 | Unpublish or trash, the draft was edited in Buttondown | Keeps the draft. The panel says "Kept because you edited it in Buttondown" |
 | Unpublish or trash, the email was scheduled or sent | Leaves it alone |
@@ -76,7 +77,8 @@ The key is read only in the Worker. It's never logged, never returned to a page,
 | Restore from trash | Nothing: EmDash restores the post as a draft. Publish it to make a new draft |
 | Permanent delete | Deletes the draft if it's untouched, then stops watching |
 | Publish again before a failed delete is retried | The delete is cancelled and the draft is updated instead |
-| Publish again after the Pack's delete got no answer | Checks the email. If it's gone, the delete was the Pack's own, and the post gets a new draft. If it's still there, the Pack keeps using it |
+| Publish again after the Pack's delete got no answer | Checks the email, with Update drafts on or off, and also when **Retry** finds the post live again. If it's gone, the delete was the Pack's own, and the post gets a new draft. If it's still there, the Pack keeps using it |
+| Publish or save after Buttondown answered a create with no email the Pack can read | No call. The post waits for **Retry** (see [Failures and retries](#failures-and-retries)) |
 | Publish or save while Buttondown refuses the saved key | No call with that key. The post waits for another key or **Retry** (see [Failures and retries](#failures-and-retries)) |
 | A category added or removed on its own | Nothing at that moment (see [Notes](#notes)). The next publish or save decides |
 
@@ -104,9 +106,9 @@ If the write fails, it is over. No retry, republish or hourly run overwrites the
 - the rules;
 - the collection's fields;
 - the site's own URL;
-- what some blocks are built from: the affiliate disclosure settings, the podcast settings and File Downloads' files.
+- what some blocks are built from: the affiliate disclosure settings, the podcast settings, and File Downloads' settings and files.
 
-If one of them can't be read, the Pack doesn't treat that as "not published" or "doesn't match", and it doesn't build the email from default values. Nothing is deleted, skipped, stopped or overwritten with a poorer body. The step fails with "The site couldn't read…" and is tried again like a call that got no answer.
+If one of them can't be read, the Pack doesn't treat that as "not published" or "doesn't match", and it doesn't build the email from default values. Nothing is deleted, skipped, stopped or overwritten with a poorer body. The step fails with "The site couldn't read…" and is tried again like a call that got no answer. A post with file cards on a site whose database binding can't be reached fails the same way: its email is never built without the files.
 
 ## The email
 
@@ -173,11 +175,14 @@ The body:
 | 429 | Waits out a short `Retry-After` (up to 10 seconds) and tries once more. Else the hourly task tries again after `Retry-After`, at least 5 minutes later, for 3 days |
 | 5xx, no answer, timeout, a read on the site that failed | Tried again after 5 minutes, 15 minutes, 1 hour, 3 hours, 6 hours, then every 6 hours, for 3 days |
 | 401, no key | Not tried again on its own, and not by publishing the post again. Once a different key is saved, the hourly task tries again, and so does the next publish. **Retry** tries now |
-| 403 | Tried once more an hour later, because Buttondown also answers 403 when it throttles. Publishing again in that hour makes no call and keeps that retry. Then the same as 401 |
+| 403 | Tried once more an hour later, because Buttondown also answers 403 when it throttles. Publishing again in that hour makes no call and keeps that retry. Then the same as 401. A 403 that comes after another failure of the same attempt gets no retry of its own: it's the same as 401 at once |
 | 400, 422 | Shown with Buttondown's error code and message. **Retry** tries again |
+| A 2xx answer to a create with no email the Pack can read | Buttondown may have made the draft, and the Pack can't tell. Not tried again on its own, and not by publishing the post again, so no second draft is made. The alert reports it. Look in Buttondown, then select **Retry** |
 | 404 on an update | The draft was deleted in Buttondown: recorded as deleted there |
 
-Saving the same key again doesn't count as a different key. After you fix a key's permissions in Buttondown, select **Retry**. Publishing the post again doesn't try a key Buttondown refused: the retry, when it runs, uses the post as it is then.
+Saving the same key again doesn't count as a different key. After you fix a key's permissions in Buttondown, select **Retry** on each failed post: the Pack can't see that the key was repaired, so nothing tries it again on its own. The error on the post and on the page says so: "Select Retry after you fix the key in Buttondown." Publishing the post again doesn't try a key Buttondown refused: the retry, when it runs, uses the post as it is then.
+
+**A create the Pack can't read.** If Buttondown answers a create with a 2xx and no email the Pack can read (its answer format changed, say), the draft may exist, and the Pack's own search may not see it either. So the Pack makes no second create on its own. **Retry** looks first and uses the draft if it finds it. If it still can't read Buttondown's answers, each **Retry** or **Create draft now** makes one more draft, so look in Buttondown before you select it.
 
 **Every failure has an end.** Once a draft has been failing for 3 days:
 
@@ -185,6 +190,15 @@ Saving the same key again doesn't count as a different key. After you fix a key'
 - the alert stops;
 - the page still lists it as failed, with **Retry**;
 - the hourly task removes its record after 180 days without a change.
+
+**A new attempt is a new failure.** You start a new attempt when you:
+
+- publish or save the post again;
+- unpublish or trash it;
+- select **Retry**;
+- save a different key.
+
+If the earlier failure is over by then (nothing more was planned for it, or its 3 days have passed), what fails next is a new failure: it gets its own retries, its own 3 days and its own alert. The same goes when the failing step changes, for example an update that kept failing, then a delete that fails. A failure that's still being retried keeps its start, so publishing again during an outage doesn't put off its alert.
 
 Every create looks in Buttondown first, by the post's key, among the emails made through the API in any status. So a create that reached Buttondown but whose answer was lost is found, not made twice, even if you scheduled or sent it since. The search costs one list call most of the time:
 
@@ -194,7 +208,7 @@ Every create looks in Buttondown first, by the post's key, among the emails made
 **A write that got no answer.** A create or a delete can reach Buttondown while its answer is lost (no response, a timeout or a 5xx). The record remembers that:
 
 - A create: the next try finds the draft by its key and uses it. If the post is unpublished or trashed first, the Pack looks for the draft the same way and deletes it if it's untouched.
-- A delete: if the email is gone on the next look, the Pack counts the delete as its own. The post shows "Deleted", and publishing it again makes a new draft.
+- A delete: if the email is gone on the next look, the Pack counts the delete as its own. The post shows "Deleted", and publishing it again makes a new draft. That holds whoever deleted it: if the Pack's delete didn't land and you deleted the draft yourself before the retry, publishing the post again still makes a new draft. The Pack had read that draft as untouched and was deleting it.
 - In every other case, an email that's gone was deleted in Buttondown. The Pack never makes that one again on its own.
 
 A clear "no" from Buttondown (a 4xx or a 429) is never taken for a write that landed.
@@ -228,6 +242,7 @@ With nothing to do, it costs four indexed queries an hour.
 - Two gaps are left. Each can only end in a second draft, never a send:
   - A job that runs past its 2-minute claim while the job that takes over doesn't see its just-made draft in Buttondown's list yet. The second draft is shown as a warning on the page and in the panel (with its email id).
   - A create whose answer was lost and that isn't retried until more than three pages of newer API-made emails exist (a refused key, fixed weeks later). The search reads three pages, so the retry can miss the first draft.
+- One more needs a change on Buttondown's side: answers the Pack can't read (see [Failures and retries](#failures-and-retries)). Then nothing creates again on its own. A second draft takes an action of yours: **Retry**, **Create draft now**, or unpublishing the post and publishing it again.
 
 ## In the admin
 

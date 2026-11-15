@@ -202,6 +202,25 @@ const hasDraft = (r: ButtondownRecord) => Boolean(r.emailId) && r.state !== "gon
 export const isBusy = (r: ButtondownRecord) => r.state === "pending" || r.state === "creating";
 
 /**
+ * A create that Buttondown answered with a 2xx and no email the Pack could read. It may have made a draft that the
+ * Pack's lookup can't see either, so nothing creates again on its own: not a retry, not a republish, not a second
+ * pass of the same job. Only Retry (or Create draft now) does, and it looks first.
+ */
+export const awaitsRetry = (r: Pick<ButtondownRecord, "state" | "emailId" | "lastError">): boolean => r.state === "error" && !r.emailId && r.lastError?.code === "unexpected_answer";
+
+/**
+ * What a new attempt that a person started (a republish, an unpublish, Retry, another key) resets on a failed
+ * record. The earlier failure is over when nothing is planned for it any more (its kind isn't retried, or its
+ * 3 days have passed), or when the step changes (make or update ↔ delete): what fails next is a new failure, with
+ * its own retries and its own alert. A failure that's still being retried keeps its start.
+ */
+export function freshAttempt(record: Pick<ButtondownRecord, "errorSince" | "nextRetryAt" | "job">, job: JobKind, now: number): Partial<ButtondownRecord> {
+	if (!record.errorSince) return {};
+	const over = !record.nextRetryAt || now - (Date.parse(record.errorSince) || 0) >= BUTTONDOWN_RETRY_FOR_MS;
+	return over || record.job !== job ? { errorSince: null, attempts: 0 } : {};
+}
+
+/**
  * An EmDash event for an entry whose collection has a rule (or a record). The lifecycle table (docs/buttondown.md,
  * section "What happens when") row by row.
  */
@@ -258,6 +277,9 @@ export function decideEvent(kind: EventKind, record: ButtondownRecord | null, fa
 		case "removing":
 			// Published again before the Pack looked for a draft its lost create may have made: the create's own lookup finds it.
 			if (!record.emailId) return queue("sync", patch({ state: "pending", job: "sync" }), "delete cancelled: create");
+			// The Pack's delete got no answer: it may have landed, so the draft is read whether or not updates are on
+			// (pending, not draft: an unchanged post must not settle without that read).
+			if (record.deleteSentAt) return queue("sync", patch({ state: "pending", job: "sync" }), "delete cancelled: check the draft");
 			// Published again before the delete ran: no delete, and the draft is updated as on a republish.
 			return facts.updatesOn ? queue("sync", patch({ state: "draft", job: "sync" }), "delete cancelled: update") : none("delete cancelled", patch({ state: "draft", job: null, nextRetryAt: null }));
 		case "error":
@@ -265,6 +287,8 @@ export function decideEvent(kind: EventKind, record: ButtondownRecord | null, fa
 			// (a 403's retry an hour later, the hourly task once the key changes, Retry). A waiting delete stays queued:
 			// its step sees the post is live again and updates the draft instead.
 			if (facts.sameRefusedKey) return none("the key was refused: waiting for another key or Retry", Object.keys(back).length ? back : null);
+			// The create's answer couldn't be read: a draft may exist that the lookup can't see. No second create on a republish.
+			if (awaitsRetry(record)) return none("the create's answer couldn't be read: waiting for Retry", Object.keys(back).length ? back : null);
 			if (!record.emailId) return queue("sync", patch({ job: "sync" }), "create again");
 			// The Pack's delete got no answer: it may have landed, so the draft is checked whether or not updates are on.
 			if (record.job === "remove") return facts.updatesOn || record.deleteSentAt ? queue("sync", patch({ job: "sync" }), "delete cancelled: check the draft") : none("delete cancelled", patch({ state: "draft", job: null, nextRetryAt: null }));
@@ -324,15 +348,19 @@ export interface FailurePlan {
 
 /**
  * What a failure means for the next try. Every kind has an end: nothing is tried again on its own once the failures
- * have lasted 3 days (Retry, a republish or another key start it again).
+ * have lasted 3 days. Retry, a republish, an unpublish or another key start a new attempt, and what fails then is a
+ * new failure with its own 3 days (freshAttempt).
  * - 429: after Retry-After (at least 5 minutes), for 3 days from the first failure.
  * - no answer, a timeout, 5xx, 409: 5 min, 15 min, 1 h, 3 h, 6 h, then every 6 h, for 3 days from the first failure.
  * - 401, no key: not until the key changes (or Retry).
  * - 403: once more an hour later (Buttondown also answers 403 when it throttles Workers' addresses), then as 401.
  * - 400, 422, other 4xx, a guard refusal: not on its own (Retry).
+ * - a 2xx with no email in it (unexpected_answer): not on its own, and not by a republish (Retry).
  */
 export function failure(input: FailureInput, record: Pick<ButtondownRecord, "attempts" | "errorSince">, now: number): FailurePlan {
 	if (input.refused) return { kind: "refused", nextRetryAt: null };
+	// A 2xx the Pack couldn't read: the write may be done, and a retry could do it twice.
+	if (input.code === "unexpected_answer") return { kind: "fatal", nextRetryAt: null };
 	const lasted = now - (Date.parse(record.errorSince ?? "") || now);
 	if (input.status === 429) {
 		if (lasted >= BUTTONDOWN_RETRY_FOR_MS) return { kind: "rate", nextRetryAt: null };

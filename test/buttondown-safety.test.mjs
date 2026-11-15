@@ -1189,3 +1189,332 @@ test("N8: a read the email is built from fails during a republish: an error to r
 		assert.match(bodyOf(s, id), /Second version\./, what);
 	}
 });
+
+// ── Second verification (P1 to P5) ───────────────────────────────
+
+/**
+ * Buttondown as it would be if its email ids stopped matching what the Pack reads: every create makes the draft and
+ * answers 201, and neither that answer nor the list holds an email the Pack can parse. Returns how to undo it.
+ */
+function unreadableEmails(s) {
+	const real = s.ctx.http;
+	s.ctx.http = {
+		fetch: async (input, init = {}) => {
+			const res = await real.fetch(input, init);
+			const url = new URL(input);
+			const method = init.method ?? "GET";
+			if (res.status >= 300 || url.pathname !== "/v1/emails") return res;
+			const body = await res.json();
+			const renamed = method === "POST" ? { ...body, id: `eml2_${body.id}` } : { ...body, results: body.results.map((e) => ({ ...e, id: `eml2_${e.id}` })) };
+			return new Response(JSON.stringify(renamed), { status: res.status, headers: { "content-type": "application/json" } });
+		},
+	};
+	return () => (s.ctx.http = real);
+}
+
+test("P1: a create Buttondown answers with a 2xx the Pack can't read is never POSTed again on its own: not by the hourly task, a republish or a second hook", async () => {
+	const s = site();
+	s.post("A");
+	const mend = unreadableEmails(s);
+	// afterSave and afterPublish of one publish: the second marks the running job dirty.
+	const item = s.entries.get("A");
+	await Promise.all([handleEvent(s.ctx, s.deps, "save", { collection: "posts", content: item }), handleEvent(s.ctx, s.deps, "publish", { collection: "posts", content: item })]);
+	await settleJobsForTests();
+	let r = await s.record("A");
+	assert.equal(r.state, "error");
+	assert.equal(r.lastError.code, "unexpected_answer");
+	assert.equal(r.lastError.status, 201);
+	assert.match(r.lastError.message, /Look in Buttondown first/);
+	assert.equal(r.nextRetryAt, null, "no retry on its own");
+	assert.ok(r.createSentAt, "the create may have landed: remembered");
+	assert.ok(r.errorSince);
+	assert.equal(s.fake.count("POST /v1/emails"), 1);
+	// 80 hourly runs, with a republish every tenth hour.
+	for (let h = 0; h < 80; h++) {
+		s.advance(3600_000);
+		assert.equal((await retryDue(s.ctx, s.deps)).retried, 0);
+		if (h % 10 === 0) await s.republish("A", { content: [para(`v${h}`)] });
+		if (h === 1) assert.equal((await failingRecords(s.ctx, s.now())).length, 1, "reported by Alerts");
+	}
+	assert.equal(s.fake.count("POST /v1/emails"), 1, "one POST in all");
+	assert.equal(s.fake.drafts().length, 1);
+	r = await s.record("A");
+	assert.equal(r.state, "error");
+	assert.equal(r.attempts, 1);
+	assert.match(recordView(r).text, /Couldn't make or update the draft: .*unexpected_answer/);
+	// Buttondown's answers read again: Retry looks first, finds the draft by its key and adopts it.
+	mend();
+	const out = await runManual(s.ctx, s.deps, "retry", "posts", "A");
+	assert.equal(out.state, "draft");
+	assert.equal(out.emailId, s.fake.drafts()[0].id);
+	assert.equal(out.createSentAt, null);
+	assert.equal(s.fake.count("POST /v1/emails"), 1, "adopted, not made again");
+});
+
+test("P1: the decisions: unexpected_answer is never retried, a publish doesn't create again, and an unpublish still looks for the draft", async () => {
+	assert.deepEqual(core.failure({ status: 201, code: "unexpected_answer", retryAfter: null }, { attempts: 0, errorSince: null }, T0), { kind: "fatal", nextRetryAt: null });
+	assert.deepEqual(core.failure({ status: 0, code: "unexpected_answer", retryAfter: null }, { attempts: 0, errorSince: null }, T0), { kind: "fatal", nextRetryAt: null });
+	const at = new Date(T0).toISOString();
+	const waiting = { ...core.newRecord("posts", "A", T0), state: "error", job: "sync", createSentAt: at, errorSince: at, attempts: 1, lastError: { at, status: 201, code: "unexpected_answer", message: "x" } };
+	assert.equal(core.awaitsRetry(waiting), true);
+	const facts = { live: true, matches: true, newEnough: true, updatesOn: true };
+	assert.equal(core.decideEvent("publish", waiting, facts).run, null);
+	assert.equal(core.decideEvent("save", waiting, facts).run, null);
+	// Any other failed create is created again on a republish (its lookup can see what was made).
+	assert.equal(core.decideEvent("publish", { ...waiting, lastError: { ...waiting.lastError, status: 0, code: "network" } }, facts).run, "sync");
+	assert.equal(core.decideEvent("unpublish", waiting, { ...facts, live: false }).run, "remove");
+	// The whole path: the post leaves the site, the Pack looks (and can't see the draft), and nothing is POSTed.
+	const s = site();
+	s.post("A");
+	unreadableEmails(s);
+	await s.event("publish", "A");
+	await s.unpublish("A");
+	assert.equal((await s.record("A")).state, "stopped");
+	assert.equal(s.fake.count("POST /v1/emails"), 1);
+	assert.equal(s.fake.count("DELETE"), 0);
+});
+
+test("P2: a refused key's error says to select Retry after the key is fixed in Buttondown, also for a 403 that isn't the first failure", async () => {
+	const RETRY = /Select Retry after you fix the key in Buttondown\./;
+	assert.match(sync.AUTH_RETRY, RETRY);
+	// 401: nothing planned.
+	const a = site();
+	a.post("A");
+	a.fake.fail({ method: "GET" }, { status: 401, code: "unauthorized", detail: "no" });
+	await a.event("publish", "A");
+	let r = await a.record("A");
+	assert.equal(r.nextRetryAt, null);
+	assert.match(r.lastError.message, RETRY);
+	assert.match(recordView(r).text, RETRY, "the panel and the page show it");
+	assert.doesNotMatch(r.lastError.message, /Check it on the plugin's Settings page/);
+	// A first 403: the one retry an hour later, and what to do if that fails too.
+	const b = site();
+	b.post("A");
+	b.fake.fail({ method: "GET" }, { status: 403, code: "forbidden", detail: "no" });
+	await b.event("publish", "A");
+	r = await b.record("A");
+	assert.match(r.lastError.message, /tries once more/);
+	assert.match(r.lastError.message, RETRY);
+	assert.match(r.lastError.message, /Buttondown said: no$/, "nothing is cut off");
+	// A 403 after another failure (Buttondown throttling): parked, and it says the same.
+	const c = site();
+	c.post("A");
+	c.fake.fail({ method: "POST", path: "/v1/emails" }, { status: 502 });
+	await c.event("publish", "A");
+	c.advance(6 * 60_000);
+	c.fake.fail({ method: "GET", path: "/v1/emails" }, { status: 403, code: "throttled", detail: "slow down" });
+	await retryDue(c.ctx, c.deps);
+	r = await c.record("A");
+	assert.equal(r.lastError.status, 403);
+	assert.equal(r.nextRetryAt, null);
+	assert.doesNotMatch(r.lastError.message, /tries once more/);
+	assert.match(r.lastError.message, RETRY);
+	assert.ok(r.lastError.message.length <= 300);
+	// Retry, once the key works again, makes the draft.
+	await runManual(c.ctx, c.deps, "retry", "posts", "A");
+	assert.equal((await c.record("A")).state, "draft");
+	assert.equal(c.fake.drafts().length, 1);
+});
+
+/** A post whose create Buttondown refused for good (422), four days ago. */
+async function failedFourDaysAgo(s) {
+	s.post("A");
+	s.fake.fail({ method: "POST", path: "/v1/emails" }, { status: 422, code: "bad", detail: "bad" });
+	await s.event("publish", "A");
+	const since = (await s.record("A")).errorSince;
+	s.advance(4 * 86_400_000);
+	assert.equal((await failingRecords(s.ctx, s.now())).length, 0, "the old failure's alert has ended");
+	return since;
+}
+
+/** The failure on the record is a new one: retried, and reported by Alerts after its own hour. */
+async function assertNewFailure(s, oldSince, what) {
+	const r = await s.record("A");
+	assert.equal(r.state, "error", what);
+	assert.equal(r.errorSince, new Date(s.now()).toISOString(), what);
+	assert.notEqual(r.errorSince, oldSince, what);
+	assert.equal(r.attempts, 1, what);
+	assert.equal(r.nextRetryAt, new Date(s.now() + 5 * 60_000).toISOString(), `${what}: retried, from the first backoff step`);
+	assert.equal((await failingRecords(s.ctx, s.now() + 2 * 3600_000)).length, 1, `${what}: alerted`);
+}
+
+test("P3: a republish or Retry after a failure that ended starts a new failure, with its own retries and alert", async () => {
+	// A republish that hits a 502.
+	const a = site();
+	const sinceA = await failedFourDaysAgo(a);
+	a.fake.fail({ method: "POST", path: "/v1/emails" }, { status: 502 });
+	await a.republish("A");
+	await assertNewFailure(a, sinceA, "republish");
+	a.advance(6 * 60_000);
+	assert.equal((await retryDue(a.ctx, a.deps)).retried, 1);
+	assert.equal((await a.record("A")).state, "draft");
+	// Retry that gets no answer.
+	const b = site();
+	const sinceB = await failedFourDaysAgo(b);
+	b.fake.fail({ method: "GET", path: "/v1/emails" }, { network: true });
+	await runManual(b.ctx, b.deps, "retry", "posts", "A");
+	await assertNewFailure(b, sinceB, "Retry");
+});
+
+test("P3: another key after the old one was refused for 4 days: a failure with the new key is retried and alerted", async () => {
+	const s = site({ settings: { buttondownApiKey: "the-old-key-0123456789abcdef" } });
+	s.post("A");
+	await s.event("publish", "A");
+	const since = (await s.record("A")).errorSince;
+	assert.equal((await s.record("A")).lastError.status, 401);
+	s.advance(4 * 86_400_000);
+	await s.ctx.settings.set("buttondownApiKey", s.fake.key);
+	s.fake.fail({ method: "GET", path: "/v1/emails" }, { status: 502 });
+	assert.equal((await retryDue(s.ctx, s.deps)).retried, 1);
+	await assertNewFailure(s, since, "new key");
+	s.advance(6 * 60_000);
+	await retryDue(s.ctx, s.deps);
+	assert.equal((await s.record("A")).state, "draft");
+});
+
+test("P3: an update that failed days ago, then an unpublish whose DELETE fails: the delete is retried and alerted", async () => {
+	const s = site();
+	s.post("A");
+	await s.event("publish", "A");
+	s.fake.fail({ method: "PATCH" }, { status: 422, code: "bad", detail: "bad" });
+	await s.republish("A", { content: [para("v2")] });
+	const since = (await s.record("A")).errorSince;
+	s.advance(4 * 86_400_000);
+	s.fake.fail({ method: "DELETE" }, { status: 502 });
+	await s.unpublish("A");
+	assert.equal((await s.record("A")).job, "remove");
+	await assertNewFailure(s, since, "unpublish");
+	s.advance(6 * 60_000);
+	await retryDue(s.ctx, s.deps);
+	assert.equal((await s.record("A")).state, "removed");
+	assert.equal(s.fake.drafts().length, 0);
+});
+
+test("P3: the failing step changes (update, then delete) inside the 3 days: the delete's failure is its own; a failure still being retried keeps its start", async () => {
+	const s = site();
+	s.post("A");
+	await s.event("publish", "A");
+	s.fake.fail({ method: "PATCH" }, { status: 502, persist: true });
+	await s.republish("A", { content: [para("v2")] });
+	const since = (await s.record("A")).errorSince;
+	// Republished while the update's retries are still planned: the same failure goes on.
+	s.advance(2 * 60_000);
+	await s.republish("A", { content: [para("v3")] });
+	let r = await s.record("A");
+	assert.equal(r.errorSince, since, "still being retried: its start is kept");
+	assert.equal(r.attempts, 2);
+	// Retried for almost 3 days, then unpublished: the delete fails too.
+	s.advance(3 * 86_400_000 - 10 * 60_000);
+	s.fake.fail({ method: "DELETE" }, { status: 502 });
+	await s.unpublish("A");
+	r = await s.record("A");
+	assert.equal(r.job, "remove");
+	assert.equal(r.errorSince, new Date(s.now()).toISOString());
+	assert.equal(r.attempts, 1);
+	// Past the update's 3 days, the delete is still retried.
+	s.advance(11 * 60_000);
+	assert.equal((await retryDue(s.ctx, s.deps)).retried, 1);
+	assert.equal((await s.record("A")).state, "removed");
+});
+
+test("P3: freshAttempt restarts a failure that's over or whose step changes, and nothing else", () => {
+	const at = new Date(T0).toISOString();
+	const soon = new Date(T0 + 5 * 60_000).toISOString();
+	const reset = { errorSince: null, attempts: 0 };
+	assert.deepEqual(core.freshAttempt({ errorSince: null, nextRetryAt: null, job: "sync" }, "sync", T0), {}, "no failure");
+	assert.deepEqual(core.freshAttempt({ errorSince: at, nextRetryAt: soon, job: "sync" }, "sync", T0 + 60_000), {}, "still being retried");
+	assert.deepEqual(core.freshAttempt({ errorSince: at, nextRetryAt: null, job: "sync" }, "sync", T0 + 60_000), reset, "nothing planned");
+	assert.deepEqual(core.freshAttempt({ errorSince: at, nextRetryAt: soon, job: "sync" }, "sync", T0 + 3 * 86_400_000), reset, "3 days old");
+	assert.deepEqual(core.freshAttempt({ errorSince: at, nextRetryAt: soon, job: "sync" }, "remove", T0 + 60_000), reset, "another step");
+});
+
+test("P4: a delete of the Pack's own that landed unanswered, a refused key on its retry, then Retry with the post live again: the draft is read, and a new one made", async () => {
+	const s = site();
+	s.post("A");
+	await s.event("publish", "A");
+	const id = s.fake.drafts()[0].id;
+	s.fake.fail({ method: "DELETE" }, { lose: true });
+	await s.unpublish("A");
+	assert.equal(s.fake.emails.has(id), false, "the delete landed");
+	s.fake.fail({ method: "GET" }, { status: 401, code: "unauthorized", detail: "no" });
+	s.advance(6 * 60_000);
+	await retryDue(s.ctx, s.deps);
+	await s.republish("A");
+	let r = await s.record("A");
+	assert.equal(r.state, "error");
+	assert.equal(r.job, "remove");
+	assert.ok(r.deleteSentAt);
+	const gets = s.fake.count(`GET /v1/emails/${id}`);
+	await runManual(s.ctx, s.deps, "retry", "posts", "A");
+	r = await s.record("A");
+	assert.equal(s.fake.count(`GET /v1/emails/${id}`), gets + 1, "the email the record named was read");
+	assert.equal(r.state, "draft");
+	assert.notEqual(r.emailId, id);
+	assert.equal(s.fake.drafts().length, 1, "a draft exists for what the record calls a draft");
+	assert.equal(r.emailId, s.fake.drafts()[0].id);
+	assert.equal(r.deleteSentAt, null);
+});
+
+test("P4: a delete that landed unanswered and is still waiting (its job was dropped), then a publish with Update drafts off: the draft is read, and a new one made", async () => {
+	const s = site({ features: { "buttondown.updates": false } });
+	s.post("A");
+	await s.event("publish", "A");
+	const id = s.fake.drafts()[0].id;
+	s.fake.fail({ method: "DELETE" }, { lose: true });
+	await s.unpublish("A");
+	// A second leave event (trash) whose job the runtime dropped: the record as the hook writes it.
+	const r0 = await s.record("A");
+	const decision = core.decideEvent("trash", r0, { live: false, matches: false, newEnough: false, updatesOn: false });
+	await s.ctx.storage.buttondownEmails.put(recordId("posts", "A"), { ...r0, ...decision.patch });
+	assert.equal((await s.record("A")).state, "removing");
+	assert.ok((await s.record("A")).deleteSentAt);
+	// The decision alone: checked, whether or not updates are on, and never settled as a draft unread.
+	const again = core.decideEvent("publish", await s.record("A"), { live: true, matches: true, newEnough: true, updatesOn: false });
+	assert.equal(again.run, "sync");
+	assert.equal(again.patch.state, "pending");
+	await s.event("restore", "A");
+	await s.republish("A");
+	const r = await s.record("A");
+	assert.equal(r.state, "draft");
+	assert.notEqual(r.emailId, id);
+	assert.equal(s.fake.drafts().length, 1);
+	assert.equal(r.emailId, s.fake.drafts()[0].id);
+	// Without an unanswered delete, the same publish cancels the delete with no call (as before).
+	const quiet = core.decideEvent("publish", { ...r0, state: "removing", deleteSentAt: null }, { live: true, matches: true, newEnough: true, updatesOn: false });
+	assert.equal(quiet.run, null);
+	assert.equal(quiet.patch.state, "draft");
+});
+
+test("P5: a create whose answer was lost, then the category is removed: the record stays, so the draft is found (not doubled) when the category comes back", async () => {
+	const s = site({ fake: fakeButtondown({ pageSize: 2 }) });
+	const id = await lostCreate(s);
+	s.terms.set("A", ["other"]);
+	await s.republish("A");
+	s.advance(6 * 60_000);
+	await retryDue(s.ctx, s.deps);
+	let r = await s.record("A");
+	assert.equal(r?.state, "stopped", "kept: its age bounds the later lookup");
+	assert.equal(r.emailId, null);
+	assert.equal(s.fake.emails.has(id), true, "the draft is left as it is");
+	assert.equal(s.fake.count("DELETE"), 0);
+	// More than a page of newer emails, then the category comes back.
+	for (const other of ["B", "C", "D"]) {
+		s.post(other);
+		await s.event("publish", other);
+	}
+	s.advance(3 * 3600_000);
+	s.terms.set("A", ["newsletter"]);
+	await s.republish("A");
+	r = await s.record("A");
+	assert.equal(r.state, "draft");
+	assert.equal(r.emailId, id, "the first draft, adopted");
+	assert.equal(s.fake.count("POST /v1/emails"), 4, "one per post: no second draft for A");
+	// A create that Buttondown refused leaves nothing to find: that record still goes.
+	const t = site();
+	t.post("A");
+	t.fake.fail({ method: "POST", path: "/v1/emails" }, { status: 422, code: "bad", detail: "bad" });
+	await t.event("publish", "A");
+	t.terms.set("A", ["other"]);
+	await runManual(t.ctx, t.deps, "retry", "posts", "A");
+	assert.equal(await t.record("A"), null);
+});

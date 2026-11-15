@@ -273,3 +273,35 @@ test("a create or a delete that went out unanswered is marked (it may have lande
 	assert.equal(lateDelete.unanswered, null);
 	assert.equal(late.fake.count("DELETE"), 0);
 });
+
+test("P7: a create answered with a 2xx and no email the Pack can read: marked as one that may have landed, with the answer's status and the code unexpected_answer", async () => {
+	const caught = async (run) => run().then(() => null, (error) => error);
+	const answers = [
+		["an id that isn't Buttondown's", (body) => ({ ...body, id: `eml2 ${body.id}` })],
+		["no status", ({ status: _status, ...body }) => body],
+		["not an object", () => "ok"],
+	];
+	for (const [what, change] of answers) {
+		const fake = fakeButtondown();
+		const fetch = async (input, init = {}) => {
+			const res = await fake.fetch(input, init);
+			if ((init.method ?? "GET") !== "POST" || res.status >= 300) return res;
+			return new Response(JSON.stringify(change(await res.json())), { status: res.status, headers: { "content-type": "application/json" } });
+		};
+		const bd = createButtondownClient({ key: FAKE_KEY, fetch });
+		const error = await caught(() => bd.createDraft(fields()));
+		assert.ok(error instanceof ButtondownError, what);
+		assert.equal(error.code, "unexpected_answer", what);
+		assert.equal(error.unanswered, "create", `${what}: Buttondown made the draft, so it's looked for if the post leaves the site`);
+		assert.equal(error.status, 201, what);
+		assert.equal(fake.drafts().length, 1, what);
+		assert.equal(fake.count("POST /v1/emails"), 1, `${what}: the client itself sends one POST`);
+		assert.ok(!error.message.includes(FAKE_KEY), what);
+	}
+	// A read or an update with such an answer is a plain failure: nothing of the Pack's own may have landed unseen.
+	const fake = fakeButtondown();
+	const made = await createButtondownClient({ key: FAKE_KEY, fetch: fake.fetch }).createDraft(fields());
+	const blank = createButtondownClient({ key: FAKE_KEY, fetch: async (input, init = {}) => ((await fake.fetch(input, init)), new Response("{}", { status: 200, headers: { "content-type": "application/json" } })) });
+	assert.equal((await caught(() => blank.getEmail(made.id))).unanswered, null);
+	assert.equal((await caught(() => blank.updateDraft(made.id, { subject: "x" }))).unanswered, null);
+});

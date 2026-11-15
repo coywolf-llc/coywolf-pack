@@ -304,12 +304,18 @@ export function createButtondownClient(options: ButtondownClientOptions) {
 		async createDraft(fields: DraftFields): Promise<ButtondownEmail> {
 			// Out of time before anything is sent: a plain failure, not a create that may have landed.
 			timeLeft();
-			const { body } = await send("POST", "/emails", { ...pickFields(fields), status: "draft" }).catch((error: unknown) => {
+			const { status, body } = await send("POST", "/emails", { ...pickFields(fields), status: "draft" }).catch((error: unknown) => {
 				throw unanswered(error, "create");
 			});
 			const email = toEmail(body);
-			// Buttondown said it made one, without saying which: as good as no answer.
-			if (!email) throw unanswered(new ButtondownError(0, "unexpected_answer", "Buttondown's answer to the create had no email in it."), "create");
+			if (!email) {
+				// Buttondown said it made one, without saying which. Marked like a create that got no answer (it may have
+				// landed, so a post that leaves the site has its draft looked for), but never retried on its own
+				// (sync-core.ts failure): if the Pack can't read Buttondown's emails, its lookup can't find this one either.
+				const error = new ButtondownError(status, "unexpected_answer", "Buttondown answered the create without an email the Pack can read, so the draft may exist. Look in Buttondown first: Retry makes another one if the Pack can't find it.");
+				error.unanswered = "create";
+				throw error;
+			}
 			return email;
 		},
 

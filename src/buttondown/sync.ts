@@ -18,6 +18,9 @@
  *   Buttondown, and is never made again on its own.
  * - A job that was dropped, or that ran out of passes: its record has a time
  *   for the hourly task (nextRetryAt), which finishes it.
+ * - A create Buttondown answered with a 2xx the Pack couldn't read: the draft
+ *   may exist where the lookup can't see it either, so nothing creates again
+ *   on its own (awaitsRetry). Retry does, after looking.
  *
  * What it never does: send, schedule or publish (the client can't), write an
  * email that isn't a draft or that was changed in Buttondown (unless Refresh
@@ -69,10 +72,12 @@ import {
 	PRUNABLE,
 	UNSENT,
 	adoptable,
+	awaitsRetry,
 	claimHeld,
 	classifyRemote,
 	decideEvent,
 	failure,
+	freshAttempt,
 	isStuck,
 	isUnsure,
 	newRecord,
@@ -139,8 +144,10 @@ export function defaultDeps(database = "DB"): SyncDeps {
 		files: async (_ctx, item, siteUrl) => {
 			const out = new Map<string, EmailFile>();
 			const ids = fileIdsIn(item.data).slice(0, 20);
-			const d1 = ids.length ? await db() : null;
-			if (!d1) return out;
+			if (!ids.length) return out;
+			const d1 = await db();
+			// No database to read them from: a failed read (the step is tried again), never "no files".
+			if (!d1) throw new Error("The site database couldn't be reached.");
 			// Strict: a failed read rejects. A file that isn't there is null, and its card links to the post.
 			const settings = await readFilesSettings(d1, true);
 			const base = settings.publicBaseUrl || siteUrl.replace(/\/+$/, "");
@@ -337,6 +344,8 @@ export async function handleEvent(ctx: PluginContext, deps: SyncDeps, kind: Even
 			next.job = decision.run;
 			if (!current) next.state = "pending";
 			if (unsure) next.sinceUnchecked = true;
+			// A person started this attempt: after a failure that's over, what fails now is a new one.
+			Object.assign(next, freshAttempt(base, decision.run, now));
 			// If the job is dropped or cut off, the hourly task runs it.
 			next.nextRetryAt = iso(now + BUTTONDOWN_LIMITS.stuckMs);
 		}
@@ -547,7 +556,9 @@ async function syncStep(run: Run): Promise<Outcome> {
 		return record.emailId ? settled({}) : { deleteRecord: true };
 	}
 	const rule = ruleFor(run.settings, record.collection);
-	if (!rule || !(await matchesRule(ctx, deps, rule, record.collection, record.entryId))) return record.emailId ? settled({ state: "stopped" }) : { deleteRecord: true };
+	// A create that got no answer may have made a draft: the record stays (stopped), so its age still bounds the
+	// lookup that finds that draft if the post matches again.
+	if (!rule || !(await matchesRule(ctx, deps, rule, record.collection, record.entryId))) return record.emailId || record.createSentAt ? settled({ state: "stopped" }) : { deleteRecord: true };
 	// Queued by a hook that couldn't read the rules: "published before the rule" is checked here instead.
 	if (record.sinceUnchecked && !record.emailId && !record.manual && !newEnough(item.publishedAt, rule)) return { deleteRecord: true };
 
@@ -635,7 +646,9 @@ async function removeStep(run: Run): Promise<Outcome> {
 		const rule = ruleFor(run.settings, record.collection);
 		// Published again before the delete ran: no delete; the draft is updated as on a republish.
 		if (isLiveItem(item) && !record.trashed) {
-			if (rule && (await matchesRule(ctx, deps, rule, record.collection, record.entryId))) return { unpublished: false, ...(await syncStep({ ...run, record: { ...record, job: "sync", state: "draft", unpublished: false } })) };
+			// After a delete of the Pack's own that got no answer, the draft is read first (it may be gone): never taken for
+			// a draft on an unchanged post alone.
+			if (rule && (await matchesRule(ctx, deps, rule, record.collection, record.entryId))) return { unpublished: false, ...(await syncStep({ ...run, record: { ...record, job: "sync", state: record.deleteSentAt ? "error" : "draft", unpublished: false } })) };
 			return settled({ state: "stopped", unpublished: false });
 		}
 	}
@@ -681,6 +694,13 @@ async function removeStep(run: Run): Promise<Outcome> {
 	}
 }
 
+/**
+ * What to do about a refused key, in the stored error (the panel and the page show it). A key repaired in Buttondown
+ * is still the same key to the Pack, so nothing tries it again on its own: Retry does. (Another key, saved on the
+ * Settings page, is tried by the hourly task and by a republish.) Short: the stored text is cut at 300 characters.
+ */
+export const AUTH_RETRY = "Select Retry after you fix the key in Buttondown.";
+
 /** A failed step as the record's error. Nothing in it asks a later try to overwrite: a failed Refresh is over. */
 async function failed(run: Run, error: unknown): Promise<Outcome> {
 	const { record } = run;
@@ -705,7 +725,7 @@ async function failed(run: Run, error: unknown): Promise<Outcome> {
 		plan = failure({ status, code, retryAfter: error.retryAfter }, record, now);
 		message =
 			plan.kind === "auth"
-				? `Buttondown refused the key (${status}). Check it on the plugin's Settings page: it needs Emails and drafts → Write.${plan.nextRetryAt ? ` The Pack tries once more at ${plan.nextRetryAt.slice(11, 16)} UTC, because Buttondown also answers 403 when it's busy.` : ""}${error.detail ? ` Buttondown said: ${error.detail}` : ""}`
+				? `Buttondown refused the key (${status}). It needs Emails and drafts → Write. ${AUTH_RETRY}${plan.nextRetryAt ? ` The Pack tries once more at ${plan.nextRetryAt.slice(11, 16)} UTC, because Buttondown also answers 403 when it's busy.` : ""}${error.detail ? ` Buttondown said: ${error.detail}` : ""}`
 				: plan.kind === "rate"
 					? `Buttondown asked the Pack to slow down (429). It tries again ${plan.nextRetryAt ? `after ${new Date(plan.nextRetryAt).toISOString().slice(11, 16)} UTC` : "later"}.`
 					: error.message;
@@ -817,16 +837,22 @@ async function runJob(ctx: PluginContext, deps: SyncDeps, collection: string, en
 				const live = Boolean(next.emailId) && !["gone", "removed", "edited", "stopped"].includes(next.state);
 				// A create that got no answer may have made a draft the record doesn't name: the delete step looks for it.
 				const orphan = !next.emailId && Boolean(next.createSentAt) && next.state === "error";
+				const before = { errorSince: next.errorSince, nextRetryAt: next.nextRetryAt, job: next.job };
 				next.job = leaving ? (live || orphan ? "remove" : null) : "sync";
 				if (!next.job) {
 					again = false;
 					// The post left the site while its create was failing: nothing left to make, or to report.
 					if (next.state === "error" && !next.emailId) Object.assign(next, CLEARED, UNSENT, { state: "stopped" });
-				} else if (lastPass) {
+				} else if (next.job === "sync" && awaitsRetry(next)) {
+					// The create's answer couldn't be read: no second create in this job. Retry runs it.
+					again = false;
+				} else {
+					// The event that marked it dirty came from a person: as in the hook, after a failure that's over (or of
+					// the other step), what fails next is a new one.
+					Object.assign(next, freshAttempt(before, next.job, deps.now()));
 					// Out of passes with work left: the hourly task's, now.
-					next.nextRetryAt = iso(deps.now());
-				} else if (next.state !== "error") {
-					next.nextRetryAt = iso(deps.now() + BUTTONDOWN_LIMITS.stuckMs);
+					if (lastPass) next.nextRetryAt = iso(deps.now());
+					else if (next.state !== "error") next.nextRetryAt = iso(deps.now() + BUTTONDOWN_LIMITS.stuckMs);
 				}
 			}
 			return next;
@@ -914,7 +940,7 @@ export async function runManual(ctx: PluginContext, deps: SyncDeps, action: Manu
 			kept = base.state === "stopped" && Boolean(base.emailId);
 			return queueCreate(base, kept);
 		}
-		return { ...base, job: base.job ?? "sync", nextRetryAt: iso(now + BUTTONDOWN_LIMITS.stuckMs), claimToken: null, claimedAt: null, updatedAt: iso(now) };
+		return { ...base, ...freshAttempt(base, base.job ?? "sync", now), job: base.job ?? "sync", nextRetryAt: iso(now + BUTTONDOWN_LIMITS.stuckMs), claimToken: null, claimedAt: null, updatedAt: iso(now) };
 	});
 	const out = await runEntry(ctx, deps, collection, id, now + 20_000);
 	// That draft turned out to be deleted in Buttondown: Create draft now makes a new one, as for any deleted draft.
@@ -936,6 +962,8 @@ export async function retryDue(ctx: PluginContext, deps: SyncDeps, deadline = de
 	const store = records(ctx);
 	const now = deps.now();
 	const picked = new Map<string, ButtondownRecord>();
+	/** Picked because another key was saved (a person's doing): what fails with the new key is a new failure. */
+	const rekeyed = new Set<string>();
 	const take = (items: Array<{ id: string; data: unknown }>, keep: (r: ButtondownRecord) => boolean) => {
 		for (const { id, data } of items) {
 			const r = readRecord(data);
@@ -949,7 +977,12 @@ export async function retryDue(ctx: PluginContext, deps: SyncDeps, deadline = de
 		const refused = errors.map((e) => readRecord(e.data)).filter((r): r is ButtondownRecord => Boolean(r?.authFingerprint));
 		if (refused.length) {
 			const current = await keyFingerprint((await readKey(ctx)).key);
-			if (current !== "none") take(errors, (r) => Boolean(r.authFingerprint) && r.authFingerprint !== current);
+			if (current !== "none")
+				take(errors, (r) => {
+					const changed = Boolean(r.authFingerprint) && r.authFingerprint !== current;
+					if (changed) rekeyed.add(recordId(r.collection, r.entryId));
+					return changed;
+				});
 		}
 		// Queued by a hook that couldn't read the rules, never made, and (now that the rules read) in a collection
 		// with no rule: nothing to make, retry or report. Forgotten here, so such a record can't outlive its retries.
@@ -967,7 +1000,8 @@ export async function retryDue(ctx: PluginContext, deps: SyncDeps, deadline = de
 	for (const r of picked.values()) {
 		if (deps.now() + BUTTONDOWN_LIMITS.jobMs > deadline) break;
 		// The time stays ahead of the run (the outcome replaces it), so a run that's cut off here is picked up again.
-		await updateRecord(ctx, recordId(r.collection, r.entryId), (current) => (current ? { ...current, job: current.job ?? "sync", nextRetryAt: iso(now + BUTTONDOWN_LIMITS.stuckMs), claimToken: isStuck(current, now) ? null : current.claimToken, updatedAt: iso(now) } : null));
+		const rid = recordId(r.collection, r.entryId);
+		await updateRecord(ctx, rid, (current) => (current ? { ...current, ...(rekeyed.has(rid) ? freshAttempt(current, current.job ?? "sync", now) : {}), job: current.job ?? "sync", nextRetryAt: iso(now + BUTTONDOWN_LIMITS.stuckMs), claimToken: isStuck(current, now) ? null : current.claimToken, updatedAt: iso(now) } : null));
 		await runEntry(ctx, deps, r.collection, r.entryId, Math.min(deadline, deps.now() + BUTTONDOWN_LIMITS.jobMs)).catch((error: unknown) => ctx.log.warn("buttondown: a retry failed", { entry: recordId(r.collection, r.entryId), error: error instanceof Error ? error.name : "error" }));
 		retried++;
 	}
