@@ -16,7 +16,7 @@ import { PACK_API, apiPost, errorText } from "./api.js";
 import { useConfirm } from "./confirm-dialog.js";
 import { PAGE_WARNINGS } from "./editor-panels.js";
 import { useManifestRefresh } from "./manifest.js";
-import { AdminLink, DocsLink, FeaturesLink, Loading, PackLink, PageHeader } from "./page.js";
+import { AdminLink, DocsLink, FeaturesLink, Loading, PackLink, PageHeader, WarningBadge, softDisabled } from "./page.js";
 import { useToast } from "./toast.js";
 
 const post = apiPost(`${PACK_API}/childPages`);
@@ -142,6 +142,25 @@ function Section(props: { title: string; description: React.ReactNode; children?
 
 const Code = ({ children }: { children: string }) => <code className="rounded bg-kumo-tint px-1 py-0.5 font-mono text-xs break-all">{children}</code>;
 
+/** A URL that wraps after its slashes (inside a word only when one segment is wider than the line). */
+function Url({ children }: { children: string }) {
+	const parts = children.split("/");
+	return (
+		<span className="font-mono text-xs cw-wrap-anywhere">
+			{parts.map((part, i) => (
+				<React.Fragment key={i}>
+					{part}
+					{i < parts.length - 1 && (
+						<>
+							/<wbr />
+						</>
+					)}
+				</React.Fragment>
+			))}
+		</span>
+	);
+}
+
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
 
 const editPath = (collection: string, id: string) => `/content/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`;
@@ -159,6 +178,7 @@ function SetUp(props: { status: Status; onChanged: () => void }) {
 	const collections = [...status.collections].sort((a, b) => Number(b.collection === "pages") - Number(a.collection === "pages") || a.label.localeCompare(b.label));
 
 	const setUp = async (c: CollectionStatus) => {
+		if (busy !== null || c.conflict) return;
 		const ok = await confirm({
 			title: `Add a Parent page field to ${c.label}?`,
 			description: `Every entry in ${c.label} gets a “Parent page” field in the editor, to choose another entry in ${c.label} as its parent. Nothing else changes until a parent is chosen and published.`,
@@ -222,9 +242,17 @@ function SetUp(props: { status: Status; onChanged: () => void }) {
 							</p>
 						</div>
 						{c.field ? (
-							<Badge variant="secondary">Set up</Badge>
+							<Badge variant="secondary">Ready</Badge>
 						) : (
-							<Button type="button" size="sm" variant={c.collection === "pages" ? "primary" : "secondary"} icon={<Plus aria-hidden="true" />} disabled={busy !== null || Boolean(c.conflict)} onClick={() => void setUp(c)}>
+							<Button
+								type="button"
+								size="sm"
+								variant={c.collection === "pages" ? "primary" : "secondary"}
+								icon={<Plus aria-hidden="true" />}
+								aria-label={busy === c.collection ? `Adding the Parent page field to ${c.label}…` : `Set up ${c.label}`}
+								{...softDisabled(busy !== null || Boolean(c.conflict))}
+								onClick={() => void setUp(c)}
+							>
 								{busy === c.collection ? "Adding…" : "Set up"}
 							</Button>
 						)}
@@ -238,6 +266,7 @@ function SetUp(props: { status: Status; onChanged: () => void }) {
 // ── The tree ─────────────────────────────────────────────────────
 
 const STATUS_BADGE: Record<string, "secondary" | "outline" | "warning"> = { published: "secondary", draft: "outline", scheduled: "outline" };
+const STATUS_LABEL: Record<string, string> = { published: "Published", draft: "Draft", scheduled: "Scheduled", archived: "Archived" };
 
 function TreeList(props: { collection: string; pages: TreePage[]; parent: string | null; depth: number }) {
 	const level = props.pages.filter((p) => (p.parentId ?? null) === props.parent);
@@ -253,12 +282,10 @@ function TreeList(props: { collection: string; pages: TreePage[]; parent: string
 								{page.title}
 							</AdminLink>
 							{page.url && <span className="break-all font-mono text-xs text-kumo-subtle">{page.url}</span>}
-							{page.status !== "published" && <Badge variant={STATUS_BADGE[page.status] ?? "outline"}>{page.status}</Badge>}
+							{page.status !== "published" && <Badge variant={STATUS_BADGE[page.status] ?? "outline"}>{STATUS_LABEL[page.status] ?? page.status}</Badge>}
 							{page.pendingChanges && <Badge variant="outline">Unpublished changes</Badge>}
 							{page.warnings.map((w) => (
-								<Badge key={w} variant="warning">
-									{WARNING_LABELS[w] ?? w}
-								</Badge>
+								<WarningBadge key={w}>{WARNING_LABELS[w] ?? w}</WarningBadge>
 							))}
 						</div>
 						{/* What each warning means, as text on the page (a title attribute reaches neither keyboards nor touch screens). */}
@@ -362,7 +389,7 @@ function ImportParents(props: { status: Status; onChanged: () => void }) {
 	if (!props.status.pageParents) return null;
 
 	const dryRun = async () => {
-		if (!collection) return;
+		if (!collection || running) return;
 		setRunning("dry");
 		setError(undefined);
 		try {
@@ -378,7 +405,7 @@ function ImportParents(props: { status: Status; onChanged: () => void }) {
 	const toSet = rows?.filter((r) => r.action === "set" && !r.result) ?? [];
 
 	const apply = async () => {
-		if (!collection || !rows || !toSet.length) return;
+		if (!collection || !rows || !toSet.length || running) return;
 		const ok = await confirm({
 			title: `Set ${plural(toSet.length, "parent page", "parent pages")}?`,
 			description:
@@ -414,10 +441,19 @@ function ImportParents(props: { status: Status; onChanged: () => void }) {
 			title="Import parents from configuration"
 			description={
 				<>
-					Moves the parents listed in <Code>pageParents</Code> (in <Code>coywolfPlugin()</Code>, {plural(props.status.pageParents, "page", "pages")}) into each page's
-					Parent page field, so they can be changed in the editor. Run the dry run first. Setting the parent publishes the page again, so drafts,
-					scheduled pages and pages with unpublished changes are skipped. Parents that aren't pages (a category) stay in the option. Afterward, the pages that were set can come out of{" "}
-					<Code>pageParents</Code>.
+					<p>
+						Moves the parents listed in <Code>pageParents</Code> (in <Code>coywolfPlugin()</Code>, {plural(props.status.pageParents, "page", "pages")}) into each
+						page's Parent page field, so they can be changed in the editor. Run the dry run first. Setting the parent publishes the page again, so these are
+						skipped:
+					</p>
+					<ul className="mt-1 list-disc space-y-0.5 ps-5">
+						<li>drafts;</li>
+						<li>scheduled pages;</li>
+						<li>pages with unpublished changes.</li>
+					</ul>
+					<p className="mt-1">
+						Parents that aren't pages (a category) stay in the option. Afterward, the pages that were set can come out of <Code>pageParents</Code>.
+					</p>
 				</>
 			}
 		>
@@ -426,52 +462,58 @@ function ImportParents(props: { status: Status; onChanged: () => void }) {
 				<p className="text-sm text-kumo-subtle">Set up the Parent page field first.</p>
 			) : (
 				<div className="flex flex-wrap items-center gap-2">
-					<Button variant="secondary" icon={<MagnifyingGlass aria-hidden="true" />} disabled={Boolean(running)} onClick={() => void dryRun()}>
+					<Button type="button" variant="secondary" icon={<MagnifyingGlass aria-hidden="true" />} {...softDisabled(Boolean(running))} onClick={() => void dryRun()}>
 						{running === "dry" ? "Checking…" : "Dry run"}
 					</Button>
-					<Button variant="primary" icon={<TreeStructure aria-hidden="true" />} disabled={Boolean(running) || !toSet.length} onClick={() => void apply()}>
+					<Button type="button" variant="primary" icon={<TreeStructure aria-hidden="true" />} {...softDisabled(Boolean(running) || !toSet.length)} onClick={() => void apply()}>
 						{running === "apply" ? "Setting parents…" : toSet.length ? `Set ${plural(toSet.length, "parent", "parents")}` : "Set parents"}
 					</Button>
 				</div>
 			)}
 			{error && <Banner variant="error" role="alert" description={error} />}
 			{rows && (
-				<div className="overflow-x-auto">
-					<table className="w-full text-start text-sm">
-						<caption className="sr-only">What the import does for each page in pageParents</caption>
-						<thead className="text-kumo-subtle">
-							<tr>
-								<th scope="col" className="py-1 pe-3 text-start font-medium">
-									Page
-								</th>
-								<th scope="col" className="py-1 pe-3 text-start font-medium">
-									Parent
-								</th>
-								<th scope="col" className="py-1 pe-3 text-start font-medium">
-									What happens
-								</th>
-								<th scope="col" className="py-1 text-start font-medium">
-									URL
-								</th>
-							</tr>
-						</thead>
-						<tbody>
-							{rows.map((row) => (
-								<tr key={row.slug} className="border-t border-kumo-line align-top">
-									<td className="py-1.5 pe-3">{row.entryId && collection ? <AdminLink to={editPath(collection, row.entryId)}>{row.title ?? row.slug}</AdminLink> : <Code>{row.slug}</Code>}</td>
-									<td className="py-1.5 pe-3">{row.parentTitle ?? <Code>{row.parentSlug}</Code>}</td>
-									<td className="py-1.5 pe-3">
-										<Badge variant={row.action === "set" ? "primary" : row.action === "skip" ? "warning" : "outline"}>{ACTION_LABEL[row.action]}</Badge>
-										{(row.result || row.reason) && <span className="mt-0.5 block text-xs text-kumo-subtle">{row.result ?? REASON_TEXT[row.reason ?? ""] ?? row.reason}</span>}
-									</td>
-									<td className="py-1.5 font-mono text-xs break-all">
-										{row.url ?? ""}
-										{row.urlAfter && row.urlAfter !== row.url && <span className="block">→ {row.urlAfter}</span>}
-									</td>
-								</tr>
-							))}
-						</tbody>
-					</table>
+				<div className="text-sm">
+					{/* A list, not a table: each row stacks on a narrow screen (nothing to scroll sideways), and every value keeps its label. */}
+					<div className="pb-1 font-medium text-kumo-subtle cw-rows-head" aria-hidden="true">
+						<div>Page</div>
+						<div>Parent</div>
+						<div>What happens</div>
+						<div>URL</div>
+					</div>
+					<ul role="list" aria-label="What the import does for each page in pageParents">
+						{rows.map((row) => (
+							<li key={row.slug} className="border-t border-kumo-line py-2 cw-rows-item">
+								<div className="min-w-0 break-words">
+									<span className="text-xs text-kumo-subtle cw-md-sr-only">Page: </span>
+									{row.entryId && collection ? <AdminLink to={editPath(collection, row.entryId)}>{row.title ?? row.slug}</AdminLink> : <Code>{row.slug}</Code>}
+								</div>
+								<div className="min-w-0 break-words">
+									<span className="text-xs text-kumo-subtle cw-md-sr-only">Parent: </span>
+									{row.parentTitle ?? <Code>{row.parentSlug}</Code>}
+								</div>
+								<div className="min-w-0">
+									<span className="sr-only">What happens: </span>
+									{row.action === "skip" ? <WarningBadge>{ACTION_LABEL[row.action]}</WarningBadge> : <Badge variant={row.action === "set" ? "primary" : "outline"}>{ACTION_LABEL[row.action]}</Badge>}
+									{(row.result || row.reason) && <span className="mt-0.5 block text-xs text-kumo-subtle">{row.result ?? REASON_TEXT[row.reason ?? ""] ?? row.reason}</span>}
+								</div>
+								<div className="min-w-0">
+									{row.url && (
+										<>
+											<span className="text-xs text-kumo-subtle cw-md-sr-only">URL: </span>
+											<Url>{row.url}</Url>
+											{row.urlAfter && row.urlAfter !== row.url && (
+												<span className="block">
+													<span aria-hidden="true">→ </span>
+													<span className="sr-only">becomes </span>
+													<Url>{row.urlAfter}</Url>
+												</span>
+											)}
+										</>
+									)}
+								</div>
+							</li>
+						))}
+					</ul>
 				</div>
 			)}
 		</Section>
@@ -488,7 +530,8 @@ const Rule = ({ rule }: { rule: RuleRef }) => (
 
 function changeText(change: ChangeStatus): string {
 	if (change.failed) return `The redirects for this change couldn't be worked out (${change.failed}). Click Re-check redirects to make them.`;
-	const parts = [`${plural(change.moved, "other page", "other pages")} moved`];
+	// A change to one page ("A page was published") counts the pages that moved with it; Slug changes redirects the page itself.
+	const parts = [/^A page\b/.test(change.reason) ? `${plural(change.moved, "more page", "more pages")} moved with it` : `${plural(change.moved, "page", "pages")} moved`];
 	if (change.redirectsOff) parts.push("no redirects (Redirect Manager or Slug changes was off)");
 	else parts.push(`${plural(change.written, "redirect", "redirects")} added`);
 	if (change.skipped) parts.push(`${plural(change.skipped, "page", "pages")} over the limit of 200 a change had to wait`);
@@ -503,6 +546,7 @@ function Redirects(props: { status: Status; onChanged: () => void }) {
 	const [error, setError] = React.useState<string>();
 	const toast = useToast();
 	const recheck = async () => {
+		if (busy) return;
 		setBusy(true);
 		setError(undefined);
 		try {
@@ -527,7 +571,7 @@ function Redirects(props: { status: Status; onChanged: () => void }) {
 				</>
 			}
 		>
-			<Button type="button" variant="secondary" icon={<ArrowsClockwise aria-hidden="true" />} disabled={busy} onClick={() => void recheck()}>
+			<Button type="button" variant="secondary" icon={<ArrowsClockwise aria-hidden="true" />} {...softDisabled(busy)} onClick={() => void recheck()}>
 				{busy ? "Re-checking…" : "Re-check redirects"}
 			</Button>
 			{error && <Banner variant="error" role="alert" description={error} />}

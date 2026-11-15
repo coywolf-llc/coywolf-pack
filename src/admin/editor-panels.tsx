@@ -24,7 +24,7 @@ import * as React from "react";
 
 import { PACK_API, apiPost, errorText } from "./api.js";
 import { EDITOR_PANELS, LIST_COLUMNS, extensionShows } from "./extensions.js";
-import { AdminLink, PackLink } from "./page.js";
+import { AdminLink, PackLink, WarningBadge } from "./page.js";
 import { packPagePath } from "./router.js";
 
 /** What EmDash hands a panel (its ContentEditorPanelContext; entry is the saved item). */
@@ -406,11 +406,11 @@ export function ChildPagesPanel(props: PanelProps) {
 					</Row>
 				)}
 				{(data.ancestors?.length ?? 0) > 0 && <Row label="Under">{data.ancestors?.map((a) => a.title).join(" › ")}</Row>}
-				<Row label="Child pages">
+				<Row label="Pages under this one">
 					{children.length ? (
-						<ul role="list" className="space-y-1">
+						<ul role="list" className="mt-0.5 space-y-2">
 							{children.slice(0, SHOWN_CHILDREN).map((child) => (
-								<li key={child.id} className="min-w-0">
+								<li key={child.id} className="min-w-0 leading-snug">
 									<EntryLink collection={collection} page={child} />
 									{child.status !== "published" && <span className="text-kumo-subtle"> ({child.status})</span>}
 								</li>
@@ -426,7 +426,7 @@ export function ChildPagesPanel(props: PanelProps) {
 				<ul role="list" className="space-y-1.5">
 					{warnings.map((w) => (
 						<li key={w} className="flex items-start gap-1.5 text-sm">
-							<Badge variant="warning">Check</Badge>
+							<WarningBadge>Check</WarningBadge>
 							<span>{PAGE_WARNINGS[w] ?? w}</span>
 						</li>
 					))}

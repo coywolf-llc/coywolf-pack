@@ -23,6 +23,9 @@ export const ADMIN_CSS = `.cw-fill-tint{fill:var(--color-kumo-tint)}
 .cw-w-60{width:15rem}
 .cw-overflow-auto{overflow:auto}
 .cw-pre-wrap{white-space:pre-wrap;overflow-wrap:anywhere}
+.cw-wrap-anywhere{overflow-wrap:anywhere}
+.cw-rows-head{display:none}
+.cw-rows-item{display:grid;gap:.375rem}
 .cw-ps-6{padding-inline-start:1.5rem}
 .cw-pe-4{padding-inline-end:1rem}
 .cw-pe-24{padding-inline-end:6rem}
@@ -40,6 +43,8 @@ export const ADMIN_CSS = `.cw-fill-tint{fill:var(--color-kumo-tint)}
 .cw-md-row{flex-direction:row;align-items:center}
 .cw-md-w-60{width:15rem}
 .cw-md-table-cell{display:table-cell}
+.cw-rows-head,.cw-rows-item{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,4fr) minmax(0,7fr) minmax(12rem,6fr);column-gap:1rem}
+.cw-md-sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}
 }
 @media (min-width:64rem){
 .cw-lg-block{display:block}
