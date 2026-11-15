@@ -261,6 +261,10 @@ test("applyUrlMoves: a rule someone else made that sends the new URL back to the
 	assert.ok(ctx.state.logs.some(([level, message]) => level === "warn" && /loop|sends the new URL back/.test(message)));
 	assert.deepEqual(await loopingRule(d1, "/apps/coywolf-seo/", "/coywolf-seo/"), { source: "/coywolf-seo", target: "/apps/coywolf-seo/" });
 	assert.equal(await loopingRule(d1, "/elsewhere/", "/coywolf-seo/"), null);
+	// Given the rules already read for the move, a new URL with no rule at it costs no query (every slug change asks).
+	const before = d1.counts.roundTrips;
+	assert.equal(await loopingRule(d1, "/a/", "/b/", []), null);
+	assert.equal(d1.counts.roundTrips, before);
 });
 
 const SEO = [page("a", "apps", "published", "Coywolf apps"), page("s", "coywolf-seo", "published", "Coywolf SEO"), page("p", "coywolf-pack", "published", "Coywolf Pack"), parent("s", "a"), parent("p", "a")].join("\n");

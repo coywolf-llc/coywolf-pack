@@ -162,12 +162,13 @@ const targetKey = (target: string) => (target.startsWith("/") && !target.startsW
  * make and that sends readers back to `from`, at once or through other exact rules (up to LOOP_HOPS).
  * coywolf.com has `/coywolf-seo` → `/apps/coywolf-seo/` from its WordPress move: a page that goes back to
  * `/coywolf-seo/` must not get `/apps/coywolf-seo` → `/coywolf-seo/` while that rule exists. (Our own rule
- * at `to` isn't one: planSlugChange deletes it.) `known` are rules already read (every rule at a source
- * that's in it); others are read here. Null when the 301 is safe to write.
+ * at `to` isn't one: planSlugChange deletes it.) `known` are rules already read, every rule at `to` among
+ * them (both callers that pass it have read the rules for the move's two URLs): with it, a move with no
+ * rule at `to` costs no query. Rules further along a chain are read here. Null when the 301 is safe to write.
  */
-export async function loopingRule(d1: D1Database, from: string, to: string, known: Iterable<KnownRule> = []): Promise<RuleRef | null> {
+export async function loopingRule(d1: D1Database, from: string, to: string, known?: Iterable<KnownRule>): Promise<RuleRef | null> {
 	const goal = sourceKey(from);
-	const loaded = [...known];
+	const loaded = [...(known ?? [])];
 	const at = async (key: string): Promise<KnownRule[]> => {
 		const hit = loaded.filter((r) => sourceKey(r.source) === key);
 		if (hit.length) return hit;
@@ -179,7 +180,8 @@ export async function loopingRule(d1: D1Database, from: string, to: string, know
 		return results;
 	};
 	const start = sourceKey(to);
-	const first = (await at(start)).find((r) => !isOurs(r) && r.enabled !== 0);
+	const atStart = known ? loaded.filter((r) => sourceKey(r.source) === start) : await at(start);
+	const first = atStart.find((r) => !isOurs(r) && r.enabled !== 0);
 	if (!first) return null;
 	const seen = new Set([start]);
 	let rule: KnownRule | undefined = first;
