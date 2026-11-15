@@ -865,3 +865,121 @@ test("nestsBy: a collection whose own URL pattern has neither {slug} nor {pagepa
 	assert.equal(nestsBy({ collection: "posts", field, urlPattern: null }, true), "override");
 	configureContentUrls({});
 });
+
+// ── Theme helpers ──
+
+const theme = await import("../src/childPages/theme.ts");
+const ALS = Symbol.for("emdash:request-context");
+/** Run as one request of EmDash's (its request context shares the pack's reads, and carries a verified preview). */
+async function inRequest(store, run) {
+	const earlier = globalThis[ALS];
+	globalThis[ALS] = { getStore: () => store };
+	try {
+		return await run();
+	} finally {
+		if (earlier === undefined) delete globalThis[ALS];
+		else globalThis[ALS] = earlier;
+	}
+}
+
+test("resolvePagePath: a draft or scheduled page answers null at its nested and its flat path (no page, no redirect), unless the route says it's a preview", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1([page("a", "apps"), page("s", "secret-launch", "draft"), page("q", "soon", "scheduled"), page("p", "coywolf-pack"), parent("s", "a"), parent("q", "a"), parent("p", "a")].join("\n"));
+	try {
+		const tree = theme.pageTreeFrom(await read.collectionTree(d1, "pages", { on: true }));
+		for (const slug of ["secret-launch", "soon"]) {
+			assert.equal(theme.resolvePagePath(tree, [slug], { search: "?x=1" }), null, "the flat form doesn't redirect to where the draft will be");
+			assert.equal(theme.resolvePagePath(tree, ["apps", slug]), null);
+			assert.equal(theme.resolvePagePath(tree, ["apps", slug], { preview: false }), null);
+		}
+		// A preview route: the draft at its path, and EmDash's flat preview link redirected there with its token.
+		assert.equal(theme.resolvePagePath(tree, ["apps", "secret-launch"], { preview: true }).page.id, "s");
+		assert.deepEqual(theme.resolvePagePath(tree, ["secret-launch"], { search: "?_preview=tok", preview: true }), { redirect: "/apps/secret-launch/?_preview=tok" });
+		// Published pages as before.
+		assert.equal(theme.resolvePagePath(tree, ["apps", "coywolf-pack"]).page.id, "p");
+		assert.deepEqual(theme.resolvePagePath(tree, ["coywolf-pack"]), { redirect: "/apps/coywolf-pack/" });
+		assert.equal(tree.get("secret-launch").published, false, "get() still finds it, for a template that already has the entry");
+
+		// isPreviewRequest: only what EmDash's middleware verified, not a _preview parameter anyone can add.
+		assert.equal(theme.isPreviewRequest(), false);
+		assert.equal(await inRequest({}, async () => theme.isPreviewRequest()), false);
+		assert.equal(await inRequest({ preview: { collection: "pages", id: "s" } }, async () => theme.isPreviewRequest()), true);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("get(): a published page wins over an unpublished one with the same slug, whatever their locales", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1([page("x-en", "about", "draft", "About (draft)", "en", "X"), page("x-fr", "about", "published", "À propos", "fr", "X")].join("\n"));
+	try {
+		const tree = theme.pageTreeFrom(await read.collectionTree(d1, "pages", { on: true }));
+		assert.equal(tree.get("about").id, "x-fr");
+		assert.equal(theme.resolvePagePath(tree, ["about"]).page.id, "x-fr");
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("cacheTags follow the chosen parents, the ones that don't count included: a parent's publish clears the pages cached at the top level while it was unpublished", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(
+		[page("a", "apps", "draft"), page("p", "coywolf-pack"), page("d", "docs"), page("l1", "loop-one"), page("l2", "loop-two"), page("x", "about"), parent("p", "a"), parent("d", "p"), parent("l1", "l2"), parent("l2", "l1")].join("\n"),
+	);
+	try {
+		const tree = theme.pageTreeFrom(await read.collectionTree(d1, "pages", { on: true }));
+		assert.equal(tree.path("coywolf-pack"), "/coywolf-pack/", "Apps isn't published: top level");
+		assert.deepEqual(tree.trail("coywolf-pack"), []);
+		assert.deepEqual(tree.cacheTags("coywolf-pack"), ["a"], "tagged with Apps all the same");
+		assert.deepEqual(tree.cacheTags("docs"), ["p", "a"], "the page above it in its URL, and the chosen parents above that");
+		assert.deepEqual(tree.cacheTags("loop-one"), ["l2"], "a loop stops where it comes back around, without the page itself");
+		assert.deepEqual(tree.cacheTags("about"), []);
+		assert.deepEqual(tree.cacheTags("nope"), []);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("loadPageTree costs an uncached page one D1 round trip, shared with the menus, the breadcrumb titles and the URL resolver", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const s = site(SITE, { modules: ["childPages"] });
+	try {
+		// The isolate has read the switches (the pack's middleware does, before anything renders).
+		await inRequest({}, () => theme.loadPageTree(s.d1));
+		const before = { ...s.d1.counts };
+		await inRequest({}, async () => {
+			const tree = await theme.loadPageTree(s.d1);
+			assert.equal(tree.path("docs"), "/apps/coywolf-pack/docs/");
+			assert.equal(tree.trail("docs")[0].title, "Coywolf apps");
+			// The page template and the layout's menus ask again; breadcrumbs and the schema graph read the titles; a module resolves a URL.
+			await theme.loadPageTree(s.d1);
+			assert.equal((await read.pageTitlesByPath(s.d1)).get("/apps/coywolf-pack"), "Coywolf Pack");
+			assert.equal(await entryUrl(s.d1, "pages", { id: "d", slug: "docs" }), "/apps/coywolf-pack/docs/");
+		});
+		assert.equal(s.d1.counts.roundTrips - before.roundTrips, 1, "one batch");
+		assert.equal(s.d1.counts.statements - before.statements, 3, "the collections and their fields, the pages' rows, the links");
+
+		// A collection whose title field isn't "title" (or that has none): found once, then one round trip again.
+		s.d1.raw.exec("ALTER TABLE ec_pages DROP COLUMN title");
+		read.invalidatePageTrees();
+		await inRequest({}, () => theme.loadPageTree(s.d1));
+		const again = s.d1.counts.roundTrips;
+		const tree = await inRequest({}, () => theme.loadPageTree(s.d1));
+		assert.equal(s.d1.counts.roundTrips - again, 1);
+		assert.equal(tree.get("docs").title, "docs", "the slug stands in");
+
+		// With Child Pages off (a theme that already uses the helpers): one round trip, without the links.
+		s.d1.raw.prepare("UPDATE options SET value = ? WHERE name = ?").run(JSON.stringify({ ...SWITCHES, childPages: false }), FEATURES_ROW);
+		invalidateFeatures();
+		read.invalidatePageTrees();
+		await inRequest({}, () => theme.loadPageTree(s.d1));
+		const off = { ...s.d1.counts };
+		const flat = await inRequest({}, () => theme.loadPageTree(s.d1));
+		assert.equal(s.d1.counts.roundTrips - off.roundTrips, 1);
+		assert.equal(s.d1.counts.statements - off.statements, 2);
+		assert.equal(flat.path("docs"), "/docs/");
+		assert.equal(await theme.loadPageTree(s.d1, { collection: "nope" }).catch((error) => error.message), 'coywolf-pack: loadPageTree: no collection "nope"');
+	} finally {
+		s.close();
+	}
+});

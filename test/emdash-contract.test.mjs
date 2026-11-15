@@ -1435,6 +1435,12 @@ test("Child Pages: links by translation group (holder → parent), kept in the t
 	const pack = await make("cp-pack", { parent_page: [apps.id] });
 	const tree = async () => readTree(d1, (await readMeta(d1)).find((m) => m.collection === "pages"), true);
 	assert.equal((await tree()).nodes.get(pack.id).effectiveParentId, apps.id);
+	// The one-batch read finds the same links from the field's validation (LINKS_BY_FIELD_SQL: json_extract of `relation`).
+	const { readCollection } = await import("../src/childPages/read.ts");
+	const together = await readCollection(d1, "pages", true);
+	assert.equal(together.meta.field.relation, "pages_parent_page");
+	assert.equal(together.tree.nodes.get(pack.id).effectiveParentId, apps.id);
+	assert.equal(together.tree.nodes.get(pack.id).title, "cp-pack");
 	const { rows } = await sql`SELECT parent_group, child_group FROM _emdash_content_references WHERE parent_group = ${pack.translationGroup}`.execute(db);
 	assert.deepEqual(rows.map((r) => ({ ...r })), [{ parent_group: pack.translationGroup, child_group: apps.translationGroup }], "the page holding the field is parent_group, its parent child_group");
 	// Trash: the link stays (a restore brings it back); the parent no longer counts.

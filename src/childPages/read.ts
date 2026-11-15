@@ -9,15 +9,17 @@
  * draft revision's data (`_references`) until it's published. Contract tests
  * check these tables and keys (test/emdash-contract.test.mjs).
  *
- * Reads are shared by everything that renders one page (src/core/request-memo.ts):
- * one query for the collections and their fields, then one batch with the
- * collection's rows and links. The Child pages hooks call invalidatePageTrees()
+ * Reads are shared by everything that renders one page (src/core/request-memo.ts).
+ * A collection's tree is one D1 round trip (readCollection): a batch with the
+ * collections and their fields, the collection's rows (no content columns) and its
+ * links. A caller that already has the collections (readMeta) reads the rows and
+ * links in one batch (readTree). The Child pages hooks call invalidatePageTrees()
  * before they look again, so a read from before a publish isn't reused after it.
  */
-import { COLLECTION_SLUG, type ChildPagesState, type StoredParents, type StoredParentsProvider, type UrlSource, comparablePath, createEntryUrlResolver, hostDefaultLocale } from "../core/content-url.js";
+import { COLLECTION_SLUG, type ChildPagesState, type CollectionInfo, type StoredParents, type StoredParentsProvider, type UrlSource, comparablePath, createEntryUrlResolver, hostDefaultLocale } from "../core/content-url.js";
 import { isOn, knownFeatures, knownSiteSetting, registerSiteSetting, siteFeatureState } from "../core/features.js";
 import { noteReadFailure } from "../core/read-failures.js";
-import { requestMemo } from "../core/request-memo.js";
+import { peekRequestMemo, requestMemo, seedRequestMemo } from "../core/request-memo.js";
 import { workerEnv } from "../shared.js";
 import { PARENT_FIELD, type PageRow, type PageTreeData, type ParentLink, buildPageTree, storedParentsOf } from "./tree.js";
 
@@ -53,6 +55,14 @@ export const META_SQL = `SELECT c.slug AS collection, c.label AS label, c.title_
 export const LINKS_SQL = `SELECT e.parent_group AS holder, e.child_group AS target
 	FROM _emdash_content_references e JOIN _emdash_relations r ON r.id = e.relation_id
 	WHERE r.slug = ?`;
+
+/**
+ * The same links, found from the collection and the field's slug (the relation is in the field's
+ * `validation`), for a read that doesn't have the collections yet (readCollection).
+ */
+export const LINKS_BY_FIELD_SQL = `SELECT e.parent_group AS holder, e.child_group AS target
+	FROM _emdash_content_references e JOIN _emdash_relations r ON r.id = e.relation_id
+	WHERE r.slug = (SELECT json_extract(f.validation, '$.relation') FROM _emdash_fields f JOIN _emdash_collections c ON c.id = f.collection_id WHERE c.slug = ? AND f.slug = ? LIMIT 1)`;
 
 const COLUMN = /^[a-z][a-z0-9_]*$/;
 /** The title column of a collection, as SQL (its title field, else "title"). */
@@ -101,11 +111,26 @@ let generation = 0;
 /** Forget this request's tree reads (after a write that changes them). */
 export function invalidatePageTrees(): void {
 	generation++;
+	titleColumns.clear();
 }
+
+const metaKey = () => `childPages:meta:${generation}`;
+const treeKey = (collection: string, withLinks: boolean) => `childPages:tree:${generation}:${collection}:${withLinks ? 1 : 0}`;
+
+/**
+ * The title column that reads for a collection, learned in this isolate: `use` is the SQL to select
+ * ("NULL" when the collection has no such column), valid while its title field is still `for`.
+ * readCollection reads the rows before it knows the title field, so it needs the answer beforehand.
+ */
+const titleColumns = new Map<string, { for: string; use: string; at: number }>();
+/** How long a learned title column is trusted: a collection's fields can change (a title field added). */
+const TITLE_COLUMN_TTL_MS = 5 * 60_000;
+const DEFAULT_TITLE = titleColumn(null);
+const missingColumn = (error: unknown) => /no such (column|table)/i.test(String((error as { message?: unknown } | null)?.message ?? error));
 
 /** Every collection and its parent field, once per request. */
 export function readMeta(db: D1Database): Promise<CollectionMeta[]> {
-	return requestMemo(`childPages:meta:${generation}`, async () => {
+	return requestMemo(metaKey(), async () => {
 		const { results } = await db.prepare(META_SQL).bind(PARENT_FIELD).all<MetaRow>();
 		return metaFromRows(results.filter((r) => COLLECTION_SLUG.test(r.collection)));
 	});
@@ -114,17 +139,19 @@ export function readMeta(db: D1Database): Promise<CollectionMeta[]> {
 /** A collection's rows and (with `links`) its parent links, read in one batch. Null for an unknown collection. */
 export function readTree(db: D1Database, meta: CollectionMeta, links: boolean): Promise<PageTreeData> {
 	const withLinks = links && meta.field !== null;
-	return requestMemo(`childPages:tree:${generation}:${meta.collection}:${withLinks ? 1 : 0}`, async () => {
+	return requestMemo(treeKey(meta.collection, withLinks), async () => {
 		const defaultLocale = await hostDefaultLocale();
 		const rowsStatement = (title: string) => db.prepare(rowsSql(meta.collection, title));
 		const linkStatement = withLinks && meta.field ? db.prepare(LINKS_SQL).bind(meta.field.relation) : null;
+		const wanted = titleColumn(meta.titleField);
 		let rows: PageRow[];
 		let edges: Array<{ holder: string; target: string }> = [];
 		try {
-			const statements = [rowsStatement(titleColumn(meta.titleField)), ...(linkStatement ? [linkStatement] : [])];
+			const statements = [rowsStatement(wanted), ...(linkStatement ? [linkStatement] : [])];
 			const results = typeof db.batch === "function" ? await db.batch(statements) : await Promise.all(statements.map((s) => s.all()));
 			rows = (results[0]?.results ?? []) as PageRow[];
 			edges = (results[1]?.results ?? []) as Array<{ holder: string; target: string }>;
+			titleColumns.set(meta.collection, { for: wanted, use: wanted, at: Date.now() });
 		} catch (error) {
 			// No title column (a collection whose title field is something else, or none): the slugs stand in.
 			// Any other failure (D1 unreachable for a moment) is the caller's: a tree read with nothing in it
@@ -132,11 +159,56 @@ export function readTree(db: D1Database, meta: CollectionMeta, links: boolean): 
 			if (!/no such column/i.test(String((error as { message?: unknown } | null)?.message ?? error))) throw error;
 			rows = (await rowsStatement("NULL").all<PageRow>()).results;
 			if (linkStatement) edges = (await linkStatement.all<{ holder: string; target: string }>()).results;
+			titleColumns.set(meta.collection, { for: wanted, use: "NULL", at: Date.now() });
 		}
-		const side = meta.field?.side ?? "parent";
-		const parentLinks: ParentLink[] = edges.map((e) => (side === "parent" ? { entry: e.holder, parent: e.target } : { entry: e.target, parent: e.holder }));
-		return buildPageTree(meta.collection, rows, parentLinks, defaultLocale);
+		return treeFrom(meta, rows, edges, defaultLocale);
 	});
+}
+
+type Edge = { holder: string; target: string };
+
+function treeFrom(meta: CollectionMeta, rows: PageRow[], edges: Edge[], defaultLocale: string): PageTreeData {
+	const side = meta.field?.side ?? "parent";
+	const parentLinks: ParentLink[] = edges.map((e) => (side === "parent" ? { entry: e.holder, parent: e.target } : { entry: e.target, parent: e.holder }));
+	return buildPageTree(meta.collection, rows, parentLinks, defaultLocale);
+}
+
+/**
+ * A collection with its tree in one D1 round trip: the collections and their fields, the collection's
+ * rows and (with `links`) its links, in one batch. What a theme's loadPageTree costs an uncached page.
+ * The other readers of the request (readMeta, readTree) share the result. Falls back to those two reads
+ * when the collections are already read, and the first time a collection's title column has to be found
+ * (one that isn't "title", or none). Null for an unknown collection.
+ */
+export async function readCollection(db: D1Database, collection: string, links: boolean): Promise<{ meta: CollectionMeta; tree: PageTreeData } | null> {
+	const twoReads = async () => {
+		const meta = (await readMeta(db)).find((m) => m.collection === collection);
+		return meta ? { meta, tree: await readTree(db, meta, links) } : null;
+	};
+	if (!COLLECTION_SLUG.test(collection)) return null;
+	if (peekRequestMemo(metaKey()) || typeof db.batch !== "function") return twoReads();
+	const learned = titleColumns.get(collection);
+	const guess = learned && Date.now() - learned.at < TITLE_COLUMN_TTL_MS ? learned : { for: DEFAULT_TITLE, use: DEFAULT_TITLE };
+	const defaultLocale = await hostDefaultLocale();
+	const started = generation;
+	let results: Awaited<ReturnType<D1Database["batch"]>>;
+	try {
+		results = await db.batch([db.prepare(META_SQL).bind(PARENT_FIELD), db.prepare(rowsSql(collection, guess.use)), ...(links ? [db.prepare(LINKS_BY_FIELD_SQL).bind(collection, PARENT_FIELD)] : [])]);
+	} catch (error) {
+		// No such table (an unknown collection) or no such title column: the two reads find out. Anything else is the caller's.
+		if (!missingColumn(error)) throw error;
+		return twoReads();
+	}
+	const metas = metaFromRows(((results[0]?.results ?? []) as MetaRow[]).filter((r) => COLLECTION_SLUG.test(r.collection)));
+	if (generation === started) seedRequestMemo(metaKey(), Promise.resolve(metas));
+	const meta = metas.find((m) => m.collection === collection);
+	if (!meta) return null;
+	// The rows were read with a title column chosen before the title field was known: read again if it wasn't the one.
+	if (titleColumn(meta.titleField) !== guess.for) return { meta, tree: await readTree(db, meta, links) };
+	const withLinks = links && meta.field !== null;
+	const tree = treeFrom(meta, (results[1]?.results ?? []) as PageRow[], withLinks ? ((results[2]?.results ?? []) as Edge[]) : [], defaultLocale);
+	if (generation === started) seedRequestMemo(treeKey(collection, withLinks), Promise.resolve(tree));
+	return { meta, tree };
 }
 
 // ── The URL resolver's provider ──────────────────────────────────
@@ -225,13 +297,15 @@ export interface CollectionTree {
  * with the feature on and off); by default the live switch decides.
  */
 export async function collectionTree(db: D1Database, collection: string, options: { on?: boolean } = {}): Promise<CollectionTree | null> {
-	const meta = (await readMeta(db)).find((m) => m.collection === collection);
-	if (!meta) return null;
 	// A switch that can't be read rejects (featureOn): the admin and a theme's loadPageTree fail rather than show flat URLs.
 	const on = options.on ?? (await featureOn());
-	const tree = await readTree(db, meta, on);
+	const read = await readCollection(db, collection, on);
+	if (!read) return null;
+	const { meta, tree } = read;
 	const state = on ? await readChildPagesState(db) : null;
-	const resolver = createEntryUrlResolver(db, { childPages: state });
+	// The collections' URL patterns are already read: the resolver doesn't read them again.
+	const collections = new Map<string, CollectionInfo>((await readMeta(db)).map((m) => [m.collection, { slug: m.collection, label: m.label, labelSingular: null, urlPattern: m.urlPattern, titleField: m.titleField }]));
+	const resolver = createEntryUrlResolver(db, { childPages: state, collections });
 	const entries = [...tree.nodes.values()].filter((n) => n.slug).map((n) => ({ id: n.id, slug: n.slug, publishedAt: n.publishedAt, locale: n.locale }));
 	const urls = await resolver.urls(collection, entries);
 	return { meta, tree, urls, nested: Boolean(on && meta.field) };

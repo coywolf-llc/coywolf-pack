@@ -9,15 +9,18 @@
  *
  * ```astro
  * ---
- * import { loadPageTree, resolvePagePath } from "@coywolf/emdash/astro";
+ * import { isPreviewRequest, loadPageTree, resolvePagePath } from "@coywolf/emdash/astro";
  * const tree = await loadPageTree();
- * const match = resolvePagePath(tree, segments, { search: Astro.url.search });
+ * const match = resolvePagePath(tree, segments, { search: Astro.url.search, preview: isPreviewRequest() });
  * if (match && "redirect" in match) return Astro.redirect(match.redirect, 301);
  * ---
  * ```
+ *
+ * The tree is one D1 round trip per request (src/childPages/read.ts readCollection), shared by
+ * the route, the page template, the menus, breadcrumbs and the schema graph.
  */
 import { comparablePath, interpolateUrlPattern } from "../core/content-url.js";
-import { requestMemo } from "../core/request-memo.js";
+import { requestMemo, requestStore } from "../core/request-memo.js";
 import { workerEnv } from "../shared.js";
 import { collectionTree, type CollectionTree } from "./read.js";
 import { type PageNode } from "./tree.js";
@@ -50,7 +53,11 @@ export interface PageTree {
 	nested: boolean;
 	/** Published pages, by title. */
 	pages: PageTreeItem[];
-	/** The page with this slug (published first, else a draft, for previews), or null. */
+	/**
+	 * The page with this slug, or null: a published page first (the default locale's before a translation's),
+	 * else one that isn't published. Check `published` before showing it or its URL to visitors;
+	 * resolvePagePath does.
+	 */
 	get(slug: string): PageTreeItem | null;
 	byId(id: string): PageTreeItem | null;
 	/** The page's URL, or null when there's no such page. */
@@ -60,9 +67,11 @@ export interface PageTree {
 	/** Published pages directly under this one, by title. */
 	children(slug: string): PageTreeItem[];
 	/**
-	 * Cache tags for a page's response: its ancestors' entry ids, so changing a parent
-	 * (a new slug, or a parent of its own) clears the pages below it. Add the page's
-	 * own tags (getEmDashEntry's cacheHint) as usual.
+	 * Cache tags for a page's response: the entry ids of the pages above it in its URL, and of the
+	 * parent pages it has chosen all the way up, including ones that don't count right now
+	 * (unpublished, scheduled): changing any of them (a new slug, a parent of its own, publishing
+	 * it) clears this page, so a page cached at the top level while its parent was unpublished
+	 * doesn't outlive the parent's publish. Add the page's own tags (getEmDashEntry's cacheHint) as usual.
 	 */
 	cacheTags(slug: string): string[];
 	/**
@@ -85,8 +94,8 @@ export function pageTreeFrom(source: CollectionTree): PageTree {
 		return { id: node.id, slug: node.slug, title: node.title?.trim() || node.slug, url, locale: node.locale, status: node.status, published: node.published, parentId: null };
 	};
 	const all = [...tree.nodes.values()]
-		// Default locale first, then published before drafts: get(slug) takes the first.
-		.sort((a, b) => Number(b.locale === tree.defaultLocale) - Number(a.locale === tree.defaultLocale) || Number(b.published) - Number(a.published))
+		// Published before unpublished, then the default locale first: get(slug) takes the first.
+		.sort((a, b) => Number(b.published) - Number(a.published) || Number(b.locale === tree.defaultLocale) - Number(a.locale === tree.defaultLocale))
 		.map(item)
 		.filter((i): i is PageTreeItem => i !== null);
 	const bySlug = new Map<string, PageTreeItem>();
@@ -136,7 +145,19 @@ export function pageTreeFrom(source: CollectionTree): PageTree {
 			const page = bySlug.get(slug);
 			return page ? pages.filter((p) => p.parentId === page.id) : [];
 		},
-		cacheTags: (slug) => trail(slug).flatMap((t) => (t.id ? [t.id] : [])),
+		cacheTags: (slug) => {
+			const ids = new Set(trail(slug).flatMap((t) => (t.id ? [t.id] : [])));
+			// The chosen parents, whether or not they count for the URL now (a loop stops where it comes back around).
+			const seen = new Set<string>();
+			let up = tree.nodes.get(bySlug.get(slug)?.id ?? "")?.parentId ?? null;
+			while (up && !seen.has(up) && seen.size < 32) {
+				seen.add(up);
+				ids.add(up);
+				up = tree.nodes.get(up)?.parentId ?? null;
+			}
+			ids.delete(bySlug.get(slug)?.id ?? "");
+			return [...ids];
+		},
 		nest: (url, origin) => nestUrl(url, byFlat, origin),
 	};
 }
@@ -178,19 +199,33 @@ export async function loadPageTree(db?: D1Database | string, options: { collecti
 export type PagePathMatch = { page: PageTreeItem; path: string } | { redirect: string };
 
 /**
+ * True when EmDash accepted this request's `_preview` token (its middleware verifies the signature and puts
+ * the previewed entry in the request context). For resolvePagePath's `preview` option. Not the same as the
+ * URL having a `_preview` parameter, which anyone can add.
+ */
+export function isPreviewRequest(): boolean {
+	return Boolean((requestStore() as { preview?: unknown } | undefined)?.preview);
+}
+
+/**
  * The page a catch-all route's path names (decoded segments, or the path):
  * `{ page }` when the path is the page's URL, `{ redirect }` (the page's URL, with
  * `options.search` kept, for previews and tracking parameters) when it's the flat
  * one-segment form of a nested page (`/coywolf-pack/` → `/apps/coywolf-pack/`),
  * and null otherwise (another page's path, a post, or nothing: let the route go on).
  * Check category archives first: they win over pages.
+ *
+ * Only published pages, unless `options.preview` is true: a draft or scheduled page answers
+ * null at both its nested and its flat path, so neither a `{ page }` nor a redirect tells a
+ * visitor that it exists or where it will be. Pass `preview: isPreviewRequest()` on a route
+ * that serves EmDash's previews; getEmDashEntry still decides whether the draft is shown.
  */
-export function resolvePagePath(tree: PageTree, segments: readonly string[] | string, options: { search?: string } = {}): PagePathMatch | null {
+export function resolvePagePath(tree: PageTree, segments: readonly string[] | string, options: { search?: string; preview?: boolean } = {}): PagePathMatch | null {
 	const parts = typeof segments === "string" ? comparablePath(segments).split("/").filter(Boolean) : segments.filter(Boolean);
 	const slug = parts[parts.length - 1];
 	if (!slug) return null;
 	const page = tree.get(slug);
-	if (!page) return null;
+	if (!page || (!page.published && options.preview !== true)) return null;
 	const requested = `/${parts.join("/")}`;
 	if (comparablePath(page.url) === requested) return { page, path: page.url };
 	if (parts.length === 1) return { redirect: `${encodePath(page.url)}${options.search ?? ""}` };
