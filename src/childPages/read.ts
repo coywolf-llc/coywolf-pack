@@ -15,7 +15,8 @@
  * before they look again, so a read from before a publish isn't reused after it.
  */
 import { COLLECTION_SLUG, type ChildPagesState, type StoredParents, type StoredParentsProvider, type UrlSource, comparablePath, createEntryUrlResolver, hostDefaultLocale } from "../core/content-url.js";
-import { isOn, knownSiteSetting, registerSiteSetting, siteFeatures } from "../core/features.js";
+import { isOn, knownFeatures, knownSiteSetting, registerSiteSetting, siteFeatureState } from "../core/features.js";
+import { noteReadFailure } from "../core/read-failures.js";
 import { requestMemo } from "../core/request-memo.js";
 import { workerEnv } from "../shared.js";
 import { PARENT_FIELD, type PageRow, type PageTreeData, type ParentLink, buildPageTree, storedParentsOf } from "./tree.js";
@@ -124,8 +125,11 @@ export function readTree(db: D1Database, meta: CollectionMeta, links: boolean): 
 			const results = typeof db.batch === "function" ? await db.batch(statements) : await Promise.all(statements.map((s) => s.all()));
 			rows = (results[0]?.results ?? []) as PageRow[];
 			edges = (results[1]?.results ?? []) as Array<{ holder: string; target: string }>;
-		} catch {
+		} catch (error) {
 			// No title column (a collection whose title field is something else, or none): the slugs stand in.
+			// Any other failure (D1 unreachable for a moment) is the caller's: a tree read with nothing in it
+			// would make every page top level.
+			if (!/no such column/i.test(String((error as { message?: unknown } | null)?.message ?? error))) throw error;
 			rows = (await rowsStatement("NULL").all<PageRow>()).results;
 			if (linkStatement) edges = (await linkStatement.all<{ holder: string; target: string }>()).results;
 		}
@@ -146,7 +150,19 @@ export interface ProviderDeps {
 	database?: (source: UrlSource) => Promise<D1Database | null>;
 }
 
-const featureOn = async () => isOn(await siteFeatures(), CHILD_PAGES_FEATURE);
+/**
+ * Whether the feature is on, from the per-isolate switches. When they can't be read (they then
+ * read as their defaults, with Child Pages off), the isolate's last read decides; without one
+ * this rejects: "off" would give nested pages their flat URLs (see parentsUnreadable in
+ * src/core/content-url.ts).
+ */
+const featureOn = async () => {
+	const { features, ok } = await siteFeatureState();
+	if (ok) return isOn(features, CHILD_PAGES_FEATURE);
+	const known = knownFeatures();
+	if (known) return isOn(known, CHILD_PAGES_FEATURE);
+	throw new Error("coywolf-pack: Child Pages: the feature switches couldn't be read");
+};
 
 /** The site's D1 database: the source when it is one, else the DB binding. */
 export async function databaseFor(source?: UrlSource | null): Promise<D1Database | null> {
@@ -211,7 +227,8 @@ export interface CollectionTree {
 export async function collectionTree(db: D1Database, collection: string, options: { on?: boolean } = {}): Promise<CollectionTree | null> {
 	const meta = (await readMeta(db)).find((m) => m.collection === collection);
 	if (!meta) return null;
-	const on = options.on ?? (await featureOn().catch(() => false));
+	// A switch that can't be read rejects (featureOn): the admin and a theme's loadPageTree fail rather than show flat URLs.
+	const on = options.on ?? (await featureOn());
 	const tree = await readTree(db, meta, on);
 	const state = on ? await readChildPagesState(db) : null;
 	const resolver = createEntryUrlResolver(db, { childPages: state });
@@ -227,7 +244,17 @@ export async function collectionTree(db: D1Database, collection: string, options
  * feature is off or no collection has the field. Read once per request.
  */
 export async function pageTitlesByPath(db?: D1Database | null): Promise<Map<string, string> | null> {
-	if (!(await featureOn().catch(() => false))) return null;
+	try {
+		return await pageTitles(db);
+	} catch (error) {
+		// The trail falls back to humanized slugs (the callers catch this): not a page for the edge cache.
+		noteReadFailure("child pages: page titles");
+		throw error;
+	}
+}
+
+async function pageTitles(db?: D1Database | null): Promise<Map<string, string> | null> {
+	if (!(await featureOn())) return null;
 	const d1 = db ?? (await databaseFor());
 	if (!d1) return null;
 	const nesting = (await readMeta(d1)).filter((m) => m.field);

@@ -13,7 +13,7 @@
  */
 import { type SearchResult, search } from "emdash";
 
-import { COLLECTION_SLUG, type CollectionInfo, createEntryUrlResolver, interpolateUrlPattern, readCollections } from "../core/content-url.js";
+import { COLLECTION_SLUG, type CollectionInfo, ParentPagesUnreadable, createEntryUrlResolver, interpolateUrlPattern, readCollections } from "../core/content-url.js";
 import { noteSearch } from "../insights/search.js";
 import { afterResponse, workerEnv } from "../shared.js";
 import { buildOrQuery, rankByCoverage } from "./fallback.js";
@@ -128,8 +128,9 @@ async function withUrls(items: SearchResult[], database = "DB"): Promise<PackSea
 			const entries = items.filter((i) => i.collection === slug).map((i) => ({ id: i.id, slug: i.slug ?? i.id, locale: i.locale }));
 			try {
 				for (const [id, url] of await resolver.urls(slug, entries)) urls.set(`${slug}:${id}`, url);
-			} catch {
-				// Fall back to the default route below rather than fail the search.
+			} catch (error) {
+				// Fall back to the default route below rather than fail the search (but never to a nested page's flat URL).
+				if (error instanceof ParentPagesUnreadable) throw error;
 			}
 		}
 	}

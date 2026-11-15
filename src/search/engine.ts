@@ -22,6 +22,7 @@
 import {
 	COLLECTION_SLUG,
 	type ChildPagesState,
+	ParentPagesUnreadable,
 	type CollectionInfo,
 	type PrimaryTermRow,
 	type SqlQuery,
@@ -189,8 +190,10 @@ export async function loadSearchMeta(db: D1Database, cacheKey = "DB", version = 
 	}
 	const termParents = termParentsFromRows(parentRows, parentTaxonomies, await hostDefaultLocale());
 	const meta = buildMeta(collections, fields, fts, termParents);
-	// Child Pages: page URLs nest by their parents, kept with the rest (the search version changes with them).
-	meta.childPages = await currentChildPagesState(db).catch(() => undefined);
+	// Child Pages: page URLs nest by their parents, kept with the rest (the search version changes with them), so a
+	// search reads no parents of its own. A read that fails rejects, and nothing is cached: "off" kept here would
+	// answer searches with flat page URLs until the metadata is read again.
+	meta.childPages = await currentChildPagesState(db);
 	metaCache.set(cacheKey, { meta, at: Date.now(), version });
 	return meta;
 }
@@ -531,8 +534,10 @@ export async function entryUrlsFromMeta(
 	for (const slug of slugs) {
 		try {
 			for (const [id, url] of await resolver.urls(slug, entriesOf(slug))) urls.set(`${slug}:${id}`, url);
-		} catch {
-			// Default routes below rather than fail the search.
+		} catch (error) {
+			// Default routes below rather than fail the search. Not when Child Pages' parents couldn't be read:
+			// the default would be a nested page's flat URL, in an answer that's cached.
+			if (error instanceof ParentPagesUnreadable) throw error;
 		}
 	}
 	return urls;

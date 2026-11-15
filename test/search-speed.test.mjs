@@ -565,3 +565,50 @@ test("content hooks: publishing, unpublishing, deleting and saving published ent
 	assert.ok(writes.every(([k, v]) => k === "searchVersion" && /^[a-z0-9]+$/.test(v)));
 	invalidateFeatures();
 });
+
+// ── Child Pages ──
+
+test("Child Pages' parents are read with the search metadata, never per search; a read that fails isn't kept as off", async () => {
+	const { configureStoredParents, ParentPagesUnreadable } = await import("../src/core/content-url.ts");
+	engine.invalidateSearchMeta();
+	const d1 = fixture();
+	let reads = 0;
+	let failing = false;
+	configureStoredParents({
+		collections: async () => {
+			reads++;
+			if (failing) throw new Error("D1 down");
+			return new Set(["pages"]);
+		},
+		parents: async () => {
+			reads++;
+			return { parentOf: new Map([["a1", "team"]]), idOf: new Map() };
+		},
+		fingerprint: () => "v",
+	});
+	const about = () => [{ id: "a1", slug: "about" }];
+	try {
+		const meta = await engine.loadSearchMeta(d1, "DB", "cp1");
+		assert.ok(reads > 0, "read once, with the metadata");
+		const after = reads;
+		assert.equal((await engine.entryUrlsFromMeta(d1, meta, ["pages"], about)).get("pages:a1"), "/team/about");
+		assert.equal((await engine.entryUrlsFromMeta(d1, await engine.loadSearchMeta(d1, "DB", "cp1"), ["pages"], about)).get("pages:a1"), "/team/about");
+		assert.equal(reads, after, "searches build page URLs from the cached parents: no read each");
+
+		// The parents can't be read: no metadata is cached with "off" (flat page URLs in every answer until it expires).
+		engine.invalidateSearchMeta();
+		failing = true;
+		await assert.rejects(engine.loadSearchMeta(d1, "DB", "cp2"), ParentPagesUnreadable);
+		failing = false;
+		const next = await engine.loadSearchMeta(d1, "DB", "cp2");
+		assert.equal((await engine.entryUrlsFromMeta(d1, next, ["pages"], about)).get("pages:a1"), "/team/about");
+
+		// Metadata without the parents (built elsewhere) asks when resolving: a failure there isn't answered with the default route.
+		failing = true;
+		const { childPages: _dropped, ...bare } = next;
+		await assert.rejects(engine.entryUrlsFromMeta(d1, bare, ["pages"], about), ParentPagesUnreadable);
+	} finally {
+		configureStoredParents(null);
+		engine.invalidateSearchMeta();
+	}
+});

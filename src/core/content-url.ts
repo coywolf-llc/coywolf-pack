@@ -45,6 +45,8 @@
  */
 import type { PluginContext } from "emdash";
 
+import { noteReadFailure } from "./read-failures.js";
+
 // ── Pattern interpolation (pure) ─────────────────────────────────
 
 const REPEATED_SLASHES = /\/{2,}/g;
@@ -357,6 +359,34 @@ export interface ChildPagesState {
 
 let storedParents: StoredParentsProvider | null = null;
 
+/**
+ * Child pages' answer couldn't be read (the switch, the collections with a parent field, or a
+ * collection's parents). There is no fallback: without the parents a nested page would get its
+ * flat URL, and Slug changes would write a 301 from the live nested page to it, a sitemap or a
+ * search answer would list it, and a rendered page would link to it. So the failure goes to the
+ * caller (which skips what it was doing: `urlOf(...).catch(() => null)` in Slug changes), and is
+ * noted, so a page rendered meanwhile stays out of the edge cache (src/core/read-failures.ts).
+ */
+function parentsUnreadable(error: unknown): never {
+	if (error instanceof ParentPagesUnreadable) throw error;
+	noteReadFailure("child pages: parent pages");
+	console.error("coywolf-pack: Child Pages: could not read the parent pages; no URLs are built from this read", error);
+	throw new ParentPagesUnreadable(error);
+}
+
+/**
+ * Child pages' parents couldn't be read. Callers that answer a failed URL lookup with a default route
+ * (search results) let this one through instead: the default would be a nested page's flat URL.
+ */
+export class ParentPagesUnreadable extends Error {
+	override readonly cause: unknown;
+	constructor(cause: unknown) {
+		super(`Child Pages: the parent pages couldn't be read (${String((cause as { message?: unknown } | null)?.message ?? cause)})`);
+		this.name = "ParentPagesUnreadable";
+		this.cause = cause;
+	}
+}
+
 /** Set by the Child pages module when the plugin is created (null to remove it). */
 export function configureStoredParents(provider: StoredParentsProvider | null): void {
 	storedParents = provider;
@@ -365,14 +395,15 @@ export function configureStoredParents(provider: StoredParentsProvider | null): 
 /**
  * Child pages as they are now, read once (null while the feature is off, or without the
  * module), for a cache that keeps entry URLs with its own version (the search metadata).
+ * Rejects when they can't be read (see parentsUnreadable): a caller must not keep "off".
  */
 export async function currentChildPagesState(source: UrlSource): Promise<ChildPagesState | null> {
 	const provider = storedParents;
 	if (!provider) return null;
-	const collections = await provider.collections(source).catch(() => new Set<string>());
+	const collections = await provider.collections(source).catch(parentsUnreadable);
 	if (!collections.size) return null;
 	const parents = new Map<string, StoredParents | null>();
-	for (const collection of collections) parents.set(collection, await provider.parents(source, collection).catch(() => null));
+	for (const collection of collections) parents.set(collection, await provider.parents(source, collection).catch(parentsUnreadable));
 	return { collections, parents: (collection) => parents.get(collection) ?? null };
 }
 
@@ -715,7 +746,10 @@ interface CollectionRoute {
 	implicit?: boolean;
 }
 
-/** Child pages for a resolver: the state it was given, else the provider's (null without a provider). */
+/**
+ * Child pages for a resolver: the state it was given, else the provider's (null without a provider).
+ * A provider that can't answer rejects (parentsUnreadable): the resolver's URLs for that collection do too.
+ */
 function childPagesView(source: UrlSource, options: EntryUrlResolverOptions) {
 	if (options.childPages !== undefined) {
 		const state = options.childPages;
@@ -726,8 +760,8 @@ function childPagesView(source: UrlSource, options: EntryUrlResolverOptions) {
 	}
 	const provider = storedParents;
 	return {
-		collections: async () => (provider ? await provider.collections(source).catch(() => new Set<string>()) : (new Set() as ReadonlySet<string>)),
-		parents: async (collection: string) => (provider ? await provider.parents(source, collection).catch(() => null) : null),
+		collections: async () => (provider ? await provider.collections(source).catch(parentsUnreadable) : (new Set() as ReadonlySet<string>)),
+		parents: async (collection: string) => (provider ? await provider.parents(source, collection).catch(parentsUnreadable) : null),
 	};
 }
 
@@ -784,7 +818,10 @@ export function createEntryUrlResolver(source: UrlSource, options: EntryUrlResol
 				};
 				if (isD1(source)) {
 					const known = options.collections;
-					const info = known ? known.get(collection) : (await readCollections(source, [collection]).catch(() => new Map<string, CollectionInfo>())).get(collection);
+					// A collection that nests by its field needs its real pattern: a failed read rejects rather than
+					// answer with EmDash's default (/<collection>/…), which Slug changes would redirect the live page to.
+					const read = known ? null : readCollections(source, [collection]);
+					const info = known ? known.get(collection) : (await (implicit ? (read as NonNullable<typeof read>).catch(parentsUnreadable) : (read as NonNullable<typeof read>).catch(() => new Map<string, CollectionInfo>()))).get(collection);
 					return withPagePath({ pattern: info?.urlPattern ?? null, override: false, routable: true });
 				}
 				const info = await source.schema?.getCollection(collection).catch(() => null);
@@ -999,7 +1036,8 @@ export async function matchEntryPath(source: UrlSource, path: string): Promise<M
 	}
 
 	// Child pages: collections with a parent field nest by {pagepath} (EmDash's own resolution would miss them).
-	const nested = storedParents ? await storedParents.collections(source).catch(() => new Set<string>()) : new Set<string>();
+	// (A failed read rejects: without it a nested page would match at its flat path.)
+	const nested = storedParents ? await storedParents.collections(source).catch(parentsUnreadable) : new Set<string>();
 
 	if (isD1(source)) {
 		let rows: Array<{ slug: string; url_pattern: string | null; routable?: number | null }> = [];
