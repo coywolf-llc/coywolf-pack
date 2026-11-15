@@ -401,7 +401,7 @@ registerSiteOption(GENERATION_OPTION);
  * can't be read, and notes the failure (src/core/read-failures.ts), so the
  * page rendered with them isn't edge-cached.
  */
-export async function siteFeatures(database = "DB", fresh = false): Promise<FeatureMap> {
+export async function siteFeatures(database: Database = "DB", fresh = false): Promise<FeatureMap> {
 	if (!fresh && cached && Date.now() - cached.at < TTL_MS) return cached.features;
 	return (await readSiteOptions(database)).features;
 }

@@ -339,6 +339,11 @@ function readHostConfig(): Promise<HostConfig> {
 	return hostConfig;
 }
 
+/** The site's trailing-slash policy outside the plugin context (middleware, theme routes): the pack's option, else EmDash's build-time one, else "ignore". */
+export async function siteTrailingPolicy(): Promise<TrailingSlash> {
+	return config.trailingSlash ?? (await readHostConfig()).trailingSlash ?? "ignore";
+}
+
 /** The site's trailing-slash policy: the pack's `trailingSlash` option, else EmDash's (Astro's `trailingSlash`), else "ignore". */
 export async function trailingPolicy(source: UrlSource): Promise<TrailingSlash> {
 	if (config.trailingSlash) return config.trailingSlash;
