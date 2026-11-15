@@ -227,3 +227,49 @@ test("scrubToken masks a Token credential, not the word in prose", () => {
 test("no key: the client won't be made", () => {
 	assert.throws(() => createButtondownClient({ key: " ", fetch: async () => new Response() }), ButtondownRefused);
 });
+
+test("a create or a delete that went out unanswered is marked (it may have landed); a clear no, a read, or a call that was never sent isn't", async () => {
+	const caught = async (run) => run().then(() => null, (error) => error);
+	// No answer, a 5xx: the write may have landed.
+	for (const failure of [{ lose: true }, { network: true }, { status: 502 }]) {
+		const { fake, bd } = make();
+		fake.fail({ method: "POST" }, failure);
+		assert.equal((await caught(() => bd.createDraft(fields()))).unanswered, "create");
+		const draft = await bd.createDraft(fields());
+		fake.fail({ method: "DELETE" }, failure);
+		assert.equal((await caught(() => bd.deleteDraft(draft.id, draft.modificationDate, "example.com:posts:1"))).unanswered, "delete");
+	}
+	// Buttondown said no: nothing landed.
+	for (const status of [400, 401, 403, 422, 429]) {
+		const { fake, bd } = make();
+		fake.fail({ method: "POST" }, { status });
+		assert.equal((await caught(() => bd.createDraft(fields()))).unanswered, null, String(status));
+		const draft = await bd.createDraft(fields());
+		fake.fail({ method: "DELETE" }, { status });
+		assert.equal((await caught(() => bd.deleteDraft(draft.id, draft.modificationDate, "example.com:posts:1"))).unanswered, null, String(status));
+	}
+	// The read before a delete, an update and the list are never marked.
+	const { fake, bd } = make();
+	const draft = await bd.createDraft(fields());
+	fake.fail({ method: "GET" }, { network: true });
+	assert.equal((await caught(() => bd.deleteDraft(draft.id, draft.modificationDate, "example.com:posts:1"))).unanswered, null);
+	fake.fail({ method: "PATCH" }, { network: true });
+	assert.equal((await caught(() => bd.updateDraft(draft.id, { subject: "x" }))).unanswered, null);
+	// Out of time before anything was sent: not marked, and no call made.
+	let clock = 1_000_000;
+	const late = make(fakeButtondown(), { deadlineAt: clock + 60_000, now: () => clock });
+	const made = await late.bd.createDraft(fields());
+	clock += 59_900;
+	const calls = late.fake.calls.length;
+	const error = await caught(() => late.bd.createDraft(fields()));
+	assert.equal(error.code, "timeout");
+	assert.equal(error.unanswered, null);
+	assert.equal(late.fake.calls.length, calls);
+	// The same for a delete whose own read used up the time.
+	clock = 1_000_000;
+	late.fake.fail({ method: "GET" }, { during: async () => void (clock += 59_900) });
+	const lateDelete = await caught(() => late.bd.deleteDraft(made.id, made.modificationDate, "example.com:posts:1"));
+	assert.equal(lateDelete.code, "timeout");
+	assert.equal(lateDelete.unanswered, null);
+	assert.equal(late.fake.count("DELETE"), 0);
+});

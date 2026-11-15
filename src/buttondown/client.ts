@@ -67,6 +67,11 @@ export class ButtondownError extends Error {
 	readonly detail: string;
 	/** Seconds, from Retry-After. */
 	readonly retryAfter: number | null;
+	/**
+	 * Set when a create or a delete went out and got no answer (no response, a timeout, a 5xx): Buttondown may have
+	 * done it all the same. Null for every other failure, also one where nothing was sent.
+	 */
+	unanswered: "create" | "delete" | null = null;
 	constructor(status: number, code: string | null, detail: string, retryAfter: number | null = null) {
 		super(`Buttondown ${status || "didn't answer"}${code ? ` (${code})` : ""}${detail ? `: ${detail}` : ""}`);
 		this.name = "ButtondownError";
@@ -83,6 +88,12 @@ export class ButtondownRefused extends Error {
 		super(`Refused before sending: ${reason}`);
 		this.name = "ButtondownRefused";
 	}
+}
+
+/** Mark a failed write that may have landed: it was sent, and no answer said it wasn't done. A 4xx or a 429 is a clear "no". */
+function unanswered(error: unknown, write: "create" | "delete"): unknown {
+	if (error instanceof ButtondownError && (error.status === 0 || error.status >= 500)) error.unanswered = write;
+	return error;
 }
 
 /** Only deleteDraft holds this, so only deleteDraft can send a DELETE. */
@@ -276,6 +287,10 @@ export function createButtondownClient(options: ButtondownClientOptions) {
 		/**
 		 * Emails made through the API, in any status, newest first, without their bodies (one page). Not only drafts: a
 		 * draft the Pack made may have been scheduled or sent since, and the Pack has to find that one too.
+		 *
+		 * No `status` parameter on purpose. Probed against the live API on 2026-11-15: `GET /emails?source=api&excluded_fields=body`
+		 * with no status returns every status, drafts included (one newsletter's answer held a `draft` and a
+		 * `transactional` email). Repeated `status=` parameters work too, but aren't needed.
 		 */
 		async listApiEmails(page = 1): Promise<{ results: ButtondownEmail[]; hasMore: boolean }> {
 			const n = Math.max(1, Math.min(Math.trunc(page), 100));
@@ -287,9 +302,14 @@ export function createButtondownClient(options: ButtondownClientOptions) {
 
 		/** POST /emails with status "draft", whatever the caller passes. */
 		async createDraft(fields: DraftFields): Promise<ButtondownEmail> {
-			const { body } = await send("POST", "/emails", { ...pickFields(fields), status: "draft" });
+			// Out of time before anything is sent: a plain failure, not a create that may have landed.
+			timeLeft();
+			const { body } = await send("POST", "/emails", { ...pickFields(fields), status: "draft" }).catch((error: unknown) => {
+				throw unanswered(error, "create");
+			});
 			const email = toEmail(body);
-			if (!email) throw new ButtondownError(201, "unexpected_answer", "Buttondown's answer had no email in it.");
+			// Buttondown said it made one, without saying which: as good as no answer.
+			if (!email) throw unanswered(new ButtondownError(0, "unexpected_answer", "Buttondown's answer to the create had no email in it."), "create");
 			return email;
 		},
 
@@ -317,11 +337,13 @@ export function createButtondownClient(options: ButtondownClientOptions) {
 			}
 			if (email.status !== "draft") return { outcome: "left", status: email.status };
 			if (!expectedModified || email.modificationDate !== expectedModified || packKeyOf(email) !== expectedKey) return { outcome: "edited", email };
+			// Out of time before anything is sent: a plain failure, not a delete that may have landed.
+			timeLeft();
 			try {
 				await send("DELETE", `/emails/${encodeURIComponent(id)}`, undefined, DELETE_GRANT);
 			} catch (error) {
 				if (error instanceof ButtondownError && error.status === 404) return { outcome: "gone" };
-				throw error;
+				throw unanswered(error, "delete");
 			}
 			return { outcome: "deleted" };
 		},

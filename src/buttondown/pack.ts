@@ -127,15 +127,17 @@ export function buttondownPack(options: ButtondownOptions = {}, overrides: Parti
 		const refusal = await manualRefusal(ctx, deps, action, collection, id, record, seen);
 		if (refusal) throw PluginRouteError.badRequest(refusal);
 		if (action === "refresh") {
-			// One attempt, and only while Buttondown still shows what the admin saw. Nothing is left to try it again.
+			// One attempt, and only while Buttondown still shows what the admin saw, on an email that still has the Pack's key. Nothing is left to try it again.
 			const out = await refreshDraft(ctx, deps, collection, id, seen as string);
 			const notice = out.busy
 				? "Another job is working on this draft, so nothing was written. Try again in a moment."
-				: out.moved
-					? "The draft changed in Buttondown after you confirmed, so nothing was written. Select Refresh draft from post again."
-					: out.record?.state === "error"
-						? `The refresh didn't work: ${out.record.lastError?.message ?? "unknown error"} Nothing overwrites the draft on its own. Select Refresh draft from post to try again.`
-						: undefined;
+				: out.unkeyed
+					? "The email in Buttondown no longer carries the Pack's key for this post in its metadata, so the Pack doesn't write over it. Nothing was written."
+					: out.moved
+						? "The draft changed in Buttondown after you confirmed, so nothing was written. Select Refresh draft from post again."
+						: out.record?.state === "error"
+							? `The refresh didn't work: ${out.record.lastError?.message ?? "unknown error"} Nothing overwrites the draft on its own. Select Refresh draft from post to try again.`
+							: undefined;
 			return { record: out.record ? recordView(out.record) : null, ...(notice ? { notice } : {}) };
 		}
 		const after = await runManual(ctx, deps, action, collection, id);

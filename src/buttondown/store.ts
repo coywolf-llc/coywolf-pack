@@ -7,8 +7,9 @@
  */
 import type { PluginContext, StorageCollection } from "emdash";
 
-import { BUTTONDOWN_APP, BUTTONDOWN_LIMITS, BUTTONDOWN_STORAGE } from "./keys.js";
-import { type ButtondownRecord, readRecord, stateText } from "./sync-core.js";
+import { BUTTONDOWN_APP, BUTTONDOWN_STORAGE } from "./keys.js";
+import { loadSettings, ruleFor } from "./settings.js";
+import { type ButtondownRecord, alertDue, isUnsure, readRecord, stateText } from "./sync-core.js";
 
 /** Indexed: the hourly task's queries (state, nextRetryAt) and the page's recent list (updatedAt). */
 export const BUTTONDOWN_STORAGE_CONFIG = { [BUTTONDOWN_STORAGE]: { indexes: ["state", "nextRetryAt", "updatedAt"] } };
@@ -71,17 +72,26 @@ export async function recentRecords(ctx: Pick<PluginContext, "storage">, limit =
 }
 
 /**
- * Records in error for over an hour (Alerts' buttondownFailed). A failed create or update of a post that has since
- * been unpublished, trashed or deleted isn't one: there's nothing left to make. A failing delete is.
+ * Records in error for over an hour and for less than 3 days (Alerts' buttondownFailed): once a failure's own
+ * retries have ended, the alert ends too, and the page still lists it with Retry.
+ *
+ * Not reported:
+ * - a failed create or update of a post that has since been unpublished, trashed or deleted (there's nothing left
+ *   to make; a failing delete is reported);
+ * - a record a hook queued while the rules couldn't be read, in a collection that has no rule now that they read.
  */
-export async function failingRecords(ctx: Pick<PluginContext, "storage">, now = Date.now()): Promise<ButtondownRecord[]> {
+export async function failingRecords(ctx: Pick<PluginContext, "storage"> & Partial<Pick<PluginContext, "settings">>, now = Date.now()): Promise<ButtondownRecord[]> {
 	const store = records(ctx);
 	if (!store) return [];
 	const page = await store.query({ where: { state: "error" }, orderBy: { updatedAt: "desc" }, limit: 50 });
-	return page.items
+	const failing = page.items
 		.map((i) => readRecord(i.data))
-		.filter((r): r is ButtondownRecord => Boolean(r && now - (Date.parse(r.errorSince ?? "") || now) >= BUTTONDOWN_LIMITS.alertAfterMs))
+		.filter((r): r is ButtondownRecord => Boolean(r && alertDue(r, now)))
 		.filter((r) => r.job === "remove" || !(r.unpublished || r.trashed || r.deleted));
+	if (!failing.some(isUnsure) || !ctx.settings) return failing;
+	// Read only when such a record exists. Unreadable still: nothing is known, so they stay reported.
+	const settings = await loadSettings({ settings: ctx.settings }, true).catch(() => null);
+	return settings ? failing.filter((r) => !isUnsure(r) || ruleFor(settings, r.collection) !== null) : failing;
 }
 
 /** What a failing record couldn't do, for the alert's title. */

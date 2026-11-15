@@ -39,9 +39,11 @@ export const BUTTONDOWN_LIMITS = {
 	stuckMs: 5 * 60_000,
 	/** Records the hourly task retries per run. */
 	retriesPerRun: 5,
-	/** Pages of the draft list read when looking for a draft the Pack already made. */
+	/** Pages of the list of API-made emails read, at most, when looking for an email the Pack already made for a post. */
 	lookupPages: 3,
-	/** Kept this long, then pruned, once they're done (left, gone, stopped, removed). */
+	/** That search ends at emails made this long before the post's record (the margin between the site's clock and Buttondown's). */
+	lookupMarginMs: 60 * 60_000,
+	/** Pruned once nothing has changed them for this long: done records (left, gone, stopped, removed) and failures nobody retried. */
 	pruneAfterMs: 180 * 86_400_000,
 	/** Rules per site. */
 	rules: 10,

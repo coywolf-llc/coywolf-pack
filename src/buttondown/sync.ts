@@ -9,7 +9,13 @@
  *   the other marks the record dirty and the winner runs once more.
  * - A POST that landed but whose answer was lost: every create first looks for
  *   the Pack's key among the emails made through the API (drafts, and ones
- *   scheduled or sent since) and adopts what it finds.
+ *   scheduled or sent since) and adopts what it finds. If the post leaves the
+ *   site first, the delete step looks for that draft the same way and deletes
+ *   it while it's untouched (createSentAt).
+ * - A DELETE that landed but whose answer was lost: the email being gone
+ *   afterwards counts as the Pack's own delete, so the next publish makes a
+ *   new draft (deleteSentAt). Any other missing email was deleted in
+ *   Buttondown, and is never made again on its own.
  * - A job that was dropped, or that ran out of passes: its record has a time
  *   for the hourly task (nextRetryAt), which finishes it.
  *
@@ -29,8 +35,11 @@
  * leaves nothing behind that a retry could take for an order to overwrite.
  *
  * A read that fails (the post, its terms, the rules, the collection's fields,
- * the site's URL) is an error to retry (ReadFailed). It never counts as "not
- * published" or "doesn't match", so nothing is deleted or skipped on it.
+ * the site's URL, and what the body is built from: the post's URL, the
+ * Custom Blocks settings, File Downloads' files) is an error to retry
+ * (ReadFailed). It never counts as "not published" or "doesn't match", and
+ * never as a default to build a poorer email from, so nothing is deleted,
+ * skipped or overwritten on it.
  *
  * Logs carry the entry, collection, email id, state, status and error code:
  * never the subject, the body, the description or the key.
@@ -58,12 +67,14 @@ import {
 	CLEARED,
 	type EventKind,
 	PRUNABLE,
+	UNSENT,
 	adoptable,
 	claimHeld,
 	classifyRemote,
 	decideEvent,
 	failure,
 	isStuck,
+	isUnsure,
 	newRecord,
 	readRecord,
 	recordId,
@@ -83,7 +94,7 @@ export interface SyncDeps {
 	termParents: (ctx: PluginContext, taxonomy: string) => Promise<ReadonlyMap<string, string>>;
 	/** The published entry's absolute URL, or null. */
 	postUrl: (ctx: PluginContext, collection: string, item: Item) => Promise<string | null>;
-	/** File Downloads' files for the entry's file cards. */
+	/** File Downloads' files for the entry's file cards. Rejects when they can't be read (never "no files"). */
 	files: (ctx: PluginContext, item: Item, siteUrl: string) => Promise<ReadonlyMap<string, EmailFile>>;
 	/** Hand a job to the runtime (waitUntil, EmDash's deferred tasks). */
 	background: (job: Promise<unknown>) => void;
@@ -130,10 +141,11 @@ export function defaultDeps(database = "DB"): SyncDeps {
 			const ids = fileIdsIn(item.data).slice(0, 20);
 			const d1 = ids.length ? await db() : null;
 			if (!d1) return out;
-			const settings = await readFilesSettings(d1);
+			// Strict: a failed read rejects. A file that isn't there is null, and its card links to the post.
+			const settings = await readFilesSettings(d1, true);
 			const base = settings.publicBaseUrl || siteUrl.replace(/\/+$/, "");
 			for (const id of ids) {
-				const file = await resolveFile(d1, id).catch(() => null);
+				const file = await resolveFile(d1, id);
 				if (file) out.set(id, { name: file.name, size: file.size, href: `${base}${downloadPath(settings.base, file.id, file.name)}` });
 			}
 			return out;
@@ -195,8 +207,8 @@ class KeyMissing extends Error {
 
 /**
  * Something the job needs couldn't be read (the post, its terms, the rules, the collection's fields, the site's
- * URL). Never the same as "not published" or "doesn't match": the step fails, and it's tried again. The message
- * names what, never the database's own words.
+ * URL, a setting or a file the body is built from). Never the same as "not published" or "doesn't match", and
+ * never a default: the step fails, and it's tried again. The message names what, never the database's own words.
  */
 export class ReadFailed extends Error {
 	constructor(what: string) {
@@ -306,7 +318,10 @@ export async function handleEvent(ctx: PluginContext, deps: SyncDeps, kind: Even
 			ctx.log.warn("buttondown: the post's terms couldn't be read in a hook; the job reads them again", { entry: rid });
 		}
 	}
-	const facts = { live, matches, newEnough: fresh, updatesOn: isOn(await cachedCtxFeatures(ctx).catch(() => ({})), BUTTONDOWN_FEATURES.updates) };
+	// A key Buttondown refused (or none saved) that's still the saved one: this event makes no call with it. Read only
+	// for a record that carries such a failure.
+	const sameRefusedKey = publishing && Boolean(existing?.authFingerprint) && existing?.state === "error" && existing.authFingerprint === (await keyFingerprint((await readKey(ctx)).key));
+	const facts = { live, matches, newEnough: fresh, updatesOn: isOn(await cachedCtxFeatures(ctx).catch(() => ({})), BUTTONDOWN_FEATURES.updates), sameRefusedKey };
 	const now = deps.now();
 	const decided: { run: ButtondownRecord["job"] } = { run: null };
 	await updateRecord(ctx, rid, (current) => {
@@ -370,11 +385,16 @@ interface Run {
 	 * draft may be overwritten only while Buttondown still shows it. Null: a plain step. Never stored on the record.
 	 */
 	seen: string | null;
-	/** Written by the step (one object, shared by every copy of the run). `moved`: the draft had changed since the admin looked, so Refresh wrote nothing. */
-	out: { moved: boolean };
+	/**
+	 * Written by the step (one object, shared by every copy of the run). `moved`: the draft had changed since the
+	 * admin looked, so Refresh wrote nothing. `unkeyed`: the email no longer carries the Pack's key for the post, so
+	 * Refresh wrote nothing. `ownDelete`: the step found the record's email gone after the Pack's own unanswered
+	 * delete, and went on to make a new draft.
+	 */
+	out: { moved: boolean; unkeyed: boolean; ownDelete: boolean };
 }
 
-const settled = (patch: Partial<ButtondownRecord>): Outcome => ({ ...CLEARED, sinceUnchecked: false, ...patch });
+const settled = (patch: Partial<ButtondownRecord>): Outcome => ({ ...CLEARED, ...UNSENT, sinceUnchecked: false, ...patch });
 
 let schemaCache: { at: number; list: Map<string, CollectionSchemaInfo> } | null = null;
 /** The collection's fields. Rejects (ReadFailed) when they can't be read: an email is never built from no fields. */
@@ -430,9 +450,10 @@ async function emailFor(run: Run, item: Item): Promise<{ built: BuiltEmail; sour
 	// Null: the collection has no page of its own. A failed read isn't that.
 	const postUrl = (await reading("the post's URL", () => deps.postUrl(ctx, record.collection, item))) ?? "";
 	const types = blockTypes(bodyFields);
-	const disclosure: DisclosureSettings | undefined = types.has("coywolf-disclosure") ? normalizeDisclosureSettings(await ctx.settings.get(DISCLOSURE_SETTINGS_KEY).catch(() => null)) : undefined;
-	const podcast: PodcastSettings | undefined = types.has("coywolf-podcast") ? normalizePodcastSettings(await ctx.settings.get(PODCAST_SETTINGS_KEY).catch(() => null)) : undefined;
-	const files = types.has("coywolf-file") ? await deps.files(ctx, item, siteUrl).catch(() => new Map<string, EmailFile>()) : undefined;
+	// What the body is built from. A failed read is never a default: that would write a poorer body over the draft.
+	const disclosure: DisclosureSettings | undefined = types.has("coywolf-disclosure") ? normalizeDisclosureSettings(await reading("the affiliate disclosure settings", () => ctx.settings.get(DISCLOSURE_SETTINGS_KEY))) : undefined;
+	const podcast: PodcastSettings | undefined = types.has("coywolf-podcast") ? normalizePodcastSettings(await reading("the podcast settings", () => ctx.settings.get(PODCAST_SETTINGS_KEY))) : undefined;
+	const files = types.has("coywolf-file") ? await reading("the post's files", () => deps.files(ctx, item, siteUrl)) : undefined;
 	const source: EmailSource = {
 		collection: record.collection,
 		entryId: record.entryId,
@@ -490,16 +511,23 @@ const packHashOf = (email: ButtondownEmail) => {
 };
 
 /**
- * Emails the Pack made for this entry, in any status, from the first pages of Buttondown's list of emails made
- * through the API (oldest first). Not only drafts: one that was scheduled or sent since must be found too, or a
- * retried create would make a second email for the post.
+ * Emails the Pack made for this entry, in any status, from Buttondown's list of emails made through the API
+ * (returned oldest first). Not only drafts: one that was scheduled or sent since must be found too, or a retried
+ * create would make a second email for the post.
+ *
+ * Bounded by time, and by three list calls. Buttondown lists newest first, and an email this record's jobs made
+ * can't be older than the record. So the search ends at the first page that holds an email made over an hour (the
+ * margin for the two clocks) before the record was: however many old emails the newsletter has, they cost no call.
  */
 async function findEmails(run: Run, client: ButtondownClient, key: string): Promise<ButtondownEmail[]> {
 	const out: ButtondownEmail[] = [];
+	const since = (Date.parse(run.record.createdAt) || 0) - BUTTONDOWN_LIMITS.lookupMarginMs;
 	for (let page = 1; page <= BUTTONDOWN_LIMITS.lookupPages; page++) {
 		const { results, hasMore } = await patient(run, () => client.listApiEmails(page));
 		out.push(...results.filter((e) => packKeyOf(e) === key && e.status !== "deleted"));
 		if (!hasMore) break;
+		// An email with no readable date doesn't end the search.
+		if (results.some((e) => Date.parse(e.creationDate ?? "") < since)) break;
 	}
 	return out.sort((a, b) => (Date.parse(a.creationDate ?? "") || 0) - (Date.parse(b.creationDate ?? "") || 0));
 }
@@ -514,6 +542,8 @@ async function syncStep(run: Run): Promise<Outcome> {
 	if (!isLiveItem(item)) {
 		// Not published (any more): an untouched draft goes as on an unpublish; a create that never happened is forgotten.
 		if (record.emailId && record.state !== "edited" && record.state !== "gone" && record.state !== "stopped") return removeStep({ ...run, seen: null, record: { ...record, unpublished: record.unpublished || !record.trashed } });
+		// A create that got no answer may have made a draft: the delete step looks for it.
+		if (!record.emailId && record.createSentAt) return removeStep({ ...run, seen: null, record: { ...record, unpublished: record.unpublished || !record.trashed } });
 		return record.emailId ? settled({}) : { deleteRecord: true };
 	}
 	const rule = ruleFor(run.settings, record.collection);
@@ -528,7 +558,7 @@ async function syncStep(run: Run): Promise<Outcome> {
 
 	const { client } = await clientFor(run);
 
-	if (record.emailId) {
+	tracked: if (record.emailId) {
 		const emailId = record.emailId;
 		let remote: ButtondownEmail | null;
 		try {
@@ -541,10 +571,20 @@ async function syncStep(run: Run): Promise<Outcome> {
 		let verdict = classifyRemote(now, record, source.key, run.seen);
 		const refresh = run.seen !== null && verdict === "update";
 		if (run.seen !== null && verdict === "edited") {
-			// Changed in Buttondown since the admin looked: Refresh writes nothing. What the record says comes from the plain check.
-			run.out.moved = true;
+			// Changed in Buttondown since the admin looked, or no longer carrying the Pack's key for this post: Refresh
+			// writes nothing. What the record says comes from the plain check.
+			if (now && now.key !== source.key) run.out.unkeyed = true;
+			else run.out.moved = true;
 			verdict = classifyRemote(now, record, source.key);
 			if (verdict === "update") return settled({ ...shown, state: "draft", remoteStatus: "draft" });
+		}
+		// Gone after the Pack's own delete got no answer: that delete landed. The post is live again, so it gets a new
+		// draft below, as after any delete of the Pack's own (if it's new enough for its rule, or was made by hand).
+		const ownDelete = verdict === "gone" && Boolean(record.deleteSentAt);
+		if (ownDelete && !record.manual && !newEnough(item.publishedAt, rule)) return settled({ ...shown, state: "removed", emailId: null, hash: null, remoteModifiedAt: null, remoteStatus: "deleted" });
+		if (ownDelete) {
+			run.out.ownDelete = true;
+			break tracked;
 		}
 		if (verdict === "gone") return settled({ ...shown, state: "gone", remoteStatus: null });
 		if (verdict === "left") return settled({ ...shown, state: "left", remoteStatus: remote?.status ?? null });
@@ -600,20 +640,44 @@ async function removeStep(run: Run): Promise<Outcome> {
 		}
 	}
 	const finalState = (state: ButtondownRecord["state"]) => (record.deleted ? "stopped" : state);
-	if (!record.emailId) return settled({ state: finalState(record.state === "removing" ? "removed" : record.state) });
+	const deleted = { emailId: null, hash: null, remoteModifiedAt: null, remoteStatus: "deleted" } as const;
+	if (!record.emailId && !record.createSentAt) return settled({ state: finalState(record.state === "removing" ? "removed" : record.state) });
 	const expectedKey = entryKey(siteOrigin(ctx), record.collection, record.entryId);
 	const { client } = await clientFor(run);
-	const outcome = await patient(run, () => client.deleteDraft(record.emailId as string, record.remoteModifiedAt, expectedKey));
-	ctx.log.info("buttondown: delete checked", { entry: recordId(record.collection, record.entryId), email: record.emailId, outcome: outcome.outcome });
+	let emailId = record.emailId;
+	let expectedModified = record.remoteModifiedAt;
+	let warnings = record.warnings;
+	if (!emailId) {
+		// A create went out and got no answer, and the post left the site before a retry looked: the draft it may have
+		// made is looked up by the Pack's key. Only one nobody changed since it was made is the Pack's to delete, and
+		// only through deleteDraft's own read. One that was edited, scheduled or sent is named on the record and kept.
+		const found = await findEmails(run, client, expectedKey);
+		const newest = found.at(-1);
+		if (newest && newest.status !== "draft") return settled({ state: finalState("left"), emailId: newest.id, hash: null, remoteModifiedAt: null, remoteStatus: newest.status });
+		const drafts = found.filter((e) => e.status === "draft");
+		// None: no draft was made (or the Pack's own delete of it, unanswered, landed).
+		if (!drafts.length) return settled({ state: finalState(record.deleteSentAt ? "removed" : "stopped"), ...(record.deleteSentAt ? deleted : {}) });
+		const oldest = drafts[0];
+		if (drafts.length > 1) warnings = [...warnings.filter((w) => !w.startsWith("Buttondown has ")), DUPLICATES(drafts.length)];
+		if (!adoptable(oldest)) return settled({ state: finalState("edited"), warnings, emailId: oldest.id, hash: null, remoteModifiedAt: null, remoteStatus: "draft" });
+		emailId = oldest.id;
+		expectedModified = oldest.modificationDate;
+	}
+	const target = emailId;
+	const outcome = await patient(run, () => client.deleteDraft(target, expectedModified, expectedKey));
+	ctx.log.info("buttondown: delete checked", { entry: recordId(record.collection, record.entryId), email: target, outcome: outcome.outcome });
 	switch (outcome.outcome) {
 		case "deleted":
-			return settled({ state: finalState("removed"), emailId: null, hash: null, remoteModifiedAt: null, remoteStatus: "deleted" });
+			return settled({ state: finalState("removed"), warnings, ...deleted });
 		case "gone":
-			return settled({ state: finalState("gone"), remoteStatus: null });
+			// Gone after the Pack's own delete got no answer: that delete landed, so it's the Pack's (the next publish
+			// makes a new draft). Any other missing email was deleted in Buttondown, and isn't made again on its own.
+			if (record.deleteSentAt) return settled({ state: finalState("removed"), ...deleted });
+			return record.emailId ? settled({ state: finalState("gone"), remoteStatus: null }) : settled({ state: finalState("stopped") });
 		case "left":
-			return settled({ state: finalState("left"), remoteStatus: outcome.status });
+			return settled({ state: finalState("left"), emailId: target, remoteStatus: outcome.status, ...(record.emailId ? {} : { hash: null, remoteModifiedAt: null }) });
 		case "edited":
-			return settled({ state: finalState("edited"), remoteStatus: "draft" });
+			return settled({ state: finalState("edited"), emailId: target, remoteStatus: "draft", ...(record.emailId ? {} : { hash: null, remoteModifiedAt: null }) });
 	}
 }
 
@@ -641,7 +705,7 @@ async function failed(run: Run, error: unknown): Promise<Outcome> {
 		plan = failure({ status, code, retryAfter: error.retryAfter }, record, now);
 		message =
 			plan.kind === "auth"
-				? `Buttondown refused the key (${status}). Check it on the plugin's Settings page: it needs Emails and drafts → Write.${error.detail ? ` Buttondown said: ${error.detail}` : ""}`
+				? `Buttondown refused the key (${status}). Check it on the plugin's Settings page: it needs Emails and drafts → Write.${plan.nextRetryAt ? ` The Pack tries once more at ${plan.nextRetryAt.slice(11, 16)} UTC, because Buttondown also answers 403 when it's busy.` : ""}${error.detail ? ` Buttondown said: ${error.detail}` : ""}`
 				: plan.kind === "rate"
 					? `Buttondown asked the Pack to slow down (429). It tries again ${plan.nextRetryAt ? `after ${new Date(plan.nextRetryAt).toISOString().slice(11, 16)} UTC` : "later"}.`
 					: error.message;
@@ -654,7 +718,9 @@ async function failed(run: Run, error: unknown): Promise<Outcome> {
 		plan = failure({ status: 0, code: null, retryAfter: null }, record, now);
 	}
 	const fingerprint = plan.kind === "auth" ? await keyFingerprint((await readKey(run.ctx)).key) : null;
-	run.ctx.log.warn("buttondown: a step failed", { entry: recordId(record.collection, record.entryId), email: record.emailId, job: record.job, status, code });
+	// A write that went out and got no answer may have landed: the record remembers it (see removeStep and syncStep).
+	const unanswered = error instanceof ButtondownError ? error.unanswered : null;
+	run.ctx.log.warn("buttondown: a step failed", { entry: recordId(record.collection, record.entryId), email: record.emailId, job: record.job, status, code, unanswered });
 	return {
 		state: "error",
 		job: record.job ?? "sync",
@@ -663,6 +729,10 @@ async function failed(run: Run, error: unknown): Promise<Outcome> {
 		lastError: { at, status, code, message: safeDetail(message) },
 		nextRetryAt: plan.nextRetryAt,
 		authFingerprint: fingerprint,
+		// The email the record named is gone, by the Pack's own delete: a failure while making the new draft doesn't bring it back.
+		...(run.out.ownDelete ? { emailId: null, hash: null, remoteModifiedAt: null, remoteStatus: "deleted", deleteSentAt: null } : {}),
+		...(unanswered === "create" && (!record.emailId || run.out.ownDelete) ? { createSentAt: record.createSentAt ?? at } : {}),
+		...(unanswered === "delete" ? { deleteSentAt: record.deleteSentAt ?? at } : {}),
 	};
 }
 
@@ -672,6 +742,8 @@ export interface JobResult {
 	busy: boolean;
 	/** Refresh draft from post only: the draft had changed since the admin looked, so nothing was written. */
 	moved: boolean;
+	/** Refresh draft from post only: the email no longer carries the Pack's key for this post, so nothing was written. */
+	unkeyed: boolean;
 }
 
 /**
@@ -687,20 +759,20 @@ async function runJob(ctx: PluginContext, deps: SyncDeps, collection: string, en
 	const token = crypto.randomUUID();
 	let last: ButtondownRecord | null = null;
 	let seenLeft = seen;
-	let moved = false;
+	const told = { moved: false, unkeyed: false };
 	for (let pass = 0; pass < 3; pass++) {
 		const read = await store.getVersioned(rid);
 		const record = readRecord(read?.value);
-		if (!read || !record || !record.job) return { record, busy: false, moved };
+		if (!read || !record || !record.job) return { record, busy: false, ...told };
 		const now = deps.now();
 		if (claimHeld(record, token, now)) {
 			// Another job has it: it runs once more when it's done.
 			if (!record.dirty) await store.compareAndSet(rid, read.revision, { ...record, dirty: true, updatedAt: iso(now) });
-			return { record, busy: true, moved };
+			return { record, busy: true, ...told };
 		}
 		const claimed: ButtondownRecord = { ...record, claimToken: token, claimedAt: iso(now), dirty: false, updatedAt: iso(now), state: record.job === "sync" && !record.emailId ? "creating" : record.state };
 		if (!(await store.compareAndSet(rid, read.revision, claimed)).applied) continue;
-		const run: Run = { ctx, deps, record: claimed, deadline, updatesOn: false, settings: BUTTONDOWN_DEFAULTS, seen: seenLeft, out: { moved: false } };
+		const run: Run = { ctx, deps, record: claimed, deadline, updatesOn: false, settings: BUTTONDOWN_DEFAULTS, seen: seenLeft, out: { moved: false, unkeyed: false, ownDelete: false } };
 		seenLeft = null;
 		let outcome: Outcome;
 		try {
@@ -712,14 +784,17 @@ async function runJob(ctx: PluginContext, deps: SyncDeps, collection: string, en
 		} catch (error) {
 			outcome = await failed(run, error);
 		}
-		moved = moved || run.out.moved;
+		told.moved = told.moved || run.out.moved;
+		told.unkeyed = told.unkeyed || run.out.unkeyed;
 		if (outcome.deleteRecord) {
 			// A create that never happened, for an entry that isn't published or doesn't match: the record goes.
 			const fresh = await store.getVersioned(rid);
 			const current = readRecord(fresh?.value);
-			if (!fresh || !current || current.claimToken !== token) return { record: current, busy: false, moved };
-			if (!current.dirty && (await store.compareAndDelete(rid, fresh.revision)).applied) return { record: null, busy: false, moved };
-			outcome = settled({ state: "stopped" });
+			if (!fresh || !current || current.claimToken !== token) return { record: current, busy: false, ...told };
+			if (!current.dirty && (await store.compareAndDelete(rid, fresh.revision)).applied) return { record: null, busy: false, ...told };
+			// An event arrived meanwhile, so the record stays for the next pass. "Published before the rule" is still
+			// unchecked if it was: that pass (or any later job) checks it again before it creates anything.
+			outcome = { ...settled({ state: "stopped" }), sinceUnchecked: claimed.sinceUnchecked || current.sinceUnchecked };
 		}
 		let again = false;
 		const result = outcome;
@@ -740,11 +815,13 @@ async function runJob(ctx: PluginContext, deps: SyncDeps, collection: string, en
 				// An event arrived meanwhile: check the entry once more (delete the draft if it was unpublished, else update).
 				const leaving = next.unpublished || next.trashed || next.deleted;
 				const live = Boolean(next.emailId) && !["gone", "removed", "edited", "stopped"].includes(next.state);
-				next.job = leaving ? (live ? "remove" : null) : "sync";
+				// A create that got no answer may have made a draft the record doesn't name: the delete step looks for it.
+				const orphan = !next.emailId && Boolean(next.createSentAt) && next.state === "error";
+				next.job = leaving ? (live || orphan ? "remove" : null) : "sync";
 				if (!next.job) {
 					again = false;
 					// The post left the site while its create was failing: nothing left to make, or to report.
-					if (next.state === "error" && !next.emailId) Object.assign(next, CLEARED, { state: "stopped" });
+					if (next.state === "error" && !next.emailId) Object.assign(next, CLEARED, UNSENT, { state: "stopped" });
 				} else if (lastPass) {
 					// Out of passes with work left: the hourly task's, now.
 					next.nextRetryAt = iso(deps.now());
@@ -754,12 +831,12 @@ async function runJob(ctx: PluginContext, deps: SyncDeps, collection: string, en
 			}
 			return next;
 		});
-		if (!again) return { record: last, busy: false, moved };
+		if (!again) return { record: last, busy: false, ...told };
 	}
 	// Out of passes (the last one lost its claim to another writer, or events kept coming): a record that still has
 	// work and no time for the hourly task gets one, so nothing is left that no one runs.
 	const left = await updateRecord(ctx, rid, (current) => (current && current.job && !current.nextRetryAt && !claimHeld(current, token, deps.now()) ? { ...current, nextRetryAt: iso(deps.now()) } : null));
-	return { record: left ?? last, busy: false, moved };
+	return { record: left ?? last, busy: false, ...told };
 }
 
 /** The entry's job (see runJob), for the hooks and the hourly task: a plain step, never a forced write. */
@@ -818,6 +895,7 @@ export async function runManual(ctx: PluginContext, deps: SyncDeps, action: Manu
 	const queueCreate = (base: ButtondownRecord, keep: boolean): ButtondownRecord => ({
 		...base,
 		...CLEARED,
+		...UNSENT,
 		state: "pending",
 		job: "sync",
 		...(keep ? {} : { emailId: null, hash: null, remoteModifiedAt: null, remoteStatus: null }),
@@ -851,7 +929,8 @@ export async function runManual(ctx: PluginContext, deps: SyncDeps, action: Manu
 
 /**
  * Retry what's due (nextRetryAt passed), finish what was dropped (pending or claimed for 5 minutes), retry a refused
- * key once it's been changed, at most five records a run; then prune finished records older than 180 days.
+ * key once it's been changed, at most five records a run; forget failed records of collections that turned out to
+ * have no rule; then prune records nothing has changed for 180 days (finished ones, and failures nobody retried).
  */
 export async function retryDue(ctx: PluginContext, deps: SyncDeps, deadline = deps.now() + 3 * 60_000): Promise<{ retried: number; pruned: number }> {
 	const store = records(ctx);
@@ -871,6 +950,17 @@ export async function retryDue(ctx: PluginContext, deps: SyncDeps, deadline = de
 		if (refused.length) {
 			const current = await keyFingerprint((await readKey(ctx)).key);
 			if (current !== "none") take(errors, (r) => Boolean(r.authFingerprint) && r.authFingerprint !== current);
+		}
+		// Queued by a hook that couldn't read the rules, never made, and (now that the rules read) in a collection
+		// with no rule: nothing to make, retry or report. Forgotten here, so such a record can't outlive its retries.
+		const unsure = errors.filter(({ id, data }) => {
+			const r = readRecord(data);
+			return Boolean(r && isUnsure(r) && !picked.has(id) && !claimHeld(r, "", now));
+		});
+		if (unsure.length) {
+			const settings = await deps.settings(ctx).catch(() => null);
+			const strays = settings ? unsure.filter(({ data }) => !ruleFor(settings, (readRecord(data) as ButtondownRecord).collection)).map(({ id }) => id) : [];
+			if (strays.length) await store.deleteMany(strays);
 		}
 	}
 	let retried = 0;

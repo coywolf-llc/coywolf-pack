@@ -86,9 +86,22 @@ export interface ButtondownRecord {
 	noSlug: boolean;
 	/**
 	 * The hook couldn't read the rules when it queued the job, so "first published since the rule was saved" wasn't
-	 * checked: the job checks it before it creates anything.
+	 * checked: the job checks it before it creates anything. Cleared only when a step settles (the check passed and
+	 * the draft exists, or there's nothing to make), so a post first published before the rule's `since` never gets a
+	 * draft on its own.
 	 */
 	sinceUnchecked: boolean;
+	/**
+	 * When a create went out and got no answer (no response, a timeout, a 5xx): Buttondown may have made the draft
+	 * although the record names none. If the post leaves the site before a retry finds it, the Pack looks for that
+	 * draft by its key and deletes it while it's untouched. Cleared when a step settles.
+	 */
+	createSentAt: string | null;
+	/**
+	 * When the Pack's own DELETE went out and got no answer: it may have landed. If the email then turns out to be
+	 * gone (404), that was the Pack's delete (`removed`), not one made in Buttondown (`gone`). Cleared when a step settles.
+	 */
+	deleteSentAt: string | null;
 	/**
 	 * Other drafts the Pack made for this post: a job that lost its claim (it ran past 2 minutes and another job took
 	 * over) after making one. Shown as a warning, so you can delete the extra one in Buttondown.
@@ -128,6 +141,8 @@ export function newRecord(collection: string, entryId: string, now: number): But
 		manual: false,
 		noSlug: false,
 		sinceUnchecked: false,
+		createSentAt: null,
+		deleteSentAt: null,
 		extraEmails: [],
 	};
 }
@@ -158,6 +173,11 @@ export interface EventFacts {
 	newEnough: boolean;
 	/** The Updates part is on. */
 	updatesOn: boolean;
+	/**
+	 * The record's last failure was a refused or missing key, and the saved key is still that one: a publish or save
+	 * makes no call with it. The record waits for another key, for Retry, or for the one retry a 403 gets.
+	 */
+	sameRefusedKey?: boolean;
 }
 
 /** What to do for an event: write `patch` over the record (creating it when there's none), and run `run` after the response. */
@@ -174,6 +194,8 @@ const queue = (run: JobKind, patch: Partial<ButtondownRecord>, reason: string): 
 
 /** A record with nothing waiting and no failure on it. */
 export const CLEARED = { job: null, attempts: 0, nextRetryAt: null, errorSince: null, lastError: null, authFingerprint: null } as const;
+/** No write of the Pack's own is waiting for an answer that never came. */
+export const UNSENT = { createSentAt: null, deleteSentAt: null } as const;
 
 const hasDraft = (r: ButtondownRecord) => Boolean(r.emailId) && r.state !== "gone" && r.state !== "removed";
 /** A job (create, update or delete) holds the record right now. */
@@ -195,8 +217,11 @@ export function decideEvent(kind: EventKind, record: ButtondownRecord | null, fa
 		// A job is under way: it checks the entry again when it's done (dirty) and deletes the draft it made then.
 		if (isBusy(record)) return none("job under way", { ...flag, dirty: true });
 		if (!hasDraft(record)) {
+			// A create that got no answer may have made a draft the record doesn't name: look for it and delete it while
+			// it's untouched (removeStep, through deleteDraft's own read).
+			if (!record.emailId && record.createSentAt && (record.state === "error" || record.state === "removing")) return queue("remove", { ...flag, ...CLEARED, state: "removing", job: "remove" }, "the create may have landed: look for its draft");
 			// A create that failed and whose post is gone from the site: nothing left to make or to report (Alerts).
-			if (record.state === "error" || kind === "delete") return none("no draft", { ...flag, ...CLEARED, state: "stopped" });
+			if (record.state === "error" || kind === "delete") return none("no draft", { ...flag, ...CLEARED, ...UNSENT, state: "stopped" });
 			return none("no draft", flag);
 		}
 		// Kept: edited in Buttondown, or no longer watched. The panel and list say so.
@@ -231,11 +256,18 @@ export function decideEvent(kind: EventKind, record: ButtondownRecord | null, fa
 		case "edited":
 			return none("edited in Buttondown: not updated", Object.keys(back).length ? back : null);
 		case "removing":
+			// Published again before the Pack looked for a draft its lost create may have made: the create's own lookup finds it.
+			if (!record.emailId) return queue("sync", patch({ state: "pending", job: "sync" }), "delete cancelled: create");
 			// Published again before the delete ran: no delete, and the draft is updated as on a republish.
 			return facts.updatesOn ? queue("sync", patch({ state: "draft", job: "sync" }), "delete cancelled: update") : none("delete cancelled", patch({ state: "draft", job: null, nextRetryAt: null }));
 		case "error":
-			if (record.job === "remove") return facts.updatesOn ? queue("sync", patch({ job: "sync" }), "delete cancelled: update") : none("delete cancelled", patch({ state: record.emailId ? "draft" : "stopped", job: null, nextRetryAt: null }));
+			// A refused or missing key that's still the saved one: no call with it. What's planned for the record stands
+			// (a 403's retry an hour later, the hourly task once the key changes, Retry). A waiting delete stays queued:
+			// its step sees the post is live again and updates the draft instead.
+			if (facts.sameRefusedKey) return none("the key was refused: waiting for another key or Retry", Object.keys(back).length ? back : null);
 			if (!record.emailId) return queue("sync", patch({ job: "sync" }), "create again");
+			// The Pack's delete got no answer: it may have landed, so the draft is checked whether or not updates are on.
+			if (record.job === "remove") return facts.updatesOn || record.deleteSentAt ? queue("sync", patch({ job: "sync" }), "delete cancelled: check the draft") : none("delete cancelled", patch({ state: "draft", job: null, nextRetryAt: null }));
 			return facts.updatesOn ? queue("sync", patch({ job: "sync" }), "update again") : none("updates off", Object.keys(back).length ? back : null);
 		case "draft":
 		case "left":
@@ -252,12 +284,13 @@ export type RemoteVerdict = "update" | "gone" | "left" | "edited";
  *
  * `seenModifiedAt` (Refresh draft from post): the modification_date the admin was shown before confirming. The
  * draft may then be overwritten although it was changed in Buttondown, but only while Buttondown still shows that
- * exact date. Anything else is "edited": changed again since the admin looked.
+ * exact date. Anything else is "edited": changed again since the admin looked. Refresh also needs the Pack's key
+ * for this post in the email's metadata: an email whose key was removed or changed there is never written.
  */
 export function classifyRemote(remote: { status: string; modificationDate: string | null; key: string | null } | null, record: Pick<ButtondownRecord, "remoteModifiedAt">, expectedKey: string, seenModifiedAt: string | null = null): RemoteVerdict {
 	if (!remote) return "gone";
 	if (remote.status !== "draft") return "left";
-	if (seenModifiedAt !== null) return seenModifiedAt !== "" && remote.modificationDate === seenModifiedAt ? "update" : "edited";
+	if (seenModifiedAt !== null) return seenModifiedAt !== "" && remote.modificationDate === seenModifiedAt && remote.key === expectedKey ? "update" : "edited";
 	if (!record.remoteModifiedAt || remote.modificationDate !== record.remoteModifiedAt || remote.key !== expectedKey) return "edited";
 	return "update";
 }
@@ -290,8 +323,9 @@ export interface FailurePlan {
 }
 
 /**
- * What a failure means for the next try:
- * - 429: after Retry-After (at least 5 minutes).
+ * What a failure means for the next try. Every kind has an end: nothing is tried again on its own once the failures
+ * have lasted 3 days (Retry, a republish or another key start it again).
+ * - 429: after Retry-After (at least 5 minutes), for 3 days from the first failure.
  * - no answer, a timeout, 5xx, 409: 5 min, 15 min, 1 h, 3 h, 6 h, then every 6 h, for 3 days from the first failure.
  * - 401, no key: not until the key changes (or Retry).
  * - 403: once more an hour later (Buttondown also answers 403 when it throttles Workers' addresses), then as 401.
@@ -299,15 +333,16 @@ export interface FailurePlan {
  */
 export function failure(input: FailureInput, record: Pick<ButtondownRecord, "attempts" | "errorSince">, now: number): FailurePlan {
 	if (input.refused) return { kind: "refused", nextRetryAt: null };
+	const lasted = now - (Date.parse(record.errorSince ?? "") || now);
 	if (input.status === 429) {
+		if (lasted >= BUTTONDOWN_RETRY_FOR_MS) return { kind: "rate", nextRetryAt: null };
 		const wait = Math.max((input.retryAfter ?? 0) * 1000, BUTTONDOWN_BACKOFF_MS[0]);
 		return { kind: "rate", nextRetryAt: new Date(now + wait).toISOString() };
 	}
 	if (input.status === 403 && record.attempts === 0) return { kind: "auth", nextRetryAt: new Date(now + BUTTONDOWN_LIMITS.forbiddenRetryMs).toISOString() };
 	if (input.status === 401 || input.status === 403 || input.code === "no_key") return { kind: "auth", nextRetryAt: null };
 	if (input.status === 0 || input.status >= 500 || input.status === 409) {
-		const since = Date.parse(record.errorSince ?? "") || now;
-		if (now - since >= BUTTONDOWN_RETRY_FOR_MS) return { kind: "temporary", nextRetryAt: null };
+		if (lasted >= BUTTONDOWN_RETRY_FOR_MS) return { kind: "temporary", nextRetryAt: null };
 		const step = BUTTONDOWN_BACKOFF_MS[Math.min(record.attempts, BUTTONDOWN_BACKOFF_MS.length - 1)];
 		return { kind: "temporary", nextRetryAt: new Date(now + step).toISOString() };
 	}
@@ -327,8 +362,23 @@ export function claimHeld(record: Pick<ButtondownRecord, "claimToken" | "claimed
 	return now - (Date.parse(record.claimedAt ?? "") || 0) < BUTTONDOWN_LIMITS.claimStaleMs;
 }
 
-/** Done records the hourly task prunes after 180 days. */
-export const PRUNABLE: readonly RecordState[] = ["left", "gone", "stopped", "removed"];
+/**
+ * Records the hourly task prunes once nothing has changed them for 180 days: the done ones, and a failure nobody
+ * retried in all that time (its own retries ended after 3 days).
+ */
+export const PRUNABLE: readonly RecordState[] = ["left", "gone", "stopped", "removed", "error"];
+
+/**
+ * A failed record that a hook queued while the rules couldn't be read, and for which nothing was made: the hook
+ * never saw a rule for its collection. Once the rules read and there's none, it isn't a failure: there's nothing to make.
+ */
+export const isUnsure = (record: Pick<ButtondownRecord, "state" | "sinceUnchecked" | "emailId" | "createSentAt">): boolean => record.state === "error" && record.sinceUnchecked && !record.emailId && !record.createSentAt;
+
+/** Whether Alerts still reports a failing record: in error for over an hour, and for less than the 3 days it's retried. */
+export function alertDue(record: Pick<ButtondownRecord, "errorSince">, now: number): boolean {
+	const lasted = now - (Date.parse(record.errorSince ?? "") || now);
+	return lasted >= BUTTONDOWN_LIMITS.alertAfterMs && lasted < BUTTONDOWN_RETRY_FOR_MS;
+}
 
 /** The record's state in plain words, for the panel and the list. */
 export function stateText(r: Pick<ButtondownRecord, "state" | "remoteStatus" | "lastError" | "unpublished" | "trashed" | "deleted" | "job"> & { emailId?: string | null }): string {
