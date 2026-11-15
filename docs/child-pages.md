@@ -44,7 +44,7 @@ Child Pages needs **Redirect Manager** and its **Slug changes** part on: they ad
 3. Add the Parent page field:
    1. Open **Child Pages** (in the sidebar, under **Content Tools**).
    2. Under **Set up**, click **Set up** next to **Pages**.
-   3. Click **Add the field** to confirm. The field shows in the page editor at once, and under **Content Types → Pages** like any other field.
+   3. Click **Add the field** to confirm. The row says **Ready**, and the field shows in the page editor at once, and under **Content Types → Pages** like any other field.
 4. Update your theme so it serves the nested URLs (next section). Until it does, a page with a parent has a URL your theme doesn't answer.
 5. Choose a parent:
    1. Open a page in the editor.
@@ -200,6 +200,10 @@ Child Pages adds at most 200 redirects for one change. When more pages move, the
 
 You don't have to: the next page you publish, unpublish, trash or restore in the collection adds the next 200 as well.
 
+A page whose redirect would loop (see below) doesn't count toward the 200: the next page in the order takes its place, so loops never keep the other pages waiting.
+
+**Re-check redirects** only goes in the list of latest changes when it added a redirect, so clicking it again doesn't push the real changes out of the list.
+
 ### Redirects someone else made
 
 Like Slug changes, Child Pages never changes a rule it didn't make. Two kinds get in the way, and both are listed under **Redirects** with the rule to fix:
@@ -208,20 +212,40 @@ Like Slug changes, Child Pages never changes a rule it didn't make. Two kinds ge
   1. Open **Redirect Manager**.
   2. Delete the rule named in the message (`/coywolf-seo` → `/apps/coywolf-seo/`).
   3. Open **Child Pages** and click **Re-check redirects**. The 301 from the old URL is added, and the message goes away.
-- **A rule that sends the new URL somewhere else.** The 301 from the old URL is added, but the page can't be reached at its new URL until you delete or change that rule on the Redirect Manager page. The message goes away with the next change, or **Re-check redirects**.
+- **A rule that sends the new URL somewhere else.** The 301 from the old URL is added, but the page can't be reached at its new URL until you delete or change that rule on the Redirect Manager page. The message goes away with the next change, or **Re-check redirects**, once the rule is gone or no page is at that URL anymore.
+
+A rule's target counts as a URL on this site when it's a path (`/apps/coywolf-seo/`) or a full URL on the site's own address, with or without `www.` (`https://coywolf.com/apps/coywolf-seo/`). A full URL on another host, a subdomain included (`https://media.coywolf.com/…`), leaves the site, so it can't be part of a loop.
+
+**What the loop check doesn't see:**
+
+- **Pattern rules.** Only exact rules are followed. A regex rule that sends the new URL back to the old one (`^/coywolf-(.+)$` → `/apps/coywolf-$1/`) isn't noticed, and the 301 is added. If you have pattern rules over the URLs of pages that nest, check them yourself after moving a page or turning Child Pages on or off.
+- **Long chains.** The way back is followed through up to 10 rules (`/coywolf-seo` → `/a/` → `/b/` → … → `/apps/coywolf-seo/`). A chain of 11 or more isn't seen.
+- **Rules on other systems.** A redirect made outside Redirect Manager (a Cloudflare redirect rule, say) is invisible to the pack.
 
 ### After turning Child Pages off
 
 The Child Pages page leaves the sidebar while the feature is off, so anything turning it off left undone shows on the **Features** page, under **Child Pages**:
 
 1. Open **Coywolf Pack → Features**.
-2. Under **Child Pages**, read the list: each loop names the redirect to delete, and pages over the 200 limit are counted.
+2. Under **Child Pages**, read the note. It lists:
+   - each loop, with the redirect to delete;
+   - each page another redirect sends elsewhere, with the redirect to delete or change;
+   - how many pages are over the 200 limit.
 3. Delete the redirects it names on the **Redirect Manager** page.
 4. Back on **Features**, click **Re-check redirects** under **Child Pages**. Repeat until the note is gone.
+
+**If turning it off didn't finish.** When the database can't be read while the switch is saved, the switch is still saved, but some nested URLs have no redirect yet. The note says "Turning Child Pages off didn't finish", with the error:
+
+1. Open **Coywolf Pack → Features**.
+2. Under **Child Pages**, click **Re-check redirects**. It works the redirects out again from the pages' parents and adds the missing ones (`/apps/coywolf-pack/` → `/coywolf-pack/`).
+3. If the note stays, read what's left in it and repeat.
+
+The same goes for turning it on: the failed change is listed under **Redirects** on the Child Pages page, and **Re-check redirects** there adds the 301s from the flat URLs.
 
 ### When a redirect couldn't be worked out
 
 - **A read failed.** If the database can't be read while a page is published, nothing is redirected from that read (never to a flat URL), the failure is logged, and the change is listed under **Redirects** as one that couldn't be worked out. Visitors aren't affected: pages keep rendering with the parents read last. The next change in the collection, or **Re-check redirects**, makes its redirects.
+- **The switches couldn't be read.** A page's save reads the feature switches fresh, so a switch turned on or off a moment ago on another server counts. If that read fails, the save uses the switches the server already had, and a warning is logged: the rest of the pack (cache clearing, Slug changes, search) still runs for the save.
 - **No earlier URLs to compare with.** Child Pages keeps each collection's nested URLs to tell what moved. If that record is missing when a page with pages under it changes, the change is listed as having no earlier URLs: the pages it moved got no redirect, and tracking starts again from the current URLs. Add those redirects by hand on the Redirect Manager page if the pages had readers.
 
 ## Import parents from configuration
@@ -234,11 +258,11 @@ Sites that listed their parents in `pageParents` (coywolf.com and get.essential.
    - **Already set**: the field already names that parent.
    - **Skipped**, for one of these reasons:
      - no page has the slug;
-     - the field names another parent;
+     - the field names another parent (even when the option's parent isn't a page: the field is what counts once it's set);
      - the parent would make a loop;
      - the page isn't published (a draft, or scheduled): setting the parent would publish it, so set its **Parent page** in the editor instead;
      - the page has unpublished changes: setting the parent would publish them too, so publish or discard them first.
-   - **Stays in the option**: the parent isn't a page (a category), so keep it in `pageParents`.
+   - **Stays in the option**: the parent isn't a page (a category) and the page's field is empty, so keep it in `pageParents`.
 3. Check the URL column: a page the option already nested keeps its URL, so no redirects are made.
 4. Click **Set parents**, then confirm. Each page is saved with its parent and published again, one at a time, through EmDash's content API with your account.
 5. Remove the pages that were set from `pageParents` in `astro.config.mjs` at your next deploy.
