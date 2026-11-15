@@ -61,6 +61,8 @@ How the prompt knows: EmDash has no admin event for a trash or unpublish, so the
 
 Feature **Redirect Manager → Slug changes** (`redirects.slugChanges`; off on new sites, and on for sites set up before 0.36.0, when it was on by default). When a published entry's public URL changes, because of a new slug, category or parent page, the pack adds a 301 from the old URL to the new one, noted `Slug change: <title>`. The URLs come from the pack's URL resolver (the one the sitemaps and breadcrumbs use, with the site's `urls`, `termParents` and `pageParents` options), so they're the URLs readers and search engines saw.
 
+With [Child Pages](child-pages.md) on, a page that moves takes the pages below it along: Child Pages adds the same kind of rule for each published page under it (at most 200 a change), for pages whose parent is unpublished, trashed or published again, and for every nested page when Child Pages is turned off or on. Those rules are noted `Slug change: <title>` too, and follow the rules below.
+
 - **How it knows the old URL.** Each published entry's URL is remembered in plugin storage: recorded from the live row before a save, and after every save or publish. An entry that hasn't been saved since the feature was turned on is recorded at its first save, before anything changes.
 - **No chains or loops.** Renaming A → B → C points the A rule at C. Renaming back to A deletes the A → B rule, which would otherwise shadow the live page.
 - **Hand-made rules win.** If a rule someone made already answers the old URL, it's left as is (and logged). Only rules noted `Slug change:` are ever edited or deleted.

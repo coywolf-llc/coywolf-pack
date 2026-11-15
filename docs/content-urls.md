@@ -17,7 +17,7 @@ Patterns take EmDash's tokens plus taxonomy tokens:
 - `{term:<taxonomy>|<fallback>}` uses `<fallback>` when the entry has no term. Without a fallback, an entry with no term has no URL.
 - `{category}` is shorthand for `{term:category|uncategorized}`.
 - `{termpath:<taxonomy>}` (and `{termpath:<taxonomy>|<fallback>}`) is the same term with its parent terms in front, root first, like WordPress's `%category%` permalink: `news/seo` for SEO under News, `guides/method-seo/structure` three levels down. A term with no parent is just its slug. Parents come from EmDash's categories (the parent set under **Taxonomies**), read once per request or build. Chains stop at a loop or after 32 levels.
-- `{pagepath}` is the entry's slug with its parent pages' slugs in front (`apps/coywolf-seo`). EmDash entries have no parent field, so the parents come from the `pageParents` option (slug → parent slug). An entry with no parent is just its slug.
+- `{pagepath}` is the entry's slug with its parent pages' slugs in front (`apps/coywolf-seo`). EmDash entries have no parent of their own: with [Child Pages](child-pages.md) on, a page's parent is its **Parent page** field; the `pageParents` option (slug → parent slug) fills in pages without one, and parents that aren't pages. An entry with no parent is just its slug.
 
 ```js
 // coywolf.com: WordPress's /%category%/%postname%/ with the full category path, and nested pages
@@ -32,10 +32,12 @@ coywolfPlugin({
 });
 ```
 
+With [Child Pages](child-pages.md) on, a collection with the **Parent page** field nests without a `urls` entry: its URL pattern with `{pagepath}` for `{slug}` (`/{slug}/` becomes `/{pagepath}/`). A `urls` entry with `{pagepath}`, as coywolf.com has, keeps working and follows the field too. Parents count only while they're published; a page whose parent doesn't count (unpublished, trashed, in a loop) is at the top level, and the `pageParents` option doesn't apply to it.
+
 `termParents` (taxonomy → term slug → parent slug) is a fallback: it's used only for terms that have no parent in EmDash, so once the parents are restored (see [Migrating from WordPress](wordpress-import.md), "Category and page parents") it can go.
 
 Collections without an override keep EmDash's resolution. The pack also maps paths back to entries (for example, the Markdown source at `/news/seo/some-post/index.html.md` resolves only when `news/seo` is the post's primary category path), so a wrong category doesn't match. With `{termpath:…}` the whole path must match: `/news/seo/some-post/` resolves, `/seo/some-post/` doesn't (the theme should redirect it, as WordPress did). With `{pagepath}`, a page under a parent resolves only at its full path.
 
 Trailing slashes follow Astro's `trailingSlash` setting. With the default (`"ignore"`), an override keeps the pattern's own trailing slash. Set `trailingSlash: "always" | "never"` on `coywolfPlugin()` to force one for every entry URL the pack builds. Override URLs get no locale prefix.
 
-The options are read when the Worker starts (EmDash creates the plugin then), so the middleware and Astro components use them too. Sites can resolve URLs the same way with `entryUrl`, `entryUrls`, and `matchEntryPath` from `@coywolf/emdash/astro`.
+The options are read when the Worker starts (EmDash creates the plugin then), so the middleware and Astro components use them too. Sites can resolve URLs the same way with `entryUrl`, `entryUrls`, and `matchEntryPath` from `@coywolf/emdash/astro`; for pages, `loadPageTree` and `resolvePagePath` give the whole tree and a catch-all route's lookup (see [Child Pages](child-pages.md#your-theme)).

@@ -22,7 +22,7 @@ Sites that used Coywolf's WordPress plugins (Video Manager, Coywolf SEO, Custom 
 | Self-closing third-party blocks (all their content is in settings) | Dropped without a trace | Prepare lists them under **Blocks EmDash will drop**; rebuild them by hand |
 | `&#91;` and bold markup in code blocks | Shown as literal text | Prepare cleans them |
 | Co-authors and guest authors (Co-Authors Plus, PublishPress Authors) | Each post is credited to its WordPress user only | Step 3, **Co-authors and guest authors** |
-| Category parents and page parents (`/{parent}/{child}/` URLs) | Every category is top level; pages lose their parent | Step 4, **Category and page parents**, with `{termpath:category}` and `{pagepath}` in [Content URLs](content-urls.md) |
+| Category parents and page parents (`/{parent}/{child}/` URLs) | Every category is top level; pages lose their parent | Step 4, **Category and page parents**, with `{termpath:category}` and `{pagepath}` in [Content URLs](content-urls.md); then [Child Pages](child-pages.md) to keep page parents in the editor |
 | `/wp-content/` URLs EmDash's URL rewrite misses: other blocks' fields (a testimonial photo, a video poster or caption track), `-scaled`, `-rotated` and image-editor copies of large images, files that were never media-library attachments, theme and plugin files (since EmDash 1.2.0 its rewrite also covers HTML blocks, embeds, links in text and tables, file and button blocks, covers, and `-1024x683` size variants of attachments) | Still point at the old site, and break when it goes away | Step 5, **Old-site media URLs**: matches, imports, rewrites and redirects them |
 | Old slugs (`_wp_old_slug`, which WordPress redirects by itself) and redirect plugins' rules (Redirection, Rank Math, Yoast SEO Premium, Coywolf SEO) | Not in the export | Step 6, **Redirects from WordPress** |
 | `/wp-content/uploads/` URLs that other sites and image search link to | 404 | Step 5 adds a redirect for every old file URL it matched |
@@ -103,6 +103,14 @@ EmDash's importer creates every category at the top level and drops each page's 
 3. **Set category parents** sets them through EmDash's own taxonomy API (`PUT /_emdash/api/taxonomies/category/terms/<slug>`), as you, parents first. You need permission to manage taxonomies.
 
 EmDash pages have no parent, so the step shows a ready-to-paste `pageParents` option for `coywolfPlugin()` instead (use it with `{pagepath}`, see [Content URLs](content-urls.md)). `node scripts/wp-prepare.mjs` prints the same option, plus a `termParents` option you can use until the category parents are set.
+
+To choose page parents in the editor from then on, move them into a **Parent page** field with [Child Pages](child-pages.md):
+
+1. Paste the `pageParents` option into `coywolfPlugin()` and deploy.
+2. Turn on **Child Pages** (with **Redirect Manager** and **Slug changes**) on the **Features** page.
+3. On the **Child Pages** page, click **Set up** next to **Pages**.
+4. Under **Import parents from configuration**, click **Dry run**, check the list, then click **Set parents**.
+5. Remove the pages that were set from `pageParents` at your next deploy.
 
 ## Old-site media URLs
 

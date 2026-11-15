@@ -31,6 +31,7 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 - [Search](search.md)
 - [Link Manager](links.md): with inbound link counts and orphans
 - [Content Audit](content-audit.md)
+- [Child Pages](child-pages.md): a Parent page field, nested URLs and their redirects
 - [Headings & TOC](headings.md)
 - [Breadcrumb Nav](breadcrumbs.md)
 - [Pagination](pagination.md): numbered page links for archives, on one line at every width, and short page URLs (`/3/`)
