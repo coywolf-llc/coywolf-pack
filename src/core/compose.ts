@@ -63,6 +63,17 @@ const COLLECTING = new Set(["page:metadata", "page:fragments"]);
  */
 const POLICY = new Set(["content:beforePublish", "content:beforeSchedule", "content:beforeUnpublish"]);
 
+/** EmDash's limit on a refusal's reason, in code points (plugins/content-policy.ts MAX_CONTENT_POLICY_REASON_LENGTH). */
+export const POLICY_REASON_MAX = 500;
+/**
+ * A refusal's reason within EmDash's limit: it throws on a longer one, and with errorPolicy "continue"
+ * (below) the action would then go through, so a module's long message must not undo its own refusal.
+ */
+export function policyReason(reason: string): string {
+	const chars = [...reason];
+	return chars.length > POLICY_REASON_MAX ? `${chars.slice(0, POLICY_REASON_MAX - 1).join("")}…` : reason;
+}
+
 /**
  * EmDash gives a hook 5 seconds (define-plugin.ts), then renders the page
  * without its part and only logs it. A page hook still running just before
@@ -184,7 +195,7 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 					if (!isOn(features, hookFeature(module, name))) continue;
 					try {
 						const decision = (await module.hooks?.[name as "content:beforePublish"]?.(event, ctx)) as { cancel?: unknown; reason?: unknown } | undefined;
-						if (decision?.cancel === true && typeof decision.reason === "string") return { cancel: true, reason: decision.reason };
+						if (decision?.cancel === true && typeof decision.reason === "string") return { cancel: true, reason: policyReason(decision.reason) };
 					} catch (error) {
 						ctx.log.error(`${module.id}: ${name} failed`, { error: String(error) });
 					}

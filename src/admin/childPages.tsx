@@ -345,6 +345,7 @@ const REASON_TEXT: Record<string, string> = {
 	noPage: "No page has this slug.",
 	parentNotPage: "The parent isn't a page here (a category, say): keep it in pageParents.",
 	otherParent: "Its Parent page is already set to another page.",
+	notPublished: "It isn't published (a draft, or scheduled), and setting the parent would publish it. Set its Parent page in the editor instead.",
 	pendingChanges: "It has unpublished changes, which publishing would put live. Publish or discard them, then run this again.",
 	loop: "That parent would make a loop.",
 	parentUnpublished: "The parent isn't published: the URL nests once it is.",
@@ -380,7 +381,8 @@ function ImportParents(props: { status: Status; onChanged: () => void }) {
 		if (!collection || !rows || !toSet.length) return;
 		const ok = await confirm({
 			title: `Set ${plural(toSet.length, "parent page", "parent pages")}?`,
-			description: "Each page listed as “Set” gets its Parent page from the pageParents option and is published again. Their URLs stay the same when the option already nested them.",
+			description:
+				"Each page listed as “Set” gets its Parent page from the pageParents option and is published again, one at a time, as if you had clicked Publish on each (so anything that runs when a page is published runs for each). Their URLs stay the same when the option already nested them.",
 			confirmLabel: "Set parents",
 			variant: "primary",
 		});
@@ -413,8 +415,8 @@ function ImportParents(props: { status: Status; onChanged: () => void }) {
 			description={
 				<>
 					Moves the parents listed in <Code>pageParents</Code> (in <Code>coywolfPlugin()</Code>, {plural(props.status.pageParents, "page", "pages")}) into each page's
-					Parent page field, so they can be changed in the editor. Run the dry run first. Pages with unpublished changes are skipped, because setting the parent
-					publishes the page. Parents that aren't pages (a category) stay in the option. Afterward, the pages that were set can come out of{" "}
+					Parent page field, so they can be changed in the editor. Run the dry run first. Setting the parent publishes the page again, so drafts,
+					scheduled pages and pages with unpublished changes are skipped. Parents that aren't pages (a category) stay in the option. Afterward, the pages that were set can come out of{" "}
 					<Code>pageParents</Code>.
 				</>
 			}

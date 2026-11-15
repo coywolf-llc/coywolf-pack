@@ -567,3 +567,301 @@ test("no snapshot: one is recorded from the current tree, and the change says pa
 		configureContentUrls({});
 	}
 });
+
+// ── Through the pack's hooks, as EmDash calls them ──
+
+const { composeHooks, policyReason, POLICY_REASON_MAX } = await import("../src/core/compose.ts");
+const { redirectsPack } = await import("../src/redirects/pack.ts");
+const { readFileSync } = await import("node:fs");
+/**
+ * Child Pages and Redirect Manager in the order src/modules.ts lists them (the whole list can't be loaded
+ * under Node: some modules need the Workers runtime), so the tests below run them as the pack does.
+ */
+function packOrder() {
+	const source = readFileSync(new URL("../src/modules.ts", import.meta.url), "utf8");
+	const list = source.slice(source.indexOf("export const MODULES"));
+	const at = { childPages: list.indexOf("childPagesPack()"), redirects: list.indexOf("redirectsPack(") };
+	assert.ok(at.childPages > 0 && at.redirects > 0, "both are in MODULES");
+	return [
+		{ id: "childPages", at: at.childPages, make: () => pack.childPagesPack() },
+		{ id: "redirects", at: at.redirects, make: () => redirectsPack({}) },
+	].sort((a, b) => a.at - b.at);
+}
+const { loopReason, MAX_REASON, importPlan, nestsBy } = pack;
+const FEATURES_ROW = "plugin:coywolf-pack:settings:features";
+const SWITCHES = { _defaults036: true, childPages: true, redirects: true, "redirects.slugChanges": true, "redirects.trashPrompt": false };
+
+/**
+ * A site: its D1 as the DB binding, the switches stored in it (the URL resolver reads them there) and given to the
+ * plugin context, and the hooks of the named modules composed in the pack's own order (src/modules.ts).
+ */
+function site(sql, { modules: ids = ["childPages", "redirects"], d1: d1Options } = {}) {
+	const d1 = fakeD1(sql, d1Options);
+	d1.raw.prepare("INSERT INTO options VALUES (?, ?)").run(FEATURES_ROW, JSON.stringify(SWITCHES));
+	env.DB = d1;
+	invalidateFeatures();
+	read.invalidatePageTrees();
+	const modules = packOrder().filter((m) => ids.includes(m.id)).map((m) => m.make());
+	const { hooks } = composeHooks(modules, { tasks: [] });
+	const ctx = fakeCtx(SWITCHES);
+	const call = (name, event) => {
+		const hook = hooks[name];
+		return (typeof hook === "function" ? hook : hook.handler)(event, ctx);
+	};
+	const row = (id) => {
+		const r = d1.raw.prepare("SELECT * FROM ec_pages WHERE id = ?").get(id);
+		return { id: r.id, slug: r.slug, status: r.status, locale: r.locale, translationGroup: r.translation_group, draftRevisionId: r.draft_revision_id, liveRevisionId: r.live_revision_id, publishedAt: r.published_at, data: { title: r.title } };
+	};
+	const event = (id) => ({ collection: "pages", content: row(id) });
+	const close = () => {
+		configureStoredParents(null);
+		configureContentUrls({});
+		delete env.DB;
+		invalidateFeatures();
+	};
+	return { d1, ctx, hooks, modules, call, event, close };
+}
+
+test("the pack's own module order puts Child Pages before Redirect Manager, so Slug changes sees the parent that was just published", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	// Coywolf Pack is published at /coywolf-pack/; Apps is chosen as its parent and waits in its draft.
+	const s = site([page("a", "apps"), page("p", "coywolf-pack")].join("\n") + `\nINSERT INTO revisions VALUES ('r2', '{"_references":{"parent_page":["a"]}}'); UPDATE ec_pages SET draft_revision_id = 'r2', live_revision_id = 'r1' WHERE id = 'p';`);
+	// One request, as EmDash runs a publish: its reads are shared (src/core/request-memo.ts).
+	const ALS = Symbol.for("emdash:request-context");
+	const request = {};
+	const earlier = globalThis[ALS];
+	globalThis[ALS] = { getStore: () => request };
+	try {
+		assert.deepEqual(s.modules.map((m) => m.id), ["childPages", "redirects"]);
+		// Slug changes knows the page at its flat URL.
+		await s.call("content:afterSave", s.event("p"));
+		assert.equal(s.ctx.state.remembered.get("pages:p").url, "/coywolf-pack/");
+		// The guard reads the tree as it is before the publish (no parent yet), in this request.
+		assert.equal(await s.call("content:beforePublish", s.event("p")), undefined);
+		// EmDash publishes: the link goes live.
+		s.d1.raw.exec(`${parent("p", "a")} UPDATE ec_pages SET draft_revision_id = NULL, live_revision_id = 'r2' WHERE id = 'p';`);
+		await s.call("content:afterPublish", s.event("p"));
+		assert.deepEqual(rules(s.d1), [["/coywolf-pack", "/apps/coywolf-pack/"]], "the 301 from the flat URL: Slug changes read the tree again, not the guard's");
+		assert.equal(s.ctx.state.remembered.get("pages:p").url, "/apps/coywolf-pack/");
+	} finally {
+		if (earlier === undefined) delete globalThis[ALS];
+		else globalThis[ALS] = earlier;
+		s.close();
+	}
+});
+
+test("afterPublish, afterUnpublish, afterDelete and afterRestore through the composed hooks: the pages below get their 301s, the page itself is left to Slug changes, and the URL version moves each time", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	// Child Pages alone: what's written here is its own doing.
+	const s = site(SITE, { modules: ["childPages"] });
+	const version = () => s.ctx.state.settings.get("childPagesVersion");
+	try {
+		await s.call("content:afterPublish", s.event("x"));
+		const v1 = version();
+		assert.ok(v1, "live search's cached page URLs are dropped (the URL fingerprint)");
+		assert.deepEqual(snapshot(s.ctx).paths, { p: "/apps/coywolf-pack/", d: "/apps/coywolf-pack/docs/" });
+
+		// A nested page is renamed and published: the page below it moves; the page itself is Slug changes' (not written here).
+		s.d1.raw.exec("UPDATE ec_pages SET slug = 'pack' WHERE id = 'p'");
+		await s.call("content:afterPublish", s.event("p"));
+		assert.deepEqual(rules(s.d1), [["/apps/coywolf-pack/docs", "/apps/pack/docs/"]]);
+		assert.notEqual(version(), v1);
+		assert.equal(snapshot(s.ctx).paths.p, "/apps/pack/");
+
+		// Unpublished: the pages below Apps become top level.
+		s.d1.raw.exec("UPDATE ec_pages SET status = 'draft' WHERE id = 'a'");
+		const v2 = version();
+		await s.call("content:afterUnpublish", s.event("a"));
+		assert.deepEqual(rules(s.d1), [
+			["/apps/coywolf-pack/docs", "/pack/docs/"],
+			["/apps/pack", "/pack/"],
+			["/apps/pack/docs", "/pack/docs/"],
+		]);
+		assert.notEqual(version(), v2);
+
+		// Published again, then moved to the trash: nested, then top level again.
+		s.d1.raw.exec("UPDATE ec_pages SET status = 'published' WHERE id = 'a'");
+		await s.call("content:afterPublish", s.event("a"));
+		assert.deepEqual(rules(s.d1).find(([from]) => from === "/pack"), ["/pack", "/apps/pack/"]);
+		s.d1.raw.exec("UPDATE ec_pages SET deleted_at = '2026-11-15' WHERE id = 'a'");
+		const v3 = version();
+		await s.call("content:afterDelete", { collection: "pages", id: "a", permanent: false });
+		assert.deepEqual(rules(s.d1).find(([from]) => from === "/apps/pack"), ["/apps/pack", "/pack/"]);
+		assert.equal(status(s.ctx).changes[0].reason, "A page was moved to the trash");
+		assert.notEqual(version(), v3);
+
+		// Restored (EmDash brings it back as a draft): nothing nests yet, but the hook runs and the version moves.
+		s.d1.raw.exec("UPDATE ec_pages SET deleted_at = NULL, status = 'draft' WHERE id = 'a'");
+		const v4 = version();
+		const before = rules(s.d1);
+		await s.call("content:afterRestore", s.event("a"));
+		assert.deepEqual(rules(s.d1), before);
+		assert.notEqual(version(), v4);
+	} finally {
+		s.close();
+	}
+});
+
+test("afterSave through the composed hooks: a draft's save does nothing; a slug-only save of a published page with pending edits moves the pages below it", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const s = site(SITE, { modules: ["childPages"] });
+	const version = () => s.ctx.state.settings.get("childPagesVersion");
+	const kvWrites = [];
+	try {
+		await s.call("content:afterPublish", s.event("x"));
+		const set = s.ctx.kv.set;
+		s.ctx.kv.set = async (key, value) => (kvWrites.push(key), set(key, value));
+		const v1 = version();
+
+		// A draft page's save: not a change to the published tree.
+		s.d1.raw.exec(page("n", "new-draft", "draft"));
+		await s.call("content:afterSave", s.event("n"));
+		// A published page with edits waiting in its draft, slug as it was: nothing is live yet.
+		s.d1.raw.exec("UPDATE ec_pages SET draft_revision_id = 'r2', live_revision_id = 'r1' WHERE id IN ('a', 'p', 'x')");
+		await s.call("content:afterSave", s.event("a"));
+		await s.call("content:afterSave", s.event("x"));
+		assert.equal(version(), v1, "no settle, no new URL version");
+		assert.deepEqual(kvWrites, []);
+		assert.deepEqual(rules(s.d1), []);
+
+		// The REST API changes only the slug (no data, no references): EmDash writes it to the live row, pending edits or not.
+		s.d1.raw.exec("UPDATE ec_pages SET slug = 'tools' WHERE id = 'a'");
+		await s.call("content:afterSave", s.event("a"));
+		assert.deepEqual(rules(s.d1), [
+			["/apps/coywolf-pack", "/tools/coywolf-pack/"],
+			["/apps/coywolf-pack/docs", "/tools/coywolf-pack/docs/"],
+		]);
+		assert.notEqual(version(), v1, "the URL version moves");
+		assert.equal(status(s.ctx).changes[0].reason, "A page's slug changed");
+		// The same for a nested page (the page itself is Slug changes').
+		s.d1.raw.exec("UPDATE ec_pages SET slug = 'pack' WHERE id = 'p'");
+		await s.call("content:afterSave", s.event("p"));
+		assert.deepEqual(rules(s.d1).find(([from]) => from === "/tools/coywolf-pack/docs"), ["/tools/coywolf-pack/docs", "/tools/pack/docs/"]);
+		// A top-level page with nothing under it: its slug moves no other page.
+		const v2 = version();
+		s.d1.raw.exec("UPDATE ec_pages SET slug = 'about-us' WHERE id = 'x'");
+		await s.call("content:afterSave", s.event("x"));
+		assert.equal(version(), v2);
+
+		// A collection without drafts saves everything live: every save of a published page settles.
+		s.d1.raw.exec("UPDATE ec_pages SET draft_revision_id = NULL WHERE id = 'x'");
+		await s.call("content:afterSave", s.event("x"));
+		assert.notEqual(version(), v2);
+	} finally {
+		s.close();
+	}
+});
+
+test("a page that goes back to a URL a hand-made rule redirects: Slug changes writes no loop, Child Pages lists it, and Re-check adds the 301 once the rule is deleted", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const s = site(SEO);
+	try {
+		await ensureTable(s.d1);
+		await byHand(s.d1, "/coywolf-seo", "/apps/coywolf-seo/");
+		await s.call("content:afterPublish", s.event("s"));
+		assert.equal(s.ctx.state.remembered.get("pages:s").url, "/apps/coywolf-seo/");
+		// Its parent is removed and it's published: it's at /coywolf-seo/ now.
+		s.d1.raw.exec("DELETE FROM _emdash_content_references WHERE parent_group = 's'");
+		await s.call("content:afterPublish", s.event("s"));
+		assert.deepEqual(rules(s.d1), [["/coywolf-seo", "/apps/coywolf-seo/"]], "no /apps/coywolf-seo → /coywolf-seo/");
+		assert.ok(s.ctx.state.logs.some(([level, message]) => level === "warn" && /^Slug change: no redirect added/.test(message)));
+		assert.deepEqual(status(s.ctx).open.pages.loops.map((l) => [l.entryId, l.from, l.to, l.rule.source]), [["s", "/apps/coywolf-seo/", "/coywolf-seo/", "/coywolf-seo"]]);
+		assert.equal(snapshot(s.ctx).paths.s, "/apps/coywolf-seo/");
+
+		// The Child Pages page's Re-check redirects, with the rule still there, then deleted.
+		const recheck = s.modules.find((m) => m.id === "childPages").routes["childPages/recheck"];
+		let answer = await recheck.handler({ ...s.ctx, input: undefined });
+		assert.equal(answer.open[0].loops.length, 1);
+		s.d1.raw.exec("DELETE FROM coywolf_redirects WHERE source = '/coywolf-seo'");
+		answer = await recheck.handler({ ...s.ctx, input: undefined });
+		assert.deepEqual(rules(s.d1), [["/apps/coywolf-seo", "/coywolf-seo/"]]);
+		assert.deepEqual(answer.open, []);
+		assert.equal(answer.changes[0].reason, "Redirects re-checked");
+	} finally {
+		s.close();
+	}
+});
+
+test("a settle that fails in a hook is logged and listed, the snapshot is left alone, and the next change makes its redirects", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	let failing = false;
+	const s = site(SITE, { modules: ["childPages"], d1: { fail: (q) => failing && /coywolf_redirects/.test(q) } });
+	try {
+		await s.call("content:afterPublish", s.event("x"));
+		const kept = snapshot(s.ctx);
+		s.d1.raw.exec("UPDATE ec_pages SET slug = 'tools' WHERE id = 'a'");
+		failing = true;
+		await s.call("content:afterPublish", s.event("a"));
+		failing = false;
+		assert.ok(s.ctx.state.logs.some(([level, message]) => level === "error" && /could not work out the redirects/.test(message)));
+		assert.match(status(s.ctx).changes[0].failed, /transient/);
+		assert.deepEqual(snapshot(s.ctx), kept);
+		await s.call("content:afterPublish", s.event("x"));
+		assert.deepEqual(rules(s.d1), [
+			["/apps/coywolf-pack", "/tools/coywolf-pack/"],
+			["/apps/coywolf-pack/docs", "/tools/coywolf-pack/docs/"],
+		]);
+	} finally {
+		s.close();
+	}
+});
+
+// ── The publish guard's message ──
+
+test("the publish guard's reason stays within EmDash's 500 code points whatever the titles, so a loop with long titles is still refused", async () => {
+	const long = "Ünïcödé 🐺 title ".repeat(20).trim(); // 300+ code points, astral characters included
+	assert.ok([...long].length > 300);
+	const reason = loopReason(long, [long, long, long]);
+	assert.ok([...reason].length <= MAX_REASON, `${[...reason].length} code points`);
+	assert.match(reason, /would put “Ünïcödé 🐺 title .+…” under itself \(.+ › .+ › .+\)\. Choose another parent page, or none\.$/u);
+	assert.ok([...loopReason(long, Array.from({ length: 40 }, () => long))].length <= MAX_REASON, "a long chain keeps its ends");
+	assert.ok([...loopReason(long, [long])].length <= MAX_REASON);
+	assert.equal(loopReason("Coywolf apps", ["docs", "Coywolf Pack", "Coywolf apps"]), "That parent page would put “Coywolf apps” under itself (Coywolf apps › Coywolf Pack › docs › Coywolf apps). Choose another parent page, or none.");
+	assert.doesNotMatch(loopReason("Bell\u0007 and\nnewline\u007f", ["a", "b"]), /[\u0000-\u001f\u007f]/, "no control characters: EmDash refuses a reason with one");
+	// Any module's refusal is cut to the limit where the hooks are composed, too.
+	assert.equal([...policyReason("🐺".repeat(600))].length, POLICY_REASON_MAX);
+	assert.equal(policyReason("short"), "short");
+
+	// Through the composed hook, as EmDash reads the decision.
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const s = site([page("a", "apps", "published", long), page("p", "pack", "published", long), page("d", "docs", "published", long), parent("p", "a"), parent("d", "p")].join("\n") + `\nINSERT INTO revisions VALUES ('r-loop', '{"_references":{"parent_page":["d"]}}');`, { modules: ["childPages"] });
+	try {
+		const decision = await s.call("content:beforePublish", { collection: "pages", content: { id: "a", translationGroup: "a", draftRevisionId: "r-loop", data: { title: long } }, origin: { source: "api" } });
+		assert.equal(decision.cancel, true);
+		assert.ok([...decision.reason].length <= 500);
+		// EmDash's limit, from its source (inspectContentPolicyDecision throws past it, and the publish would go through).
+		const emdash = readFileSync(new URL("../node_modules/emdash/src/plugins/content-policy.ts", import.meta.url), "utf8");
+		assert.match(emdash, new RegExp(`MAX_CONTENT_POLICY_REASON_LENGTH = ${POLICY_REASON_MAX};`));
+		assert.match(emdash, /codePointLength\(.*reason.*\) > MAX_CONTENT_POLICY_REASON_LENGTH|reason.*MAX_CONTENT_POLICY_REASON_LENGTH/s);
+	} finally {
+		s.close();
+	}
+});
+
+// ── The import, and the Set up list ──
+
+test("the import never publishes a page that isn't published: drafts (with no draft revision too) and scheduled pages are skipped", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" }, pageParents: { "sold-domain": "domains", soon: "domains", live: "domains", waiting: "domains" } });
+	const d1 = fakeD1([page("dm", "domains"), page("s", "sold-domain", "draft"), page("q", "soon", "scheduled"), page("l", "live"), page("w", "waiting")].join("\n") + "\nUPDATE ec_pages SET draft_revision_id = 'r2', live_revision_id = 'r1' WHERE id = 'w';");
+	try {
+		assert.equal(d1.raw.prepare("SELECT draft_revision_id FROM ec_pages WHERE id = 's'").get().draft_revision_id, null, "a draft with no draft revision");
+		const ct = await read.collectionTree(d1, "pages", { on: true });
+		const rows = Object.fromEntries((await importPlan(d1, ct)).map((r) => [r.slug, [r.action, r.reason]]));
+		assert.deepEqual(rows, { "sold-domain": ["skip", "notPublished"], soon: ["skip", "notPublished"], live: ["set", undefined], waiting: ["skip", "pendingChanges"] });
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("nestsBy: a collection whose own URL pattern has neither {slug} nor {pagepath} can't nest by its field", () => {
+	const field = { id: "f", relation: "r", side: "parent" };
+	assert.equal(nestsBy({ collection: "items", field, urlPattern: "/{id}" }, true), "pattern");
+	assert.equal(nestsBy({ collection: "pages", field, urlPattern: "/{slug}/" }, true), "field");
+	assert.equal(nestsBy({ collection: "pages", field, urlPattern: null }, true), "field", "EmDash's default pattern has {slug}");
+	assert.equal(nestsBy({ collection: "pages", field, urlPattern: "/{slug}/" }, false), null);
+	assert.equal(nestsBy({ collection: "pages", field: null, urlPattern: "/{slug}/" }, true), null);
+	configureContentUrls({ urls: { pages: "/{pagepath}/", posts: "/{slug}/" } });
+	assert.equal(nestsBy({ collection: "pages", field, urlPattern: null }, true), "configured");
+	assert.equal(nestsBy({ collection: "posts", field, urlPattern: null }, true), "override");
+	configureContentUrls({});
+});

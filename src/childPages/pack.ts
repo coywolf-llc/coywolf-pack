@@ -22,7 +22,7 @@ import type { PluginContext } from "emdash";
 import { definePluginRoute } from "emdash";
 import { z } from "zod";
 
-import { COLLECTION_SLUG, type ChildPagesState, type StoredParents, comparablePath, configureStoredParents, configuredPageParents, createEntryUrlResolver, patternUsesPagePath, urlOverride } from "../core/content-url.js";
+import { COLLECTION_SLUG, type ChildPagesState, type StoredParents, comparablePath, configureStoredParents, configuredPageParents, createEntryUrlResolver, pagePathPattern, patternUsesPagePath, urlOverride } from "../core/content-url.js";
 import { type FeatureMap, ctxFeatures, isOn, registerFeatures, rememberSiteSetting } from "../core/features.js";
 import type { FeatureDef, FeatureNotice, PackModule } from "../core/module.js";
 import { readOnlyRoute } from "../core/routes.js";
@@ -491,13 +491,33 @@ async function loopGuard(event: { content: Record<string, unknown>; collection: 
 	const chain = loopWith(await readTree(db, meta, true), group, parentGroup);
 	if (!chain) return undefined;
 	const title = typeof (content.data as Record<string, unknown> | undefined)?.title === "string" ? String((content.data as Record<string, unknown>).title) : "This page";
-	return {
-		cancel: true,
-		reason:
-			chain.length === 1
-				? `“${title}” can't be its own parent page. Choose another parent page, or none.`
-				: `That parent page would put “${title}” under itself (${[...chain].reverse().join(" › ")} › ${title}). Choose another parent page, or none.`,
-	};
+	return { cancel: true, reason: loopReason(title, chain) };
+}
+
+/** The longest reason the guard gives. EmDash refuses a decision whose reason is over 500 code points (MAX_CONTENT_POLICY_REASON_LENGTH), and the publish would then go through. */
+export const MAX_REASON = 480;
+/** Titles in the reason are cut to this many characters. */
+const REASON_TITLE = 60;
+const codePoints = (text: string) => [...text];
+const shortTitle = (title: string) => {
+	// Control characters too: EmDash refuses a reason with one in it (the publish would go through).
+	const chars = codePoints(title.replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim());
+	return chars.length > REASON_TITLE ? `${chars.slice(0, REASON_TITLE - 1).join("")}…` : chars.join("");
+};
+
+/**
+ * Why a publish is refused: the page would be under itself. `chain` is loopWith's (the parent up to the
+ * page). Long titles are cut and a long chain keeps its ends, and the whole stays within MAX_REASON code
+ * points whatever the titles are (without the chain if it must).
+ */
+export function loopReason(title: string, chain: string[]): string {
+	const name = shortTitle(title) || "This page";
+	const advice = "Choose another parent page, or none.";
+	if (chain.length <= 1) return `“${name}” can't be its own parent page. ${advice}`;
+	let steps = [...chain].reverse().map(shortTitle);
+	if (steps.length > 4) steps = [...steps.slice(0, 2), "…", ...steps.slice(-1)];
+	const full = `That parent page would put “${name}” under itself (${[...steps, name].join(" › ")}). ${advice}`;
+	return codePoints(full).length <= MAX_REASON ? full : `That parent page would put “${name}” under itself. ${advice}`;
 }
 
 // ── Routes ───────────────────────────────────────────────────────
@@ -528,13 +548,16 @@ async function routeTree(collection: string): Promise<{ db: D1Database; ct: Coll
 
 /**
  * A collection's nesting: by a `urls` pattern with {pagepath} ("configured"), by its field
- * while the feature is on ("field"), not at all, or "override" when its `urls` pattern has
- * no {pagepath} (that pattern wins, so the field can't nest it).
+ * while the feature is on ("field"), not at all, "override" when its `urls` pattern has
+ * no {pagepath} (that pattern wins, so the field can't nest it), or "pattern" when it has the
+ * field but its own URL pattern has neither {slug} nor {pagepath} (nothing to nest).
  */
-function nestsBy(meta: CollectionMeta, on: boolean): "configured" | "field" | "override" | null {
+export function nestsBy(meta: Pick<CollectionMeta, "collection" | "field" | "urlPattern">, on: boolean): "configured" | "field" | "override" | "pattern" | null {
 	const override = urlOverride(meta.collection);
 	if (override) return patternUsesPagePath(override) ? "configured" : "override";
-	return on && meta.field ? "field" : null;
+	if (!on || !meta.field) return null;
+	// Its own URL pattern needs {slug} (or {pagepath}) for the parents to go in front of ("/{id}" can't nest).
+	return pagePathPattern(meta.urlPattern, meta.collection) ? "field" : "pattern";
 }
 
 export type ImportAction = "set" | "done" | "skip" | "keep";
@@ -543,7 +566,7 @@ export interface ImportRow {
 	slug: string;
 	parentSlug: string;
 	action: ImportAction;
-	/** Why it's skipped or kept (noPage, parentNotPage, otherParent, pendingChanges, loop) or a note for "set" (parentUnpublished). */
+	/** Why it's skipped or kept (noPage, parentNotPage, otherParent, notPublished, pendingChanges, loop) or a note for "set" (parentUnpublished). */
 	reason?: string;
 	entryId?: string;
 	title?: string;
@@ -580,6 +603,11 @@ export async function importPlan(db: D1Database, ct: CollectionTree): Promise<Im
 		Object.assign(row, { parentId: parent.id, parentTitle: titleOf(parent) });
 		if (node.hasParent) {
 			rows.push({ ...row, action: node.parentId === parent.id ? "done" : "skip", ...(node.parentId === parent.id ? {} : { reason: "otherParent" }) });
+			continue;
+		}
+		// The import sets the parent and publishes the page: a draft or a scheduled page would go live.
+		if (!node.published) {
+			rows.push({ ...row, action: "skip", reason: "notPublished" });
 			continue;
 		}
 		if (node.pendingChanges) {
@@ -831,11 +859,20 @@ export function childPagesPack(): PackModule {
 			"content:afterDelete": (event: { id: string; collection: string; permanent: boolean }, ctx: PluginContext) =>
 				changed(ctx, event.collection, event.id, event.permanent ? "A page was deleted" : "A page was moved to the trash"),
 			"content:afterRestore": (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => changed(ctx, event.collection, contentId(event.content), "A page was restored"),
-			// Collections without drafts save their links at once: a published entry's save can move pages too.
-			// (With revisions, a save of a published entry waits in a draft revision: nothing changes until it's published.)
+			// A save of a published page can move pages without a publish:
+			// - a collection without drafts saves its fields, the parent included, at once (no draft revision);
+			// - with drafts, edits wait in a draft revision, but EmDash still writes a new slug to the live row when
+			//   the request has neither `data` nor `references` (a slug-only PUT), pending edits or not. The
+			//   snapshot knows the slug of every page that's nested or has pages under it: a different one settles.
 			"content:afterSave": async (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => {
-				if (event.content?.status !== "published" || event.content.draftRevisionId) return;
-				await changed(ctx, event.collection, contentId(event.content), "A page was saved");
+				const content = event.content;
+				if (content?.status !== "published") return;
+				const id = contentId(content);
+				if (!content.draftRevisionId) return changed(ctx, event.collection, id, "A page was saved");
+				if (!id || typeof content.slug !== "string" || !COLLECTION_SLUG.test(event.collection)) return;
+				const known = (await ctx.kv.get<Snapshot>(snapshotKey(event.collection)).catch(() => null))?.slugs?.[id];
+				if (known === undefined || known === content.slug) return;
+				await changed(ctx, event.collection, id, "A page's slug changed");
 			},
 		},
 		// Runs for every save of the switches: only this module's switch matters.
