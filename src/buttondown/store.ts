@@ -70,10 +70,21 @@ export async function recentRecords(ctx: Pick<PluginContext, "storage">, limit =
 	return page.items.map((i) => readRecord(i.data)).filter((r): r is ButtondownRecord => r !== null);
 }
 
-/** Records in error for over an hour (Alerts' buttondownFailed). */
+/**
+ * Records in error for over an hour (Alerts' buttondownFailed). A failed create or update of a post that has since
+ * been unpublished, trashed or deleted isn't one: there's nothing left to make. A failing delete is.
+ */
 export async function failingRecords(ctx: Pick<PluginContext, "storage">, now = Date.now()): Promise<ButtondownRecord[]> {
 	const store = records(ctx);
 	if (!store) return [];
 	const page = await store.query({ where: { state: "error" }, orderBy: { updatedAt: "desc" }, limit: 50 });
-	return page.items.map((i) => readRecord(i.data)).filter((r): r is ButtondownRecord => Boolean(r && now - (Date.parse(r.errorSince ?? "") || now) >= BUTTONDOWN_LIMITS.alertAfterMs));
+	return page.items
+		.map((i) => readRecord(i.data))
+		.filter((r): r is ButtondownRecord => Boolean(r && now - (Date.parse(r.errorSince ?? "") || now) >= BUTTONDOWN_LIMITS.alertAfterMs))
+		.filter((r) => r.job === "remove" || !(r.unpublished || r.trashed || r.deleted));
+}
+
+/** What a failing record couldn't do, for the alert's title. */
+export function failedJob(r: Pick<ButtondownRecord, "job" | "emailId">): "created" | "updated" | "deleted" {
+	return r.job === "remove" ? "deleted" : r.emailId ? "updated" : "created";
 }

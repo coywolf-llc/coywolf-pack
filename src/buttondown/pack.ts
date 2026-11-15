@@ -20,11 +20,11 @@ import type { PackModule } from "../core/module.js";
 import { readOnlyRoute } from "../core/routes.js";
 import { parseInput } from "../shared.js";
 import { siteHost } from "./body.js";
-import { createButtondownClient } from "./client.js";
+import { ButtondownError, createButtondownClient } from "./client.js";
 import { BUTTONDOWN_FEATURES as F, BUTTONDOWN_HOST, BUTTONDOWN_SETTINGS_KEY, BUTTONDOWN_TASK } from "./keys.js";
 import { loadSettings, normalizeSettings, ruleFor, settingsInput, stampRules } from "./settings.js";
 import { BUTTONDOWN_STORAGE_CONFIG, recentRecords, recordView, records } from "./store.js";
-import { type ManualAction, type SyncDeps, defaultDeps, handleEvent, manualRefusal, matchesRule, readKey, retryDue, runManual } from "./sync.js";
+import { type ManualAction, type SyncDeps, defaultDeps, handleEvent, manualRefusal, matchesRule, readKey, refreshDraft, retryDue, runManual } from "./sync.js";
 import { type EventKind, readRecord, recordId } from "./sync-core.js";
 
 export interface ButtondownOptions {
@@ -49,7 +49,10 @@ export const BUTTONDOWN_FEATURE_DEFS = [
 registerFeatures(BUTTONDOWN_FEATURE_DEFS);
 
 const entryInput = z.object({ collection: z.string().regex(COLLECTION_SLUG), id: z.string().min(1).max(128) });
-const actionInput = entryInput.extend({ action: z.enum(["create", "refresh"]) });
+/** `remote`: also read the entry's email from Buttondown (its status and modification date), for Refresh draft from post. */
+const entryReadInput = entryInput.extend({ remote: z.boolean().optional() });
+/** `seen` (refresh): the email's modification date the admin was shown before confirming. */
+const actionInput = entryInput.extend({ action: z.enum(["create", "refresh"]), seen: z.string().min(1).max(64).optional() });
 
 interface TermOption {
 	slug: string;
@@ -98,9 +101,10 @@ async function pickerData(ctx: PluginContext): Promise<{ collections: Array<{ sl
 	};
 }
 
-export function buttondownPack(options: ButtondownOptions = {}): PackModule {
+/** `overrides`: for tests (the clock, the reads the job makes). */
+export function buttondownPack(options: ButtondownOptions = {}, overrides: Partial<SyncDeps> = {}): PackModule {
 	const database = options.database ?? "DB";
-	const deps: SyncDeps = defaultDeps(database);
+	const deps: SyncDeps = { ...defaultDeps(database), ...overrides };
 
 	const on = (kind: EventKind) => async (event: { id?: unknown; collection?: unknown; content?: Record<string, unknown>; permanent?: unknown }, ctx: PluginContext) => handleEvent(ctx, deps, kind, event);
 
@@ -118,12 +122,35 @@ export function buttondownPack(options: ButtondownOptions = {}): PackModule {
 		};
 	};
 
-	const manual = async (ctx: PluginContext, action: ManualAction, collection: string, id: string) => {
+	const manual = async (ctx: PluginContext, action: ManualAction, collection: string, id: string, seen?: string) => {
 		const record = readRecord(await records(ctx).get(recordId(collection, id)));
-		const refusal = await manualRefusal(ctx, deps, action, collection, id, record);
+		const refusal = await manualRefusal(ctx, deps, action, collection, id, record, seen);
 		if (refusal) throw PluginRouteError.badRequest(refusal);
+		if (action === "refresh") {
+			// One attempt, and only while Buttondown still shows what the admin saw. Nothing is left to try it again.
+			const out = await refreshDraft(ctx, deps, collection, id, seen as string);
+			const notice = out.busy
+				? "Another job is working on this draft, so nothing was written. Try again in a moment."
+				: out.moved
+					? "The draft changed in Buttondown after you confirmed, so nothing was written. Select Refresh draft from post again."
+					: out.record?.state === "error"
+						? `The refresh didn't work: ${out.record.lastError?.message ?? "unknown error"} Nothing overwrites the draft on its own. Select Refresh draft from post to try again.`
+						: undefined;
+			return { record: out.record ? recordView(out.record) : null, ...(notice ? { notice } : {}) };
+		}
 		const after = await runManual(ctx, deps, action, collection, id);
 		return { record: after ? recordView(after) : null };
+	};
+
+	/** The entry's email as Buttondown has it now: its status and modification date, never its content. */
+	const remoteNow = async (ctx: PluginContext, emailId: string, key: string): Promise<{ remote: { status: string; modifiedAt: string | null } | null; remoteError?: string }> => {
+		try {
+			const email = await createButtondownClient({ key, fetch: contextFetch(ctx) }).getEmail(emailId);
+			return { remote: { status: email.status, modifiedAt: email.modificationDate } };
+		} catch (error) {
+			if (error instanceof ButtondownError && error.status === 404) return { remote: { status: "deleted", modifiedAt: null } };
+			return { remote: null, remoteError: "The draft couldn't be read from Buttondown just now. Try again in a moment." };
+		}
 	};
 
 	const routes = {
@@ -167,7 +194,7 @@ export function buttondownPack(options: ButtondownOptions = {}): PackModule {
 			}),
 		),
 
-		/** Which areas the saved key reaches, by status code only (the answers' bodies are never read). */
+		/** Which areas the saved key reaches, by status code only (the answers' bodies are never parsed, kept or returned). */
 		"buttondown/key/check": readOnlyRoute(
 			definePluginRoute({
 				permission: "plugins:manage",
@@ -183,7 +210,10 @@ export function buttondownPack(options: ButtondownOptions = {}): PackModule {
 			}),
 		),
 
-		/** The entry editor panel: the entry's record and what can be done with it. */
+		/**
+		 * The entry editor panel: the entry's record and what can be done with it. With `remote`, also the email's
+		 * status and modification date as Buttondown has them now, which Refresh draft from post sends back as `seen`.
+		 */
 		"buttondown/entry": readOnlyRoute(
 			definePluginRoute({
 				permission: "plugins:manage",
@@ -191,22 +221,30 @@ export function buttondownPack(options: ButtondownOptions = {}): PackModule {
 				request: { body: "json" },
 				handler: async (ctx) => {
 					await requireFeature(ctx, F.main);
-					const { collection, id } = parseInput(entryInput, ctx.input);
+					const { collection, id, remote } = parseInput(entryReadInput, ctx.input);
 					const settings = await loadSettings(ctx);
 					const rule = ruleFor(settings, collection);
 					if (!rule) return { covered: false };
-					const [record, item, key] = await Promise.all([records(ctx).get(recordId(collection, id)).then(readRecord), ctx.content?.get(collection, id).catch(() => null), readKey(ctx)]);
+					// A read that fails isn't "not published" or "doesn't match": the panel says it couldn't read (unread).
+					let unread = false;
+					const failedRead = () => {
+						unread = true;
+						return null;
+					};
+					const [record, item, key] = await Promise.all([records(ctx).get(recordId(collection, id)).then(readRecord), ctx.content ? ctx.content.get(collection, id).catch(failedRead) : failedRead(), readKey(ctx)]);
 					const published = (item as { status?: string } | null)?.status === "published";
-					const matches = published ? await matchesRule(ctx, deps, rule, collection, id).catch(() => false) : false;
+					const matches = published ? ((await matchesRule(ctx, deps, rule, collection, id).catch(failedRead)) ?? false) : false;
 					const state = record?.state ?? null;
 					return {
 						covered: true,
 						published,
 						matches,
+						unread,
+						...(remote && record?.emailId && key.key ? await remoteNow(ctx, record.emailId, key.key) : {}),
 						keySaved: Boolean(key.key),
 						record: record ? recordView(record) : null,
 						canCreate: published && matches && (!record || state === "gone" || state === "stopped" || state === "removed" || (state === "error" && !record.emailId)),
-						canRefresh: published && matches && (state === "draft" || state === "edited"),
+						canRefresh: published && matches && Boolean(record?.emailId) && (state === "draft" || state === "edited"),
 						canRetry: state === "error",
 					};
 				},
@@ -221,8 +259,8 @@ export function buttondownPack(options: ButtondownOptions = {}): PackModule {
 				request: { body: "json" },
 				handler: async (ctx) => {
 					await requireFeature(ctx, F.main);
-					const { collection, id, action } = parseInput(actionInput, ctx.input);
-					return manual(ctx, action, collection, id);
+					const { collection, id, action, seen } = parseInput(actionInput, ctx.input);
+					return manual(ctx, action, collection, id, seen);
 				},
 			}),
 		),

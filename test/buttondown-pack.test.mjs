@@ -165,6 +165,74 @@ test("the entry route: not covered without a rule; Create draft now refused for 
 	assert.equal(ctx.fake.calls.length, 0);
 });
 
+test("Refresh draft from post through the routes: the date the admin saw goes back with it, it writes only while that's current, and a failure is never tried again as an overwrite", async () => {
+	let clock = Date.parse("2026-11-15T12:00:00Z");
+	const pack = buttondownPack({}, { now: () => clock, terms: async () => ["n"], termParents: async () => new Map(), postUrl: async () => "https://coywolf.com/newsletter/one/", files: async () => new Map(), background: () => {} });
+	const { routes } = pack;
+	const rules = { buttondownSettings: { rules: [{ collection: "posts", taxonomy: "category", terms: ["n"], since: "2026-11-01T00:00:00.000Z" }] } };
+	const base = context({ settings: { ...rules, features: { _defaults036: true, buttondown: true, "buttondown.updates": true } } });
+	const item = { id: "1", slug: "one", status: "published", publishedAt: "2026-11-15T10:00:00.000Z", data: { title: "One", content: [{ _type: "block", _key: "b", style: "normal", markDefs: [], children: [{ _type: "span", _key: "s", text: "First.", marks: [] }] }] } };
+	base.content = { get: async () => structuredClone(item) };
+	base.schema = { ...base.schema, getCollection: async (slug) => ({ slug, label: "Posts", titleField: "title", fields: [{ slug: "title", type: "string", sortOrder: 0 }, { slug: "content", type: "portableText", sortOrder: 1 }] }) };
+	const call = (route, input) => routes[`buttondown/${route}`].handler({ ...base, input: { collection: "posts", id: "1", ...input } });
+	const fake = base.fake;
+
+	assert.equal((await call("sync", { action: "create" })).record.state, "draft");
+	const id = fake.drafts()[0].id;
+	// Edited in Buttondown. The panel reads the email's status and date (nothing else of it) before it asks.
+	fake.edit(id, { body: "Mine" });
+	const read = await call("entry", { remote: true });
+	assert.deepEqual(read.remote, { status: "draft", modifiedAt: fake.emails.get(id).modification_date });
+	assert.equal(read.canRefresh, true);
+	assert.ok(!JSON.stringify(read).includes("Mine") && !JSON.stringify(read).includes(FAKE_KEY));
+	assert.ok(!("remote" in (await call("entry", {}))), "only when asked");
+	// No date: refused. A date that's no longer current: nothing written, and the answer says so.
+	await assert.rejects(call("sync", { action: "refresh" }), /Select Refresh draft from post again/);
+	fake.edit(id, { body: "Mine, changed again" });
+	const stale = await call("sync", { action: "refresh", seen: read.remote.modifiedAt });
+	assert.match(stale.notice, /changed in Buttondown after you confirmed, so nothing was written/);
+	assert.equal(fake.count("PATCH"), 0);
+	assert.equal(fake.emails.get(id).body, "Mine, changed again");
+	// The write fails: the answer says it isn't tried again as an overwrite, and it isn't.
+	const seen = (await call("entry", { remote: true })).remote.modifiedAt;
+	fake.fail({ method: "PATCH" }, { status: 503 });
+	fake.allowOverwrite(id);
+	const failed = await call("sync", { action: "refresh", seen });
+	assert.equal(failed.record.state, "error");
+	assert.match(failed.notice, /Nothing overwrites the draft on its own/);
+	assert.equal(fake.emails.get(id).body, "Mine, changed again", "the failed write changed nothing");
+	fake.edit(id, { body: "Fixed by hand after the failure" });
+	clock += 6 * 60_000;
+	await pack.tasks[0].handler(base);
+	assert.equal(fake.emails.get(id).body, "Fixed by hand after the failure");
+	const after = core.readRecord(await base.storage[BUTTONDOWN_STORAGE].get("posts:1"));
+	assert.equal(after.state, "edited");
+	// Asked again, with what Buttondown shows now: written, still a draft.
+	const again = (await call("entry", { remote: true })).remote.modifiedAt;
+	fake.allowOverwrite(id);
+	const done = await call("sync", { action: "refresh", seen: again });
+	assert.equal(done.record.state, "draft");
+	assert.equal(done.notice, undefined);
+	assert.match(fake.emails.get(id).body, /First\./);
+	assert.equal(fake.emails.get(id).status, "draft");
+	// A scheduled email: its status comes back, so the panel doesn't ask at all; and the route refuses anyway.
+	fake.setStatus(id, "scheduled");
+	assert.equal((await call("entry", { remote: true })).remote.status, "scheduled");
+	fake.emails.delete(id);
+	assert.deepEqual((await call("entry", { remote: true })).remote, { status: "deleted", modifiedAt: null });
+	assert.deepEqual(fake.violations, []);
+});
+
+test("the entry route says when the post can't be read, instead of \"not published\"", async () => {
+	const { routes } = buttondownPack();
+	const ctx = context({ input: { collection: "posts", id: "1" }, settings: { buttondownSettings: { rules: [{ collection: "posts", taxonomy: "category", terms: ["n"], since: "2026-11-01T00:00:00.000Z" }] } } });
+	ctx.content = { get: async () => { throw new Error("D1 down"); } };
+	const entry = await routes["buttondown/entry"].handler(ctx);
+	assert.equal(entry.unread, true);
+	assert.equal(entry.canCreate, false);
+	await assert.rejects(routes["buttondown/sync"].handler({ ...ctx, input: { collection: "posts", id: "1", action: "create" } }), /couldn't be read/);
+});
+
 test("a record as the admin sees it: plain-words state and a link to the draft in Buttondown, nothing internal", () => {
 	const r = { ...core.newRecord("posts", "1", 0), state: "edited", job: null, emailId: "em_0000000000000000000000000a", unpublished: true, hash: "h", claimToken: "t", authFingerprint: "f", remoteModifiedAt: "m" };
 	const view = recordView(r);
@@ -207,6 +275,27 @@ test("Alerts: buttondownFailed lists records in error for over an hour, when But
 	await alerts.checkAlerts(ctx, NOW + 86_400_000);
 	assert.equal(sent.length, 2, "the next day, while they still fail");
 	assert.match(sent[1].subject, /2 Buttondown drafts couldn't be created/);
+	// The title says what failed: a delete or an update isn't "couldn't be created".
+	const { failedJob } = await import("../src/buttondown/store.ts");
+	assert.equal(failedJob({ job: "remove", emailId: "em_x" }), "deleted");
+	assert.equal(failedJob({ job: "sync", emailId: "em_x" }), "updated");
+	assert.equal(failedJob({ job: "sync", emailId: null }), "created");
+	const titles = async (records) => {
+		const s = { [BUTTONDOWN_STORAGE]: fakeCollection() };
+		for (const r of records) await s[BUTTONDOWN_STORAGE].put(`posts:${r.entryId}`, r);
+		const out = [];
+		await alerts.checkAlerts({ ...ctx, kv: fakeKv(), storage: s, email: { send: async (m) => void out.push(m) } }, NOW);
+		return out.map((m) => m.subject).join(" | ");
+	};
+	const old = NOW - 2 * 3600_000;
+	assert.match(await titles([{ ...failing("d", old), job: "remove", emailId: "em_x", unpublished: true }]), /A Buttondown draft couldn't be deleted/);
+	assert.match(await titles([{ ...failing("u", old), emailId: "em_x" }]), /A Buttondown draft couldn't be updated/);
+	assert.match(await titles([{ ...failing("u", old), emailId: "em_x" }, failing("c", old)]), /2 Buttondown drafts couldn't be created, updated or deleted/);
+	// A failed create of a post that's unpublished, trashed or deleted since: not reported.
+	const gone = { [BUTTONDOWN_STORAGE]: fakeCollection() };
+	await gone[BUTTONDOWN_STORAGE].put("posts:t", { ...failing("t", old), trashed: true });
+	await gone[BUTTONDOWN_STORAGE].put("posts:r", { ...failing("r", old), job: "remove", emailId: "em_x", trashed: true });
+	assert.deepEqual((await failingRecords({ storage: gone }, NOW)).map((r) => r.entryId), ["r"]);
 	// Off: not gathered.
 	const off = { ...ctx, settings: fakeSettings({ features: { _defaults036: true, alerts: true, buttondown: false } }) };
 	assert.equal((await alerts.checkAlerts(off, NOW + 2 * 86_400_000)).issues, 0);

@@ -17,7 +17,7 @@ When a post with a chosen category is published, the Pack makes one [Buttondown]
    - Set **Emails and drafts** to **Write**, and every other area to **None** (**Sending** included). Save it.
 2. **Save the key** as **Buttondown API key** on the plugin's Settings page (`https://coywolf.com/_emdash/admin/plugins-manager/coywolf-pack/settings`). It's stored encrypted, and no page shows it again. The field's guide has the same steps.
 3. **Turn on Buttondown Drafts** on the Features page. Turn on **Update drafts** too if you want republished posts to update their drafts.
-4. **Check the key**: on the Buttondown Drafts page, select **Check key**. It should say the key works, can read and write drafts, and can't read your newsletters or subscribers.
+4. **Check the key**: on the Buttondown Drafts page, select **Check key**. It should say the key works, can read drafts, and can't read your newsletters or subscribers. The check only reads. The first draft the Pack makes shows the key can write.
 5. **Add a rule** under **When to create a draft**: a collection, a taxonomy and its terms. On coywolf.com that's **Posts**, **Categories**, **Coywolf Newsletter**. Save.
 
 From then on, publishing a post with one of the rule's terms (or a child term of one) makes its draft within a few seconds. A scheduled post gets its draft when it goes live, on the site's hourly cron tick.
@@ -26,7 +26,8 @@ From then on, publishing a post with one of the rule's terms (or a child term of
 
 - One rule per collection, up to 10. A rule needs at least one term.
 - A post matches when it has one of the rule's terms, or a child term of one (as term feeds count them).
-- **Only new posts.** Saving a new or changed rule stamps it with the time (its `since`). Only posts first published at or after that time get a draft on their own. So republishing an old post, such as "Why Claude has my attention", never makes a draft. **Create draft now** in the entry editor makes one for any published post that matches.
+- **Only new posts.** Saving a new or changed rule stamps it with the time (its `since`). Only posts whose publish date is at or after that time get a draft on their own. So republishing an old post, such as "Why Claude has my attention", never makes a draft. **Create draft now** in the entry editor makes one for any published post that matches.
+- The Pack reads the publish date EmDash shows for the post. If you change an old post's publish date to a time after the rule was saved and publish it again, it counts as new and gets a draft. A new post you give a publish date from before the rule gets none on its own.
 - Unpublishing keeps a post's first publish date, so a post that was unpublished and published again still counts as new.
 - The footer link ("Read it on coywolf.com") is on by default. Turn it off on the page.
 
@@ -34,12 +35,12 @@ From then on, publishing a post with one of the rule's terms (or a child term of
 
 The Pack needs only **Emails and drafts → Write**. With **Sending → None**, a key that leaks can't send or schedule an email.
 
-**Check key** makes four reads and looks only at their status codes. It never reads the answers' bodies.
+**Check key** makes four reads and looks only at their status codes. It never parses, keeps or returns the answers. EmDash's fetch does download each answer into the Worker's memory before the Pack can drop it. With a key that's too broad, that includes the newsletter and subscriber lists, which is one more reason to replace such a key.
 
 | Read | Expected | What it means |
 | --- | --- | --- |
 | `GET /ping` | 200 | The key works |
-| The draft list | 200 | It can read and write drafts |
+| The draft list | 200 | It can read drafts. A read can't show that it can write: the first draft the Pack makes shows that |
 | `GET /newsletters` | 401 or 403 | It can't read your newsletters (or their keys) |
 | `GET /subscribers` | 401 or 403 | It can't read your subscribers |
 
@@ -63,16 +64,38 @@ The key is read only in the Worker. It's never logged, never returned to a page,
 | Republish, the email was scheduled or sent | Leaves it alone. It's checked again on the next event |
 | Republish, the draft was edited in Buttondown | Leaves it alone. **Refresh draft from post** overwrites it |
 | Republish, the draft was deleted in Buttondown | Leaves it deleted. **Create draft now** makes a new one |
+| A create is retried, and Buttondown already has the post's email as a draft nobody changed | Uses that draft. No second one |
+| A create is retried, and that draft was edited in Buttondown | Keeps it as it is and marks it "Edited in Buttondown" |
+| A create is retried, and that email was scheduled or sent | Points at that email and leaves it alone. No second draft |
 | The category is removed, then the post is saved or published | Stops watching the post. The draft is left as it is |
 | Unpublish or trash, the draft is untouched | Deletes the draft (decision D2). Publishing again makes a new one |
 | Unpublish or trash, the draft was edited in Buttondown | Keeps the draft. The panel says "Kept because you edited it in Buttondown" |
 | Unpublish or trash, the email was scheduled or sent | Leaves it alone |
+| Unpublish or trash, the draft was never made (the create kept failing) | Stops trying and stops alerting. Publishing again tries again |
 | Restore from trash | Nothing: EmDash restores the post as a draft. Publish it to make a new draft |
 | Permanent delete | Deletes the draft if it's untouched, then stops watching |
 | Publish again before a failed delete is retried | The delete is cancelled and the draft is updated instead |
 | A category added or removed on its own | Nothing at that moment (see [Notes](#notes)). The next publish or save decides |
 
 "Untouched" means Buttondown's own read, right before the change, shows the email as a draft, with the `modification_date` the Pack recorded after its own last write, and the Pack's key in its metadata.
+
+Only Buttondown's own times decide this:
+
+- For a draft the Pack wrote, the `modification_date` Buttondown returned for that write.
+- For a draft the Pack finds by its key (a create whose answer was lost), a `modification_date` within a second of its `creation_date`.
+- Never the hash in the Pack's metadata. An edit in Buttondown doesn't change that hash, so it can't show that nobody edited the draft.
+
+A draft the Pack finds already changed is recorded with no date of the Pack's own. The Pack then never updates or deletes it, unless you select **Refresh draft from post**.
+
+**Refresh draft from post** is one attempt:
+
+1. The panel reads the draft's status and `modification_date` from Buttondown.
+2. You confirm.
+3. The Pack writes only if Buttondown still shows that exact `modification_date`. If the draft changed in between, nothing is written and the panel says so.
+
+If the write fails, it is over. No retry, republish or hourly run overwrites the draft because of it. Select **Refresh draft from post** to try again.
+
+**A read that fails is never a "no".** If the site can't read the post, its terms, the rules, the collection's fields or its own URL, the Pack doesn't treat that as "not published" or "doesn't match". Nothing is deleted, skipped or stopped. The step fails with "The site couldn't read…" and is tried again like a call that got no answer.
 
 ## The email
 
@@ -93,14 +116,14 @@ The body:
 - Starts with `<!-- buttondown-editor-mode: plaintext -->`, so Buttondown reads it as Markdown. Its own guess isn't reliable.
 - Has no frontmatter. Buttondown refuses a body that starts with it.
 - Holds each Portable Text field of the collection, in field order, as the Markdown versions in [Discovery](discovery.md) do, with links made absolute.
-- Ends with a rule and "Read it on coywolf.com", linking to the post (unless you turn that off).
+- Ends with a rule and "Read it on coywolf.com", linking to the post (unless you turn that off). A post with no content gets the link alone.
 
 **Images.** Media-library images are resized to 1200 px on the [media host](images.md#setting-up-a-media-host):
 
 - JPEG, PNG and GIF keep their format.
-- WebP, HEIC and SVG become JPEG, which every email app shows.
-- AVIF can't be resized, and a site without a media host has nothing to resize with: those use the original file, with a warning.
-- An image from another site is used as it is, with a warning when it's WebP or AVIF.
+- WebP and HEIC become JPEG, which every email app shows.
+- AVIF and SVG can't be resized (Cloudflare serves an SVG as it is and ignores the resize options), and a site without a media host has nothing to resize with: those use the original file, with a warning.
+- An image from another site is used as it is, with a warning when it's WebP, AVIF or SVG.
 
 **Blocks.**
 
@@ -119,14 +142,15 @@ The body:
 **Warnings** show in the panel and on the page. They don't stop the draft. You see one when:
 
 - a block can't be shown in email;
-- an image can't be resized, or is WebP or AVIF from another site;
+- an image can't be resized, or is WebP, AVIF or SVG from another site;
 - the post contains template code (`{{`, `{%` or `{#`). Buttondown runs Django templating when it sends. Check the preview in Buttondown;
 - Buttondown has more than one draft for the post (the Pack uses the oldest; delete the others).
 
 ## What the Pack never does
 
 - Send, schedule or publish an email. Its API client has no such call, and a guard in front of every call refuses a `send-draft` or `publish` path, a status other than `draft`, and Buttondown's `X-Buttondown-Live-Dangerously` header.
-- Change an email that isn't a draft, or one edited in Buttondown (unless you select **Refresh draft from post**, and then only while it's a draft).
+- Change an email that isn't a draft, or one edited in Buttondown (unless you select **Refresh draft from post**, and then only while it's a draft that still shows the `modification_date` you were shown).
+- Make a second email for a post whose email was already scheduled or sent.
 - Delete anything but an untouched draft of a post that was unpublished, trashed or deleted. Buttondown's docs say a delete also removes the email from the archive and cancels its scheduled sends, so the Pack reads the email right before every delete and deletes only a draft.
 - Call any host but `api.buttondown.com`, read subscribers, or touch automations or other newsletters.
 - Log the key, the subject, the body or the description. Logs name the entry, the email id, the state and the status code.
@@ -136,27 +160,34 @@ The body:
 | Answer | What happens |
 | --- | --- |
 | 429 | Waits out a short `Retry-After` (up to 10 seconds) and tries once more. Else the hourly task tries again after `Retry-After`, at least 5 minutes later |
-| 5xx, no answer, timeout | Tried again after 5 minutes, 15 minutes, 1 hour, 3 hours, 6 hours, then every 6 hours, for 3 days |
-| 401, 403, no key | Not tried again on its own. Once the saved key changes, the hourly task tries again. **Retry** tries now |
+| 5xx, no answer, timeout, a read on the site that failed | Tried again after 5 minutes, 15 minutes, 1 hour, 3 hours, 6 hours, then every 6 hours, for 3 days |
+| 401, no key | Not tried again on its own. Once a different key is saved, the hourly task tries again. **Retry** tries now |
+| 403 | Tried once more an hour later, because Buttondown also answers 403 when it throttles. Then the same as 401 |
 | 400, 422 | Shown with Buttondown's error code and message. **Retry** tries again |
+| 404 on an update | The draft was deleted in Buttondown: recorded as deleted there |
 
-Every retry of a create looks in Buttondown first, by the post's key. So a create that reached Buttondown but whose answer was lost is adopted, not made twice.
+Saving the same key again doesn't count as a different key. After you fix a key's permissions in Buttondown, select **Retry**.
+
+Every retry of a create looks in Buttondown first, by the post's key, among the emails made through the API in any status. So a create that reached Buttondown but whose answer was lost is found, not made twice, even if you scheduled or sent it since.
 
 The hourly task (`buttondown-retry`) runs only while Buttondown Drafts is on. Each run it:
 
 - tries again up to five records that are due;
-- finishes a job that was dropped (a record waiting for 5 minutes);
+- finishes a job that was dropped or cut off (every queued job has a time, 5 minutes on, at which the task takes it over);
+- finishes a job that ran out of passes (more than three changes to the post while one job ran);
 - removes finished records (left, deleted, stopped, removed) older than 180 days.
 
 With nothing to do, it costs four indexed queries an hour.
 
-**Alerts.** With [Alerts & Digest](alerts.md) on, the **Buttondown draft failed** alert emails you when a draft has been failing for over an hour. At most one email a day while drafts keep failing.
+**Alerts.** With [Alerts & Digest](alerts.md) on, the **Buttondown draft failed** alert emails you when a draft has been failing for over an hour. At most one email a day while drafts keep failing. The email says whether the draft couldn't be created, updated or deleted. A failed create or update of a post you have since unpublished, trashed or deleted isn't reported.
 
 ## No duplicates, no lost drafts
 
 - Two Worker isolates, or a hook that fires twice: each job claims the post's record first (compare-and-set), and only one claim wins. The other marks the record, and the winner checks once more when it's done.
 - A publish fires two hooks (after save and after publish). One job serves both.
-- A job that was cut off: its record is already waiting, and the hourly task finishes it. A claim older than 2 minutes is taken over.
+- A job that was cut off: its record already has a time for the hourly task, which finishes it. A claim older than 2 minutes is taken over.
+- A create whose answer was lost: the retry finds the email by the post's key, whatever its status, and uses it.
+- A publish while the post's draft is being deleted: the job checks the post once more when the delete is done, and makes a new draft if the post is live.
 - The one gap left: a job that runs past its 2-minute claim while the job that takes over doesn't see its just-made draft in Buttondown's list yet. The result would be a second draft, shown as a warning on the page and in the panel (with its email id). Never a send.
 
 ## In the admin
@@ -170,8 +201,8 @@ The **Buttondown Drafts** page has:
 
 The entry editor's **Buttondown** section (admins only) shows the post's draft in plain words, its warnings and **Open in Buttondown**. It offers:
 
-- **Create draft now**, for a published post that matches and has no draft (or whose draft was deleted);
-- **Refresh draft from post**, which asks first: it overwrites changes made in Buttondown, and still refuses an email that isn't a draft;
+- **Create draft now**, for a published post that matches and has no draft (or whose draft was deleted). For a post the Pack stopped watching, it checks the draft the post already has and makes no second one;
+- **Refresh draft from post**, which reads the draft from Buttondown and asks first: it overwrites changes made in Buttondown, only if the draft hasn't changed again since you were asked, and still refuses an email that isn't a draft;
 - **Retry**, after a failure.
 
 **Open in Buttondown** links to `https://buttondown.com/emails/<email id>`.
@@ -181,6 +212,9 @@ The entry editor's **Buttondown** section (admins only) shows the post's draft i
 - **Category changes alone do nothing.** EmDash's admin saves a post's categories through a route that fires no plugin hook. Adding the newsletter category to a published post makes its draft on the next publish or save (if it's new enough), or with **Create draft now**.
 - **Turning it on** takes effect at once in the isolate that saved, and within five minutes in others, like every switch.
 - **Rendering.** Buttondown renders the Markdown when it sends. Tables, nested lists and code blocks look as Buttondown draws them, and the preview can't be read through its API. Preview each draft before sending.
-- **Records.** One plugin-storage document per post (`buttondownEmails`, id `<collection>:<entry id>`): the state, the email id, the hash of what was written, Buttondown's `modification_date` after the Pack's last write, warnings and the last error. Never the body or the key.
+- **Records.** One plugin-storage document per post (`buttondownEmails`, id `<collection>:<entry id>`): the state, the email id, the hash of what was written, Buttondown's `modification_date` after the Pack's last write, warnings and the last error. Never the body or the key. A record never holds an order to overwrite: **Refresh draft from post** lives only in the request that asked.
+- **Cost of the hooks.** A publish or save in a collection without a rule reads nothing. An unpublish, trash, delete or restore reads the entry's record once, in any collection, because a record can outlive its rule.
+- **An update whose answer was lost.** If the Pack's update reached Buttondown but the answer didn't come back, the Pack doesn't know the draft's new `modification_date`. The retry then sees a draft that changed, and marks it "Edited in Buttondown" although the change was the Pack's own. Nothing is lost. Select **Refresh draft from post** to take it back.
+- **The site URL.** The post's key holds the site's host. If EmDash can't tell the Pack the site's URL, the job fails and is tried again. It never makes a key from a missing URL.
 - **Option.** `coywolfPlugin({ buttondown: { database: "DB" } })` names the D1 binding (for the post's terms and File Downloads' files). `buttondown: false` leaves the module out.
 - **Cost.** Drafts made through Buttondown's API need no paid add-on (RSS-to-email isn't used). Each image is one Cloudflare image transformation a month, well inside the free 5,000.

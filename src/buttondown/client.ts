@@ -2,7 +2,7 @@
  * The Buttondown API client: one function per call the module may make, and
  * nothing else. There's no generic request export.
  *
- * - ping, getEmail, listApiDrafts, createDraft, updateDraft, deleteDraft, checkKey.
+ * - ping, getEmail, listApiEmails, createDraft, updateDraft, deleteDraft, checkKey.
  * - Every create sends `status: "draft"` (Buttondown's documented default is
  *   still `about_to_send`, so the Pack never relies on it).
  * - A guard inside the one sender refuses anything else before it reaches the
@@ -273,10 +273,13 @@ export function createButtondownClient(options: ButtondownClientOptions) {
 
 		getEmail,
 
-		/** Drafts made through the API, newest first, without their bodies (one page). */
-		async listApiDrafts(page = 1): Promise<{ results: ButtondownEmail[]; hasMore: boolean }> {
+		/**
+		 * Emails made through the API, in any status, newest first, without their bodies (one page). Not only drafts: a
+		 * draft the Pack made may have been scheduled or sent since, and the Pack has to find that one too.
+		 */
+		async listApiEmails(page = 1): Promise<{ results: ButtondownEmail[]; hasMore: boolean }> {
 			const n = Math.max(1, Math.min(Math.trunc(page), 100));
-			const { body } = await send("GET", `/emails?status=draft&source=api&excluded_fields=body&ordering=-creation_date&page=${n}`);
+			const { body } = await send("GET", `/emails?source=api&excluded_fields=body&ordering=-creation_date&page=${n}`);
 			const b = (body ?? {}) as { results?: unknown; next?: unknown };
 			const results = Array.isArray(b.results) ? b.results.map(toEmail).filter((e): e is ButtondownEmail => e !== null) : [];
 			return { results, hasMore: typeof b.next === "string" && b.next.length > 0 };

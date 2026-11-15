@@ -146,7 +146,7 @@ test("Check key: four lines from the status codes, and a red warning when the ke
 	try {
 		await page.click("Check key");
 		assert.match(page.text(), /The key works\./);
-		assert.match(page.text(), /It can read and write drafts\./);
+		assert.match(page.text(), /It can read drafts\. The first draft the Pack makes shows it can write them\./);
 		assert.match(page.text(), /It can't read your newsletters or their keys\./);
 		assert.match(page.text(), /It can't read your subscribers\./);
 		assert.doesNotMatch(page.text(), /can do more than it needs/);
@@ -215,26 +215,54 @@ test("recent drafts: state badges, Open in Buttondown, and Retry for a failed on
 
 test("the panel: the draft's state and link; Create draft now; Refresh asks first and sends only after Refresh draft", async () => {
 	let entry = { covered: true, published: true, matches: true, keySaved: true, record: null, canCreate: true, canRefresh: false, canRetry: false };
+	const SEEN = "2026-11-15T12:30:00.000Z";
+	let remote = { status: "draft", modifiedAt: SEEN };
+	let remoteError;
 	const calls = server({
-		entry: () => entry,
+		// With `remote`, the email as Buttondown has it now (what Refresh sends back as `seen`).
+		entry: (body) => (body.remote ? { ...entry, remote, ...(remoteError ? { remoteError } : {}) } : entry),
 		sync: (body) => {
 			entry = { ...entry, record: view(), canCreate: false, canRefresh: true };
+			if (body.action === "refresh" && body.seen !== SEEN) return { record: view({ state: "edited", text: "Edited in Buttondown, so the Pack doesn't change it." }), notice: "The draft changed in Buttondown after you confirmed, so nothing was written. Select Refresh draft from post again." };
 			return { record: view({ text: body.action === "refresh" ? "Refreshed." : "Draft in Buttondown." }) };
 		},
 	});
+	const syncs = () => calls.filter((c) => c.url.endsWith("/buttondown/sync"));
 	const panel = await render(h(ButtondownPanel, { collection: "posts", entry: { id: "P1", updatedAt: "u1" } }));
 	try {
-		assert.match(panel.text(), /published before the rule was saved: Create draft now makes one/);
+		assert.match(panel.text(), /No draft yet\. Create draft now makes one\./);
+		assert.ok(!/published before the rule/.test(panel.text()), "no guess at why there's none");
 		await panel.click("Create draft now");
 		assert.deepEqual(calls.find((c) => c.url.endsWith("/buttondown/sync")).body, { collection: "posts", id: "P1", action: "create" });
 		assert.match(panel.text(), /Draft in Buttondown\./);
 		assert.ok([...panel.main.querySelectorAll("a")].some((a) => a.textContent.includes("Open in Buttondown")));
+		// Refresh reads the draft from Buttondown first; when that fails, or it isn't a draft, nothing is asked or sent.
+		remote = null;
+		remoteError = "The draft couldn't be read from Buttondown just now. Try again in a moment.";
 		await panel.click("Refresh draft from post");
+		assert.match(panel.text(), /couldn't be read from Buttondown just now/);
+		assert.ok(!/Refresh the draft from the post\?/.test(window.document.body.textContent));
+		remoteError = undefined;
+		remote = { status: "scheduled", modifiedAt: SEEN };
+		await panel.click("Refresh draft from post");
+		assert.match(panel.text(), /isn't a draft in Buttondown any more/);
+		assert.equal(syncs().length, 1);
+		// A draft: the confirm, then the write carries the modification date that was read (seen).
+		remote = { status: "draft", modifiedAt: SEEN };
+		await panel.click("Refresh draft from post");
+		assert.deepEqual(calls.filter((c) => c.url.endsWith("/buttondown/entry") && c.body.remote).at(-1).body, { collection: "posts", id: "P1", remote: true });
 		assert.match(window.document.body.textContent, /Refresh the draft from the post\?/);
-		assert.equal(calls.filter((c) => c.url.endsWith("/buttondown/sync")).length, 1, "nothing sent before the confirm");
+		assert.match(window.document.body.textContent, /If it changes again before the Pack writes, nothing is overwritten/);
+		assert.equal(syncs().length, 1, "nothing sent before the confirm");
 		await panel.click("Refresh draft");
-		const refresh = calls.filter((c) => c.url.endsWith("/buttondown/sync"))[1];
-		assert.deepEqual(refresh.body, { collection: "posts", id: "P1", action: "refresh" });
+		assert.deepEqual(syncs()[1].body, { collection: "posts", id: "P1", action: "refresh", seen: SEEN });
+		assert.match(panel.text(), /Refreshed\./);
+		// The server found the draft changed since: the panel says nothing was written.
+		remote = { status: "draft", modifiedAt: "2026-11-15T12:31:00.000Z" };
+		await panel.click("Refresh draft from post");
+		await panel.click("Refresh draft");
+		assert.equal(syncs()[2].body.seen, "2026-11-15T12:31:00.000Z");
+		assert.match(panel.text(), /changed in Buttondown after you confirmed, so nothing was written/);
 	} finally {
 		await panel.unmount();
 	}

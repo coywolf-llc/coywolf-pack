@@ -27,7 +27,7 @@ import { ArrowClockwise, ArrowSquareOut, ArrowsClockwise, Copy, EnvelopeSimple }
 import * as React from "react";
 
 import { PACK_API, apiPost, errorText } from "./api.js";
-import { STATE_BADGE, type RecordView, badgeLabel, buttondownEntry, buttondownPanelVisible, timeAgo } from "./buttondown-core.js";
+import { type ButtondownEntry, STATE_BADGE, type RecordView, badgeLabel, buttondownEntry, buttondownPanelVisible, timeAgo } from "./buttondown-core.js";
 import { useConfirm } from "./confirm-dialog.js";
 import { EDITOR_PANELS, LIST_COLUMNS, extensionShows } from "./extensions.js";
 import { AdminLink, PackLink, WarningBadge } from "./page.js";
@@ -466,10 +466,32 @@ export function ButtondownPanel(props: PanelProps) {
 	if (!data.covered) return <Muted>No Buttondown rule covers this collection. Add one on the <PackLink page="/buttondown">Buttondown Drafts page</PackLink>.</Muted>;
 	const record: RecordView | null = data.record ?? null;
 	const run = async (action: "create" | "refresh" | "retry") => {
+		// Refresh overwrites only the draft as you saw it: its modification date in Buttondown is read first and sent
+		// along (seen). If the draft changes there before the write, nothing is written.
+		let seen: string | undefined;
 		if (action === "refresh") {
+			setPending("refresh");
+			setNotice(undefined);
+			try {
+				const now = await buttondownPost<ButtondownEntry>("entry", { collection, id: entry.id, remote: true }, "Couldn't read the draft from Buttondown");
+				if (!now.remote) {
+					setNotice(now.remoteError ?? "The draft couldn't be read from Buttondown just now. Try again in a moment.");
+					return;
+				}
+				if (now.remote.status !== "draft" || !now.remote.modifiedAt) {
+					setNotice(now.remote.status === "deleted" ? "The draft was deleted in Buttondown, so there's nothing to refresh." : "The email isn't a draft in Buttondown any more, so the Pack leaves it alone.");
+					return;
+				}
+				seen = now.remote.modifiedAt;
+			} catch (cause) {
+				setNotice(errorText(cause, "Couldn't read the draft from Buttondown"));
+				return;
+			} finally {
+				setPending(undefined);
+			}
 			const ok = await confirm({
 				title: "Refresh the draft from the post?",
-				description: "This writes the post as it's published now over the draft in Buttondown, including any changes made there. It still won't touch an email that isn't a draft.",
+				description: `This writes the post as it's published now over the draft in Buttondown, including any changes made there. The draft was last changed in Buttondown ${timeAgo(seen) || "a while ago"}. If it changes again before the Pack writes, nothing is overwritten. It still won't touch an email that isn't a draft.`,
 				confirmLabel: "Refresh draft",
 			});
 			if (!ok) return;
@@ -477,8 +499,8 @@ export function ButtondownPanel(props: PanelProps) {
 		setPending(action);
 		setNotice(undefined);
 		try {
-			const result = await buttondownPost<{ record: RecordView | null }>(action === "retry" ? "retry" : "sync", action === "retry" ? { collection, id: entry.id } : { collection, id: entry.id, action }, "That didn't work");
-			setNotice(result.record?.state === "error" ? `Didn't work: ${result.record.lastError?.message ?? result.record.text}` : (result.record?.text ?? "Done."));
+			const result = await buttondownPost<{ record: RecordView | null; notice?: string }>(action === "retry" ? "retry" : "sync", action === "retry" ? { collection, id: entry.id } : action === "refresh" ? { collection, id: entry.id, action, seen } : { collection, id: entry.id, action }, "That didn't work");
+			setNotice(result.notice ?? (result.record?.state === "error" ? `Didn't work: ${result.record.lastError?.message ?? result.record.text}` : (result.record?.text ?? "Done.")));
 		} catch (cause) {
 			setNotice(errorText(cause, "That didn't work"));
 		} finally {
@@ -497,7 +519,7 @@ export function ButtondownPanel(props: PanelProps) {
 					<p className="text-sm">{record.text}</p>
 				</div>
 			) : (
-				<Muted>{data.published ? (data.matches ? "No draft yet. It was published before the rule was saved: Create draft now makes one." : "This post doesn't have one of the rule's terms, so it gets no draft.") : "Publish the post to make its draft in Buttondown."}</Muted>
+				<Muted>{data.unread ? "The post couldn't be read just now. Reload the page to try again." : data.published ? (data.matches ? "No draft yet. Create draft now makes one." : "This post doesn't have one of the rule's terms, so it gets no draft.") : "Publish the post to make its draft in Buttondown."}</Muted>
 			)}
 			{record && record.warnings.length > 0 && (
 				<ul role="list" className="space-y-1.5">

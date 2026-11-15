@@ -19,7 +19,7 @@ const make = (fake = fakeButtondown(), opts = {}) => ({ fake, bd: createButtondo
 
 test("one function per allowed call, and no generic request", () => {
 	const { bd } = make();
-	assert.deepEqual(Object.keys(bd).sort(), ["checkKey", "createDraft", "deleteDraft", "getEmail", "listApiDrafts", "ping", "updateDraft"]);
+	assert.deepEqual(Object.keys(bd).sort(), ["checkKey", "createDraft", "deleteDraft", "getEmail", "listApiEmails", "ping", "updateDraft"]);
 	assert.equal(typeof client.request, "undefined");
 	assert.equal(typeof client.send, "undefined");
 });
@@ -29,7 +29,7 @@ test("every call goes to https://api.buttondown.com/v1 with Authorization: Token
 	await bd.ping();
 	const draft = await bd.createDraft(fields());
 	await bd.getEmail(draft.id);
-	await bd.listApiDrafts(1);
+	await bd.listApiEmails(1);
 	await bd.updateDraft(draft.id, { subject: "Changed" });
 	await bd.deleteDraft(draft.id, (await bd.getEmail(draft.id)).modificationDate, "example.com:posts:1");
 	await bd.checkKey();
@@ -185,17 +185,19 @@ test("429 carries Retry-After in seconds (a number or an HTTP date)", async () =
 	assert.equal(retryAfterSeconds(null), null);
 });
 
-test("the draft list: drafts made through the API, newest first, without bodies, page by page", async () => {
+test("the email list: emails made through the API in any status (a draft may have been scheduled or sent since), newest first, without bodies, page by page", async () => {
 	const fake = fakeButtondown({ pageSize: 2 });
 	const { bd } = make(fake);
 	for (let i = 0; i < 3; i++) await bd.createDraft(fields({ subject: `S${i}` }));
-	const first = await bd.listApiDrafts(1);
+	const first = await bd.listApiEmails(1);
 	assert.equal(first.results.length, 2);
 	assert.equal(first.hasMore, true);
 	assert.deepEqual(first.results.map((e) => e.subject), ["S2", "S1"]);
-	assert.equal((await bd.listApiDrafts(2)).hasMore, false);
+	assert.equal((await bd.listApiEmails(2)).hasMore, false);
 	const call = fake.calls.find((c) => c.method === "GET" && c.path === "/v1/emails");
-	assert.equal(call.search, "?status=draft&source=api&excluded_fields=body&ordering=-creation_date&page=1");
+	assert.equal(call.search, "?source=api&excluded_fields=body&ordering=-creation_date&page=1");
+	fake.setStatus(first.results[0].id, "scheduled");
+	assert.deepEqual((await bd.listApiEmails(1)).results.map((e) => e.status), ["scheduled", "draft"], "not only drafts");
 	assert.ok(!("body" in first.results[0]), "the Pack's email objects never hold a body");
 	assert.equal(packKeyOf(first.results[0]), "example.com:posts:1");
 });

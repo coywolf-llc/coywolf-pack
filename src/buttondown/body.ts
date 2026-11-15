@@ -12,7 +12,9 @@
  * - holds each Portable Text field of the collection in field order, with
  *   relative links made absolute, images resized and in a format email apps
  *   show, and the Pack's blocks as Markdown (src/buttondown/blocks.ts);
- * - ends with a rule and "Read it on <site>" linking to the post (footerLink).
+ * - ends with a rule and "Read it on <site>" linking to the post (footerLink);
+ *   a post with no content gets the link alone (a rule at the top would read
+ *   as frontmatter).
  *
  * Pure apart from the media host the images module knows (src/images/lib.ts).
  */
@@ -30,18 +32,21 @@ export const SLUG = /^[a-zA-Z0-9_-]{1,100}$/;
 export const TEMPLATE_CODE = /\{\{|\{%|\{#/;
 export const METADATA_VERSION = 1;
 
-/** Originals Cloudflare's resizer can keep in their format, and the ones it turns into JPEG (it can't read AVIF). */
+/**
+ * Originals Cloudflare's resizer can keep in their format, and the ones it turns into JPEG. It can't read AVIF, and
+ * it doesn't resize or convert SVG (it serves the SVG itself, whatever `format` says), so those two go as they are.
+ */
 const KEEP_FORMAT = new Set(["jpg", "jpeg", "png", "gif"]);
-const TO_JPEG = new Set(["webp", "heic", "svg"]);
+const TO_JPEG = new Set(["webp", "heic"]);
 
 export type ImageKind = "resized" | "original" | "external";
 
 /**
  * An image for email: a media-library file at 1200 px on the media host
- * (JPEG, PNG and GIF keep their format; WebP, HEIC and SVG become JPEG, which
- * every email app shows); an AVIF original, or any file on a site without a
- * media host, as the original (with a warning); another site's image as it is
- * (a warning when it's WebP or AVIF).
+ * (JPEG, PNG and GIF keep their format; WebP and HEIC become JPEG, which
+ * every email app shows); an AVIF or SVG original, or any file on a site
+ * without a media host, as the original (with a warning); another site's
+ * image as it is (a warning when it's WebP, AVIF or SVG).
  */
 export function emailImage(src: string, absolute: (url: string) => string): { url: string; kind: ImageKind; risky: boolean } {
 	const value = String(src ?? "").trim();
@@ -63,7 +68,7 @@ export function emailImage(src: string, absolute: (url: string) => string): { ur
 	} catch {
 		// Not a URL: checked as it is.
 	}
-	return { url, kind: "external", risky: /\.(webp|avif)$/i.test(path) };
+	return { url, kind: "external", risky: /\.(webp|avif|svg)$/i.test(path) };
 }
 
 /** An image field's value (a URL, or EmDash's media value) as a URL, or null. */
@@ -179,7 +184,8 @@ export async function buildEmail(source: EmailSource): Promise<BuiltEmail> {
 	while (/^---\s*(\n|$)/.test(content)) content = content.replace(/^---\s*\n*/, "");
 	if (source.footerLink) {
 		const href = markdownUrl(source.postUrl, absolute);
-		if (href) content = `${content ? `${content}\n\n` : ""}---\n\n[Read it on ${host}](${href})`;
+		// With nothing above it, the rule would be the body's first line (frontmatter to Buttondown): the link goes alone.
+		if (href) content = content ? `${content}\n\n---\n\n[Read it on ${host}](${href})` : `[Read it on ${host}](${href})`;
 	}
 	if (/^\s*---/.test(content)) throw new Error("The email body would start with frontmatter.");
 	const body = `${MODE_COMMENT}\n${content}\n`;
@@ -204,8 +210,8 @@ export async function buildEmail(source: EmailSource): Promise<BuiltEmail> {
 		const total = [...blocks.values()].reduce((a, b) => a + b, 0);
 		warnings.push(`${plural(total, "block")} can't be shown in email (${[...blocks.keys()].slice(0, 5).join(", ")}): the email links to the post there.`);
 	}
-	if (counts.original) warnings.push(`${plural(counts.original, "image")} can't be resized for email (an AVIF file, or no media host), so the original is used. Check ${counts.original === 1 ? "it" : "them"} in Buttondown's preview.`);
-	if (counts.risky) warnings.push(`${plural(counts.risky, "image")} ${counts.risky === 1 ? "is" : "are"} WebP or AVIF, which some email apps don't show.`);
+	if (counts.original) warnings.push(`${plural(counts.original, "image")} can't be resized for email (an AVIF or SVG file, or no media host), so the original is used. Check ${counts.original === 1 ? "it" : "them"} in Buttondown's preview.`);
+	if (counts.risky) warnings.push(`${plural(counts.risky, "image")} ${counts.risky === 1 ? "is" : "are"} WebP, AVIF or SVG, which some email apps don't show.`);
 	if (TEMPLATE_CODE.test(content) || TEMPLATE_CODE.test(subject) || TEMPLATE_CODE.test(description)) warnings.push("Contains template code ({{, {% or {#). Buttondown runs it when the email is sent: check the preview in Buttondown before sending.");
 
 	return { fields: { ...shown, metadata: packMetadata(source, hash) }, hash, warnings };

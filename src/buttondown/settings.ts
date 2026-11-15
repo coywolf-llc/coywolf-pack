@@ -88,20 +88,24 @@ export function ruleFor(settings: ButtondownSettings, collection: string): Butto
 	return settings.rules.find((r) => r.collection === collection) ?? null;
 }
 
-/** Through the plugin context (routes, the page). */
-export async function loadSettings(ctx: Pick<PluginContext, "settings">): Promise<ButtondownSettings> {
-	return normalizeSettings(await ctx.settings.get(BUTTONDOWN_SETTINGS_KEY).catch(() => null));
+/**
+ * Through the plugin context (routes, the page). `strict`: reject when the setting can't be read, for the hooks and
+ * the job, where "no rules" would mean "stop watching this post".
+ */
+export async function loadSettings(ctx: Pick<PluginContext, "settings">, strict = false): Promise<ButtondownSettings> {
+	return normalizeSettings(strict ? await ctx.settings.get(BUTTONDOWN_SETTINGS_KEY) : await ctx.settings.get(BUTTONDOWN_SETTINGS_KEY).catch(() => null));
 }
 
 let memo: { raw: unknown; settings: ButtondownSettings } | null = null;
 
 /**
  * In the publish hooks: from the feature switches' read and per-isolate cache (no query of its own most of the time),
- * else through the plugin context when D1 can't be read here (tests, Node).
+ * else through the plugin context when D1 can't be read here (tests, Node). `strict`: reject when neither read
+ * works, instead of answering with no rules.
  */
-export async function cachedSettings(ctx: Pick<PluginContext, "settings">, database = "DB"): Promise<ButtondownSettings> {
+export async function cachedSettings(ctx: Pick<PluginContext, "settings">, database = "DB", strict = false): Promise<ButtondownSettings> {
 	const read = await readSiteSetting(BUTTONDOWN_SETTINGS_KEY, database).catch(() => null);
-	if (!read) return loadSettings(ctx);
+	if (!read) return loadSettings(ctx, strict);
 	if (memo && memo.raw === read.value) return memo.settings;
 	memo = { raw: read.value, settings: normalizeSettings(read.value) };
 	return memo.settings;

@@ -22,7 +22,7 @@ import { siteName as readSiteName } from "../core/site.js";
 import { DeadlineError, withDeadline } from "../core/single-flight.js";
 import { readTaskOutcome } from "../core/task-health.js";
 import { BACKUPS_TASK } from "../backups/module.js";
-import { failingRecords } from "../buttondown/store.js";
+import { failedJob, failingRecords } from "../buttondown/store.js";
 import { CHECK_INFO } from "../audit/checks.js";
 import { getReport, worsened } from "../audit/run.js";
 import { type UrlRow, getCounts, urls } from "../links/store.js";
@@ -301,12 +301,15 @@ export async function gatherIssues(ctx: PluginContext, settings: AlertsSettings,
 	if (wants("buttondownFailed")) {
 		const failing = await failingRecords(ctx, now).catch(() => []);
 		if (failing.length) {
+			// What couldn't be done: one word when they all failed the same way, else all three.
+			const kinds = [...new Set(failing.map(failedJob))];
+			const what = kinds.length === 1 ? kinds[0] : "created, updated or deleted";
 			issues.push({
 				type: "buttondownFailed",
 				// One key for all of them: at most one email a day while drafts keep failing, listing the ones failing then.
 				key: "buttondown-failed",
 				section: {
-					title: failing.length === 1 ? "A Buttondown draft couldn't be created" : `${failing.length} Buttondown drafts couldn't be created`,
+					title: failing.length === 1 ? `A Buttondown draft couldn't be ${what}` : `${failing.length} Buttondown drafts couldn't be ${what}`,
 					lines: [
 						...failing.slice(0, 10).map((r) => `${r.title || `${r.collection} ${r.entryId}`}: ${r.lastError?.message ?? "unknown error"}`),
 						...(failing.length > 10 ? [`and ${failing.length - 10} more`] : []),

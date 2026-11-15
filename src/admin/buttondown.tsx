@@ -64,7 +64,7 @@ function KeyCheckResults(props: { result: KeyCheck }) {
 	const refused = (s: number) => s === 401 || s === 403;
 	const lines: Array<{ ok: boolean; text: string }> = [
 		{ ok: c.ping === 200, text: c.ping === 200 ? "The key works." : c.ping ? `Buttondown refused the key (${c.ping}).` : "Buttondown didn't answer. Try again in a minute." },
-		{ ok: c.emails === 200, text: c.emails === 200 ? "It can read and write drafts." : `It can't read drafts (${c.emails || "no answer"}). Give it Emails and drafts → Write.` },
+		{ ok: c.emails === 200, text: c.emails === 200 ? "It can read drafts. The first draft the Pack makes shows it can write them." : `It can't read drafts (${c.emails || "no answer"}). Give it Emails and drafts → Write.` },
 		{ ok: refused(c.newsletters), text: refused(c.newsletters) ? "It can't read your newsletters or their keys." : c.newsletters === 200 ? "It can read your newsletters, and with them every newsletter's API key." : `Newsletters answered ${c.newsletters || "nothing"}.` },
 		{ ok: refused(c.subscribers), text: refused(c.subscribers) ? "It can't read your subscribers." : c.subscribers === 200 ? "It can read your subscribers." : `Subscribers answered ${c.subscribers || "nothing"}.` },
 	];
@@ -131,7 +131,7 @@ function Connection(props: { status: Status }) {
 				</Button>
 			}
 		>
-			{error ? <Banner variant="error" role="alert" description={error} /> : result ? <KeyCheckResults result={result} /> : <p className="text-sm text-kumo-subtle">Check key makes four small reads (their answers' bodies are never read). Nothing is written.</p>}
+			{error ? <Banner variant="error" role="alert" description={error} /> : result ? <KeyCheckResults result={result} /> : <p className="text-sm text-kumo-subtle">Check key makes four small reads and looks only at their status codes. Nothing is written.</p>}
 		</SettingsSection>
 	);
 }

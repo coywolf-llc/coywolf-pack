@@ -51,6 +51,8 @@ export const BUTTONDOWN_LIMITS = {
 	detailChars: 300,
 	/** Width of images in the email (resized on the media host). */
 	imageWidth: 1200,
+	/** A 403 is tried once more after this long (Buttondown answers 403 when it throttles, too). */
+	forbiddenRetryMs: 60 * 60_000,
 	/** A record in error this long is reported by Alerts (buttondownFailed). */
 	alertAfterMs: 60 * 60_000,
 } as const;

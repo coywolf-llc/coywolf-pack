@@ -671,20 +671,23 @@ export async function primaryTerms(source: UrlSource, collection: string, ids: s
  * Every term slug one entry has in one taxonomy (locale-resolved, ordered by
  * label): primaryTermsQuery's SQL (EmDash's selectEntryTermRows) for that one
  * entry, all its rows kept. One query. Empty when the entry has none or the
- * tables can't be read.
+ * tables can't be read; with `strict`, a read that fails rejects instead (for
+ * a caller that would act on "no terms", such as Buttondown Drafts).
  */
-export async function entryTerms(source: UrlSource, collection: string, id: string, taxonomy: string): Promise<string[]> {
+export async function entryTerms(source: UrlSource, collection: string, id: string, taxonomy: string, options: { strict?: boolean } = {}): Promise<string[]> {
 	if (!id || !COLLECTION_SLUG.test(collection) || !TAXONOMY_NAME.test(taxonomy)) return [];
 	if (!isD1(source)) {
 		const { getTermsForEntries } = await import("emdash");
-		const map = (await getTermsForEntries(collection, [id], taxonomy).catch(() => new Map())) as Map<string, Array<{ slug: string }>>;
+		const read = getTermsForEntries(collection, [id], taxonomy);
+		const map = (await (options.strict ? read : read.catch(() => new Map()))) as Map<string, Array<{ slug: string }>>;
 		return [...new Set((map.get(id) ?? []).map((t) => t.slug).filter(Boolean))];
 	}
 	try {
 		const q = primaryTermsQuery(collection, [id], [taxonomy], await hostDefaultLocale());
 		const rows = (await source.prepare(q.sql).bind(...q.binds).all<PrimaryTermRow>()).results;
 		return [...new Set(rows.filter((r) => r.entry_id === id && r.name === taxonomy && r.slug).map((r) => r.slug))];
-	} catch {
+	} catch (error) {
+		if (options.strict) throw error;
 		return []; // No taxonomy tables yet: no terms.
 	}
 }
@@ -694,9 +697,10 @@ export async function entryTerms(source: UrlSource, collection: string, id: stri
  * query: EmDash's `taxonomies.parent_id` (the parent's translation_group, or
  * a row id before EmDash's migration 045), then the `termParents` option for
  * terms with no parent in the database. A parent in the entry's own locale
- * wins; otherwise the default locale's slug is used.
+ * wins; otherwise the default locale's slug is used. With `strict`, a read
+ * that fails rejects instead of answering with no parents.
  */
-export async function termParentMaps(source: UrlSource, taxonomies: string[]): Promise<Map<string, Map<string, string>>> {
+export async function termParentMaps(source: UrlSource, taxonomies: string[], options: { strict?: boolean } = {}): Promise<Map<string, Map<string, string>>> {
 	const wanted = [...new Set(taxonomies)].filter((t) => TAXONOMY_NAME.test(t));
 	const out = new Map<string, Map<string, string>>();
 	for (const taxonomy of wanted) out.set(taxonomy, new Map());
@@ -706,7 +710,8 @@ export async function termParentMaps(source: UrlSource, taxonomies: string[]): P
 		const { getTaxonomyTerms } = await import("emdash");
 		type Node = { slug: string; children?: Node[] };
 		for (const taxonomy of wanted) {
-			const roots = (await getTaxonomyTerms(taxonomy, { includeCounts: false }).catch(() => [])) as Node[];
+			const read = getTaxonomyTerms(taxonomy, { includeCounts: false });
+			const roots = (await (options.strict ? read : read.catch(() => []))) as Node[];
 			const map = out.get(taxonomy)!;
 			const walk = (nodes: Node[], parent: string | null, depth: number) => {
 				if (depth > MAX_DEPTH) return;
@@ -724,7 +729,8 @@ export async function termParentMaps(source: UrlSource, taxonomies: string[]): P
 	try {
 		const q = termParentsQuery(wanted);
 		rows = (await source.prepare(q.sql).bind(...q.binds).all<TermParentRow>()).results;
-	} catch {
+	} catch (error) {
+		if (options.strict) throw error;
 		rows = []; // No taxonomy table yet: only the option applies.
 	}
 	return termParentsFromRows(rows, wanted, await hostDefaultLocale());

@@ -6,7 +6,9 @@
 //
 // It records every call and every safety violation (a send or publish path, the Live-Dangerously header,
 // a create without status "draft", a PATCH with status/publish_date/filters/email_type/archival_mode, a DELETE
-// whose email wasn't read just before), and can be told to fail: a status with a body and headers, a
+// whose email wasn't read just before, and any PATCH or DELETE of an email a person changed in Buttondown
+// since the Pack's last write: edit() and setStatus() mark it, allowOverwrite() is the one way to let a
+// PATCH through, for Refresh draft from post), and can be told to fail: a status with a body and headers, a
 // network error, a call that never answers, "the call lands, then the answer is lost", or something that
 // happens while a call is on its way (during).
 
@@ -30,6 +32,10 @@ export function fakeButtondown(options = {}) {
 	const statusFor = { newsletters: options.newsletters ?? 403, subscribers: options.subscribers ?? 403 };
 	/** The last email read (GET /emails/{id}), for "a DELETE comes right after its own read". */
 	let lastRead = null;
+	/** Emails a person changed in Buttondown since the Pack's last write (edit, setStatus): the Pack must not PATCH or DELETE them. */
+	const human = new Set();
+	/** Emails whose next PATCH may overwrite a person's changes (the admin confirmed Refresh draft from post). */
+	const overwriteAllowed = new Set();
 
 	const tick = (ms = 1000) => (clock += ms);
 	const newId = () => {
@@ -102,11 +108,15 @@ export function fakeButtondown(options = {}) {
 				}
 			}
 			if (changed) email.modification_date = new Date(tick()).toISOString();
+			// The Pack's own write: the email is as the Pack left it again.
+			human.delete(one[1]);
+			overwriteAllowed.delete(one[1]);
 			return json(200, publicEmail(email));
 		}
 		if (one && method === "DELETE") {
 			if (!emails.has(one[1])) return json(404, { code: "not_found", detail: "Not found.", metadata: {} });
 			emails.delete(one[1]);
+			human.delete(one[1]);
 			return new Response(null, { status: 204 });
 		}
 		return json(404, { code: "not_found", detail: "No such route." });
@@ -132,6 +142,12 @@ export function fakeButtondown(options = {}) {
 			const previous = calls.at(-2);
 			if (!previous || previous.method !== "GET" || previous.path !== url.pathname || lastRead !== id) violations.push(`a DELETE without its own read just before: ${id}`);
 			else if (emails.get(id)?.status !== "draft") violations.push(`a DELETE of a non-draft: ${id}`);
+			if (human.has(id)) violations.push(`a DELETE of an email changed in Buttondown: ${id}`);
+		}
+		if (method === "PATCH") {
+			const id = url.pathname.split("/").pop();
+			if (emails.has(id) && emails.get(id).status !== "draft") violations.push(`a PATCH of a non-draft: ${id}`);
+			if (human.has(id) && !overwriteAllowed.has(id)) violations.push(`a PATCH of an email changed in Buttondown: ${id}`);
 		}
 		if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
 		if (headers.authorization !== `Token ${key}`) return json(401, { code: "unauthorized", detail: `Invalid token ${String(headers.authorization ?? "").slice(6)}` });
@@ -176,6 +192,15 @@ export function fakeButtondown(options = {}) {
 			const email = emails.get(id);
 			Object.assign(email, fields);
 			email.modification_date = new Date(tick()).toISOString();
+			human.add(id);
+		},
+		/** The admin confirmed Refresh draft from post: the next PATCH of this email may overwrite what a person changed. */
+		allowOverwrite(id) {
+			overwriteAllowed.add(id);
+		},
+		/** Whether a person changed the email in Buttondown since the Pack's last write. */
+		changedByHand(id) {
+			return human.has(id);
 		},
 		/**
 		 * Buttondown moved the email to another status (Jon scheduled or sent it). `keepModified`: one of Buttondown's own
@@ -184,7 +209,10 @@ export function fakeButtondown(options = {}) {
 		setStatus(id, status, { keepModified = false } = {}) {
 			const email = emails.get(id);
 			email.status = status;
-			if (!keepModified) email.modification_date = new Date(tick()).toISOString();
+			if (!keepModified) {
+				email.modification_date = new Date(tick()).toISOString();
+				human.add(id);
+			}
 		},
 		/** Calls of one kind: "POST /v1/emails", "PATCH", "DELETE"… */
 		count(kind) {

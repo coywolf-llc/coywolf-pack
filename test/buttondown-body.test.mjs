@@ -60,14 +60,17 @@ test("Portable Text fields in order, relative links absolute, and the footer lin
 	assert.equal(plain.fields.body, `${MODE_COMMENT}\nHello.\n`);
 });
 
-test("images: media-library JPEG, PNG and GIF keep their format at 1200 px; WebP, HEIC and SVG become JPEG; AVIF and no media host use the original with a warning", async () => {
+test("images: media-library JPEG, PNG and GIF keep their format at 1200 px; WebP and HEIC become JPEG; AVIF, SVG and no media host use the original with a warning", async () => {
 	withMediaHost(() => {
 		const abs = (u) => new URL(u, "https://coywolf.com/").href;
 		assert.equal(emailImage("/_emdash/api/media/file/01ABC.jpg", abs).url, "https://media.coywolf.com/cdn-cgi/image/width=1200,fit=scale-down,quality=85/01ABC.jpg");
 		assert.equal(emailImage("https://media.coywolf.com/01ABC.png", abs).url, "https://media.coywolf.com/cdn-cgi/image/width=1200,fit=scale-down,quality=85/01ABC.png");
 		assert.equal(emailImage("https://media.coywolf.com/s/800/01ABC.gif", abs).url, "https://media.coywolf.com/cdn-cgi/image/width=1200,fit=scale-down,quality=85/01ABC.gif");
 		assert.equal(emailImage("/_emdash/api/media/file/01ABC.webp", abs).url, "https://media.coywolf.com/cdn-cgi/image/width=1200,fit=scale-down,quality=85,format=jpeg/01ABC.webp");
-		assert.equal(emailImage("/_emdash/api/media/file/01ABC.svg", abs).url, "https://media.coywolf.com/cdn-cgi/image/width=1200,fit=scale-down,quality=85,format=jpeg/01ABC.svg");
+		assert.equal(emailImage("/_emdash/api/media/file/01ABC.heic", abs).url, "https://media.coywolf.com/cdn-cgi/image/width=1200,fit=scale-down,quality=85,format=jpeg/01ABC.heic");
+		// Cloudflare doesn't resize or convert SVG (it ignores the options and serves the SVG): the original, with the warning.
+		assert.deepEqual(emailImage("/_emdash/api/media/file/01ABC.svg", abs), { url: "https://media.coywolf.com/01ABC.svg", kind: "original", risky: false });
+		assert.deepEqual(emailImage("https://other.example/logo.svg", abs), { url: "https://other.example/logo.svg", kind: "external", risky: true });
 		assert.deepEqual(emailImage("/_emdash/api/media/file/01ABC.avif", abs), { url: "https://media.coywolf.com/01ABC.avif", kind: "original", risky: false });
 		assert.deepEqual(emailImage("https://other.example/pic.webp", abs), { url: "https://other.example/pic.webp", kind: "external", risky: true });
 		assert.deepEqual(emailImage("https://other.example/pic.jpg?x=1", abs), { url: "https://other.example/pic.jpg?x=1", kind: "external", risky: false });
@@ -79,7 +82,10 @@ test("images: media-library JPEG, PNG and GIF keep their format at 1200 px; WebP
 	assert.match(built.fields.body, /!\[Alt\]\(https:\/\/media\.coywolf\.com\/cdn-cgi\/image\/width=1200,fit=scale-down,quality=85,format=jpeg\/a\.webp\)/);
 	assert.equal(built.fields.image, "https://media.coywolf.com/cdn-cgi/image/width=1200,fit=scale-down,quality=85/f.png");
 	assert.ok(built.warnings.some((w) => /1 image can't be resized/.test(w)), built.warnings.join("\n"));
-	assert.ok(built.warnings.some((w) => /1 image is WebP or AVIF/.test(w)), built.warnings.join("\n"));
+	assert.ok(built.warnings.some((w) => /1 image is WebP, AVIF or SVG/.test(w)), built.warnings.join("\n"));
+	const svg = await withMediaHost(() => buildEmail(source({ bodyFields: [[image("/_emdash/api/media/file/logo.svg")]] })));
+	assert.match(svg.fields.body, /!\[Alt\]\(https:\/\/media\.coywolf\.com\/logo\.svg\)/);
+	assert.ok(svg.warnings.some((w) => /1 image can't be resized for email \(an AVIF or SVG file/.test(w)), svg.warnings.join("\n"));
 });
 
 test("an image field's value: a URL, EmDash's media value (src, url, or the storage key), else nothing", () => {

@@ -9,104 +9,24 @@ import { afterEach, test } from "node:test";
 
 import "./ts-resolve.mjs";
 import { FAKE_KEY, fakeButtondown } from "./fixtures/buttondown-fake.mjs";
-import { fakeCollection, fakeKv, fakeSettings, quietLog } from "./fixtures/fake-plugin.mjs";
+import { fakeCollection } from "./fixtures/fake-plugin.mjs";
+import { T0, fakes, site } from "./fixtures/buttondown-site.mjs";
 
 const core = await import("../src/buttondown/sync-core.ts");
 const sync = await import("../src/buttondown/sync.ts");
-const { loadSettings } = await import("../src/buttondown/settings.ts");
 const { invalidateFeatures } = await import("../src/core/features.ts");
 await import("../src/buttondown/pack.ts");
 
 const { decideEvent, failure, classifyRemote, adoptable, isStuck, recordId } = core;
 const { handleEvent, runEntry, runManual, manualRefusal, retryDue, settleJobsForTests, keyFingerprint } = sync;
 
-const T0 = Date.parse("2026-11-15T12:00:00Z");
-const SINCE = "2026-11-10T00:00:00.000Z";
-const RULE = { collection: "posts", taxonomy: "category", terms: ["newsletter"], since: SINCE };
-
-const span = (text) => ({ _type: "span", _key: "s", text, marks: [] });
-const para = (text) => ({ _type: "block", _key: "b", style: "normal", markDefs: [], children: [span(text)] });
-
-/** Every fake a test's sites used: after each test, none may have seen a call that could send (afterEach). */
-const fakes = new Set();
-
-/** A site: the plugin context (storage, settings, content, schema, http to the fake) and the deps the job uses. */
-function site({ fake = fakeButtondown(), features = {}, settings = {}, storage } = {}) {
-	invalidateFeatures();
-	fakes.add(fake);
-	const entries = new Map();
-	const terms = new Map();
-	let clock = T0;
-	const slept = [];
-	const ctx = {
-		storage: { buttondownEmails: storage ?? fakeCollection() },
-		kv: fakeKv(),
-		log: quietLog(),
-		site: { url: "https://coywolf.com", name: "Coywolf" },
-		settings: fakeSettings({ features: { _defaults036: true, buttondown: true, "buttondown.updates": true, ...features }, buttondownApiKey: FAKE_KEY, buttondownSettings: { rules: [RULE], footerLink: true }, ...settings }),
-		http: fake.http,
-		content: { get: async (_collection, id) => (entries.has(id) ? structuredClone(entries.get(id)) : null) },
-		schema: {
-			getCollection: async (slug) =>
-				slug === "posts"
-					? { slug, label: "Posts", titleField: "title", urlPattern: "/{slug}/", routable: true, hidden: false, fields: [{ slug: "title", type: "string", sortOrder: 0 }, { slug: "featured_image", type: "image", sortOrder: 1 }, { slug: "content", type: "portableText", sortOrder: 2 }, { slug: "excerpt", type: "text", sortOrder: 3 }] }
-					: null,
-		},
-	};
-	const deps = {
-		now: () => clock,
-		db: async () => null,
-		settings: (c) => loadSettings(c),
-		terms: async (_ctx, _collection, id) => terms.get(id) ?? [],
-		termParents: async () => new Map([["newsletter-extra", "newsletter"]]),
-		postUrl: async (_ctx, _collection, item) => `https://coywolf.com/newsletter/${item.slug}/`,
-		files: async () => new Map(),
-		background: () => {},
-		sleep: async (ms) => void slept.push(ms),
-	};
-	const post = (id, extra = {}) => {
-		const item = { id, slug: `post-${id.toLowerCase()}`, status: "published", publishedAt: "2026-11-15T10:00:00.000Z", draftRevisionId: null, data: { title: `Post ${id}`, excerpt: "Short.", content: [para("Hello.")] }, seo: null, ...extra };
-		entries.set(id, item);
-		if (!terms.has(id)) terms.set(id, ["newsletter"]);
-		return item;
-	};
-	const event = async (kind, id, extra = {}) => {
-		const item = entries.get(id);
-		await handleEvent(ctx, deps, kind, kind === "trash" || kind === "delete" ? { id, collection: "posts", permanent: kind === "delete" } : { collection: "posts", content: { ...item, ...extra } });
-		await settleJobsForTests();
-	};
-	const record = async (id) => core.readRecord(await ctx.storage.buttondownEmails.get(recordId("posts", id)));
-	return {
-		fake,
-		ctx,
-		deps,
-		entries,
-		terms,
-		slept,
-		post,
-		event,
-		record,
-		advance: (ms) => (clock += ms),
-		now: () => clock,
-		unpublish: async (id) => {
-			entries.get(id).status = "draft";
-			await event("unpublish", id);
-		},
-		republish: async (id, data = {}) => {
-			const item = entries.get(id);
-			item.status = "published";
-			item.data = { ...item.data, ...data };
-			await event("publish", id);
-		},
-	};
-}
-
 afterEach(() => {
 	invalidateFeatures();
 	// No call with a non-draft status, a send or publish path, the Live-Dangerously header, a forbidden PATCH field,
 	// or a DELETE without its own read just before, in any test.
-	for (const fake of fakes) assert.deepEqual(fake.violations, []);
+	const violations = [...fakes].flatMap((fake) => fake.violations);
 	fakes.clear();
+	assert.deepEqual(violations, []);
 });
 
 const facts = (f = {}) => ({ live: true, matches: true, newEnough: true, updatesOn: true, ...f });
@@ -150,14 +70,17 @@ test("Buttondown's answer for an update: only an untouched draft with the Pack's
 	const r = { remoteModifiedAt: "m1" };
 	assert.equal(classifyRemote(null, r, "k"), "gone");
 	assert.equal(classifyRemote({ status: "scheduled", modificationDate: "m1", key: "k" }, r, "k"), "left");
-	assert.equal(classifyRemote({ status: "sent", modificationDate: "m1", key: "k" }, r, "k", true), "left", "Refresh never writes a sent email");
+	assert.equal(classifyRemote({ status: "sent", modificationDate: "m1", key: "k" }, r, "k", "m1"), "left", "Refresh never writes a sent email");
 	assert.equal(classifyRemote({ status: "draft", modificationDate: "m2", key: "k" }, r, "k"), "edited");
 	assert.equal(classifyRemote({ status: "draft", modificationDate: "m1", key: "other" }, r, "k"), "edited");
-	assert.equal(classifyRemote({ status: "draft", modificationDate: "m2", key: "k" }, r, "k", true), "update");
+	assert.equal(classifyRemote({ status: "draft", modificationDate: "m2", key: "k" }, r, "k", "m2"), "update", "Refresh: Buttondown shows what the admin saw");
+	assert.equal(classifyRemote({ status: "draft", modificationDate: "m3", key: "k" }, r, "k", "m2"), "edited", "Refresh: changed again since the admin looked");
+	assert.equal(classifyRemote({ status: "draft", modificationDate: "m1", key: "k" }, r, "k", "m2"), "edited", "Refresh: only the exact date the admin saw");
+	assert.equal(classifyRemote({ status: "draft", modificationDate: null, key: "k" }, r, "k", ""), "edited", "Refresh: no date seen, no write");
+	assert.equal(classifyRemote({ status: "draft", modificationDate: "m1", key: "k" }, { remoteModifiedAt: null }, "k"), "edited", "no date of the Pack's own: never taken for untouched");
 	assert.equal(classifyRemote({ status: "draft", modificationDate: "m1", key: "k" }, r, "k"), "update");
-	assert.equal(adoptable({ modificationDate: "2026-11-15T12:00:00.001Z", creationDate: "2026-11-15T12:00:00.000Z" }, false), true);
-	assert.equal(adoptable({ modificationDate: "2026-11-15T12:05:00.000Z", creationDate: "2026-11-15T12:00:00.000Z" }, false), false);
-	assert.equal(adoptable({ modificationDate: "2026-11-15T12:05:00.000Z", creationDate: "2026-11-15T12:00:00.000Z" }, true), true);
+	assert.equal(adoptable({ modificationDate: "2026-11-15T12:00:00.001Z", creationDate: "2026-11-15T12:00:00.000Z" }), true);
+	assert.equal(adoptable({ modificationDate: "2026-11-15T12:05:00.000Z", creationDate: "2026-11-15T12:00:00.000Z" }), false);
 });
 
 test("failures: 429 after Retry-After (5 minutes at least), backoff for 5xx and no answer for 3 days, no retry for refused keys or bad requests", () => {
@@ -167,7 +90,10 @@ test("failures: 429 after Retry-After (5 minutes at least), backoff for 5xx and 
 	const steps = [5, 15, 60, 180, 360, 360].map((m) => new Date(T0 + m * 60_000).toISOString());
 	steps.forEach((at, attempts) => assert.equal(failure({ status: 503, code: null, retryAfter: null }, { attempts, errorSince: new Date(T0).toISOString() }, T0).nextRetryAt, at));
 	assert.equal(failure({ status: 0, code: "timeout", retryAfter: null }, { attempts: 9, errorSince: new Date(T0 - 3 * 86_400_000).toISOString() }, T0).nextRetryAt, null, "given up after 3 days");
-	for (const status of [401, 403]) assert.deepEqual(failure({ status, code: null, retryAfter: null }, r, T0), { kind: "auth", nextRetryAt: null });
+	assert.deepEqual(failure({ status: 401, code: null, retryAfter: null }, r, T0), { kind: "auth", nextRetryAt: null });
+	// 403: once more an hour later (Buttondown throttles with 403 too), then like 401.
+	assert.deepEqual(failure({ status: 403, code: null, retryAfter: null }, r, T0), { kind: "auth", nextRetryAt: new Date(T0 + 60 * 60_000).toISOString() });
+	assert.deepEqual(failure({ status: 403, code: null, retryAfter: null }, { attempts: 1, errorSince: null }, T0), { kind: "auth", nextRetryAt: null });
 	assert.deepEqual(failure({ status: 0, code: "no_key", retryAfter: null }, r, T0), { kind: "auth", nextRetryAt: null });
 	for (const status of [400, 422]) assert.deepEqual(failure({ status, code: "subject_invalid", retryAfter: null }, r, T0), { kind: "fatal", nextRetryAt: null });
 	assert.equal(failure({ status: 0, code: null, retryAfter: null, refused: true }, r, T0).kind, "refused");
@@ -306,10 +232,14 @@ test("edited in Buttondown: not updated; Refresh draft from post overwrites it (
 	assert.equal(s.fake.count("PATCH"), 0);
 	assert.equal((await s.record("P1")).state, "edited");
 	assert.equal(s.fake.emails.get(id).body, "My own words");
-	assert.equal(await manualRefusal(s.ctx, s.deps, "refresh", "posts", "P1", await s.record("P1")), null);
-	const r = await runManual(s.ctx, s.deps, "refresh", "posts", "P1");
+	// The admin is shown the draft as Buttondown has it now, and confirms.
+	const seen = s.fake.emails.get(id).modification_date;
+	assert.equal(await manualRefusal(s.ctx, s.deps, "refresh", "posts", "P1", await s.record("P1"), seen), null);
+	s.fake.allowOverwrite(id);
+	const r = await runManual(s.ctx, s.deps, "refresh", "posts", "P1", { seen });
 	assert.equal(r.state, "draft");
-	assert.equal(r.force, false);
+	assert.ok(!("force" in r));
+	assert.equal(r.remoteModifiedAt, s.fake.emails.get(id).modification_date);
 	assert.equal(s.fake.emails.get(id).subject, "Changed");
 	// Buttondown's own metadata keys stay.
 	assert.equal(s.fake.emails.get(id).metadata.coywolf_pack.key, "coywolf.com:posts:P1");

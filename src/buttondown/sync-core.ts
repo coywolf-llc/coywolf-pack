@@ -51,7 +51,11 @@ export interface ButtondownRecord {
 	emailId: string | null;
 	/** Hash of the fields last written (src/buttondown/body.ts emailHash). */
 	hash: string | null;
-	/** Buttondown's modification_date right after the Pack's last write (or the draft it adopted). */
+	/**
+	 * Buttondown's modification_date right after the Pack's own last write (or of a draft it adopted that nobody had
+	 * changed since it was made). Null for an email the Pack found already changed, scheduled or sent: with no date
+	 * of its own to compare, the Pack never updates or deletes that one.
+	 */
 	remoteModifiedAt: string | null;
 	remoteStatus: string | null;
 	claimedAt: string | null;
@@ -80,8 +84,11 @@ export interface ButtondownRecord {
 	manual: boolean;
 	/** Buttondown refused the slug once: it's left out. */
 	noSlug: boolean;
-	/** A Refresh draft from post waiting: overwrite changes made in Buttondown (still only a draft). */
-	force: boolean;
+	/**
+	 * The hook couldn't read the rules when it queued the job, so "first published since the rule was saved" wasn't
+	 * checked: the job checks it before it creates anything.
+	 */
+	sinceUnchecked: boolean;
 	/**
 	 * Other drafts the Pack made for this post: a job that lost its claim (it ran past 2 minutes and another job took
 	 * over) after making one. Shown as a warning, so you can delete the extra one in Buttondown.
@@ -120,7 +127,7 @@ export function newRecord(collection: string, entryId: string, now: number): But
 		deleted: false,
 		manual: false,
 		noSlug: false,
-		force: false,
+		sinceUnchecked: false,
 		extraEmails: [],
 	};
 }
@@ -130,9 +137,11 @@ export function readRecord(raw: unknown): ButtondownRecord | null {
 	if (!raw || typeof raw !== "object") return null;
 	const r = raw as Partial<ButtondownRecord>;
 	if (typeof r.collection !== "string" || typeof r.entryId !== "string") return null;
+	// `force` was a field once (a standing order to overwrite): never read back.
+	const { force: _force, ...stored } = r as Partial<ButtondownRecord> & { force?: unknown };
 	return {
 		...newRecord(r.collection, r.entryId, Date.parse(r.createdAt ?? "") || 0),
-		...r,
+		...stored,
 		warnings: Array.isArray(r.warnings) ? r.warnings.filter((w) => typeof w === "string") : [],
 		extraEmails: Array.isArray(r.extraEmails) ? r.extraEmails.filter((e) => typeof e === "string") : [],
 	};
@@ -163,6 +172,9 @@ export interface Decision {
 const none = (reason: string, patch: Partial<ButtondownRecord> | null = null): Decision => ({ run: null, patch, reason });
 const queue = (run: JobKind, patch: Partial<ButtondownRecord>, reason: string): Decision => ({ run, patch, reason });
 
+/** A record with nothing waiting and no failure on it. */
+export const CLEARED = { job: null, attempts: 0, nextRetryAt: null, errorSince: null, lastError: null, authFingerprint: null } as const;
+
 const hasDraft = (r: ButtondownRecord) => Boolean(r.emailId) && r.state !== "gone" && r.state !== "removed";
 /** A job (create, update or delete) holds the record right now. */
 export const isBusy = (r: ButtondownRecord) => r.state === "pending" || r.state === "creating";
@@ -182,12 +194,16 @@ export function decideEvent(kind: EventKind, record: ButtondownRecord | null, fa
 		const flag: Partial<ButtondownRecord> = kind === "unpublish" ? { unpublished: true } : kind === "trash" ? { trashed: true } : { deleted: true };
 		// A job is under way: it checks the entry again when it's done (dirty) and deletes the draft it made then.
 		if (isBusy(record)) return none("job under way", { ...flag, dirty: true });
-		if (!hasDraft(record)) return none("no draft", kind === "delete" ? { ...flag, state: "stopped", job: null, nextRetryAt: null } : flag);
+		if (!hasDraft(record)) {
+			// A create that failed and whose post is gone from the site: nothing left to make or to report (Alerts).
+			if (record.state === "error" || kind === "delete") return none("no draft", { ...flag, ...CLEARED, state: "stopped" });
+			return none("no draft", flag);
+		}
 		// Kept: edited in Buttondown, or no longer watched. The panel and list say so.
 		if (record.state === "edited") return none("edited in Buttondown: kept", kind === "delete" ? { ...flag, state: "stopped", job: null } : flag);
 		if (record.state === "stopped") return none("not watched: kept", flag);
 		// draft, left (it may be a draft again), removing, error: deleteDraft's own read decides.
-		return queue("remove", { ...flag, state: "removing", job: "remove", force: false }, "delete the untouched draft");
+		return queue("remove", { ...flag, state: "removing", job: "remove" }, "delete the untouched draft");
 	}
 
 	// publish or save
@@ -231,24 +247,28 @@ export function decideEvent(kind: EventKind, record: ButtondownRecord | null, fa
 export type RemoteVerdict = "update" | "gone" | "left" | "edited";
 
 /**
- * Whether the Pack may write the draft: still a draft in Buttondown, and (unless `force`, Refresh draft from post)
- * not changed there since the Pack's last write, with the Pack's own key in its metadata.
+ * Whether the Pack may write the draft: still a draft in Buttondown, and not changed there since the Pack's last
+ * write (Buttondown's modification_date is the one the Pack recorded then), with the Pack's own key in its metadata.
+ *
+ * `seenModifiedAt` (Refresh draft from post): the modification_date the admin was shown before confirming. The
+ * draft may then be overwritten although it was changed in Buttondown, but only while Buttondown still shows that
+ * exact date. Anything else is "edited": changed again since the admin looked.
  */
-export function classifyRemote(remote: { status: string; modificationDate: string | null; key: string | null } | null, record: Pick<ButtondownRecord, "remoteModifiedAt">, expectedKey: string, force = false): RemoteVerdict {
+export function classifyRemote(remote: { status: string; modificationDate: string | null; key: string | null } | null, record: Pick<ButtondownRecord, "remoteModifiedAt">, expectedKey: string, seenModifiedAt: string | null = null): RemoteVerdict {
 	if (!remote) return "gone";
 	if (remote.status !== "draft") return "left";
-	if (force) return "update";
+	if (seenModifiedAt !== null) return seenModifiedAt !== "" && remote.modificationDate === seenModifiedAt ? "update" : "edited";
 	if (!record.remoteModifiedAt || remote.modificationDate !== record.remoteModifiedAt || remote.key !== expectedKey) return "edited";
 	return "update";
 }
 
 /**
- * A draft found in Buttondown by the Pack's key (a create whose answer was lost, or one made before): safe to write
- * only when nobody changed it since it was made (its modification and creation times within a second of each other)
- * or it already shows what the Pack would write (`sameHash`).
+ * A draft found in Buttondown by the Pack's key (a create whose answer was lost, or one made before): the Pack's to
+ * write and delete only when nobody changed it since it was made, which only Buttondown's own times can say (its
+ * modification and creation times within a second of each other). The hash in the Pack's metadata says nothing
+ * here: an edit in Buttondown doesn't change it.
  */
-export function adoptable(found: { modificationDate: string | null; creationDate: string | null }, sameHash: boolean): boolean {
-	if (sameHash) return true;
+export function adoptable(found: { modificationDate: string | null; creationDate: string | null }): boolean {
 	const m = Date.parse(found.modificationDate ?? "");
 	const c = Date.parse(found.creationDate ?? "");
 	return Number.isFinite(m) && Number.isFinite(c) && Math.abs(m - c) < 1000;
@@ -273,7 +293,8 @@ export interface FailurePlan {
  * What a failure means for the next try:
  * - 429: after Retry-After (at least 5 minutes).
  * - no answer, a timeout, 5xx, 409: 5 min, 15 min, 1 h, 3 h, 6 h, then every 6 h, for 3 days from the first failure.
- * - 401, 403, no key: not until the key changes (or Retry).
+ * - 401, no key: not until the key changes (or Retry).
+ * - 403: once more an hour later (Buttondown also answers 403 when it throttles Workers' addresses), then as 401.
  * - 400, 422, other 4xx, a guard refusal: not on its own (Retry).
  */
 export function failure(input: FailureInput, record: Pick<ButtondownRecord, "attempts" | "errorSince">, now: number): FailurePlan {
@@ -282,6 +303,7 @@ export function failure(input: FailureInput, record: Pick<ButtondownRecord, "att
 		const wait = Math.max((input.retryAfter ?? 0) * 1000, BUTTONDOWN_BACKOFF_MS[0]);
 		return { kind: "rate", nextRetryAt: new Date(now + wait).toISOString() };
 	}
+	if (input.status === 403 && record.attempts === 0) return { kind: "auth", nextRetryAt: new Date(now + BUTTONDOWN_LIMITS.forbiddenRetryMs).toISOString() };
 	if (input.status === 401 || input.status === 403 || input.code === "no_key") return { kind: "auth", nextRetryAt: null };
 	if (input.status === 0 || input.status >= 500 || input.status === 409) {
 		const since = Date.parse(record.errorSince ?? "") || now;
@@ -309,7 +331,7 @@ export function claimHeld(record: Pick<ButtondownRecord, "claimToken" | "claimed
 export const PRUNABLE: readonly RecordState[] = ["left", "gone", "stopped", "removed"];
 
 /** The record's state in plain words, for the panel and the list. */
-export function stateText(r: Pick<ButtondownRecord, "state" | "remoteStatus" | "lastError" | "unpublished" | "trashed" | "deleted" | "job">): string {
+export function stateText(r: Pick<ButtondownRecord, "state" | "remoteStatus" | "lastError" | "unpublished" | "trashed" | "deleted" | "job"> & { emailId?: string | null }): string {
 	const kept = r.deleted ? " The post was deleted." : r.trashed ? " The post is in the trash." : r.unpublished ? " The post isn't published." : "";
 	switch (r.state) {
 		case "pending":
@@ -331,6 +353,7 @@ export function stateText(r: Pick<ButtondownRecord, "state" | "remoteStatus" | "
 		case "error":
 			return `${r.job === "remove" ? "Couldn't delete the draft" : "Couldn't make or update the draft"}: ${r.lastError?.message ?? "unknown error"}`;
 		case "stopped":
+			if (!r.emailId && !r.deleted && (r.unpublished || r.trashed)) return "No draft was made before the post was unpublished or trashed. Publishing it again makes one.";
 			return `Not watched: the post no longer matches a rule${r.deleted ? " or was deleted" : ""}. The draft, if any, is left as it is.`;
 	}
 }

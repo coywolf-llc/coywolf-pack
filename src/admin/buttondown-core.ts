@@ -37,6 +37,11 @@ export interface ButtondownEntry {
 	covered: boolean;
 	published?: boolean;
 	matches?: boolean;
+	/** The post or its terms couldn't be read just now (so `published` and `matches` aren't known). */
+	unread?: boolean;
+	/** Asked for with `remote`: the email as Buttondown has it now ("deleted" when it's gone). Refresh sends `modifiedAt` back. */
+	remote?: { status: string; modifiedAt: string | null } | null;
+	remoteError?: string;
 	keySaved?: boolean;
 	record?: RecordView | null;
 	canCreate?: boolean;
