@@ -46,6 +46,7 @@ const PAGES: Record<string, ReturnType<typeof packPage>> = {
 	"/content-audit": packPage("Content Audit", () => import("./content-audit.js").then((m) => m.ContentAuditPage)),
 	"/child-pages": packPage("Child Pages", () => import("./childPages.js").then((m) => m.ChildPagesPage)),
 	"/alerts": packPage("Alerts & Digest", () => import("./alerts.js").then((m) => m.AlertsPage)),
+	"/buttondown": packPage("Buttondown Drafts", () => import("./buttondown.js").then((m) => m.ButtondownPage)),
 	"/social-images": packPage("Social Images", () => import("./social-images.js").then((m) => m.SocialImagesPage)),
 };
 
@@ -64,7 +65,7 @@ export const widgets: PluginAdminExports["widgets"] = {
 
 /**
  * EmDash 1.4+: the pack's sections in the entry editor sidebar (Child pages, Schema & Social, AI
- * suggestions, Link status) and its Parent and Links columns in content lists, each only while its module is on
+ * suggestions, Link status, Buttondown) and its Parent and Links columns in content lists, each only while its module is on
  * (src/admin/editor-panels.tsx, src/admin/extensions.ts).
  */
 export { contentEditorPanels, contentListColumns } from "./editor-panels.js";

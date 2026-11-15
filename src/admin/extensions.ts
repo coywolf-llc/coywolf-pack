@@ -83,6 +83,8 @@ export const EDITOR_PANELS = [
 	{ id: "schema", title: "Schema & Social", page: "/schema", minRole: ADMIN_ROLE, order: 50 },
 	{ id: "ai", title: "AI suggestions", page: "/ai", minRole: ADMIN_ROLE, order: 51 },
 	{ id: "links", title: "Link status", page: "/links", minRole: ADMIN_ROLE, order: 52 },
+	// Shown only in collections with a Buttondown rule (its isVisible check, editor-panels.tsx).
+	{ id: "buttondown", title: "Buttondown", page: "/buttondown", minRole: ADMIN_ROLE, order: 53 },
 ] as const;
 
 /**

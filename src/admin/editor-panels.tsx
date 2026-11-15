@@ -9,20 +9,26 @@
  *   collection's), main subject and custom markup, with a link to edit them.
  * - AI suggestions: the entry's AI description and entities (AI Enrichment).
  * - Link status: the entry's links, worst first (Link Manager).
+ * - Buttondown: the entry's email draft (its state, warnings and link), with
+ *   Create draft now and Refresh draft from post. Only in collections a
+ *   Buttondown rule covers (EmDash's isVisible check).
  * - Parent column: each listed entry's parent page (Child Pages), and Links
  *   column: each listed entry's broken and blocked links; each read for the
  *   whole page in one request.
  *
  * Each shows only while its module is on (src/admin/extensions.ts; the Child
  * Pages ones only in collections with the Parent page field) and to admins
- * only (the routes need plugins:manage). They only read: changes are
- * made on the module pages, so nothing here races the editor's own save.
+ * only (the routes need plugins:manage). They never change the entry: changes are
+ * made on the module pages (the Buttondown panel's buttons change only the email draft
+ * in Buttondown), so nothing here races the editor's own save.
  */
 import { Badge, Button } from "@cloudflare/kumo";
-import { ArrowsClockwise, Copy } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowSquareOut, ArrowsClockwise, Copy, EnvelopeSimple } from "@phosphor-icons/react";
 import * as React from "react";
 
 import { PACK_API, apiPost, errorText } from "./api.js";
+import { STATE_BADGE, type RecordView, badgeLabel, buttondownEntry, buttondownPanelVisible, timeAgo } from "./buttondown-core.js";
+import { useConfirm } from "./confirm-dialog.js";
 import { EDITOR_PANELS, LIST_COLUMNS, extensionShows } from "./extensions.js";
 import { AdminLink, PackLink, WarningBadge } from "./page.js";
 import { packPagePath } from "./router.js";
@@ -46,6 +52,7 @@ const schemaPost = apiPost(`${PACK_API}/schema`);
 const aiPost = apiPost(`${PACK_API}/ai`);
 const linksPost = apiPost(`${PACK_API}/links`);
 const childPagesPost = apiPost(`${PACK_API}/childPages`);
+const buttondownPost = apiPost(`${PACK_API}/buttondown`);
 
 /** Load `fetcher` for an entry (again when it's saved), with a loading and an error state. */
 function useEntryData<T>(fetcher: () => Promise<T>, deps: React.DependencyList) {
@@ -445,6 +452,96 @@ export function ChildPagesPanel(props: PanelProps) {
 	);
 }
 
+// ── Buttondown ───────────────────────────────────────────────────
+
+export function ButtondownPanel(props: PanelProps) {
+	const { collection, entry } = props;
+	const [fresh, setFresh] = React.useState(0);
+	const { data, error, loading } = useEntryData(() => buttondownEntry(collection, entry.id, entry.updatedAt ?? "", { fresh: fresh > 0 }), [collection, entry.id, entry.updatedAt, fresh]);
+	const [pending, setPending] = React.useState<"create" | "refresh" | "retry">();
+	const [notice, setNotice] = React.useState<string>();
+	const [confirm, confirmDialog] = useConfirm();
+	if (loading && !data) return <Muted>Loading…</Muted>;
+	if (error || !data) return <Muted>{error ?? "Couldn't read the Buttondown draft."}</Muted>;
+	if (!data.covered) return <Muted>No Buttondown rule covers this collection. Add one on the <PackLink page="/buttondown">Buttondown Drafts page</PackLink>.</Muted>;
+	const record: RecordView | null = data.record ?? null;
+	const run = async (action: "create" | "refresh" | "retry") => {
+		if (action === "refresh") {
+			const ok = await confirm({
+				title: "Refresh the draft from the post?",
+				description: "This writes the post as it's published now over the draft in Buttondown, including any changes made there. It still won't touch an email that isn't a draft.",
+				confirmLabel: "Refresh draft",
+			});
+			if (!ok) return;
+		}
+		setPending(action);
+		setNotice(undefined);
+		try {
+			const result = await buttondownPost<{ record: RecordView | null }>(action === "retry" ? "retry" : "sync", action === "retry" ? { collection, id: entry.id } : { collection, id: entry.id, action }, "That didn't work");
+			setNotice(result.record?.state === "error" ? `Didn't work: ${result.record.lastError?.message ?? result.record.text}` : (result.record?.text ?? "Done."));
+		} catch (cause) {
+			setNotice(errorText(cause, "That didn't work"));
+		} finally {
+			setPending(undefined);
+			setFresh((n) => n + 1);
+		}
+	};
+	return (
+		<div className="space-y-3">
+			{record ? (
+				<div className="space-y-1.5">
+					<div className="flex flex-wrap items-center gap-2">
+						<Badge variant={STATE_BADGE[record.state]?.variant ?? "outline"}>{badgeLabel(record)}</Badge>
+						<span className="text-xs text-kumo-subtle">{timeAgo(record.updatedAt)}</span>
+					</div>
+					<p className="text-sm">{record.text}</p>
+				</div>
+			) : (
+				<Muted>{data.published ? (data.matches ? "No draft yet. It was published before the rule was saved: Create draft now makes one." : "This post doesn't have one of the rule's terms, so it gets no draft.") : "Publish the post to make its draft in Buttondown."}</Muted>
+			)}
+			{record && record.warnings.length > 0 && (
+				<ul role="list" className="space-y-1.5">
+					{record.warnings.map((w) => (
+						<li key={w} className="flex items-start gap-1.5 text-sm">
+							<WarningBadge>Check</WarningBadge>
+							<span>{w}</span>
+						</li>
+					))}
+				</ul>
+			)}
+			{!data.keySaved && <Muted>No Buttondown API key saved yet: add it on the plugin's Settings page.</Muted>}
+			{record?.appUrl && (
+				<a href={record.appUrl} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-sm text-kumo-link underline">
+					Open in Buttondown
+					<ArrowSquareOut aria-hidden="true" />
+					<span className="sr-only">(opens in a new tab)</span>
+				</a>
+			)}
+			<div aria-live="polite">{notice && <Muted>{notice}</Muted>}</div>
+			{(data.canCreate || data.canRefresh || data.canRetry) && (
+				<div className="flex flex-wrap gap-1.5">
+					{data.canCreate && (
+						<Button type="button" size="sm" variant="secondary" icon={<EnvelopeSimple aria-hidden="true" />} disabled={pending !== undefined} onClick={() => void run("create")}>
+							{pending === "create" ? "Creating…" : "Create draft now"}
+						</Button>
+					)}
+					{data.canRefresh && (
+						<Button type="button" size="sm" variant="ghost" icon={<ArrowsClockwise aria-hidden="true" />} disabled={pending !== undefined} onClick={() => void run("refresh")}>
+							{pending === "refresh" ? "Refreshing…" : "Refresh draft from post"}
+						</Button>
+					)}
+					{data.canRetry && (
+						<Button type="button" size="sm" variant="ghost" icon={<ArrowClockwise aria-hidden="true" />} disabled={pending !== undefined} onClick={() => void run("retry")}>
+							{pending === "retry" ? "Retrying…" : "Retry"}
+						</Button>
+					)}
+				</div>
+			)}
+			{confirmDialog}
+		</div>
+	);
+}
+
 // ── Links column ─────────────────────────────────────────────────
 
 type PageLinks = Record<string, LinkSummary | null>;
@@ -551,9 +648,11 @@ export function ParentCell(props: CellProps) {
 
 // ── What EmDash reads from the admin module ──────────────────────
 
-const PANEL_COMPONENTS: Record<(typeof EDITOR_PANELS)[number]["id"], React.ComponentType<PanelProps>> = { childPages: ChildPagesPanel, schema: SchemaPanel, ai: AiPanel, links: LinksPanel };
+const PANEL_COMPONENTS: Record<(typeof EDITOR_PANELS)[number]["id"], React.ComponentType<PanelProps>> = { childPages: ChildPagesPanel, schema: SchemaPanel, ai: AiPanel, links: LinksPanel, buttondown: ButtondownPanel };
+/** Panels that show only when their check says so (EmDash 1.5 isVisible): Buttondown, in collections a rule covers. */
+const PANEL_VISIBLE: Partial<Record<(typeof EDITOR_PANELS)[number]["id"], (context: PanelProps) => Promise<boolean>>> = { buttondown: buttondownPanelVisible };
 const COLUMN_CELLS: Record<(typeof LIST_COLUMNS)[number]["id"], React.ComponentType<CellProps>> = { parent: ParentCell, links: LinksCell };
 
-export const contentEditorPanels = EDITOR_PANELS.map(({ page, ...panel }) => ({ ...panel, component: PANEL_COMPONENTS[panel.id], collections: (collection: string) => extensionShows(panel.id, page, collection) }));
+export const contentEditorPanels = EDITOR_PANELS.map(({ page, ...panel }) => ({ ...panel, component: PANEL_COMPONENTS[panel.id], collections: (collection: string) => extensionShows(panel.id, page, collection), ...(PANEL_VISIBLE[panel.id] ? { isVisible: PANEL_VISIBLE[panel.id] } : {}) }));
 
 export const contentListColumns = LIST_COLUMNS.map(({ page, ...column }) => ({ ...column, cell: COLUMN_CELLS[column.id], collections: (collection: string) => extensionShows(column.id, page, collection) }));
