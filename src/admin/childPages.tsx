@@ -13,6 +13,7 @@ import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
 import { PACK_API, apiPost, errorText } from "./api.js";
+import { changeReason, changeText, plural, treeCollection, type ChangeStatus, type CollectionStatus, type LoopRef, type MoveRef, type RuleRef, type Shadow } from "./childPages-core.js";
 import { useConfirm } from "./confirm-dialog.js";
 import { PAGE_WARNINGS } from "./editor-panels.js";
 import { useManifestRefresh } from "./manifest.js";
@@ -26,52 +27,6 @@ const FIELD = "parent_page";
 async function send<T>(url: string, method: "POST" | "PUT", body: unknown, fallback: string): Promise<T> {
 	const response = await apiFetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 	return parseApiResponse<T>(response, fallback);
-}
-
-interface CollectionStatus {
-	collection: string;
-	label: string;
-	field: boolean;
-	conflict: string | null;
-	urlPattern: string | null;
-	nests: "configured" | "field" | "override" | "pattern" | null;
-}
-
-interface RuleRef {
-	source: string;
-	target: string;
-}
-
-/** A page that moved (src/childPages/pack.ts). */
-interface MoveRef {
-	entryId: string;
-	title: string;
-	from: string;
-	to: string;
-}
-
-interface LoopRef extends MoveRef {
-	rule: RuleRef;
-}
-
-interface Shadow {
-	url: string;
-	rule: RuleRef;
-}
-
-interface ChangeStatus {
-	at: string;
-	collection: string;
-	label: string;
-	reason: string;
-	moved: number;
-	written: number;
-	skipped: number;
-	redirectsOff: boolean;
-	loops?: LoopRef[];
-	shadowed?: Shadow[];
-	noSnapshot?: boolean;
-	failed?: string;
 }
 
 /** What's unresolved for a collection after its latest change. */
@@ -160,8 +115,6 @@ function Url({ children }: { children: string }) {
 		</span>
 	);
 }
-
-const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
 
 const editPath = (collection: string, id: string) => `/content/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`;
 
@@ -313,22 +266,35 @@ const WARNING_LABELS: Record<string, string> = {
 
 function Tree(props: { collections: CollectionStatus[]; reloadKey: number }) {
 	const withField = props.collections.filter((c) => c.field);
-	const [collection, setCollection] = React.useState(withField.find((c) => c.collection === "pages")?.collection ?? withField[0]?.collection ?? "");
-	const [state, setState] = React.useState<{ pages?: TreePage[]; nested?: boolean; error?: string; loading: boolean }>({ loading: true });
+	const [chosen, setChosen] = React.useState<string | null>(null);
+	// From the collections as they are now, not as they were when the page loaded: Set up can add the first field later.
+	const collection = treeCollection(props.collections, chosen);
+	const [state, setState] = React.useState<{ collection?: string; pages?: TreePage[]; nested?: boolean; error?: string; loading: boolean }>({ loading: true });
 
 	React.useEffect(() => {
-		if (!collection) return;
+		if (!collection) {
+			// No collection has the field: nothing to read, so nothing is loading.
+			setState({ loading: false });
+			return;
+		}
 		let live = true;
-		setState((s) => ({ ...s, loading: true, error: undefined }));
+		// Another collection's pages aren't shown while this one's load.
+		setState((s) => (s.collection === collection ? { ...s, loading: true, error: undefined } : { loading: true }));
 		post<{ pages: TreePage[]; nested: boolean }>("tree", { collection }, "Couldn't read the page tree")
-			.then((r) => live && setState({ pages: r.pages, nested: r.nested, loading: false }))
+			.then((r) => live && setState({ collection, pages: r.pages, nested: r.nested, loading: false }))
 			.catch((cause) => live && setState({ error: errorText(cause, "Couldn't read the page tree"), loading: false }));
 		return () => {
 			live = false;
 		};
 	}, [collection, props.reloadKey]);
 
-	if (!withField.length) return null;
+	if (!collection) {
+		return (
+			<Section title="Page tree" description="Pages by their URLs, as visitors and search engines see them.">
+				<p className="text-sm text-kumo-subtle">No collection has a Parent page field yet. Add it under Set up, and its pages are listed here.</p>
+			</Section>
+		);
+	}
 	const pages = state.pages ?? [];
 	const warned = pages.filter((p) => p.warnings.length).length;
 	return (
@@ -345,14 +311,14 @@ function Tree(props: { collections: CollectionStatus[]; reloadKey: number }) {
 				<Select
 					label="Collection"
 					value={collection}
-					onValueChange={(value: string | null) => value && setCollection(value)}
+					onValueChange={(value: string | null) => value && setChosen(value)}
 					items={withField.map((c) => ({ value: c.collection, label: c.label }))}
 				/>
 			)}
 			{state.error && <Banner variant="error" role="alert" description={state.error} />}
 			{state.loading && !state.pages ? (
 				<Loading label="Loading the page tree…" />
-			) : (
+			) : state.error && !state.pages ? null : (
 				<>
 					<p className="text-sm text-kumo-subtle">
 						{plural(pages.length, "page", "pages")}
@@ -528,18 +494,6 @@ const Rule = ({ rule }: { rule: RuleRef }) => (
 	</>
 );
 
-function changeText(change: ChangeStatus): string {
-	if (change.failed) return `The redirects for this change couldn't be worked out (${change.failed}). Click Re-check redirects to make them.`;
-	// A change to one page ("A page was published") counts the pages that moved with it; Slug changes redirects the page itself.
-	const parts = [/^A page\b/.test(change.reason) ? `${plural(change.moved, "more page", "more pages")} moved with it` : `${plural(change.moved, "page", "pages")} moved`];
-	if (change.redirectsOff) parts.push("no redirects (Redirect Manager or Slug changes was off)");
-	else parts.push(`${plural(change.written, "redirect", "redirects")} added`);
-	if (change.skipped) parts.push(`${plural(change.skipped, "page", "pages")} over the limit of 200 a change had to wait`);
-	if (change.loops?.length) parts.push(`${plural(change.loops.length, "redirect", "redirects")} not added (a loop)`);
-	const text = `${parts.join("; ")}.`;
-	return change.noSnapshot ? `${text} There were no earlier URLs to compare with, so pages this change moved got no redirect. Tracking started again from the current URLs.` : text;
-}
-
 function Redirects(props: { status: Status; onChanged: () => void }) {
 	const { changes, open } = props.status;
 	const [busy, setBusy] = React.useState(false);
@@ -638,7 +592,7 @@ function Redirects(props: { status: Status; onChanged: () => void }) {
 						{changes.map((change) => (
 							<li key={`${change.at}${change.collection}`}>
 								{new Date(change.at).toLocaleString()}
-								{several ? `, ${change.label}` : ""}: {change.reason.toLowerCase()}. {changeText(change)}
+								{several ? `, ${change.label}` : ""}: {changeReason(change)}. {changeText(change)}
 							</li>
 						))}
 					</ul>

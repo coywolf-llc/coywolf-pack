@@ -32,7 +32,7 @@ import { ensureTable, sourceKey, storedForms } from "../redirects/rules.js";
 import { SLUG_NOTE_PREFIX } from "../redirects/slug-core.js";
 import { type MoveLoop, type MoveShadow, type RuleRef, SLUG_CHANGES_FEATURE, type UrlMove, applyUrlMoves, loopingRule, memoHosts } from "../redirects/slug-changes.js";
 import { parseInput } from "../shared.js";
-import { CHILD_PAGES_FEATURE, type CollectionMeta, type CollectionTree, VERSION_SETTING, childPagesProvider, collectionTree, couldNest, databaseFor, invalidatePageTrees, readChildPagesState, readMeta, readTree } from "./read.js";
+import { CHILD_PAGES_FEATURE, type CollectionMeta, type CollectionTree, VERSION_SETTING, childPagesProvider, collectionTree, couldNest, databaseFor, invalidatePageTrees, readChildPagesState, readMeta, readTree, rowTitleSql, titleColumn } from "./read.js";
 import { DIGIT_SLUG, PARENT_FIELD, type PageNode, type PageTreeData, ancestorsOf, childrenOf, loopWith, storedParentsOf, warningsFor } from "./tree.js";
 
 export const FEATURES: FeatureDef[] = [
@@ -94,10 +94,34 @@ export interface LoopRef extends MoveRef {
 	rule: RuleRef;
 }
 
+/** The page a change was made to, for the list of changes: named by its title, or by its URL when it has none. */
+export interface ChangedPage {
+	title?: string;
+	url?: string;
+}
+
+const NAME_MAX = 200;
+const changedPage = (title: string | null | undefined, url: string | null | undefined): ChangedPage | null => {
+	const t = title?.trim().slice(0, NAME_MAX);
+	return t || url ? { ...(t ? { title: t } : {}), ...(url ? { url } : {}) } : null;
+};
+
+/** The title of an entry that isn't in the tree (it's in the trash), or null: a row that's gone or a read that fails names nothing. */
+async function titleOutsideTree(db: D1Database, meta: CollectionMeta, id: string): Promise<string | null> {
+	try {
+		const row = await db.prepare(rowTitleSql(meta.collection, titleColumn(meta.titleField))).bind(id).first<{ title: unknown }>();
+		return typeof row?.title === "string" ? row.title : null;
+	} catch {
+		return null;
+	}
+}
+
 export interface ChangeStatus {
 	at: string;
 	collection: string;
 	reason: string;
+	/** The page the change was made to (none for the switch or Re-check): its title, and its URL after the change, else before it, as far as they're known. */
+	page?: ChangedPage;
 	/** Pages whose URL changed (besides the one that was edited). */
 	moved: number;
 	/** Redirects added or updated. */
@@ -395,8 +419,19 @@ const notable = (change: ChangeStatus, recheck: boolean | undefined) =>
  *   write failed) there is nothing to compare with: one is recorded from the current tree, and when other
  *   pages already have parents the change says so (`noSnapshot`), since pages it moved got no redirect.
  * - A snapshot that can't be read rejects: the settle is left to the next change (the snapshot is unchanged).
+ *
+ * `options.title`: the changed entry's title as the caller has it, for a page that's no longer in the tree
+ * (the trash; without it the row's title is read, one more query for a change that's rare).
  */
-export async function settleCollection(ctx: PluginContext, db: D1Database, features: FeatureMap, collection: string, except: string | null, reason: string, options: { recheck?: boolean } = {}): Promise<void> {
+export async function settleCollection(
+	ctx: PluginContext,
+	db: D1Database,
+	features: FeatureMap,
+	collection: string,
+	except: string | null,
+	reason: string,
+	options: { recheck?: boolean; title?: string | null } = {},
+): Promise<void> {
 	invalidatePageTrees();
 	const meta = (await readMeta(db)).find((m) => m.collection === collection);
 	if (!meta?.field) return;
@@ -437,7 +472,16 @@ export async function settleCollection(ctx: PluginContext, db: D1Database, featu
 	const applied = await applyMoves(ctx, db, features, collection, moves, reason);
 	for (const [id, move] of applied.unapplied) keep.set(id, move.from);
 	await ctx.kv.set(snapshotKey(collection), snapshotOf(current, base, keep));
-	const change: ChangeStatus = { ...applied.change, ...(noSnapshot ? { noSnapshot: true } : {}), ...(exceptLoop ? { loops: [exceptLoop, ...(applied.change.loops ?? [])].slice(0, LISTED) } : {}) };
+	// The page that changed, by name: from the tree (a draft is in it too), else what the caller knows or its row in the trash, and where it was.
+	const known = except === null ? undefined : (tree.nodes.get(except)?.title ?? options.title);
+	const page =
+		except === null ? null : changedPage(known ?? (tree.nodes.has(except) ? null : await titleOutsideTree(db, meta, except)), current.urls.get(except) ?? before?.paths?.[except] ?? base.get(except));
+	const change: ChangeStatus = {
+		...applied.change,
+		...(page ? { page } : {}),
+		...(noSnapshot ? { noSnapshot: true } : {}),
+		...(exceptLoop ? { loops: [exceptLoop, ...(applied.change.loops ?? [])].slice(0, LISTED) } : {}),
+	};
 	// Only changes that did or left something are kept: an ordinary publish that moved nothing doesn't push them out.
 	await recordChange(ctx, collection, notable(change, options.recheck) ? change : null, openAfter(db, applied, exceptLoop, liveUrls(tree, current.urls)));
 }
@@ -608,8 +652,8 @@ export const ALL_COLLECTIONS = "";
 const failureText = (error: unknown) => String((error as { message?: unknown } | null)?.message ?? error).slice(0, 300);
 
 /** A settle that failed: said on the Child Pages page (its redirects are made by the next change, or Re-check). */
-async function recordFailure(ctx: PluginContext, collection: string, reason: string, error: unknown): Promise<void> {
-	const change: ChangeStatus = { at: new Date().toISOString(), collection, reason, moved: 0, written: 0, skipped: 0, redirectsOff: false, failed: failureText(error) };
+async function recordFailure(ctx: PluginContext, collection: string, reason: string, error: unknown, page: ChangedPage | null = null): Promise<void> {
+	const change: ChangeStatus = { at: new Date().toISOString(), collection, reason, ...(page ? { page } : {}), moved: 0, written: 0, skipped: 0, redirectsOff: false, failed: failureText(error) };
 	await recordChange(ctx, collection, change, async (earlier) => earlier ?? null);
 }
 
@@ -990,7 +1034,7 @@ function childPagesRoutes() {
 // ── The module ───────────────────────────────────────────────────
 
 /** Settle after a change to a page, when the feature is on and the collection has the field. */
-async function changed(ctx: PluginContext, collection: string, id: string | null, reason: string): Promise<void> {
+async function changed(ctx: PluginContext, collection: string, id: string | null, reason: string, title: string | null = null): Promise<void> {
 	if (!COLLECTION_SLUG.test(collection)) return;
 	const db = await databaseFor();
 	if (!db) return;
@@ -999,15 +1043,20 @@ async function changed(ctx: PluginContext, collection: string, id: string | null
 	if (!meta?.field) return;
 	await bumpVersion(ctx);
 	try {
-		await settleCollection(ctx, db, await ctxFeatures(ctx), collection, id, reason);
+		await settleCollection(ctx, db, await ctxFeatures(ctx), collection, id, reason, { title });
 	} catch (error) {
 		// The snapshot is as it was, so the next change (or Re-check redirects) works these moves out again.
 		ctx.log.error("Child pages: could not work out the redirects for this change; the next change, or Re-check redirects on the Child Pages page, makes them", { collection, reason, error: String(error) });
-		await recordFailure(ctx, collection, reason, error);
+		await recordFailure(ctx, collection, reason, error, changedPage(title, null));
 	}
 }
 
 const contentId = (content: Record<string, unknown> | undefined) => (content && typeof content.id === "string" ? content.id : null);
+/** The entry's title as a hook's event has it (EmDash puts the fields under `data`), for the list of changes. */
+const contentTitle = (content: Record<string, unknown> | undefined): string | null => {
+	const title = (content?.data as Record<string, unknown> | undefined)?.title ?? content?.title;
+	return typeof title === "string" && title.trim() ? title : null;
+};
 
 export function childPagesPack(): PackModule {
 	// The resolver follows stored parents while the feature is on (src/core/content-url.ts).
@@ -1020,11 +1069,11 @@ export function childPagesPack(): PackModule {
 		routes: childPagesRoutes(),
 		hooks: {
 			"content:beforePublish": loopGuard,
-			"content:afterPublish": (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => changed(ctx, event.collection, contentId(event.content), "A page was published"),
-			"content:afterUnpublish": (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => changed(ctx, event.collection, contentId(event.content), "A page was unpublished"),
+			"content:afterPublish": (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => changed(ctx, event.collection, contentId(event.content), "A page was published", contentTitle(event.content)),
+			"content:afterUnpublish": (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => changed(ctx, event.collection, contentId(event.content), "A page was unpublished", contentTitle(event.content)),
 			"content:afterDelete": (event: { id: string; collection: string; permanent: boolean }, ctx: PluginContext) =>
 				changed(ctx, event.collection, event.id, event.permanent ? "A page was deleted" : "A page was moved to the trash"),
-			"content:afterRestore": (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => changed(ctx, event.collection, contentId(event.content), "A page was restored"),
+			"content:afterRestore": (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => changed(ctx, event.collection, contentId(event.content), "A page was restored", contentTitle(event.content)),
 			// A save of a published page can move pages without a publish:
 			// - a collection without drafts saves its fields, the parent included, at once (no draft revision);
 			// - with drafts, edits wait in a draft revision, but EmDash still writes a new slug to the live row when
@@ -1034,11 +1083,11 @@ export function childPagesPack(): PackModule {
 				const content = event.content;
 				if (content?.status !== "published") return;
 				const id = contentId(content);
-				if (!content.draftRevisionId) return changed(ctx, event.collection, id, "A page was saved");
+				if (!content.draftRevisionId) return changed(ctx, event.collection, id, "A page was saved", contentTitle(content));
 				if (!id || typeof content.slug !== "string" || !COLLECTION_SLUG.test(event.collection)) return;
 				const known = (await ctx.kv.get<Snapshot>(snapshotKey(event.collection)).catch(() => null))?.slugs?.[id];
 				if (known === undefined || known === content.slug) return;
-				await changed(ctx, event.collection, id, "A page's slug changed");
+				await changed(ctx, event.collection, id, "A page's slug changed", contentTitle(content));
 			},
 		},
 		// Runs for every save of the switches: only this module's switch matters.

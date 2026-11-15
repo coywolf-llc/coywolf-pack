@@ -718,6 +718,8 @@ test("afterPublish, afterUnpublish, afterDelete and afterRestore through the com
 		assert.deepEqual(rules(s.d1), [["/apps/coywolf-pack/docs", "/apps/pack/docs/"]]);
 		assert.notEqual(version(), v1);
 		assert.equal(snapshot(s.ctx).paths.p, "/apps/pack/");
+		// The change names the page that was published: its title, and where it is now.
+		assert.deepEqual(status(s.ctx).changes[0].page, { title: "Coywolf Pack", url: "/apps/pack/" });
 
 		// Unpublished: the pages below Apps become top level.
 		s.d1.raw.exec("UPDATE ec_pages SET status = 'draft' WHERE id = 'a'");
@@ -739,6 +741,7 @@ test("afterPublish, afterUnpublish, afterDelete and afterRestore through the com
 		await s.call("content:afterDelete", { collection: "pages", id: "a", permanent: false });
 		assert.deepEqual(rules(s.d1).find(([from]) => from === "/apps/pack"), ["/apps/pack", "/pack/"]);
 		assert.equal(status(s.ctx).changes[0].reason, "A page was moved to the trash");
+		assert.deepEqual(status(s.ctx).changes[0].page, { title: "Coywolf apps" }, "a trashed page isn't in the tree: its title is read from its row");
 		assert.notEqual(version(), v3);
 
 		// Restored (EmDash brings it back as a draft): nothing nests yet, but the hook runs and the version moves.
@@ -784,6 +787,7 @@ test("afterSave through the composed hooks: a draft's save does nothing; a slug-
 		]);
 		assert.notEqual(version(), v1, "the URL version moves");
 		assert.equal(status(s.ctx).changes[0].reason, "A page's slug changed");
+		assert.deepEqual(status(s.ctx).changes[0].page, { title: "Coywolf apps", url: "/tools/" });
 		// The same for a nested page (the page itself is Slug changes').
 		s.d1.raw.exec("UPDATE ec_pages SET slug = 'pack' WHERE id = 'p'");
 		await s.call("content:afterSave", s.event("p"));
@@ -828,6 +832,7 @@ test("a page that goes back to a URL a hand-made rule redirects: Slug changes wr
 		assert.deepEqual(rules(s.d1), [["/apps/coywolf-seo", "/coywolf-seo/"]]);
 		assert.deepEqual(answer.open, []);
 		assert.equal(answer.changes[0].reason, "Redirects re-checked");
+		assert.equal(answer.changes[0].page, undefined, "Re-check is no page's change");
 	} finally {
 		s.close();
 	}
@@ -846,6 +851,7 @@ test("a settle that fails in a hook is logged and listed, the snapshot is left a
 		failing = false;
 		assert.ok(s.ctx.state.logs.some(([level, message]) => level === "error" && /could not work out the redirects/.test(message)));
 		assert.match(status(s.ctx).changes[0].failed, /transient/);
+		assert.equal(status(s.ctx).changes[0].page?.url, undefined, "a settle that failed read no URLs");
 		assert.deepEqual(snapshot(s.ctx), kept);
 		await s.call("content:afterPublish", s.event("x"));
 		assert.deepEqual(rules(s.d1), [
@@ -978,15 +984,15 @@ test("resolvePagePath: a draft or scheduled page answers null at its nested and 
 		assert.equal(theme.isPreviewRequest(), false);
 		assert.equal(await inRequest({}, async () => theme.isPreviewRequest()), false);
 		assert.equal(await inRequest({ preview: { collection: "pages", id: "s" } }, async () => theme.isPreviewRequest()), true);
+		assert.equal(theme.previewedEntry(), null);
+		assert.equal(await inRequest({}, async () => theme.previewedEntry()), null);
+		assert.equal(await inRequest({ preview: { collection: "pages" } }, async () => theme.previewedEntry()), null, "not the shape EmDash sets");
 	} finally {
 		configureContentUrls({});
 	}
 });
 
 test("get(): a published page wins over an unpublished one with the same slug, whatever their locales", async () => {
-		assert.equal(theme.previewedEntry(), null);
-		assert.equal(await inRequest({}, async () => theme.previewedEntry()), null);
-		assert.equal(await inRequest({ preview: { collection: "pages" } }, async () => theme.previewedEntry()), null, "not the shape EmDash sets");
 	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
 	const d1 = fakeD1([page("x-en", "about", "draft", "About (draft)", "en", "X"), page("x-fr", "about", "published", "À propos", "fr", "X")].join("\n"));
 	try {

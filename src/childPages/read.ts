@@ -73,6 +73,11 @@ export function rowsSql(collection: string, title: string): string {
 	return `SELECT id, slug, locale, translation_group, status, published_at, draft_revision_id, live_revision_id, ${title} AS title FROM "ec_${collection}" WHERE deleted_at IS NULL`;
 }
 
+/** One row's title, in the trash or not (the tree has no trashed pages). */
+export function rowTitleSql(collection: string, title: string): string {
+	return `SELECT ${title} AS title FROM "ec_${collection}" WHERE id = ?`;
+}
+
 interface MetaRow {
 	collection: string;
 	label: string | null;

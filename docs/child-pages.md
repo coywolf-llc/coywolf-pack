@@ -190,7 +190,7 @@ With Redirect Manager and Slug changes on:
 - **Turning Child Pages off** adds a 301 from each nested URL to the URL the page has without its parent (or with its `pageParents` parent). **Turning it on** adds them the other way, and removes the ones that pointed away from the now-nested URLs.
 - **The cached pages go too.** Child Pages clears the cached page at each moved page's old and new URL, so the redirect answers at once.
 
-The rules are Slug changes' own (noted `Slug change: <title>`), listed on the Redirect Manager page. The **Redirects** section of the Child Pages page lists the latest changes that moved pages, and anything still open.
+The rules are Slug changes' own (noted `Slug change: <title>`), listed on the Redirect Manager page. The **Redirects** section of the Child Pages page lists the latest changes that moved pages, each with the page it was made to (its title, or its URL when it has none), and anything still open.
 
 ### More than 200 pages at once
 
