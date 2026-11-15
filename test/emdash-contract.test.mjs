@@ -23,8 +23,21 @@ import { after, before, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CompiledQuery, Kysely, sql } from "kysely";
+import { registerHooks } from "node:module";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// getEmDashCollection outside Astro: its live collection (astro:content's getLiveCollection) is EmDash's own loader,
+// handed the filter as Astro hands it (see the Pagination test), and EmDash's build-time config module is empty.
+registerHooks({
+	resolve(specifier, context, next) {
+		if (specifier === "astro:content") {
+			return { url: "data:text/javascript,export const getLiveCollection = (...args) => globalThis.__contractLiveCollection(...args);", shortCircuit: true };
+		}
+		if (specifier === "virtual:emdash/config") return { url: "data:text/javascript,export default {};", shortCircuit: true };
+		return next(specifier, context);
+	},
+});
 
 // ── Installed packages ─────────────────────────────────────────
 
@@ -390,6 +403,15 @@ function sourceFiles() {
 /** Every SQL statement in src that names one of EmDash's tables, with its expressions filled in. */
 async function packStatements() {
 	Object.assign(IMPORTED, { VARIANTS_COLLECTION: (await import("../src/images/variants-store.ts")).VARIANTS_COLLECTION });
+	// src/pagination/count.ts countQuery: the fragments it joins, from the module itself (no locale, or the locale's
+	// candidates; no filter, a taxonomy or the byline; no taxonomy names to check, or the check).
+	const count = await import("../src/pagination/count.ts");
+	Object.assign(EXPRESSIONS, {
+		"src/pagination/count.ts::termLocale": ["", count.TERM_LOCALE_SQL],
+		"src/pagination/count.ts::localeSql": ["", count.LOCALE_SQL],
+		"src/pagination/count.ts::known": ["NULL", count.KNOWN_TAXONOMIES],
+		"src/pagination/count.ts::filters": ["", ` AND c.translation_group IN ${count.termEntries(count.TERM_LOCALE_SQL)}`, ` AND c.id IN ${count.BYLINE_ENTRIES}`],
+	});
 	const statements = [];
 	const unknown = [];
 	const used = new Set();
@@ -825,6 +847,140 @@ test("EmDash's storage publicUrl reaches the pack through virtual:emdash/config,
 		assert.deepEqual(mediaFile(resolveUrl(undefined, "01ABC.jpg")), { id: "01ABC", ext: "jpg" });
 	} finally {
 		resetStoragePublicUrl();
+	}
+});
+
+// ── Pagination: the entry count ────────────────────────────────
+
+/** getEmDashCollection's live collection outside Astro: EmDash's own loader, called with the filter as Astro's getLiveCollection calls it. */
+async function useEmDashLoader() {
+	const { emdashLoader } = await import("emdash/runtime");
+	const loader = emdashLoader();
+	globalThis.__contractLiveCollection = async (_name, filter) => {
+		const result = await loader.loadCollection({ filter });
+		return result.error ? { entries: [], error: result.error } : { entries: result.entries, cacheHint: result.cacheHint };
+	};
+}
+
+test("countEntries counts what paging through getEmDashCollection to the end lists: status, trash, locale, categories, tags and bylines (src/pagination/count.ts)", async () => {
+	const { ContentRepository, getEmDashCollection, runWithContext } = await import("emdash");
+	const TaxonomyRepository = await distClass("TaxonomyRepository", "async setTermsForEntry(");
+	const BylineRepository = await distClass("BylineRepository", "async setContentBylines(");
+	const { countEntries } = await import("../src/pagination/count.ts");
+	const { invalidateFeatures } = await import("../src/core/features.ts");
+	await useEmDashLoader();
+
+	// Posts the way a site has them: categories (a parent and its child, and posts in two), a tag, bylines (several on
+	// one post), a draft, an archived post, trashed posts, one dated in the future (EmDash lists it: there's no
+	// published_at rule), and posts in French, one stored under an alias code.
+	const content = new ContentRepository(db);
+	const terms = new TaxonomyRepository(db);
+	const people = new BylineRepository(db);
+	const news = await terms.create({ name: "category", slug: "news", label: "News" });
+	const seo = await terms.create({ name: "category", slug: "seo", label: "SEO", parentId: news.id });
+	const guides = await terms.create({ name: "category", slug: "guides", label: "Guides" });
+	await terms.create({ name: "category", slug: "actualites", label: "Actualités", locale: "fr", translationOf: news.id });
+	const coyotes = await terms.create({ name: "tag", slug: "coyotes", label: "Coyotes" });
+	const jon = await people.create({ slug: "jon", displayName: "Jon" });
+	const guest = await people.create({ slug: "guest", displayName: "Guest", isGuest: true });
+	let n = 0;
+	const post = async (status, { categories = [], tags = [], credits = [], trashed = false, locale, date } = {}) => {
+		n++;
+		const publishedAt = status === "draft" ? null : (date ?? new Date(Date.UTC(2026, 0, n)).toISOString());
+		const entry = await content.create({ type: "posts", slug: `paged-${n}`, status, locale, publishedAt, data: { title: `Paged ${n}` } });
+		if (categories.length) await terms.setTermsForEntry("posts", entry.id, "category", categories.map((t) => t.id));
+		if (tags.length) await terms.setTermsForEntry("posts", entry.id, "tag", tags.map((t) => t.id));
+		if (credits.length) await people.setContentBylines("posts", entry.id, credits.map((b) => ({ bylineId: b.id })));
+		if (trashed) assert.ok(await content.delete("posts", entry.id));
+	};
+	for (let i = 0; i < 5; i++) await post("published", { categories: [news], tags: i % 2 ? [coyotes] : [], credits: i < 2 ? [jon] : [] });
+	for (let i = 0; i < 3; i++) await post("published", { categories: [seo], credits: [guest, jon] });
+	for (let i = 0; i < 2; i++) await post("published", { categories: [news, guides], tags: [coyotes] });
+	await post("published", { categories: [guides], date: "2099-01-01T00:00:00.000Z" });
+	await post("draft", { categories: [news], credits: [jon] });
+	await post("archived", { categories: [news] });
+	await post("published", { categories: [news, seo], tags: [coyotes], credits: [jon], trashed: true });
+	await post("published", { categories: [guides], trashed: true });
+	await post("published", { categories: [news], locale: "fr" });
+	await post("published", { locale: "fr-CA" });
+
+	/** Every entry getEmDashCollection lists for the filter, page by page to the end (offset paging, as archive routes do). */
+	const listed = (filter, context = {}) =>
+		runWithContext({ db, ...context }, async () => {
+			let total = 0;
+			for (let page = 1; ; page++) {
+				const result = await getEmDashCollection("posts", { ...filter, orderBy: { published_at: "desc" }, limit: 2, offset: (page - 1) * 2 });
+				assert.equal(result.error, undefined, JSON.stringify(filter));
+				total += result.entries.length;
+				if (!result.hasMore) return total;
+				assert.ok(page < 100, "paging never ended");
+			}
+		});
+	const statements = [];
+	const database = { prepare: (query) => (statements.push(query), d1.prepare(query)), batch: (list) => d1.batch(list) };
+	const counted = (filter, context = {}) => runWithContext({ db, ...context }, () => countEntries("posts", filter, { database }));
+
+	const before = await ctx.settings.get("features");
+	await ctx.settings.set("features", { ...(before ?? {}), pagination: true });
+	invalidateFeatures();
+	try {
+		const jonGroup = jon.translationGroup ?? jon.id;
+		const guestGroup = guest.translationGroup ?? guest.id;
+		const filters = [
+			{},
+			{ status: "published" },
+			{ status: "draft" },
+			{ status: "archived" },
+			{ where: { category: "news" } },
+			{ where: { category: ["news", "seo"] } },
+			{ where: { category: "guides" } },
+			{ where: { tag: "coyotes" } },
+			{ where: { category: "news", tag: "coyotes" } },
+			{ where: { category: "news", tag: null } },
+			{ where: { byline: jonGroup } },
+			{ where: { byline: [jonGroup, guestGroup] } },
+			{ where: { category: "seo", byline: guestGroup } },
+			{ where: { category: ["news", "guides"], byline: jonGroup } },
+			{ status: "draft", where: { category: "news" } },
+			{ where: { category: "missing" } },
+			{ where: { category: [] } },
+			{ where: { byline: [] } },
+		];
+		for (const filter of filters) assert.equal(await counted(filter), await listed(filter), JSON.stringify(filter));
+		// The seeds count: drafts, archived, trashed, other categories and the subcategory are left out (EmDash matches exact terms).
+		assert.equal(await counted({ where: { category: "news" } }), 8);
+		assert.equal(await counted({ where: { category: "guides" } }), 3, "with the post dated in the future");
+		assert.equal(await counted({ where: { tag: "coyotes" } }), 4);
+		assert.equal(await counted({ where: { byline: jonGroup } }), 5);
+
+		// A field filter isn't mirrored: no count, rather than a wrong one.
+		assert.equal(await listed({ where: { title: "Paged 1" } }), 1, "EmDash filters on the field");
+		assert.equal(await counted({ where: { title: "Paged 1" } }), null);
+		assert.equal(await counted({ where: { title: "Paged 1", category: "news" } }), null);
+
+		// Several locales: the filter's, else the request's, else the default one, each with its alias codes; terms in that locale.
+		const i18n = Symbol.for("emdash:i18n-config");
+		globalThis[i18n] = { defaultLocale: "en", locales: ["en", "fr"], localeAliases: { "fr-CA": "fr" } };
+		try {
+			const localized = [{}, { where: { category: "news" } }, { where: { category: "actualites" } }, { locale: "fr" }, { locale: "fr-CA" }, { locale: "fr", where: { category: "news" } }, { locale: "fr", where: { category: "actualites" } }];
+			for (const filter of localized) assert.equal(await counted(filter), await listed(filter), `i18n: ${JSON.stringify(filter)}`);
+			assert.equal(await counted({}, { locale: "fr" }), await listed({}, { locale: "fr" }), "the request's locale");
+			assert.equal(await counted({ locale: "fr" }), 2, "fr, and fr-CA rows (an alias code of fr)");
+			assert.equal(await counted({ locale: "fr", where: { category: "actualites" } }), 1);
+			assert.equal(await counted({ locale: "fr", where: { category: "news" } }), 0, "news is an English term");
+		} finally {
+			delete globalThis[i18n];
+		}
+
+		// Pagination off: null, and no count query.
+		await ctx.settings.set("features", { ...(before ?? {}), pagination: false });
+		invalidateFeatures();
+		statements.length = 0;
+		assert.equal(await counted({ where: { category: "news" } }), null);
+		assert.ok(!statements.some((q) => q.includes('"ec_posts"')), statements.join("\n"));
+	} finally {
+		await ctx.settings.set("features", before ?? {});
+		invalidateFeatures();
 	}
 });
 

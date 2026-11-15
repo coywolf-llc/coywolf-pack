@@ -60,6 +60,7 @@ test("the README's module table uses the sidebar's names", () => {
 	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 	const table = [...readme.matchAll(/^\| \[([^\]]+)\]\(docs\/[^)]+\.md\) \|/gm)].map((m) => m[1]);
 	assert.ok(table.length >= 18, `found ${table.length} modules in the README`);
-	const names = new Set([...declared.values(), "Update Check"]);
+	// Modules without a page of their own go by their Features name.
+	const names = new Set([...declared.values(), "Update Check", "Pagination"]);
 	for (const name of table) assert.ok(names.has(name), `README module "${name}" isn't a sidebar name (${[...names].join(", ")})`);
 });

@@ -401,9 +401,21 @@ registerSiteOption(GENERATION_OPTION);
  * can't be read, and notes the failure (src/core/read-failures.ts), so the
  * page rendered with them isn't edge-cached.
  */
-export async function siteFeatures(database = "DB", fresh = false): Promise<FeatureMap> {
+export async function siteFeatures(database: Database = "DB", fresh = false): Promise<FeatureMap> {
 	if (!fresh && cached && Date.now() - cached.at < TTL_MS) return cached.features;
 	return (await readSiteOptions(database)).features;
+}
+
+/**
+ * Like siteFeatures, and whether the switches could be read. `ok: false`: D1
+ * failed, the switches are their defaults and the failure is noted
+ * (src/core/read-failures.ts). For callers that would act on a default as if
+ * it were the site's choice (a redirect, say) and should hold off instead.
+ */
+export async function siteFeatureState(database: Database = "DB"): Promise<{ features: FeatureMap; ok: boolean }> {
+	if (cached && Date.now() - cached.at < TTL_MS) return { features: cached.features, ok: true };
+	const { features, ok } = await readSiteOptions(database);
+	return { features, ok };
 }
 
 /** A D1 binding name, or the binding itself (for callers that already have it). */

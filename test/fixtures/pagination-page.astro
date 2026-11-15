@@ -1,0 +1,12 @@
+---
+// A page with two navs (above and below a list), for test/pagination-render.test.mjs.
+import Pagination from "../../src/astro/pagination/Pagination.astro";
+
+const { top, bottom, database } = Astro.props;
+---
+
+<main>
+	<Pagination {...top} database={database} />
+	<p>the list</p>
+	<Pagination {...bottom} database={database} />
+</main>

@@ -1,0 +1,76 @@
+---
+/**
+ * Pagination for archive pages (the W3C design system's pagination pattern):
+ * a named <nav> with Previous, numbered page links (first, nearby pages and
+ * last, with gaps) and Next, on one line at every width. Markup and CSS come
+ * from src/pagination/html.ts and css.ts; the CSS goes out once per page,
+ * before the first nav (unless `styles={false}`).
+ *
+ * With the `pagination` switch off it shows Previous and Next only. Links
+ * are `/N/` with `shortPageUrls` on, `/page/N/` with it off. Renders
+ * nothing when there's only one page.
+ *
+ *   import { Pagination, countEntries } from "@coywolf/emdash/astro";
+ *   <Pagination base="/news/" page={page} perPage={20} count={count} hasMore={hasMore} />
+ *
+ * Props:
+ * - `base`: the archive's page 1 ("/", "/news/web-development/", "/tag/coyotes/").
+ * - `page`: the current page.
+ * - `perPage`: entries per page (the list's limit).
+ * - `count`: the entry count (countEntries), or null/undefined when unknown
+ *   (search and author archives): then there's no last-page link.
+ * - `hasMore`: the list's hasMore (getEmDashCollection, search). With a count
+ *   it keeps the last page honest; without one it decides Next.
+ * - `query`: a query string kept on every link ("?s=coyote").
+ * - `label`: the nav's name (a visually hidden heading). Default "Pagination".
+ * - `headingLevel`: that heading's level, 2–6. Default 2.
+ * - `styles`: print the CSS. Default true; false when the theme ships PAGINATION_CSS itself.
+ * - `database`: the site database for the switches, as archivePage and
+ *   countEntries take it: a D1 binding name (default "DB") or the binding.
+ */
+import { isOn, siteFeatures } from "../../core/features.js";
+import { PAGINATION_CSS } from "../../pagination/css.js";
+import { paginationHtml } from "../../pagination/html.js";
+import { PAGINATION_FEATURE, SHORT_URLS_FEATURE } from "../../pagination/pack.js";
+import { lastPage } from "../../pagination/pages.js";
+import { type PageQuery, pageHref } from "../../pagination/urls.js";
+
+interface Props {
+	base: string;
+	page: number;
+	perPage: number;
+	count?: number | null;
+	hasMore?: boolean;
+	query?: PageQuery;
+	label?: string;
+	headingLevel?: 2 | 3 | 4 | 5 | 6;
+	styles?: boolean;
+	database?: string | D1Database;
+}
+
+const { base, page, perPage, count, hasMore, query, label, headingLevel, styles = true, database = "DB" } = Astro.props;
+
+const features = await siteFeatures(database);
+const numbered = isOn(features, PAGINATION_FEATURE);
+const short = isOn(features, SHORT_URLS_FEATURE);
+const current = Math.max(1, Math.floor(Number(page)) || 1);
+
+// Each nav's heading gets its own id, and the CSS goes out once per page, before the first nav.
+const locals = (Astro.locals ?? {}) as Record<string, unknown>;
+const html = paginationHtml({
+	page: current,
+	last: lastPage(count, perPage, current, hasMore),
+	hasMore,
+	numbered,
+	href: (n) => pageHref(base, n, { short, query }),
+	id: `cw-pagination-${(Number(locals.__cwPaginationNavs) || 0) + 1}`,
+	label,
+	headingLevel,
+});
+if (html) locals.__cwPaginationNavs = (Number(locals.__cwPaginationNavs) || 0) + 1;
+const css = html && styles && !locals.__cwPaginationCss ? PAGINATION_CSS : "";
+if (css) locals.__cwPaginationCss = true;
+---
+
+{css && <style is:inline set:html={css} />}
+{html && <Fragment set:html={html} />}

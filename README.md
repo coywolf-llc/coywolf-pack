@@ -32,6 +32,7 @@ Every module starts off on a new site. Turn on only the ones you want on the **F
 | [Content Audit](docs/content-audit.md) | A weekly report of missing SEO titles and descriptions, alt text and social images, thin and stale entries, heading problems and broken internal links, with trends |
 | [Headings & TOC](docs/headings.md) | Linkable headings and a Table of Contents block |
 | [Breadcrumb Nav](docs/breadcrumbs.md) | An accessible breadcrumb trail for themes and as a block |
+| [Pagination](docs/pagination.md) | Numbered page links for the theme's archives (first, nearby pages and last, on one line at every width) and short page URLs: page 3 is `/3/`, not `/page/3/` |
 | [Code Blocks](docs/code-blocks.md) | Server-side syntax highlighting, themes, language labels, copy buttons |
 | [File Downloads](docs/files.md) | Download cards, stable download URLs with counts, uploads of any size |
 | [Private Form Uploads](docs/form-uploads.md) | Files sent through EmDash Forms go to a private bucket that only admins can read |
@@ -221,7 +222,7 @@ Each module has its own page in [docs](docs/README.md), with its setup, settings
 
 - [Performance](docs/performance.md): page cache, cache warming, Cloudflare usage
 - [Content URLs](docs/content-urls.md): telling the pack how your theme routes entries
-- Modules: [Clean Image URLs](docs/images.md) · [Backups](docs/backups.md) · [Redirect Manager](docs/redirects.md) · [Schema & Social](docs/schema.md) · [Discovery](docs/discovery.md) · [Robots.txt](docs/robots.md) · [Search](docs/search.md) · [Link Manager](docs/links.md) · [Headings & TOC](docs/headings.md) · [Breadcrumb Nav](docs/breadcrumbs.md) · [Code Blocks](docs/code-blocks.md) · [File Downloads](docs/files.md) · [Private Form Uploads](docs/form-uploads.md) · [Videos](docs/videos.md) · [Reviews](docs/reviews.md) · [Custom Blocks](docs/custom-blocks.md) · [AI Enrichment](docs/ai.md)
+- Modules: [Clean Image URLs](docs/images.md) · [Backups](docs/backups.md) · [Redirect Manager](docs/redirects.md) · [Schema & Social](docs/schema.md) · [Discovery](docs/discovery.md) · [Robots.txt](docs/robots.md) · [Search](docs/search.md) · [Link Manager](docs/links.md) · [Headings & TOC](docs/headings.md) · [Breadcrumb Nav](docs/breadcrumbs.md) · [Pagination](docs/pagination.md) · [Code Blocks](docs/code-blocks.md) · [File Downloads](docs/files.md) · [Private Form Uploads](docs/form-uploads.md) · [Videos](docs/videos.md) · [Reviews](docs/reviews.md) · [Custom Blocks](docs/custom-blocks.md) · [AI Enrichment](docs/ai.md)
 - [WordPress Migration](docs/wordpress-import.md): finishing a move from WordPress
 - [Internals](docs/internals.md): how the pack keeps database reads low, and the deadlines on shared reads
 

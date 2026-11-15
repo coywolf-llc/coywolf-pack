@@ -47,6 +47,25 @@ export { hostedPosterImage } from "../videos/poster.js";
 export { BreadcrumbsComponent as Breadcrumbs };
 
 /**
+ * Pagination module (docs/pagination.md): the Pagination nav for archive
+ * routes; archivePage reads the page number from a route's path (and says
+ * where to redirect); countEntries counts the archive's entries for the last
+ * page; pageHref builds a page's URL (for canonicals). lastPage, pageItems,
+ * parsePagePath and PAGINATION_CSS are the pieces, for themes that render
+ * their own nav or ship the CSS themselves.
+ */
+export { default as Pagination } from "./pagination/Pagination.astro";
+export { archivePage } from "../pagination/pack.js";
+export type { ArchivePage, ArchivePageOptions } from "../pagination/pack.js";
+export { countEntries } from "../pagination/count.js";
+export type { CountFilter, CountOptions } from "../pagination/count.js";
+export { PAGE_NUMBER, pageHref, parsePagePath } from "../pagination/urls.js";
+export type { PageForm, PageHrefOptions, PagePath, PagePathOptions, PageQuery } from "../pagination/urls.js";
+export { lastPage, pageItems } from "../pagination/pages.js";
+export type { PageItem, PageLevel } from "../pagination/pages.js";
+export { PAGINATION_CSS } from "../pagination/css.js";
+
+/**
  * Pass to <PortableText components={...}> so headings get their anchor ids
  * (Headings & TOC module) and tables are keyboard-scrollable, with their
  * caption. Plugins can't override EmDash's `block` renderer.
