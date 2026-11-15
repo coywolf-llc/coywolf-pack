@@ -7,7 +7,8 @@
  * (paragraphs, headings h1–h6, blockquotes, bullet and numbered lists at any
  * depth, with strong/em/code/strike-through and link marks), images, code,
  * horizontal breaks, and tables. Anything else (embeds, buttons, custom
- * plugin blocks) is skipped rather than guessed at.
+ * plugin blocks) is skipped rather than guessed at, unless the caller passes
+ * `unknownBlock` (Buttondown Drafts does, for its email bodies).
  */
 import { cdnOriginalUrl } from "../images/lib.js";
 
@@ -17,6 +18,13 @@ type Node = Record<string, any>;
 export interface MarkdownOptions {
 	/** Turn a site-relative href or media URL into an absolute one. Default: unchanged. */
 	absolute?: (url: string) => string;
+	/**
+	 * The URL an image block uses, given the one this converter found (the original on the media host when there's
+	 * one). Default: that URL. Buttondown Drafts swaps in an email-safe size and format.
+	 */
+	image?: (url: string, block: Node) => string;
+	/** Markdown for a block type this converter doesn't know (null: left out). Default: every such block is left out. */
+	unknownBlock?: (block: Node) => string | null;
 }
 
 export interface Frontmatter {
@@ -124,7 +132,8 @@ function imageUrl(block: Node): string | null {
 }
 
 function renderImage(block: Node, options: MarkdownOptions): string | null {
-	const src = safeHref(imageUrl(block), options);
+	const found = imageUrl(block);
+	const src = safeHref(found && options.image ? options.image(found, block) : found, options);
 	if (!src) return null;
 	const asset = isRecord(block.asset) ? block.asset : {};
 	const altRaw = typeof block.alt === "string" ? block.alt : typeof asset.alt === "string" ? asset.alt : "";
@@ -241,7 +250,8 @@ export function portableTextToMarkdown(value: unknown, options: MarkdownOptions 
 				rendered = renderTable(block, options);
 				break;
 			default:
-				rendered = null; // Unknown block types are skipped.
+				// Unknown block types are skipped, unless the caller renders them.
+				rendered = options.unknownBlock ? options.unknownBlock(block) : null;
 		}
 		if (rendered) parts.push(rendered);
 	}

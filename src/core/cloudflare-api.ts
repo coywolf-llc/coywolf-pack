@@ -45,9 +45,12 @@ export function contextFetch(ctx?: { http?: { fetch(url: string, init?: RequestI
 	return ctx?.http ? (ctx.http.fetch.bind(ctx.http) as Fetch) : (url, init) => fetch(url, init);
 }
 
-/** `text` with the token, and anything sent as a bearer credential, replaced. */
+/**
+ * `text` with the token, and anything sent as a bearer credential or as a `Token <key>` credential (Buttondown's
+ * Authorization scheme: a long key after the word, so prose like "Token expired" stays), replaced.
+ */
 export function scrubToken(text: string, token?: string | null): string {
-	let out = text.replaceAll(/Bearer\s+\S+/gi, "Bearer …");
+	let out = text.replaceAll(/Bearer\s+\S+/gi, "Bearer …").replaceAll(/\bToken\s+[A-Za-z0-9_.-]{16,}/g, "Token …");
 	if (token && token.length >= 8) out = out.replaceAll(token, "…");
 	return out;
 }

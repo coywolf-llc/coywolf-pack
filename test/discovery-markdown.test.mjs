@@ -129,3 +129,19 @@ test("images in Markdown point at the media host when there is one (not the site
 		lib.setStoragePublicUrl(null);
 	}
 });
+
+test("the optional hooks (Buttondown Drafts): image swaps an image's URL, unknownBlock renders blocks it would skip; without them nothing changes", () => {
+	const value = [
+		{ _type: "image", _key: "i", asset: { url: "/_emdash/api/media/file/a.webp" }, alt: "A" },
+		{ _type: "coywolf-note", _key: "n", body: "Hi" },
+		{ _type: "mystery", _key: "m" },
+	];
+	assert.equal(portableTextToMarkdown(value), "![A](/_emdash/api/media/file/a.webp)", "the default: unknown blocks are skipped");
+	const seen = [];
+	const md = portableTextToMarkdown(value, {
+		image: (url, node) => (seen.push(node._key), `${url}?email`),
+		unknownBlock: (node) => (node._type === "coywolf-note" ? "> Hi" : null),
+	});
+	assert.equal(md, "![A](/_emdash/api/media/file/a.webp?email)\n\n> Hi");
+	assert.deepEqual(seen, ["i"]);
+});

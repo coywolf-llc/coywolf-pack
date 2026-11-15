@@ -668,6 +668,28 @@ export async function primaryTerms(source: UrlSource, collection: string, ids: s
 }
 
 /**
+ * Every term slug one entry has in one taxonomy (locale-resolved, ordered by
+ * label): primaryTermsQuery's SQL (EmDash's selectEntryTermRows) for that one
+ * entry, all its rows kept. One query. Empty when the entry has none or the
+ * tables can't be read.
+ */
+export async function entryTerms(source: UrlSource, collection: string, id: string, taxonomy: string): Promise<string[]> {
+	if (!id || !COLLECTION_SLUG.test(collection) || !TAXONOMY_NAME.test(taxonomy)) return [];
+	if (!isD1(source)) {
+		const { getTermsForEntries } = await import("emdash");
+		const map = (await getTermsForEntries(collection, [id], taxonomy).catch(() => new Map())) as Map<string, Array<{ slug: string }>>;
+		return [...new Set((map.get(id) ?? []).map((t) => t.slug).filter(Boolean))];
+	}
+	try {
+		const q = primaryTermsQuery(collection, [id], [taxonomy], await hostDefaultLocale());
+		const rows = (await source.prepare(q.sql).bind(...q.binds).all<PrimaryTermRow>()).results;
+		return [...new Set(rows.filter((r) => r.entry_id === id && r.name === taxonomy && r.slug).map((r) => r.slug))];
+	} catch {
+		return []; // No taxonomy tables yet: no terms.
+	}
+}
+
+/**
  * Term parents per taxonomy (term slug → parent term slug), read in one
  * query: EmDash's `taxonomies.parent_id` (the parent's translation_group, or
  * a row id before EmDash's migration 045), then the `termParents` option for
