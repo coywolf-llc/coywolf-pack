@@ -323,7 +323,8 @@ export function slugChangesModule(options: { database?: string }) {
 	}
 
 	const urlOf = (d1: D1Database, collection: string, entry: EntrySnapshot) =>
-		entry.slug ? entryUrl(d1, collection, { id: entry.id, slug: entry.slug, publishedAt: entry.publishedAt, locale: entry.locale }).catch(() => null) : Promise.resolve(null);
+		// Strict: a rule and a remembered URL are written from this. If Child Pages' parents can't be read there's no URL (and no settle), never the flat one.
+		entry.slug ? entryUrl(d1, collection, { id: entry.id, slug: entry.slug, publishedAt: entry.publishedAt, locale: entry.locale }, { strict: true }).catch(() => null) : Promise.resolve(null);
 
 	/** Every exact rule whose source or target is either URL. */
 	async function related(d1: D1Database, a: string, b: string): Promise<KnownRule[]> {

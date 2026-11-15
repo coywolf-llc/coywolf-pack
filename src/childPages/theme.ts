@@ -21,6 +21,7 @@
  * the route, the page template, the menus, breadcrumbs and the schema graph.
  */
 import { comparablePath, interpolateUrlPattern } from "../core/content-url.js";
+import { noteReadFailure } from "../core/read-failures.js";
 import { requestMemo, requestStore } from "../core/request-memo.js";
 import { workerEnv } from "../shared.js";
 import { collectionTree, type CollectionTree } from "./read.js";
@@ -181,19 +182,34 @@ function nestUrl(url: string, byFlat: Map<string, PageTreeItem>, origin?: string
 	return sameSite ? `${parsed.origin}${nested}` : nested;
 }
 
+/** The tree each collection had the last time this isolate read it, for a render whose read fails. */
+const lastTrees = new Map<string, PageTree>();
+
 /**
  * The page tree of a collection ("pages" unless named), read once per request.
- * `db` is the D1 binding or its name (default "DB"). Throws when D1 can't be read,
- * so a theme's error handling (a 503 that isn't cached) applies.
+ * `db` is the D1 binding or its name (default "DB"). When D1 can't be read, the tree this
+ * isolate read last is used (the failure is noted, so the page isn't edge-cached, and logged);
+ * an isolate with none yet throws, so a theme's error handling (a 503 that isn't cached) applies.
  */
 export async function loadPageTree(db?: D1Database | string, options: { collection?: string } = {}): Promise<PageTree> {
 	const collection = options.collection ?? "pages";
 	const d1 = typeof db === "object" && db ? db : ((await workerEnv())[db ?? "DB"] as D1Database | undefined);
 	if (!d1) throw new Error(`coywolf-pack: no D1 binding "${typeof db === "string" ? db : "DB"}" for loadPageTree`);
 	return requestMemo(`childPages:pageTree:${collection}`, async () => {
-		const source = await collectionTree(d1, collection);
+		let source: CollectionTree | null;
+		try {
+			source = await collectionTree(d1, collection, { lenient: true });
+		} catch (error) {
+			const last = lastTrees.get(collection);
+			if (!last) throw error;
+			noteReadFailure("child pages: page tree");
+			console.error("coywolf-pack: Child Pages: could not read the page tree; using the last one read for this render", error);
+			return last;
+		}
 		if (!source) throw new Error(`coywolf-pack: loadPageTree: no collection "${collection}"`);
-		return pageTreeFrom(source);
+		const tree = pageTreeFrom(source);
+		lastTrees.set(collection, tree);
+		return tree;
 	});
 }
 

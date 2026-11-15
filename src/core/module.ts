@@ -129,6 +129,12 @@ export interface PackModule {
 	 */
 	featuresChanged?: (ctx: PluginContext, before: import("./features.js").FeatureMap, after: import("./features.js").FeatureMap) => Promise<void>;
 	/**
+	 * True when a content hook (content:after…) for this event must run on the switches as they are now, not as this
+	 * isolate read them up to FEATURES_TTL_MS ago: composeHooks then reads them fresh for every module (one settings
+	 * read). For a module whose hook writes something lasting from a switch (Child Pages' redirects). Must not query.
+	 */
+	freshSwitches?: (hook: string, event: { collection?: unknown }) => boolean;
+	/**
 	 * A note under the module on the Features page (features/list), which stays reachable while the module is off
 	 * and its own pages are out of the sidebar: work left over from turning it off, say. Null: none.
 	 */

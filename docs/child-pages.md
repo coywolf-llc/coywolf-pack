@@ -221,7 +221,7 @@ The Child Pages page leaves the sidebar while the feature is off, so anything tu
 
 ### When a redirect couldn't be worked out
 
-- **A read failed.** If the database can't be read while a page is published, nothing is redirected from that read (never to a flat URL), the failure is logged, and the change is listed under **Redirects** as one that couldn't be worked out. The next change in the collection, or **Re-check redirects**, makes its redirects.
+- **A read failed.** If the database can't be read while a page is published, nothing is redirected from that read (never to a flat URL), the failure is logged, and the change is listed under **Redirects** as one that couldn't be worked out. Visitors aren't affected: pages keep rendering with the parents read last. The next change in the collection, or **Re-check redirects**, makes its redirects.
 - **No earlier URLs to compare with.** Child Pages keeps each collection's nested URLs to tell what moved. If that record is missing when a page with pages under it changes, the change is listed as having no earlier URLs: the pages it moved got no redirect, and tracking starts again from the current URLs. Add those redirects by hand on the Redirect Manager page if the pages had readers.
 
 ## Import parents from configuration
@@ -296,17 +296,16 @@ EmDash's MCP content tools can't set reference fields yet; its REST API can (`PU
   - A selection saved on a page with drafts waits in its draft revision's `_references` until it's published.
   - Contract tests check those tables and keys against each EmDash release (`test/emdash-contract.test.mjs`).
 - **The tree** is one D1 batch (the collections and their fields, the collection's pages, its links), shared by everything that renders a page: the theme's `loadPageTree`, breadcrumbs, the schema graph.
-- **A read that fails gives no URL.** With Child Pages on, a parent tree (or switch) that can't be read makes the URL resolver fail instead of answering with the flat URL. What follows:
-  - Slug changes skips the page, so no 301 is written from a live nested page to its flat URL;
-  - sitemaps, feeds and search answers fail for that request rather than list flat URLs;
-  - a page rendered meanwhile isn't kept in the edge cache;
-  - the failure is logged (`Child Pages: could not read the parent pages`).
+- **A read that fails never writes anything.** With Child Pages on, the parent tree (or the switch) may be unreadable for a moment. What happens depends on what the URL is for:
+  - **Something is written from it** (Slug changes' and Removed content's redirects, Child Pages' own redirects, its record of URLs and its status, the import, Re-check): there's no URL, and the step is skipped. No 301 is ever written from a live nested page to its flat URL. The next change, or **Re-check redirects**, makes what was skipped.
+  - **A page is rendered from it** (your theme's `entryUrl`, `entryUrls`, `matchEntryPath` and `loadPageTree`, the sitemaps, feeds, schema, breadcrumbs, search): the site keeps rendering, with the parents that Worker isolate read last. An isolate that hasn't read any yet uses the flat URLs (which redirect), as if Child Pages were off; `loadPageTree` alone has nothing to answer with then, and throws.
+  - **Either way** the failure is logged (`Child Pages: could not read the parent pages`), the response isn't kept in the edge cache, and search doesn't keep what it read.
 - **`childPagesVersion`**, a plugin setting, changes whenever published pages may have moved. It's part of the URL configuration's fingerprint, so live search answers cached with old page URLs aren't served again. It changes when a page with the field is:
   - published or unpublished;
   - trashed, deleted or restored;
   - saved with a new slug while it's published (EmDash's REST API writes a slug-only change to the live page, pending edits or not).
 - **The publish guard** is EmDash's `content:beforePublish` hook. A failure of the pack's own (D1 unavailable) never blocks a publish. Its message stays under EmDash's 500 characters whatever the titles, because EmDash ignores a refusal with a longer one.
-- **After the switch is saved**, other Worker isolates keep the old switch for up to five minutes, and a page one of them renders meanwhile (a 404 at a nested URL, say) could be cached. The Features save clears every cached page at once, and clears what those isolates cached once more when the five minutes are over (the pack's settling purge, by settings generation; see [Performance](performance.md)). A page published in such an isolate during those minutes can still get a redirect in the old direction: publish it again afterward, or click **Re-check redirects**.
+- **After the switch is saved**, other Worker isolates keep the old switch for up to five minutes, and a page one of them renders meanwhile (a 404 at a nested URL, say) could be cached. The Features save clears every cached page at once, and clears what those isolates cached once more when the five minutes are over (the pack's settling purge, by settings generation; see [Performance](performance.md)). Publishing is different, because a redirect outlasts the request: when a page is published, unpublished, trashed, restored or saved in a collection that can nest (Pages, a collection with the Parent page field, or one whose `urls` pattern has `{pagepath}`), the pack reads the switches again first, in whichever isolate handles it. That's one small read per page save; posts and other collections don't pay it.
 - **Plugin storage** (KV):
   - `state:childPages:paths:<collection>`: each collection's nested URLs, to find the pages below one that moved. A move that got no redirect yet keeps its old URL here until one is made.
   - `state:childPages:status`: the last 10 changes that moved pages, and each collection's open issues, for the Child Pages page.

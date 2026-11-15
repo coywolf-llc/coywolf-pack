@@ -122,6 +122,11 @@ test("the switch can't be read and was never read: the provider rejects (never '
 	invalidateFeatures();
 	try {
 		await quiet(() => assert.rejects(provider.collections(d1), /feature switches couldn't be read/));
+		// A render goes on as if the feature were off (a site with it off never fails for this); a strict resolver doesn't.
+		configureStoredParents(provider);
+		assert.equal(await quiet(() => entryUrl(d1, "pages", { id: "p", slug: "coywolf-pack" })), "/coywolf-pack");
+		await quiet(() => assert.rejects(entryUrl(d1, "pages", { id: "p", slug: "coywolf-pack" }, { strict: true }), ParentPagesUnreadable));
+		invalidateFeatures();
 		// A read that works (no stored switches: Child Pages is off by default)…
 		env.DB = d1;
 		invalidateFeatures();
@@ -131,6 +136,7 @@ test("the switch can't be read and was never read: the provider rejects (never '
 		invalidateFeatures();
 		assert.equal((await quiet(() => provider.collections(d1))).size, 0);
 	} finally {
+		configureStoredParents(null);
 		delete env.DB;
 		invalidateFeatures();
 	}
@@ -150,6 +156,9 @@ test("a tree read that fails: Slug changes skips its settle (no 301 from the liv
 		assert.equal(ctx.state.remembered.get("pages:p").url, "/apps/coywolf-pack/");
 		failing = true;
 		read.invalidatePageTrees();
+		// (A provider with no earlier read to fall back on, as in an isolate that just started: a render would get the flat URL.)
+		configureStoredParents(read.childPagesProvider({ enabled: async () => true }));
+		assert.equal(await quiet(() => entryUrl(d1, "pages", { id: "p", slug: "coywolf-pack" })), "/coywolf-pack/");
 		const before = readFailures();
 		await quiet(() => slugChanges.hooks["content:afterPublish"]({ content, collection: "pages" }, ctx));
 		await quiet(() => slugChanges.hooks["content:afterSave"]({ content, collection: "pages" }, ctx));
@@ -168,40 +177,78 @@ test("a tree read that fails: Slug changes skips its settle (no 301 from the liv
 	}
 });
 
-test("a tree read that fails while rendering: URLs, path matches, the theme's tree and the search state reject, and the failure is noted", async () => {
+test("a tree read that fails while rendering: the page still renders, from the last parents this isolate read (else flat URLs), and the failure is noted; only a strict resolver rejects", async () => {
 	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
 	let failing = false;
 	const d1 = fakeD1(SITE, { fail: (q) => failing && TREE_READ.test(q) });
-	configureStoredParents(read.childPagesProvider({ enabled: async () => true, database: async () => d1 }));
+	const provide = () => configureStoredParents(read.childPagesProvider({ enabled: async () => true, database: async () => d1 }));
 	const entries = [{ id: "p", slug: "coywolf-pack" }, { id: "x", slug: "about" }];
+	const noted = async (run) => {
+		const before = readFailures();
+		const out = await quiet(run);
+		assert.ok(readFailures() > before, "noted (src/core/read-failures.ts): the page isn't edge-cached");
+		return out;
+	};
 	try {
+		// An isolate that has never read the parents: as if Child Pages were off (what a site with it off gets, too).
+		provide();
+		failing = true;
+		read.invalidatePageTrees();
+		assert.equal((await noted(() => createEntryUrlResolver(d1).urls("pages", entries))).get("p"), "/coywolf-pack/");
+		assert.equal((await noted(() => currentChildPagesState(d1))).parents("pages"), null, "no parents known");
+		// A caller that writes from the URL asks to be strict: no URL at all.
+		await quiet(() => assert.rejects(createEntryUrlResolver(d1, { strict: true }).urls("pages", entries), ParentPagesUnreadable));
+		await quiet(() => assert.rejects(entryUrl(d1, "pages", entries[0], { strict: true }), ParentPagesUnreadable));
+
+		// Once the isolate has read them, a later failure renders with those: sitemaps, feeds, llms.txt, schema, search.
+		failing = false;
+		read.invalidatePageTrees();
 		assert.equal((await createEntryUrlResolver(d1).urls("pages", entries)).get("p"), "/apps/coywolf-pack/");
 		failing = true;
 		read.invalidatePageTrees();
-		const before = readFailures();
-		await quiet(async () => {
-			// What the sitemaps, feeds, llms.txt and schema build their URLs with.
-			await assert.rejects(createEntryUrlResolver(d1).urls("pages", entries), ParentPagesUnreadable);
-			await assert.rejects(entryUrl(d1, "pages", entries[0]), ParentPagesUnreadable);
-			await assert.rejects(currentChildPagesState(d1), ParentPagesUnreadable);
-			// loadPageTree (a theme's catch-all route) and the breadcrumb titles.
-			await assert.rejects(read.collectionTree(d1, "pages", { on: true }), /transient/);
-		});
-		// The breadcrumb titles (the switch read from the site's options, on): rejects, so the trail's caller falls back, and noted.
+		assert.equal((await noted(() => createEntryUrlResolver(d1).urls("pages", entries))).get("p"), "/apps/coywolf-pack/");
+		assert.equal(await noted(() => entryUrl(d1, "pages", { id: "d", slug: "docs" })), "/apps/coywolf-pack/docs/");
+		assert.equal((await noted(() => currentChildPagesState(d1))).parents("pages").parentOf.get("p"), "apps");
+		const now = await quiet(() => cu.readChildPagesNow(d1));
+		assert.equal(now.ok, false, "not a state to keep (the search metadata isn't cached from it)");
+		await quiet(() => assert.rejects(entryUrl(d1, "pages", entries[0], { strict: true }), ParentPagesUnreadable));
+		// Child Pages' own settle reads the tree itself and never falls back: nothing is written from a failed read.
+		await assert.rejects(read.collectionTree(d1, "pages", { on: true }), /transient/);
+		const ctx = fakeCtx();
+		await assert.rejects(pack.settleCollection(ctx, d1, ON, "pages", null, "x"), /transient/);
+		assert.equal(ctx.state.kv.size, 0, "no snapshot, no status");
+
+		// The theme's tree and the breadcrumb titles (the switch read from the site's options, on).
+		failing = false;
 		d1.raw.prepare("INSERT INTO options VALUES (?, ?)").run("plugin:coywolf-pack:settings:features", JSON.stringify({ _defaults036: true, childPages: true }));
 		env.DB = d1;
 		invalidateFeatures();
-		const titlesBefore = readFailures();
-		await quiet(() => assert.rejects(read.pageTitlesByPath(d1), /transient/));
-		assert.ok(readFailures() > titlesBefore);
-		assert.ok(readFailures() >= before + 3, "each failure is noted (src/core/read-failures.ts): the page isn't edge-cached");
-		// The collections with a field can't be read either: a nested page must not match at its flat path.
+		read.invalidatePageTrees();
+		const themeHelpers = await import("../src/childPages/theme.ts");
+		assert.equal(await themeHelpers.loadPageTree(d1, { collection: "nope" }).catch(() => "no tree"), "no tree");
+		assert.equal((await themeHelpers.loadPageTree(d1)).path("docs"), "/apps/coywolf-pack/docs/");
+		assert.equal((await read.pageTitlesByPath(d1)).get("/apps/coywolf-pack"), "Coywolf Pack");
+		failing = true;
+		read.invalidatePageTrees();
+		assert.equal((await noted(() => themeHelpers.loadPageTree(d1))).path("docs"), "/apps/coywolf-pack/docs/", "the last tree read");
+		assert.equal((await noted(() => read.pageTitlesByPath(d1))).get("/apps/coywolf-pack"), "Coywolf Pack", "the last titles read");
+
+		// The collections with a field can't be read: path matching goes on with the last ones read.
 		configureContentUrls({});
 		failing = false;
+		let down = false;
+		const flaky = read.childPagesProvider({ enabled: async () => true, database: async () => d1 });
+		configureStoredParents({ ...flaky, collections: async (source) => (down ? Promise.reject(new Error("D1 down")) : flaky.collections(source)) });
+		read.invalidatePageTrees();
 		assert.equal(await matchEntryPath(d1, "/docs/"), null);
+		down = true;
+		assert.equal(await noted(() => matchEntryPath(d1, "/docs/")), null, "still not at its flat path");
+		assert.equal((await noted(() => matchEntryPath(d1, "/apps/coywolf-pack/docs/"))).id, "d");
+		// A provider with nothing to fall back on: flat, as if the feature were off.
 		configureStoredParents({ collections: async () => { throw new Error("D1 down"); }, parents: async () => null, fingerprint: () => "" });
-		await quiet(() => assert.rejects(matchEntryPath(d1, "/docs/"), ParentPagesUnreadable));
-		await quiet(() => assert.rejects(entryUrl(d1, "pages", entries[0]), ParentPagesUnreadable));
+		assert.equal((await noted(() => matchEntryPath(d1, "/docs/"))).id, "d");
+		assert.equal(await noted(() => entryUrl(d1, "pages", entries[0])), "/coywolf-pack");
+		await quiet(() => assert.rejects(entryUrl(d1, "pages", entries[0], { strict: true }), ParentPagesUnreadable));
 	} finally {
 		configureStoredParents(null);
 		configureContentUrls({});
@@ -985,6 +1032,73 @@ test("loadPageTree costs an uncached page one D1 round trip, shared with the men
 		assert.equal(s.d1.counts.statements - off.statements, 2);
 		assert.equal(flat.path("docs"), "/docs/");
 		assert.equal(await theme.loadPageTree(s.d1, { collection: "nope" }).catch((error) => error.message), 'coywolf-pack: loadPageTree: no collection "nope"');
+	} finally {
+		s.close();
+	}
+});
+
+// ── A toggle seen late (another isolate saved the switch) ──
+
+test("a publish in an isolate that still has the old switch settles the right way: page saves read the switch fresh, posts keep the per-isolate read", async () => {
+	const { cachedCtxFeatures } = await import("../src/core/features.ts");
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const s = site([page("a", "apps"), page("p", "coywolf-pack"), parent("p", "a")].join("\n"));
+	const p = { id: "p", slug: "coywolf-pack" };
+	/** The switch as stored (what another isolate's Features save leaves), without telling this isolate. */
+	const store = (on) => {
+		const switches = { ...SWITCHES, childPages: on };
+		s.d1.raw.prepare("UPDATE options SET value = ? WHERE name = ?").run(JSON.stringify(switches), FEATURES_ROW);
+		s.ctx.state.settings.set("features", switches);
+		return switches;
+	};
+	let settingsReads = 0;
+	const get = s.ctx.settings.get;
+	s.ctx.settings.get = async (key) => (settingsReads++, get(key));
+	try {
+		// Off, and this isolate knows it. The page is at its flat URL.
+		store(false);
+		invalidateFeatures();
+		await s.call("content:afterPublish", s.event("p"));
+		assert.equal(s.ctx.state.remembered.get("pages:p").url, "/coywolf-pack/");
+		await cachedCtxFeatures(s.ctx);
+
+		// Another isolate saves the switch on (its featuresChanged redirects the flat URL to the nested one).
+		await settleSwitch(s.ctx, s.d1, store(true), true);
+		assert.deepEqual(rules(s.d1), [["/coywolf-pack", "/apps/coywolf-pack/"]]);
+		assert.equal(await entryUrl(s.d1, "pages", p), "/coywolf-pack/", "this isolate still reads the switch as off");
+		// Within the five minutes, a page is published here.
+		const version = s.ctx.state.settings.get("childPagesVersion");
+		await s.call("content:afterPublish", s.event("p"));
+		assert.deepEqual(rules(s.d1), [["/coywolf-pack", "/apps/coywolf-pack/"]], "no 301 from the live nested page back to its flat URL");
+		assert.equal(s.ctx.state.remembered.get("pages:p").url, "/apps/coywolf-pack/");
+		assert.notEqual(s.ctx.state.settings.get("childPagesVersion"), version, "Child Pages' hook ran: the switch is on");
+		assert.equal(await entryUrl(s.d1, "pages", p), "/apps/coywolf-pack/", "and the isolate has the new switch from here on");
+
+		// The other way: saved off elsewhere, this isolate still has it on.
+		await cachedCtxFeatures(s.ctx);
+		await settleSwitch(s.ctx, s.d1, store(false), false);
+		assert.deepEqual(rules(s.d1), [["/apps/coywolf-pack", "/coywolf-pack/"]]);
+		assert.equal(await entryUrl(s.d1, "pages", p), "/apps/coywolf-pack/", "stale: still on here");
+		const after = s.ctx.state.settings.get("childPagesVersion");
+		await s.call("content:afterSave", s.event("p"));
+		await s.call("content:afterPublish", s.event("p"));
+		assert.deepEqual(rules(s.d1), [["/apps/coywolf-pack", "/coywolf-pack/"]], "no 301 from the live flat page to a nested URL that's gone");
+		assert.equal(s.ctx.state.remembered.get("pages:p").url, "/coywolf-pack/");
+		assert.equal(s.ctx.state.settings.get("childPagesVersion"), after, "Child Pages' hook didn't run: the switch is off");
+
+		// A post's save adds no read: the switches this isolate already has are used.
+		await cachedCtxFeatures(s.ctx);
+		settingsReads = 0;
+		await s.call("content:afterPublish", { collection: "posts", content: { id: "q", slug: "hello", status: "published", locale: "en", data: { title: "Hello" } } });
+		await s.call("content:afterSave", { collection: "posts", content: { id: "q", slug: "hello", status: "published", locale: "en", data: { title: "Hello" } } });
+		assert.equal(settingsReads, 0);
+		await s.call("content:afterPublish", s.event("a"));
+		assert.ok(settingsReads >= 1, "a page's save reads them");
+		// Which collections ask: pages, a urls pattern with {pagepath}, a collection seen with the field; not one whose urls pattern has none.
+		configureContentUrls({ urls: { docs: "/docs/{pagepath}/", posts: "/{slug}/", pages: "/{slug}/" } });
+		assert.deepEqual(["docs", "posts", "pages", "notes"].map(read.couldNest), [true, false, false, false]);
+		configureContentUrls({});
+		assert.deepEqual(["pages", "posts"].map(read.couldNest), [true, false]);
 	} finally {
 		s.close();
 	}

@@ -22,14 +22,13 @@
 import {
 	COLLECTION_SLUG,
 	type ChildPagesState,
-	ParentPagesUnreadable,
 	type CollectionInfo,
 	type PrimaryTermRow,
 	type SqlQuery,
 	type TermParentRow,
 	collectPrimaryTerms,
 	createEntryUrlResolver,
-	currentChildPagesState,
+	readChildPagesNow,
 	hostDefaultLocale,
 	interpolateUrlPattern,
 	overriddenCollections,
@@ -191,10 +190,12 @@ export async function loadSearchMeta(db: D1Database, cacheKey = "DB", version = 
 	const termParents = termParentsFromRows(parentRows, parentTaxonomies, await hostDefaultLocale());
 	const meta = buildMeta(collections, fields, fts, termParents);
 	// Child Pages: page URLs nest by their parents, kept with the rest (the search version changes with them), so a
-	// search reads no parents of its own. A read that fails rejects, and nothing is cached: "off" kept here would
-	// answer searches with flat page URLs until the metadata is read again.
-	meta.childPages = await currentChildPagesState(db);
-	metaCache.set(cacheKey, { meta, at: Date.now(), version });
+	// search reads no parents of its own. When they can't be read this search still answers (with the last parents
+	// read, else flat URLs; the failure is noted, so the answer isn't edge-cached), but the metadata isn't kept:
+	// "off" kept here would answer every search with flat page URLs until it's read again.
+	const childPages = await readChildPagesNow(db);
+	meta.childPages = childPages.state;
+	if (childPages.ok) metaCache.set(cacheKey, { meta, at: Date.now(), version });
 	return meta;
 }
 
@@ -534,10 +535,8 @@ export async function entryUrlsFromMeta(
 	for (const slug of slugs) {
 		try {
 			for (const [id, url] of await resolver.urls(slug, entriesOf(slug))) urls.set(`${slug}:${id}`, url);
-		} catch (error) {
-			// Default routes below rather than fail the search. Not when Child Pages' parents couldn't be read:
-			// the default would be a nested page's flat URL, in an answer that's cached.
-			if (error instanceof ParentPagesUnreadable) throw error;
+		} catch {
+			// Default routes below rather than fail the search.
 		}
 	}
 	return urls;

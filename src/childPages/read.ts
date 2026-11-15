@@ -16,7 +16,7 @@
  * links in one batch (readTree). The Child pages hooks call invalidatePageTrees()
  * before they look again, so a read from before a publish isn't reused after it.
  */
-import { COLLECTION_SLUG, type ChildPagesState, type CollectionInfo, type StoredParents, type StoredParentsProvider, type UrlSource, comparablePath, createEntryUrlResolver, hostDefaultLocale } from "../core/content-url.js";
+import { COLLECTION_SLUG, type ChildPagesState, type CollectionInfo, type StoredParents, type StoredParentsProvider, type UrlSource, comparablePath, createEntryUrlResolver, hostDefaultLocale, patternUsesPagePath, urlOverride } from "../core/content-url.js";
 import { isOn, knownFeatures, knownSiteSetting, registerSiteSetting, siteFeatureState } from "../core/features.js";
 import { noteReadFailure } from "../core/read-failures.js";
 import { peekRequestMemo, requestMemo, seedRequestMemo } from "../core/request-memo.js";
@@ -128,11 +128,30 @@ const TITLE_COLUMN_TTL_MS = 5 * 60_000;
 const DEFAULT_TITLE = titleColumn(null);
 const missingColumn = (error: unknown) => /no such (column|table)/i.test(String((error as { message?: unknown } | null)?.message ?? error));
 
+/** Whether each collection had a parent field the last time this isolate read the collections. */
+const fieldSeen = new Map<string, boolean>();
+const sawFields = (metas: CollectionMeta[]): CollectionMeta[] => {
+	for (const meta of metas) fieldSeen.set(meta.collection, meta.field !== null);
+	return metas;
+};
+
+/**
+ * Whether a collection's entries could have nested URLs, decided without a query: a `urls` pattern with
+ * {pagepath}; else `pages`, or a collection this isolate has seen with a parent field. A `urls` pattern
+ * without {pagepath} can't nest (that pattern wins). For the content hooks: a save in such a collection
+ * reads the switches fresh (src/core/compose.ts), others (posts) keep the per-isolate read.
+ */
+export function couldNest(collection: string): boolean {
+	const override = urlOverride(collection);
+	if (override) return patternUsesPagePath(override);
+	return collection === "pages" || fieldSeen.get(collection) === true;
+}
+
 /** Every collection and its parent field, once per request. */
 export function readMeta(db: D1Database): Promise<CollectionMeta[]> {
 	return requestMemo(metaKey(), async () => {
 		const { results } = await db.prepare(META_SQL).bind(PARENT_FIELD).all<MetaRow>();
-		return metaFromRows(results.filter((r) => COLLECTION_SLUG.test(r.collection)));
+		return sawFields(metaFromRows(results.filter((r) => COLLECTION_SLUG.test(r.collection))));
 	});
 }
 
@@ -199,7 +218,7 @@ export async function readCollection(db: D1Database, collection: string, links: 
 		if (!missingColumn(error)) throw error;
 		return twoReads();
 	}
-	const metas = metaFromRows(((results[0]?.results ?? []) as MetaRow[]).filter((r) => COLLECTION_SLUG.test(r.collection)));
+	const metas = sawFields(metaFromRows(((results[0]?.results ?? []) as MetaRow[]).filter((r) => COLLECTION_SLUG.test(r.collection))));
 	if (generation === started) seedRequestMemo(metaKey(), Promise.resolve(metas));
 	const meta = metas.find((m) => m.collection === collection);
 	if (!meta) return null;
@@ -225,8 +244,8 @@ export interface ProviderDeps {
 /**
  * Whether the feature is on, from the per-isolate switches. When they can't be read (they then
  * read as their defaults, with Child Pages off), the isolate's last read decides; without one
- * this rejects: "off" would give nested pages their flat URLs (see parentsUnreadable in
- * src/core/content-url.ts).
+ * this rejects, and the caller decides what a failure means (parentsFailed in
+ * src/core/content-url.ts: a render goes on as if off, a caller that writes redirects stops).
  */
 const featureOn = async () => {
 	const { features, ok } = await siteFeatureState();
@@ -260,20 +279,32 @@ export function childPagesProvider(deps: ProviderDeps = {}): StoredParentsProvid
 	const enabled = deps.enabled ?? featureOn;
 	const database = deps.database ?? databaseFor;
 	const empty: ReadonlySet<string> = new Set();
+	// This isolate's last answers that worked, for a render whose read fails (lastKnown).
+	let lastCollections: ReadonlySet<string> | null = null;
+	const lastParents = new Map<string, StoredParents | null>();
 	return {
 		async collections(source) {
-			if (!(await enabled())) return empty;
-			const db = await database(source);
-			if (!db) return empty;
-			return new Set((await readMeta(db)).filter((m) => m.field).map((m) => m.collection));
+			const read = async () => {
+				if (!(await enabled())) return empty;
+				const db = await database(source);
+				if (!db) return empty;
+				return new Set((await readMeta(db)).filter((m) => m.field).map((m) => m.collection));
+			};
+			return (lastCollections = await read());
 		},
 		async parents(source, collection) {
-			if (!(await enabled())) return null;
-			const db = await database(source);
-			const meta = db ? (await readMeta(db)).find((m) => m.collection === collection) : undefined;
-			if (!db || !meta?.field) return null;
-			return storedParentsOf(await readTree(db, meta, true));
+			const read = async () => {
+				if (!(await enabled())) return null;
+				const db = await database(source);
+				const meta = db ? (await readMeta(db)).find((m) => m.collection === collection) : undefined;
+				if (!db || !meta?.field) return null;
+				return storedParentsOf(await readTree(db, meta, true));
+			};
+			const parents = await read();
+			lastParents.set(collection, parents);
+			return parents;
 		},
+		lastKnown: { collections: () => lastCollections, parents: (collection) => lastParents.get(collection) },
 		fingerprint: () => {
 			const version = knownSiteSetting<string>(VERSION_SETTING);
 			return typeof version === "string" ? version : "";
@@ -296,9 +327,15 @@ export interface CollectionTree {
  * A collection's tree and every entry's URL. `on` overrides the switch (to compare URLs
  * with the feature on and off); by default the live switch decides.
  */
-export async function collectionTree(db: D1Database, collection: string, options: { on?: boolean } = {}): Promise<CollectionTree | null> {
-	// A switch that can't be read rejects (featureOn): the admin and a theme's loadPageTree fail rather than show flat URLs.
-	const on = options.on ?? (await featureOn());
+export async function collectionTree(db: D1Database, collection: string, options: { on?: boolean; lenient?: boolean } = {}): Promise<CollectionTree | null> {
+	// A switch that can't be read rejects (featureOn): the admin's routes and the import fail rather than work from flat
+	// URLs. `lenient` (a render: a theme's loadPageTree) goes on as if the feature were off; the failed read is already noted.
+	const on =
+		options.on ??
+		(await featureOn().catch((error) => {
+			if (!options.lenient) throw error;
+			return false;
+		}));
 	const read = await readCollection(db, collection, on);
 	if (!read) return null;
 	const { meta, tree } = read;
@@ -315,17 +352,21 @@ export async function collectionTree(db: D1Database, collection: string, options
  * Titles of published pages by URL path (decoded, no trailing slash), for breadcrumb
  * trails derived from a page's path (Breadcrumb Nav, the schema's BreadcrumbList): the
  * ancestors get their real titles instead of their humanized slugs. Null while the
- * feature is off or no collection has the field. Read once per request.
+ * feature is off or no collection has the field. Read once per request. When they can't
+ * be read: the titles this isolate read last (else null: humanized slugs), with the failure
+ * noted so the page isn't edge-cached.
  */
 export async function pageTitlesByPath(db?: D1Database | null): Promise<Map<string, string> | null> {
 	try {
-		return await pageTitles(db);
+		return (lastTitles = await pageTitles(db));
 	} catch (error) {
-		// The trail falls back to humanized slugs (the callers catch this): not a page for the edge cache.
 		noteReadFailure("child pages: page titles");
-		throw error;
+		console.error("coywolf-pack: Child Pages: could not read the page titles for a breadcrumb trail; using the last ones read (or the slugs)", error);
+		return lastTitles;
 	}
 }
+
+let lastTitles: Map<string, string> | null = null;
 
 async function pageTitles(db?: D1Database | null): Promise<Map<string, string> | null> {
 	if (!(await featureOn())) return null;

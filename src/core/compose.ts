@@ -3,7 +3,7 @@
  */
 import type { PluginContext } from "emdash";
 
-import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn, recordDefaults } from "./features.js";
+import { type FeatureMap, cachedCtxFeatures, freshCtxFeatures, ctxFeatures, isOn, recordDefaults } from "./features.js";
 import type { PackModule, TaskDef } from "./module.js";
 import { noteReadFailure } from "./read-failures.js";
 import { requestStore } from "./request-memo.js";
@@ -159,8 +159,13 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 			} };
 			continue;
 		}
+		// Content writes a module says need the switches as they are now (PackModule.freshSwitches): Child Pages, for a
+		// collection whose pages can nest. A publish in an isolate that still has the old switch would otherwise skip
+		// Child Pages' hooks, or run them, the wrong way round, and Slug changes would redirect to the wrong URL.
+		const mayNeedFresh = name.startsWith("content:after") && modules.some((m) => m.freshSwitches);
 		const run: Handler = async (event, ctx) => {
-			const features = await cachedCtxFeatures(ctx);
+			const fresh = mayNeedFresh && modules.some((m) => m.freshSwitches?.(name, event ?? {}) === true);
+			const features = fresh ? await freshCtxFeatures(ctx) : await cachedCtxFeatures(ctx);
 			if (COLLECTING.has(name)) {
 				const out: unknown[] = [];
 				for (const module of participants) {

@@ -349,6 +349,14 @@ export interface StoredParentsProvider {
 	parents(source: UrlSource, collection: string): Promise<StoredParents | null>;
 	/** Changes whenever stored parents may have (part of contentUrlFingerprint). */
 	fingerprint(): string;
+	/**
+	 * The answers of this isolate's last reads that worked, for a render whose read fails
+	 * (see parentsFailed): null or undefined when there are none yet.
+	 */
+	lastKnown?: {
+		collections(): ReadonlySet<string> | null;
+		parents(collection: string): StoredParents | null | undefined;
+	};
 }
 
 /** Child pages state handed to a resolver directly: as if the feature were on with these (null: as if off). */
@@ -361,22 +369,31 @@ let storedParents: StoredParentsProvider | null = null;
 
 /**
  * Child pages' answer couldn't be read (the switch, the collections with a parent field, or a
- * collection's parents). There is no fallback: without the parents a nested page would get its
- * flat URL, and Slug changes would write a 301 from the live nested page to it, a sitemap or a
- * search answer would list it, and a rendered page would link to it. So the failure goes to the
- * caller (which skips what it was doing: `urlOf(...).catch(() => null)` in Slug changes), and is
- * noted, so a page rendered meanwhile stays out of the edge cache (src/core/read-failures.ts).
+ * collection's parents). Always noted, so a page rendered meanwhile stays out of the edge cache
+ * (src/core/read-failures.ts), and logged. Then:
+ *
+ * - `strict` (a caller that writes something from the URL: Slug changes' and Removed content's
+ *   redirects) rejects with ParentPagesUnreadable. Without the parents a nested page would get its
+ *   flat URL, and a 301 would be written from the live nested page to it. The caller skips what it
+ *   was doing (`urlOf(...).catch(() => null)`).
+ * - Everything else (pages, sitemaps, schema, breadcrumbs, search) keeps rendering through the
+ *   hiccup with `fallback`: this isolate's last answer that worked, else as if Child pages were off
+ *   (flat URLs, which the theme redirects). A site with the feature off is never failed by it.
  */
-function parentsUnreadable(error: unknown): never {
-	if (error instanceof ParentPagesUnreadable) throw error;
-	noteReadFailure("child pages: parent pages");
-	console.error("coywolf-pack: Child Pages: could not read the parent pages; no URLs are built from this read", error);
-	throw new ParentPagesUnreadable(error);
+function parentsFailed<T>(error: unknown, strict: boolean | undefined, fallback: () => T): T {
+	if (!(error instanceof ParentPagesUnreadable)) {
+		noteReadFailure("child pages: parent pages");
+		console.error(`coywolf-pack: Child Pages: could not read the parent pages; ${strict ? "nothing is written from this read" : "using the last ones read (or none) for this render"}`, error);
+	}
+	if (strict) throw error instanceof ParentPagesUnreadable ? error : new ParentPagesUnreadable(error);
+	return fallback();
 }
 
+const NO_COLLECTIONS: ReadonlySet<string> = new Set();
+
 /**
- * Child pages' parents couldn't be read. Callers that answer a failed URL lookup with a default route
- * (search results) let this one through instead: the default would be a nested page's flat URL.
+ * Child pages' parents couldn't be read, for a resolver that was asked to be `strict` (one whose URLs
+ * are written somewhere: a redirect rule, a remembered URL). Never thrown to a render.
  */
 export class ParentPagesUnreadable extends Error {
 	override readonly cause: unknown;
@@ -395,16 +412,27 @@ export function configureStoredParents(provider: StoredParentsProvider | null): 
 /**
  * Child pages as they are now, read once (null while the feature is off, or without the
  * module), for a cache that keeps entry URLs with its own version (the search metadata).
- * Rejects when they can't be read (see parentsUnreadable): a caller must not keep "off".
+ * `ok` is false when a read failed and the state is the fallback (parentsFailed): good for
+ * this answer, not for keeping.
  */
-export async function currentChildPagesState(source: UrlSource): Promise<ChildPagesState | null> {
+export async function readChildPagesNow(source: UrlSource): Promise<{ state: ChildPagesState | null; ok: boolean }> {
 	const provider = storedParents;
-	if (!provider) return null;
-	const collections = await provider.collections(source).catch(parentsUnreadable);
-	if (!collections.size) return null;
+	if (!provider) return { state: null, ok: true };
+	let ok = true;
+	const failed = <T>(fallback: () => T) => (error: unknown) => {
+		ok = false;
+		return parentsFailed(error, false, fallback);
+	};
+	const collections = await provider.collections(source).catch(failed(() => provider.lastKnown?.collections() ?? NO_COLLECTIONS));
+	if (!collections.size) return { state: null, ok };
 	const parents = new Map<string, StoredParents | null>();
-	for (const collection of collections) parents.set(collection, await provider.parents(source, collection).catch(parentsUnreadable));
-	return { collections, parents: (collection) => parents.get(collection) ?? null };
+	for (const collection of collections) parents.set(collection, await provider.parents(source, collection).catch(failed(() => provider.lastKnown?.parents(collection) ?? null)));
+	return { state: { collections, parents: (collection) => parents.get(collection) ?? null }, ok };
+}
+
+/** The state of readChildPagesNow (the fallback when a read failed). */
+export async function currentChildPagesState(source: UrlSource): Promise<ChildPagesState | null> {
+	return (await readChildPagesNow(source)).state;
 }
 
 /**
@@ -735,6 +763,12 @@ export interface EntryUrlResolverOptions {
 	 * before and after a change (src/childPages).
 	 */
 	childPages?: ChildPagesState | null;
+	/**
+	 * For a caller that writes something from the URLs (a redirect rule, a remembered URL): reject
+	 * with ParentPagesUnreadable when Child pages' parents can't be read, instead of resolving with
+	 * the last ones read or none (see parentsFailed). Renders leave it off.
+	 */
+	strict?: boolean;
 }
 
 interface CollectionRoute {
@@ -748,7 +782,7 @@ interface CollectionRoute {
 
 /**
  * Child pages for a resolver: the state it was given, else the provider's (null without a provider).
- * A provider that can't answer rejects (parentsUnreadable): the resolver's URLs for that collection do too.
+ * A provider that can't answer: see parentsFailed (a strict resolver rejects; a render falls back).
  */
 function childPagesView(source: UrlSource, options: EntryUrlResolverOptions) {
 	if (options.childPages !== undefined) {
@@ -760,8 +794,9 @@ function childPagesView(source: UrlSource, options: EntryUrlResolverOptions) {
 	}
 	const provider = storedParents;
 	return {
-		collections: async () => (provider ? await provider.collections(source).catch(parentsUnreadable) : (new Set() as ReadonlySet<string>)),
-		parents: async (collection: string) => (provider ? await provider.parents(source, collection).catch(parentsUnreadable) : null),
+		collections: async () => (provider ? await provider.collections(source).catch((error) => parentsFailed(error, options.strict, () => provider.lastKnown?.collections() ?? NO_COLLECTIONS)) : NO_COLLECTIONS),
+		parents: async (collection: string) =>
+			provider ? await provider.parents(source, collection).catch((error) => parentsFailed(error, options.strict, () => provider.lastKnown?.parents(collection) ?? null)) : null,
 	};
 }
 
@@ -818,10 +853,10 @@ export function createEntryUrlResolver(source: UrlSource, options: EntryUrlResol
 				};
 				if (isD1(source)) {
 					const known = options.collections;
-					// A collection that nests by its field needs its real pattern: a failed read rejects rather than
-					// answer with EmDash's default (/<collection>/…), which Slug changes would redirect the live page to.
-					const read = known ? null : readCollections(source, [collection]);
-					const info = known ? known.get(collection) : (await (implicit ? (read as NonNullable<typeof read>).catch(parentsUnreadable) : (read as NonNullable<typeof read>).catch(() => new Map<string, CollectionInfo>()))).get(collection);
+					// A collection that nests by its field needs its real pattern: for a strict resolver a failed read rejects
+					// rather than answer with EmDash's default (/<collection>/…), which Slug changes would redirect the live page to.
+					const none = () => new Map<string, CollectionInfo>();
+					const info = known ? known.get(collection) : (await readCollections(source, [collection]).catch((error) => (implicit ? parentsFailed(error, options.strict, none) : none()))).get(collection);
 					return withPagePath({ pattern: info?.urlPattern ?? null, override: false, routable: true });
 				}
 				const info = await source.schema?.getCollection(collection).catch(() => null);
@@ -935,8 +970,8 @@ export function createEntryUrlResolver(source: UrlSource, options: EntryUrlResol
 }
 
 /** Root-relative public path of one entry, or null. */
-export async function entryUrl(source: UrlSource, collection: string, entry: EntryRef): Promise<string | null> {
-	return createEntryUrlResolver(source).url(collection, entry);
+export async function entryUrl(source: UrlSource, collection: string, entry: EntryRef, options: Pick<EntryUrlResolverOptions, "strict"> = {}): Promise<string | null> {
+	return createEntryUrlResolver(source, options).url(collection, entry);
 }
 
 /** Root-relative public paths of a list of entries (terms and dates read in batches), keyed by id. */
@@ -1036,8 +1071,9 @@ export async function matchEntryPath(source: UrlSource, path: string): Promise<M
 	}
 
 	// Child pages: collections with a parent field nest by {pagepath} (EmDash's own resolution would miss them).
-	// (A failed read rejects: without it a nested page would match at its flat path.)
-	const nested = storedParents ? await storedParents.collections(source).catch(parentsUnreadable) : new Set<string>();
+	// (A read that fails: the last collections read, else none, and the page isn't edge-cached. See parentsFailed.)
+	const provider = storedParents;
+	const nested = provider ? await provider.collections(source).catch((error) => parentsFailed(error, false, () => provider.lastKnown?.collections() ?? NO_COLLECTIONS)) : NO_COLLECTIONS;
 
 	if (isD1(source)) {
 		let rows: Array<{ slug: string; url_pattern: string | null; routable?: number | null }> = [];

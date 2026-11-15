@@ -32,7 +32,7 @@ import { ensureTable, sourceKey, storedForms } from "../redirects/rules.js";
 import { SLUG_NOTE_PREFIX } from "../redirects/slug-core.js";
 import { type MoveLoop, type MoveShadow, type RuleRef, SLUG_CHANGES_FEATURE, type UrlMove, applyUrlMoves, loopingRule } from "../redirects/slug-changes.js";
 import { parseInput } from "../shared.js";
-import { CHILD_PAGES_FEATURE, type CollectionMeta, type CollectionTree, VERSION_SETTING, childPagesProvider, collectionTree, databaseFor, invalidatePageTrees, readChildPagesState, readMeta, readTree } from "./read.js";
+import { CHILD_PAGES_FEATURE, type CollectionMeta, type CollectionTree, VERSION_SETTING, childPagesProvider, collectionTree, couldNest, databaseFor, invalidatePageTrees, readChildPagesState, readMeta, readTree } from "./read.js";
 import { DIGIT_SLUG, PARENT_FIELD, type PageNode, type PageTreeData, ancestorsOf, childrenOf, loopWith, storedParentsOf, warningsFor } from "./tree.js";
 
 export const FEATURES: FeatureDef[] = [
@@ -887,6 +887,10 @@ export function childPagesPack(): PackModule {
 			}
 			await settleSwitch(ctx, db, after, now);
 		},
+		// A save in a collection whose pages can nest runs on the switch as it is now, in whichever isolate handles it: for
+		// up to five minutes after a toggle another isolate still has the old one, and would settle (or Slug changes would
+		// redirect) the wrong way. Decided without a query; other collections (posts) keep the per-isolate read.
+		freshSwitches: (_hook, event) => typeof event.collection === "string" && couldNest(event.collection),
 		// While the switch is off the Child Pages page is out of the sidebar: what turning it off left undone shows on the Features page.
 		featureNotice: async (ctx, features) => (isOn(features, CHILD_PAGES_FEATURE) ? null : offNotice(await readStatus(ctx))),
 		// content:read for the content hooks; hooks.content-policy:register (beforePublish) is added from the hooks (src/core/compose.ts).
