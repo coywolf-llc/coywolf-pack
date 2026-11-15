@@ -28,6 +28,8 @@ export interface FeatureDef {
 	 * found there decides, so existing sites keep their choice.
 	 */
 	replaces?: string[];
+	/** Features this one needs to do its whole job: the Features page warns while one of them is off. */
+	requires?: string[];
 }
 
 export interface AdminPageDef {
@@ -111,6 +113,12 @@ export interface PackModule {
 	storage?: Record<string, any>;
 	/** Capabilities this module needs (e.g. "network:request", "email:send"). */
 	capabilities?: string[];
+	/**
+	 * Runs after the Features page saves the switches (features/save), with the switches as
+	 * they applied before and after, whether or not this module's own changed. Errors are
+	 * logged; the save stands.
+	 */
+	featuresChanged?: (ctx: PluginContext, before: import("./features.js").FeatureMap, after: import("./features.js").FeatureMap) => Promise<void>;
 	/** Hosts for network:request, if any. */
 	allowedHosts?: string[];
 }

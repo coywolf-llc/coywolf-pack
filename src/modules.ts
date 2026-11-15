@@ -17,6 +17,7 @@ import { imagesMiddleware, imagesPack } from "./images/pack.js";
 import { insightsPack } from "./insights/pack.js";
 import { pageCacheMiddleware, strayRobotsMiddleware, pageCachePack } from "./pageCache/pack.js";
 import { breadcrumbsPack } from "./breadcrumbs/pack.js";
+import { childPagesPack } from "./childPages/pack.js";
 import { filesMiddleware, filesPack } from "./files/pack.js";
 import { formUploadsPack } from "./formUploads/pack.js";
 import { discoveryMiddleware, discoveryPack } from "./discovery/pack.js";
@@ -39,6 +40,8 @@ export const MODULES: Factory[] = [
 	// First on the Features page, where it's easy to find (no hooks or middleware, so its place changes nothing else).
 	(o) => (o.updates === false ? null : updatesPack()),
 	(o) => (o.backups ? backupsPack(o.backups) : null),
+	// Before Redirect Manager: its publish hooks re-read the page tree first, so Slug changes sees the new parents.
+	(o) => (o.childPages === false ? null : childPagesPack()),
 	(o) => (o.redirects === false ? null : redirectsPack(o.redirects ?? {})),
 	// Before Headings & TOC: imported heading ids must be in place when anchors are stamped.
 	(o) => (o.wpImport === false ? null : wpImportPack()),

@@ -21,12 +21,14 @@
  */
 import {
 	COLLECTION_SLUG,
+	type ChildPagesState,
 	type CollectionInfo,
 	type PrimaryTermRow,
 	type SqlQuery,
 	type TermParentRow,
 	collectPrimaryTerms,
 	createEntryUrlResolver,
+	currentChildPagesState,
 	hostDefaultLocale,
 	interpolateUrlPattern,
 	overriddenCollections,
@@ -60,6 +62,8 @@ export interface SearchMeta {
 	collections: Map<string, CollectionMeta>;
 	/** Term parents per taxonomy named by `{termpath:…}` URL overrides. */
 	termParents: Map<string, Map<string, string>>;
+	/** Child Pages' parents, read with the rest (null while it's off; absent: ask when resolving). */
+	childPages?: ChildPagesState | null;
 }
 
 interface CollectionRow {
@@ -185,6 +189,8 @@ export async function loadSearchMeta(db: D1Database, cacheKey = "DB", version = 
 	}
 	const termParents = termParentsFromRows(parentRows, parentTaxonomies, await hostDefaultLocale());
 	const meta = buildMeta(collections, fields, fts, termParents);
+	// Child Pages: page URLs nest by their parents, kept with the rest (the search version changes with them).
+	meta.childPages = await currentChildPagesState(db).catch(() => undefined);
 	metaCache.set(cacheKey, { meta, at: Date.now(), version });
 	return meta;
 }
@@ -514,6 +520,7 @@ export async function entryUrlsFromMeta(
 ): Promise<Map<string, string | null>> {
 	const resolver = createEntryUrlResolver(db, {
 		collections: meta.collections,
+		...(meta.childPages !== undefined ? { childPages: meta.childPages } : {}),
 		termParents: async (taxonomies) => {
 			const out = new Map<string, Map<string, string>>();
 			for (const t of taxonomies) out.set(t, meta.termParents.get(t) ?? new Map());

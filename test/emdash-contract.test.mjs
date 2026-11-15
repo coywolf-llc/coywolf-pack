@@ -347,6 +347,8 @@ const EXPRESSIONS = {
 	"src/links/inbound.ts::titleColumn": ['content."title"', "content.slug"],
 	// src/schema/module.ts: a media reference by id or storage key
 	'ref.by === "id" ? "id" : "storage_key"': ["id", "storage_key"],
+	// src/childPages/read.ts: rowsSql (the collection's title column, else none)
+	"src/childPages/read.ts::title": ['"title"', "NULL"],
 };
 
 /** The file's `const NAME = <literal>` declarations: fragments of SQL kept in constants. */
@@ -1394,4 +1396,94 @@ test("EmDash runs plugin:install, then plugin:activate, once for a config plugin
 	for (const [step, at] of steps) assert.notEqual(at, -1, `installUnrecordedConfigPlugins no longer has ${step}`);
 	assert.deepEqual(steps.map(([, at]) => at), steps.map(([, at]) => at).toSorted((a, b) => a - b), "install and activate no longer run in this order");
 	assert.match(runtime, /runtime\.installUnrecordedConfigPlugins\(/, "the boot no longer calls it");
+});
+
+// ── Child Pages (src/childPages) ───────────────────────────────
+
+test("Child Pages: parent_page isn't reserved, and EmDash's schema API makes it a one-parent relation the pack reads (src/childPages/read.ts)", async () => {
+	const { RESERVED_FIELD_SLUGS, SchemaRegistry } = await import("emdash");
+	assert.ok(!RESERVED_FIELD_SLUGS.includes("parent_page"), "EmDash now reserves parent_page");
+	await new SchemaRegistry(db).createCollection({ slug: "pages", label: "Pages", labelSingular: "Page", urlPattern: "/{slug}/", supports: ["drafts", "revisions"] });
+	await new SchemaRegistry(db).createField("pages", { slug: "title", label: "Title", type: "string" });
+	// What the Child Pages page sends to POST /_emdash/api/schema/collections/pages/fields (src/admin/childPages.tsx).
+	const handleSchemaFieldCreate = await distFunction("handleSchemaFieldCreate");
+	const created = await handleSchemaFieldCreate(db, "pages", { slug: "parent_page", label: "Parent page", type: "reference", required: false, validation: { targetCollection: "pages" } });
+	assert.ok(created.success, JSON.stringify(created.error));
+	assert.deepEqual(created.data.item.validation, { targetCollection: "pages", relation: "pages_parent_page", relationSide: "parent" });
+	// No column: the selection lives in the link table, one parent per page.
+	assert.ok(!(await columns("ec_pages")).some((c) => c.name === "parent_page"));
+	const { rows } = await sql`SELECT slug, parent_collection, child_collection, max_children_per_parent FROM _emdash_relations WHERE slug = 'pages_parent_page'`.execute(db);
+	assert.deepEqual(rows.map((r) => ({ ...r })), [{ slug: "pages_parent_page", parent_collection: "pages", child_collection: "pages", max_children_per_parent: 1 }]);
+	const { readMeta } = await import("../src/childPages/read.ts");
+	const meta = (await readMeta(d1)).find((m) => m.collection === "pages");
+	assert.deepEqual(meta.field, { id: created.data.item.id, relation: "pages_parent_page", side: "parent" });
+	// The admin's manifest describes it as a reference (the panel's and column's predicate: src/admin/extensions.ts).
+	const buildManifestCollections = await distFunction("buildManifestCollections");
+	const manifest = await buildManifestCollections({}, db);
+	assert.equal(manifest.pages.fields.parent_page.kind, "reference");
+});
+
+test("Child Pages: links by translation group (holder → parent), kept in the trash, removed with the page, and a restored page comes back as a draft", async () => {
+	const { handleContentCreate, handleContentDelete, handleContentRestore, handleContentPermanentDelete, handleContentPublish } = await import("emdash");
+	const { readMeta, readTree } = await import("../src/childPages/read.ts");
+	const make = async (slug, references) => {
+		const r = await handleContentCreate(db, "pages", { data: { title: slug }, slug, status: "published", ...(references ? { references } : {}) });
+		assert.ok(r.success, JSON.stringify(r.error));
+		return r.data.item;
+	};
+	const apps = await make("cp-apps");
+	const pack = await make("cp-pack", { parent_page: [apps.id] });
+	const tree = async () => readTree(d1, (await readMeta(d1)).find((m) => m.collection === "pages"), true);
+	assert.equal((await tree()).nodes.get(pack.id).effectiveParentId, apps.id);
+	const { rows } = await sql`SELECT parent_group, child_group FROM _emdash_content_references WHERE parent_group = ${pack.translationGroup}`.execute(db);
+	assert.deepEqual(rows.map((r) => ({ ...r })), [{ parent_group: pack.translationGroup, child_group: apps.translationGroup }], "the page holding the field is parent_group, its parent child_group");
+	// Trash: the link stays (a restore brings it back); the parent no longer counts.
+	assert.ok((await handleContentDelete(db, "pages", apps.id)).success);
+	let t = await tree();
+	assert.equal(t.nodes.has(apps.id), false);
+	assert.equal(t.nodes.get(pack.id).hasParent, true);
+	assert.equal(t.nodes.get(pack.id).effectiveParentId, null);
+	// Restore: a draft, so still top level until it's published again.
+	const restored = await handleContentRestore(db, "pages", apps.id);
+	assert.ok(restored.success);
+	assert.equal(restored.data.item.status, "draft");
+	assert.equal((await tree()).nodes.get(pack.id).effectiveParentId, null);
+	assert.ok((await handleContentPublish(db, "pages", apps.id)).success);
+	assert.equal((await tree()).nodes.get(pack.id).effectiveParentId, apps.id);
+	// Delete for good (from the trash): EmDash removes the links on both ends.
+	assert.ok((await handleContentDelete(db, "pages", apps.id)).success);
+	assert.ok((await handleContentPermanentDelete(db, "pages", apps.id)).success);
+	t = await tree();
+	assert.equal(t.nodes.get(pack.id).hasParent, false);
+});
+
+test("Child Pages: a parent chosen on a page with drafts waits in the draft revision's _references until publish, where the pack's publish guard reads it", async () => {
+	const { handleContentCreate, handleContentPublish } = await import("emdash");
+	const { stagedParent } = await import("../src/childPages/pack.ts");
+	const { readMeta, readTree } = await import("../src/childPages/read.ts");
+	// The runtime stages a reference selection in the draft under this key (emdash-runtime: mergedData[STAGED_REFERENCES_KEY]).
+	const staged = [...emdashDist.values()].find((src) => /const STAGED_REFERENCES_KEY = "_references";/.test(src));
+	assert.ok(staged, "the staged references key is no longer _references");
+	assert.ok([...emdashDist.values()].some((src) => src.includes("mergedData[STAGED_REFERENCES_KEY] = mergeStagedReferences(baseData, stagedReferences)")), "the runtime no longer stages reference selections in the draft revision");
+	const parent = (await handleContentCreate(db, "pages", { data: { title: "Docs" }, slug: "cp-docs", status: "published" })).data.item;
+	const page = (await handleContentCreate(db, "pages", { data: { title: "Guide" }, slug: "cp-guide", status: "published" })).data.item;
+	// A draft revision as the runtime writes it (raw: the runtime's update isn't a public handler).
+	const draftId = "01CPDRAFT0000000000000000";
+	await sql`INSERT INTO revisions (id, collection, entry_id, data) VALUES (${draftId}, 'pages', ${page.id}, ${JSON.stringify({ title: "Guide", _references: { parent_page: [parent.translationGroup] }, _referencesBaseline: { parent_page: [] } })})`.execute(db);
+	await sql`UPDATE ec_pages SET draft_revision_id = ${draftId} WHERE id = ${page.id}`.execute(db);
+	assert.equal(await stagedParent(d1, draftId), parent.translationGroup);
+	const readStaged = await distFunction("readStagedReferences");
+	assert.deepEqual(readStaged(JSON.parse((await sql`SELECT data FROM revisions WHERE id = ${draftId}`.execute(db)).rows[0].data)), { parent_page: [parent.translationGroup] });
+	const tree = async () => readTree(d1, (await readMeta(d1)).find((m) => m.collection === "pages"), true);
+	assert.equal((await tree()).nodes.get(page.id).hasParent, false, "not live before publish");
+	assert.ok((await handleContentPublish(db, "pages", page.id)).success);
+	assert.equal((await tree()).nodes.get(page.id).effectiveParentId, parent.id, "publish made it live");
+	// The publish policy hook gets the entry (with its draft revision id and group), as src/childPages/pack.ts loopGuard reads it.
+	const runtime = [...emdashDist.values()].find((src) => src.includes("async checkContentPolicy("));
+	assert.ok(runtime, "no checkContentPolicy");
+	const at = runtime.indexOf("async checkContentPolicy(");
+	const policy = runtime.slice(at, runtime.indexOf("\n\t}\n", at));
+	assert.match(policy, /hydrateDraftData\(current/);
+	assert.match(policy, /content: contentItemToRecord\(current\.data\.item\)/);
+	assert.match(functionSource(runtime, "contentItemToRecord"), /return \{ \.\.\.item \};/);
 });

@@ -20,8 +20,8 @@ import { REDIRECTS_TAG, purgePageCache } from "../pageCache/lib.js";
 import { workerEnv } from "../shared.js";
 import { noteRedirectsChanged } from "./middleware.js";
 import { type EntrySnapshot, snapshotFromContent, snapshotFromRow } from "./removed-core.js";
-import { deleteRule, ensureTable, normalizePath, saveRule, sourceKey, storedForms } from "./rules.js";
-import { type PlanRule, SLUG_NOTE_PREFIX, planSlugChange } from "./slug-core.js";
+import { deleteRule, ensureTable, normalizePath, saveRule, sourceKey, storedForms, validate } from "./rules.js";
+import { type PlanRule, SLUG_NOTE_PREFIX, isOurs, planSlugChange } from "./slug-core.js";
 
 export const SLUG_CHANGES_FEATURE = "redirects.slugChanges";
 const STORE = "redirects_urls";
@@ -37,6 +37,7 @@ interface KnownUrl {
 const urls = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[STORE] as {
 	get(id: string): Promise<KnownUrl | null>;
 	put(id: string, data: KnownUrl): Promise<void>;
+	putMany(items: Array<{ id: string; data: KnownUrl }>): Promise<void>;
 };
 
 const key = (collection: string, id: string) => `${collection}:${id}`;
@@ -120,6 +121,113 @@ export async function dropEmDashAuto(
 		cursor = result.cursor;
 	}
 	return removed;
+}
+
+/** An entry whose URL changed without a save of its own: a parent page moved, or Child pages was turned on or off. */
+export interface UrlMove {
+	collection: string;
+	entryId: string;
+	/** For the rule's note ("Slug change: <title>"). */
+	title: string;
+	from: string;
+	to: string;
+}
+
+/** Moves read for related rules per query (each brings up to ~14 bound values; D1 allows 100). */
+const MOVES_PER_READ = 6;
+/** Statements per D1 batch when writing the rules. */
+const WRITES_PER_BATCH = 50;
+
+/** Every spelling a rule may store for these URLs as a source, and as a target (what related() matches). */
+function relatedKeys(urls: string[]): { sources: string[]; targets: string[] } {
+	const paths = urls.map(normalizePath);
+	return {
+		sources: [...new Set([...urls.flatMap((u) => storedForms(u)), ...paths])],
+		targets: [...new Set([...paths, ...paths.map((p) => sourceKey(p)), ...paths.map((p) => `${p}/`)])],
+	};
+}
+
+/**
+ * The 301s for entries whose URL changed together (the pages below a page that moved;
+ * every nested page when Child pages is turned on or off), planned like a slug change
+ * (src/redirects/slug-core.ts: earlier rules retargeted, rules from a URL that's live again
+ * removed, someone else's rule for the old URL kept) and written in batches: a cascade of
+ * a few hundred pages stays within D1's queries per invocation. Each entry's remembered
+ * URL is updated too, so its next save doesn't see a move. EmDash makes no redirects of its
+ * own for these (no slug changed), so there are none of its rows to remove. Returns how many
+ * rules were written or kept, and the new URLs that a rule someone else made redirects away
+ * (left alone, like Slug changes leaves them: the page there can't be reached until it's removed).
+ */
+export async function applyUrlMoves(ctx: PluginContext, d1: D1Database, moves: UrlMove[]): Promise<{ written: number; kept: number; shadowed: string[] }> {
+	const real = moves.filter((m) => m.from && m.to && sourceKey(m.from) !== sourceKey(m.to));
+	if (!real.length) return { written: 0, kept: 0, shadowed: [] };
+	await ensureTable(d1);
+	const rules = new Map<string, PlanRule>();
+	for (let i = 0; i < real.length; i += MOVES_PER_READ) {
+		const { sources, targets } = relatedKeys(real.slice(i, i + MOVES_PER_READ).flatMap((m) => [m.from, m.to]));
+		const { results } = await d1
+			.prepare(`SELECT id, source, target, note FROM coywolf_redirects WHERE is_regex = 0 AND (source IN (${sources.map(() => "?").join(", ")}) OR target IN (${targets.map(() => "?").join(", ")}))`)
+			.bind(...sources, ...targets)
+			.all<PlanRule>();
+		for (const rule of results) rules.set(rule.id, rule);
+	}
+	const writes: D1PreparedStatement[] = [];
+	const now = new Date().toISOString();
+	let written = 0;
+	let kept = 0;
+	const shadowed: string[] = [];
+	for (const move of real) {
+		const keys = relatedKeys([move.from, move.to]);
+		const related = [...rules.values()].filter((r) => keys.sources.includes(r.source) || keys.targets.includes(r.target));
+		if (related.some((r) => !isOurs(r) && sourceKey(r.source) === sourceKey(move.to))) shadowed.push(move.to);
+		const plan = planSlugChange(move.from, move.to, related);
+		if (plan.kind === "none") continue;
+		for (const id of plan.deleteIds) {
+			writes.push(d1.prepare("DELETE FROM coywolf_redirects WHERE id = ?").bind(id));
+			rules.delete(id);
+		}
+		for (const id of plan.retargetIds) {
+			writes.push(d1.prepare("UPDATE coywolf_redirects SET target = ?, updated_at = ? WHERE id = ?").bind(move.to, now, id));
+			const rule = rules.get(id);
+			if (rule) rule.target = move.to;
+		}
+		if (plan.keptManual) {
+			kept++;
+			continue;
+		}
+		let rule: ReturnType<typeof validate>;
+		try {
+			rule = validate({ source: move.from, target: move.to, type: 301, note: `${SLUG_NOTE_PREFIX} ${move.title}`.slice(0, 500) });
+		} catch (error) {
+			ctx.log.warn("Child pages: skipped a redirect that isn't valid", { from: move.from, to: move.to, error: String(error) });
+			continue;
+		}
+		const id = plan.upsert.id ?? crypto.randomUUID();
+		if (plan.upsert.id) {
+			writes.push(d1.prepare("UPDATE coywolf_redirects SET source = ?, target = ?, type = 301, enabled = 1, note = ?, updated_at = ? WHERE id = ?").bind(rule.source, rule.target, rule.note ?? null, now, id));
+		} else {
+			writes.push(
+				d1
+					.prepare("INSERT INTO coywolf_redirects (id, source, target, type, is_regex, enabled, note, created_at, updated_at) VALUES (?, ?, ?, 301, 0, 1, ?, ?, ?) ON CONFLICT(source, is_regex) DO UPDATE SET target = excluded.target, note = excluded.note, updated_at = excluded.updated_at")
+					.bind(id, rule.source, rule.target, rule.note ?? null, now, now),
+			);
+		}
+		rules.set(id, { id, source: rule.source, target: rule.target, note: rule.note ?? null });
+		written++;
+	}
+	for (let i = 0; i < writes.length; i += WRITES_PER_BATCH) await d1.batch(writes.slice(i, i + WRITES_PER_BATCH));
+	const store = urls(ctx) as ReturnType<typeof urls> | undefined;
+	if (typeof store?.putMany === "function") {
+		await store
+			.putMany(real.map((m) => ({ id: key(m.collection, m.entryId), data: { url: m.to, at: now } })))
+			.catch((error: unknown) => ctx.log.warn("Child pages: could not remember the new URLs", { error: String(error) }));
+	}
+	if (writes.length) {
+		await noteRedirectsChanged(d1);
+		await purgePageCache({ tags: [REDIRECTS_TAG] });
+	}
+	if (shadowed.length) ctx.log.warn("Child pages: other redirects send these pages' new URLs elsewhere; remove them on the Redirect Manager page", { urls: shadowed.slice(0, 20) });
+	return { written, kept, shadowed };
 }
 
 export function slugChangesModule(options: { database?: string }) {

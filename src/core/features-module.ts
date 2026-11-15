@@ -49,6 +49,8 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 				// Record the defaults first if they aren't yet (a fresh install's flag still counts); should that fail,
 				// the save records them as an existing site's.
 				await recordDefaults(ctx).catch((error: unknown) => ctx.log.warn("Could not record the feature defaults", { error: String(error) }));
+				// The switches as they applied before this save, for modules that act on a change (featuresChanged).
+				const before = modules.some((m) => m.featuresChanged) ? (await ctxFeatureState(ctx).catch(() => null))?.features : undefined;
 				const stored = withRecordedDefaults(await ctx.settings.get<FeatureMap>(FEATURES_SETTING), true);
 				// Every switch in the request, in one write. A part sent with its module keeps its own value (a part
 				// turned on with its module off stays off until the module is on).
@@ -57,6 +59,16 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 				invalidateFeatures();
 				ctx.log.info("Features saved", stored);
 				const { features: now, choices } = await ctxFeatureState(ctx);
+				if (before) {
+					for (const module of modules) {
+						if (!module.featuresChanged) continue;
+						try {
+							await module.featuresChanged(ctx, before, now);
+						} catch (error) {
+							ctx.log.error(`${module.id}: acting on the new switches failed`, { error: String(error) });
+						}
+					}
+				}
 				// A switch turned on schedules its tasks that run only while on; turned off, cancels them (a task that
 				// fires while off cancels itself too). A task that couldn't be scheduled is reported, not just logged.
 				const failed = (await ensureTasks(ctx, tasks.filter((t) => t.onlyWhileOn), now)).filter((f) => f.scheduling);

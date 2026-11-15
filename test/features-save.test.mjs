@@ -125,3 +125,20 @@ test("save: unknown ids are ignored, and the request still makes one write", asy
 		await s.close();
 	}
 });
+
+test("save: modules with featuresChanged get the switches as they applied before and after (Child Pages re-settles its URLs)", async () => {
+	const s = await site({ cwB: false });
+	try {
+		const calls = [];
+		const watching = [...modules, { id: "cwW", label: "W", features: [], featuresChanged: async (_ctx, before, after) => void calls.push([before.cwB, after.cwB]) }];
+		const failing = { id: "cwF", label: "F", features: [], featuresChanged: async () => { throw new Error("boom"); } };
+		const routes = featuresRoutes([...watching, failing], tasks);
+		const out = await routes["features/save"].handler(s.ctx({ features: { cwB: true } }));
+		assert.deepEqual(calls, [[false, true]]);
+		assert.equal(out.features.cwB, true, "a module that fails doesn't fail the save");
+		await routes["features/save"].handler(s.ctx({ features: { "cwA.two": true } }));
+		assert.deepEqual(calls[1], [true, true], "called on every save: the module checks its own switch");
+	} finally {
+		await s.close();
+	}
+});
