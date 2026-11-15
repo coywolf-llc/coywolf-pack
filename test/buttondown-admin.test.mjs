@@ -167,12 +167,21 @@ test("rules: the saved rule with its date, a new rule that needs a term before i
 		assert.match(page.text(), /Saved Nov (9|10), 2026/, "the rule's since, in local time");
 		const checkboxes = () => [...page.main.querySelectorAll('[role="checkbox"], input[type="checkbox"]')];
 		assert.ok(checkboxes().length >= 3, "two terms and the footer link");
+		// Changing the rule's terms means it's stamped again when saved: the page says so.
+		const seo = [...page.main.querySelectorAll("label")].find((l) => l.textContent.trim() === "SEO");
+		assert.ok(seo, "the SEO term's checkbox");
+		await act(async () => seo.click());
+		await settle();
+		assert.match(page.text(), /Once saved, only posts first published from then on/);
+		await act(async () => seo.click());
+		await settle();
+		assert.match(page.text(), /Saved Nov (9|10), 2026/, "back to the saved terms: the saved time again");
 		assert.equal(page.button("Add a rule").disabled, true, "one collection, already ruled: no second rule");
 		await page.click("Remove rule");
 		assert.match(page.text(), /No rules yet/);
 		assert.equal(page.button("Add a rule").disabled, false);
 		await page.click("Add a rule");
-		assert.match(page.text(), /New: once saved/);
+		assert.match(page.text(), /Once saved, only posts first published from then on/);
 		// An incomplete rule isn't sent.
 		const form = page.main.querySelector("#cw-buttondown-form");
 		await act(async () => form.requestSubmit());

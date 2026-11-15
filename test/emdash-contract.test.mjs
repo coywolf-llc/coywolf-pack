@@ -1132,7 +1132,7 @@ test("Settings page: the route, the form id and Kumo's Input for each secret fie
 	assert.match(page, /className: "space-y-4",\s*children: \[fields\.length === 0 && [\s\S]{0,400}?fields\.map\(\(\[key, field\]\) => [\s\S]{0,40}?jsx\(SettingFieldInput, \{/);
 });
 
-test("Settings page: the script keeps four fields in view, hides empty older tokens and the webhook secret, and tucks saved ones behind a toggle (rendered as EmDash does, with the installed Kumo)", async () => {
+test("Settings page: the script keeps five fields in view, hides empty older tokens and the webhook secret, and tucks saved ones behind a toggle (rendered as EmDash does, with the installed Kumo)", async () => {
 	const { Window } = await import("happy-dom");
 	const window = new Window({ url: "https://example.com/_emdash/admin/plugins-manager/coywolf-pack/settings" });
 	for (const key of ["window", "document", "navigator", "HTMLElement", "Node", "Element", "MutationObserver", "requestAnimationFrame", "cancelAnimationFrame", "getComputedStyle"]) {
@@ -1174,7 +1174,7 @@ test("Settings page: the script keeps four fields in view, hides empty older tok
 		window.eval(settingsEnhanceScript());
 		await window.happyDOM.waitUntilComplete();
 
-		for (const key of ["cloudflareApiToken", "aiApiKey", "insightsFathomApiKey", "insightsGoogleServiceAccount"]) assert.equal(wrapper(key).hidden, false, `${key} stays in view`);
+		for (const key of ["cloudflareApiToken", "aiApiKey", "insightsFathomApiKey", "insightsGoogleServiceAccount", "buttondownApiKey"]) assert.equal(wrapper(key).hidden, false, `${key} stays in view`);
 		for (const key of OLDER_SECRET_KEYS) assert.equal(wrapper(key).hidden, true, `${key} is out of view`);
 		assert.equal(wrapper("videosWebhookSecret").hidden, true, "the webhook secret is hidden even when saved");
 		// Browsers ignore autocomplete="off" on password inputs but respect "new-password", so no field may lose EmDash's hint.

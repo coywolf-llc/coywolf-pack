@@ -191,7 +191,7 @@ function RuleEditor(props: { index: number; rule: Draft["rules"][number]; status
 				<p className="text-xs text-kumo-subtle">
 					{props.since
 						? `Saved ${when(props.since)}. Posts first published before then get a draft only with Create draft now (in the entry editor).`
-						: "New: once saved, only posts first published from then on get a draft on their own."}
+						: "Once saved, only posts first published from then on get a draft on their own."}
 				</p>
 				<Button type="button" size="sm" variant="ghost" icon={<Trash aria-hidden="true" />} aria-label={`Remove the ${collection ? `${collection.label} ` : "new "}rule`} onClick={props.onRemove}>
 					Remove rule
@@ -312,7 +312,9 @@ export function ButtondownPage() {
 	};
 
 	const dirty = isDirty(draft, saved);
-	const sinceOf = (collection: string) => status?.settings.rules.find((r) => r.collection === collection && saved?.rules.some((s) => s.collection === collection && s.taxonomy === r.taxonomy && [...s.terms].sort().join() === [...r.terms].sort().join()))?.since;
+	// A rule keeps the time it was saved only while it's unchanged (collection, taxonomy and terms): a changed one is stamped again.
+	const sameTerms = (a: string[], b: string[]) => [...a].sort().join("\n") === [...b].sort().join("\n");
+	const sinceOf = (rule: Draft["rules"][number]) => status?.settings.rules.find((r) => r.collection === rule.collection && r.taxonomy === rule.taxonomy && sameTerms(r.terms, rule.terms))?.since;
 
 	return (
 		<div className="space-y-6">
@@ -365,7 +367,7 @@ export function ButtondownPage() {
 										rule={rule}
 										status={status}
 										taken={draft.rules.filter((_, j) => j !== i).map((r) => r.collection)}
-										since={rule.collection ? sinceOf(rule.collection) : undefined}
+										since={rule.collection ? sinceOf(rule) : undefined}
 										onChange={(next) => setDraft({ ...draft, rules: draft.rules.map((r, j) => (j === i ? next : r)) })}
 										onRemove={() => setDraft({ ...draft, rules: draft.rules.filter((_, j) => j !== i) })}
 									/>
