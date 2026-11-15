@@ -77,6 +77,9 @@ export { searchWithFallback } from "../search/query.js";
 export type { PackSearchOptions, PackSearchResponse, PackSearchResult } from "../search/query.js";
 export { entryUrl, entryUrls, matchEntryPath } from "../core/content-url.js";
 export type { EntryRef, MatchedEntry } from "../core/content-url.js";
+/** Child Pages: the page tree with nested URLs, the catch-all route's page lookup (flat → nested 301), and nested menu URLs. */
+export { loadPageTree, nestMenuUrls, resolvePagePath } from "../childPages/theme.js";
+export type { PagePathMatch, PageTrailItem, PageTree, PageTreeItem } from "../childPages/theme.js";
 /** Reviews module: the review box for theme code, and legacy WordPress review marker attrs → review fields. */
 export { Review };
 export { reviewFromAttrs } from "../reviews/lib.js";

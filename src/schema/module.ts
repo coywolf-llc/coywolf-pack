@@ -17,6 +17,7 @@ import type { PageMetadataContribution, PluginContext, PublicPageContext } from 
 import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
+import { pageTitlesByPath } from "../childPages/read.js";
 import { absoluteUrl, entryUrl, matchEntryPath, trailingPolicy } from "../core/content-url.js";
 import {
 	type FeatureMap,
@@ -821,6 +822,11 @@ export async function schemaContributions(
 			: Promise.resolve(null);
 	const imageRead =
 		graphOn || ogOn || isOn(on, "socialImages") ? generatedRead.then((generated) => generated ?? (graphOn || ogOn ? primaryImage(options, page, site, cleanImages) : null)) : Promise.resolve(null);
+	// Child Pages: a trail derived from the path names the parent pages by their titles (the tree is read once per request, with the theme's).
+	const breadcrumbTitles =
+		isOn(on, SCHEMA_FEATURES.breadcrumbs) && isOn(on, "childPages") && page.breadcrumbs === undefined && (page.path || "").split("/").filter(Boolean).length > 1
+			? pageTitlesByPath().catch(() => null)
+			: Promise.resolve(null);
 	// With the graph on: its nodes, the publisher's @id and the entry's override, for the custom markup.
 	let packGraph: Node[] | null = null;
 	let packPublisherId: string | null = null;
@@ -901,6 +907,7 @@ export async function schemaContributions(
 			image,
 			breadcrumbs: isOn(on, SCHEMA_FEATURES.breadcrumbs),
 			homeLabel: config.settings.schemaBreadcrumbHome || "Home",
+			breadcrumbTitles: await breadcrumbTitles,
 		});
 		// Videos, then reviews, then entities: each step may look at what the one before added.
 		for (const step of [videosStep, reviewsStep, entityStep]) step(graph as { "@graph": Node[] });
@@ -912,7 +919,7 @@ export async function schemaContributions(
 		packPublisherId = String(publisher["@id"]);
 		out.push({ kind: "jsonld", id: "primary", graph });
 	} else if (isOn(on, SCHEMA_FEATURES.breadcrumbs)) {
-		const doc = breadcrumbDocument(page, site.origin, config.settings.schemaBreadcrumbHome || "Home");
+		const doc = breadcrumbDocument(page, site.origin, config.settings.schemaBreadcrumbHome || "Home", await breadcrumbTitles);
 		if (doc) out.push({ kind: "jsonld", id: "coywolf-breadcrumbs", graph: doc });
 	}
 
