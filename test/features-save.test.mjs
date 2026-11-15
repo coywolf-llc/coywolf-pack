@@ -142,3 +142,48 @@ test("save: modules with featuresChanged get the switches as they applied before
 		await s.close();
 	}
 });
+
+test("save: featuresChanged gets the switches from the same read the save builds on; when that read fails the save fails, and nothing is written or missed", async () => {
+	const s = await site({ cwB: false });
+	try {
+		const calls = [];
+		const watching = [...modules, { id: "cwW", label: "W", features: [], featuresChanged: async (_ctx, before, after) => void calls.push([before.cwB, after.cwB]) }];
+		const routes = featuresRoutes(watching, tasks);
+		// The stored switches can't be read (recordDefaults' own failed read is only logged; the save's read is the one that counts).
+		const failing = (input) => {
+			const ctx = s.ctx(input);
+			return { ...ctx, log: { ...ctx.log, warn() {} }, settings: { ...ctx.settings, get: async (key) => (key === FEATURES_SETTING ? Promise.reject(new Error("D1 down")) : ctx.settings.get(key)) } };
+		};
+		await assert.rejects(routes["features/save"].handler(failing({ features: { cwB: true } })), /D1 down/);
+		assert.deepEqual(s.writes.filter((k) => k === FEATURES_SETTING), [], "nothing saved");
+		assert.deepEqual(calls, [], "and no module told of a change that didn't happen");
+		// The save works: the module hears of the change (it used to be skipped when its own earlier read failed).
+		await routes["features/save"].handler(s.ctx({ features: { cwB: true } }));
+		assert.deepEqual(calls, [[false, true]]);
+	} finally {
+		await s.close();
+	}
+});
+
+test("list: a module's note for the Features page (work left over from turning it off); one that can't be read is left out", async () => {
+	const s = await site({});
+	try {
+		const notice = { text: "Left 1 URL without a redirect.", items: ["Delete /a → /b"], action: { label: "Re-check redirects", route: "cwN/recheck" } };
+		const noted = { id: "cwN", label: "N", features: [feature("cwN")], featureNotice: async (_ctx, features) => (features.cwN ? null : notice) };
+		const broken = { id: "cwX", label: "X", features: [feature("cwX")], featureNotice: async () => { throw new Error("KV down"); } };
+		registerFeatures([...noted.features, ...broken.features]);
+		const routes = featuresRoutes([...modules, noted, broken], tasks);
+		const quiet = (input) => ({ ...s.ctx(input), log: { info() {}, warn() {}, error() {} } });
+		const list = await routes["features/list"].handler(quiet());
+		assert.deepEqual(list.modules.find((m) => m.id === "cwN").notice, notice);
+		assert.equal("notice" in list.modules.find((m) => m.id === "cwX"), false);
+		assert.equal("notice" in list.modules.find((m) => m.id === "cwA"), false);
+		// The save's answer carries them too, as they are after it (the page doesn't read the list again).
+		const off = await routes["features/save"].handler(quiet({ features: { cwB: true } }));
+		assert.deepEqual(off.notices, { cwN: notice });
+		const on = await routes["features/save"].handler(quiet({ features: { cwN: true } }));
+		assert.deepEqual(on.notices, {});
+	} finally {
+		await s.close();
+	}
+});

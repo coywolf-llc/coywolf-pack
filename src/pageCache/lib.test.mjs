@@ -312,6 +312,7 @@ const READ_ONLY_ROUTES = [
 	"childPages/entry",
 	"childPages/import/plan",
 	"childPages/parents",
+	"childPages/recheck",
 	"childPages/status",
 	"childPages/tree",
 	"cloudflare-token/clear-older",

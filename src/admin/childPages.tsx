@@ -34,18 +34,54 @@ interface CollectionStatus {
 	field: boolean;
 	conflict: string | null;
 	urlPattern: string | null;
-	nests: "configured" | "field" | "override" | null;
+	nests: "configured" | "field" | "override" | "pattern" | null;
+}
+
+interface RuleRef {
+	source: string;
+	target: string;
+}
+
+/** A page that moved (src/childPages/pack.ts). */
+interface MoveRef {
+	entryId: string;
+	title: string;
+	from: string;
+	to: string;
+}
+
+interface LoopRef extends MoveRef {
+	rule: RuleRef;
+}
+
+interface Shadow {
+	url: string;
+	rule: RuleRef;
 }
 
 interface ChangeStatus {
 	at: string;
 	collection: string;
+	label: string;
 	reason: string;
 	moved: number;
 	written: number;
 	skipped: number;
 	redirectsOff: boolean;
-	shadowed?: string[];
+	loops?: LoopRef[];
+	shadowed?: Shadow[];
+	noSnapshot?: boolean;
+	failed?: string;
+}
+
+/** What's unresolved for a collection after its latest change. */
+interface OpenIssues {
+	collection: string;
+	label: string;
+	waiting: MoveRef[];
+	waitingCount: number;
+	loops: LoopRef[];
+	shadowed: Shadow[];
 }
 
 interface Status {
@@ -54,7 +90,9 @@ interface Status {
 	slugChanges: boolean;
 	pageParents: number;
 	collections: CollectionStatus[];
-	lastChange: ChangeStatus | null;
+	/** The latest changes that moved pages, newest first (every collection's). */
+	changes: ChangeStatus[];
+	open: OpenIssues[];
 }
 
 interface TreePage {
@@ -173,7 +211,9 @@ function SetUp(props: { status: Status; onChanged: () => void }) {
 											? "Parent page field added. URLs nest by it."
 											: c.nests === "override"
 												? "Parent page field added, but its urls option has no {pagepath}, so URLs don't nest."
-												: "Parent page field added. URLs nest once Child Pages is on."
+												: c.nests === "pattern"
+													? "Parent page field added, but its URL pattern has neither {slug} nor {pagepath}, so URLs can't nest."
+													: "Parent page field added."
 									: c.conflict
 										? `It already has a field named parent_page (${c.conflict}), so the Parent page field can't be added.`
 										: c.nests === "configured"
@@ -217,10 +257,18 @@ function TreeList(props: { collection: string; pages: TreePage[]; parent: string
 							{page.pendingChanges && <Badge variant="outline">Unpublished changes</Badge>}
 							{page.warnings.map((w) => (
 								<Badge key={w} variant="warning">
-									<span title={PAGE_WARNINGS[w]}>{WARNING_LABELS[w] ?? w}</span>
+									{WARNING_LABELS[w] ?? w}
 								</Badge>
 							))}
 						</div>
+						{/* What each warning means, as text on the page (a title attribute reaches neither keyboards nor touch screens). */}
+						{page.warnings.length > 0 && (
+							<ul role="list" className="mb-1 space-y-0.5 text-xs text-kumo-subtle">
+								{page.warnings.map((w) => (
+									<li key={w}>{PAGE_WARNINGS[w] ?? w}</li>
+								))}
+							</ul>
+						)}
 						<TreeList collection={props.collection} pages={props.pages} parent={page.id} depth={props.depth + 1} />
 					</li>
 				))}
@@ -282,7 +330,6 @@ function Tree(props: { collections: CollectionStatus[]; reloadKey: number }) {
 					<p className="text-sm text-kumo-subtle">
 						{plural(pages.length, "page", "pages")}
 						{warned ? `, ${plural(warned, "needs", "need")} a look` : ""}.
-						{state.nested === false && " Child Pages is off: these URLs ignore the Parent page field."}
 					</p>
 					{pages.length ? <TreeList collection={collection} pages={pages} parent={null} depth={0} /> : <p className="text-sm text-kumo-subtle">No pages yet.</p>}
 				</>
@@ -429,6 +476,134 @@ function ImportParents(props: { status: Status; onChanged: () => void }) {
 	);
 }
 
+// ── Redirects ────────────────────────────────────────────────────
+
+const Rule = ({ rule }: { rule: RuleRef }) => (
+	<>
+		<Code>{rule.source}</Code> → <Code>{rule.target}</Code>
+	</>
+);
+
+function changeText(change: ChangeStatus): string {
+	if (change.failed) return `The redirects for this change couldn't be worked out (${change.failed}). Click Re-check redirects to make them.`;
+	const parts = [`${plural(change.moved, "other page", "other pages")} moved`];
+	if (change.redirectsOff) parts.push("no redirects (Redirect Manager or Slug changes was off)");
+	else parts.push(`${plural(change.written, "redirect", "redirects")} added`);
+	if (change.skipped) parts.push(`${plural(change.skipped, "page", "pages")} over the limit of 200 a change had to wait`);
+	if (change.loops?.length) parts.push(`${plural(change.loops.length, "redirect", "redirects")} not added (a loop)`);
+	const text = `${parts.join("; ")}.`;
+	return change.noSnapshot ? `${text} There were no earlier URLs to compare with, so pages this change moved got no redirect. Tracking started again from the current URLs.` : text;
+}
+
+function Redirects(props: { status: Status; onChanged: () => void }) {
+	const { changes, open } = props.status;
+	const [busy, setBusy] = React.useState(false);
+	const [error, setError] = React.useState<string>();
+	const toast = useToast();
+	const recheck = async () => {
+		setBusy(true);
+		setError(undefined);
+		try {
+			await post("recheck", undefined, "Couldn't re-check the redirects");
+			toast.success("Redirects re-checked");
+		} catch (cause) {
+			setError(errorText(cause, "Couldn't re-check the redirects"));
+		} finally {
+			setBusy(false);
+			props.onChanged();
+		}
+	};
+	const several = new Set(props.status.collections.filter((c) => c.field).map((c) => c.collection)).size > 1;
+	return (
+		<Section
+			title="Redirects"
+			description={
+				<>
+					When a page moves, Slug changes adds the 301 from its old URL and Child Pages adds one for every published page below it (at most 200 a change). The
+					rules are listed on <PackLink page="/redirects">Redirect Manager</PackLink>. <strong>Re-check redirects</strong> adds the ones that still wait and looks at
+					the problems below again.
+				</>
+			}
+		>
+			<Button type="button" variant="secondary" icon={<ArrowsClockwise aria-hidden="true" />} disabled={busy} onClick={() => void recheck()}>
+				{busy ? "Re-checking…" : "Re-check redirects"}
+			</Button>
+			{error && <Banner variant="error" role="alert" description={error} />}
+			{open.map((issues) => (
+				<div key={issues.collection} className="space-y-3 rounded-md border border-kumo-line p-3 text-sm" role="status">
+					{several && <h3 className="font-medium">{issues.label}</h3>}
+					{issues.loops.length > 0 && (
+						<div>
+							<p>
+								<strong>{plural(issues.loops.length, "redirect wasn't", "redirects weren't")} added</strong>, because a redirect someone else made sends the page's new
+								URL back to its old one (a loop). Delete {issues.loops.length === 1 ? "that redirect" : "those redirects"} on{" "}
+								<PackLink page="/redirects">Redirect Manager</PackLink>, then click Re-check redirects:
+							</p>
+							<ul role="list" className="mt-1 list-disc space-y-1 ps-5">
+								{issues.loops.map((loop) => (
+									<li key={loop.entryId}>
+										Delete <Rule rule={loop.rule} />. It sends <Code>{loop.to}</Code> (the new URL of “{loop.title}”) back to <Code>{loop.from}</Code>, so the page
+										can't be reached.
+									</li>
+								))}
+							</ul>
+						</div>
+					)}
+					{issues.shadowed.length > 0 && (
+						<div>
+							<p>
+								<strong>
+									Another redirect sends {plural(issues.shadowed.length, "page's new URL", "pages' new URLs")} elsewhere
+								</strong>
+								, so {issues.shadowed.length === 1 ? "that page can't" : "those pages can't"} be reached there. Delete or change{" "}
+								{issues.shadowed.length === 1 ? "it" : "them"} on <PackLink page="/redirects">Redirect Manager</PackLink>:
+							</p>
+							<ul role="list" className="mt-1 list-disc space-y-1 ps-5">
+								{issues.shadowed.map((shadow) => (
+									<li key={shadow.url}>
+										<Rule rule={shadow.rule} /> (the page is at <Code>{shadow.url}</Code>)
+									</li>
+								))}
+							</ul>
+						</div>
+					)}
+					{issues.waitingCount > 0 && (
+						<div>
+							<p>
+								<strong>{plural(issues.waitingCount, "page still waits", "pages still wait")} for a redirect</strong> from {issues.waitingCount === 1 ? "its" : "their"}{" "}
+								old URL: more than 200 pages moved at once. Click Re-check redirects to add {issues.waitingCount > 200 ? "the next 200" : "them"}.
+							</p>
+							<ul role="list" className="mt-1 list-disc space-y-1 ps-5">
+								{issues.waiting.map((move) => (
+									<li key={move.entryId}>
+										<Code>{move.from}</Code> → <Code>{move.to}</Code>
+									</li>
+								))}
+								{issues.waitingCount > issues.waiting.length && <li>And {(issues.waitingCount - issues.waiting.length).toLocaleString()} more.</li>}
+							</ul>
+						</div>
+					)}
+				</div>
+			))}
+			{changes.length > 0 ? (
+				<div>
+					<h3 className="text-sm font-medium">Latest changes that moved pages</h3>
+					<ul role="list" className="mt-1 space-y-1 text-sm text-kumo-subtle">
+						{changes.map((change) => (
+							<li key={`${change.at}${change.collection}`}>
+								{new Date(change.at).toLocaleString()}
+								{several ? `, ${change.label}` : ""}: {change.reason.toLowerCase()}. {changeText(change)}
+							</li>
+						))}
+					</ul>
+				</div>
+			) : (
+				!open.length && <p className="text-sm text-kumo-subtle">No pages have moved yet.</p>
+			)}
+		</Section>
+	);
+}
+
 // ── The page ─────────────────────────────────────────────────────
 
 export function ChildPagesPage() {
@@ -450,7 +625,6 @@ export function ChildPagesPage() {
 		setReloadKey((k) => k + 1);
 	};
 
-	const last = status?.lastChange;
 	return (
 		<div className="space-y-6">
 			<PageHeader
@@ -472,23 +646,13 @@ export function ChildPagesPage() {
 			{!status && !error && <Loading />}
 			{status && (
 				<>
-					{!status.enabled && (
-						<Banner
-							variant="default"
-							description={
-								<>
-									Child Pages is off: you can set up the field and choose parents, but URLs don't use them until it's turned on on <FeaturesLink />.
-								</>
-							}
-						/>
-					)}
 					{status.enabled && (!status.redirects || !status.slugChanges) && (
 						<Banner
 							variant="alert"
 							description={
 								<>
 									{!status.redirects ? "Redirect Manager is off" : "Slug changes (part of Redirect Manager) is off"}, so pages that move get no 301 from their
-									old URLs. Turn {!status.redirects ? "Redirect Manager and its Slug changes part" : "Slug changes"} on on <FeaturesLink />.
+									old URLs. Turn on {!status.redirects ? "Redirect Manager and its Slug changes part" : "Slug changes"} on <FeaturesLink />.
 								</>
 							}
 						/>
@@ -496,32 +660,7 @@ export function ChildPagesPage() {
 					<SetUp status={status} onChanged={changed} />
 					<Tree collections={status.collections} reloadKey={reloadKey} />
 					<ImportParents status={status} onChanged={changed} />
-					{last && (
-						<p className="text-sm text-kumo-subtle">
-							Last change: {last.reason.toLowerCase()} ({new Date(last.at).toLocaleString()}). {plural(last.moved, "other page", "other pages")} moved
-							{last.redirectsOff ? ", with no redirects (Redirect Manager or Slug changes is off)" : `; ${plural(last.written, "redirect", "redirects")} added`}
-							{last.skipped ? `; ${plural(last.skipped, "page", "pages")} over the limit got none` : ""}. See them on <PackLink page="/redirects">Redirect Manager</PackLink>.
-						</p>
-					)}
-					{last?.shadowed?.length ? (
-						<Banner
-							variant="alert"
-							description={
-								<>
-									Another redirect still sends {plural(last.shadowed.length, "page's new URL", "pages' new URLs")} elsewhere, so{" "}
-									{last.shadowed.length === 1 ? "that page can't" : "those pages can't"} be reached there. Remove or change {last.shadowed.length === 1 ? "it" : "them"} on{" "}
-									<PackLink page="/redirects">Redirect Manager</PackLink>:
-									<ul role="list" className="mt-1 space-y-0.5">
-										{last.shadowed.map((url) => (
-											<li key={url}>
-												<Code>{url}</Code>
-											</li>
-										))}
-									</ul>
-								</>
-							}
-						/>
-					) : null}
+					<Redirects status={status} onChanged={changed} />
 				</>
 			)}
 		</div>

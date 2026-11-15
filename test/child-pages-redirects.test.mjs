@@ -76,6 +76,8 @@ function fakeCtx() {
 	};
 }
 
+/** The newest change kept for the Child Pages page. */
+const lastChange = (ctx) => ctx.state.kv.get("state:childPages:status")?.changes[0];
 const ON = { redirects: true, "redirects.slugChanges": true, childPages: true };
 const rules = (d1) =>
 	d1.raw.prepare("SELECT count(*) n FROM sqlite_master WHERE name = 'coywolf_redirects'").get().n
@@ -97,7 +99,7 @@ test("applyUrlMoves: one 301 a page, chains retargeted, our rule at the new URL 
 		{ collection: "pages", entryId: "d", title: "Docs", from: "/apps/pack/docs/", to: "/docs/" },
 		{ collection: "pages", entryId: "x", title: "Same", from: "/same/", to: "/same" },
 	]);
-	assert.deepEqual(out, { written: 2, kept: 0, shadowed: ["/docs/"] });
+	assert.deepEqual(out, { written: 2, kept: 0, shadowed: [{ url: "/docs/", rule: { source: "/docs", target: "/elsewhere/" } }], loops: [] });
 	assert.deepEqual(rules(d1), [
 		["/apps/pack", "/tools/pack/"],
 		["/apps/pack/docs", "/docs/"],
@@ -125,7 +127,7 @@ test("settleCollection: the first change only records; a parent's rename moves t
 			["/apps/coywolf-pack", "/tools/coywolf-pack/"],
 			["/apps/coywolf-pack/docs", "/tools/coywolf-pack/docs/"],
 		], "the renamed page itself is Slug changes' (excluded here)");
-		assert.equal(ctx.state.kv.get("state:childPages:lastChange").moved, 2);
+		assert.equal(lastChange(ctx).moved, 2);
 
 		d1.raw.exec("UPDATE ec_pages SET status = 'draft' WHERE id = 'a'");
 		await settleCollection(ctx, d1, ON, "pages", "a", "A page was unpublished");
@@ -153,7 +155,7 @@ test("settleCollection: Redirect Manager or Slug changes off: nothing written, t
 		d1.raw.exec("UPDATE ec_pages SET slug = 'tools' WHERE id = 'a'");
 		await settleCollection(ctx, d1, { ...ON, "redirects.slugChanges": false }, "pages", "a", "x");
 		assert.equal(d1.raw.prepare("SELECT count(*) n FROM sqlite_master WHERE name = 'coywolf_redirects'").get().n, 0);
-		assert.equal(ctx.state.kv.get("state:childPages:lastChange").redirectsOff, true);
+		assert.equal(lastChange(ctx).redirectsOff, true);
 		assert.equal(ctx.state.kv.get("state:childPages:paths:pages").paths.p, "/tools/coywolf-pack/");
 	} finally {
 		configureContentUrls({});
@@ -169,9 +171,10 @@ test(`settleCollection: at most ${MAX_MOVES} redirects for one change, the rest 
 		await settleCollection(ctx, d1, ON, "pages", null, "x");
 		d1.raw.exec("UPDATE ec_pages SET slug = 'tools' WHERE id = 'a'");
 		await settleCollection(ctx, d1, ON, "pages", "a", "A page was published");
-		const status = ctx.state.kv.get("state:childPages:lastChange");
+		const status = lastChange(ctx);
 		assert.deepEqual([status.moved, status.written, status.skipped], [MAX_MOVES + 5, MAX_MOVES, 5]);
 		assert.equal(rules(d1).length, MAX_MOVES);
+		assert.equal(status.skippedUrls.length, 5, "the URLs still without a redirect, not just how many");
 	} finally {
 		configureContentUrls({});
 	}

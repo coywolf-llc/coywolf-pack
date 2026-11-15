@@ -32,6 +32,15 @@ export interface FeatureDef {
 	requires?: string[];
 }
 
+/** A module's note on the Features page (PackModule.featureNotice). */
+export interface FeatureNotice {
+	text: string;
+	/** Listed under the text. */
+	items?: string[];
+	/** A button that POSTs to one of the pack's routes (no body), then reloads the list. */
+	action?: { label: string; route: string };
+}
+
 export interface AdminPageDef {
 	path: string;
 	label: string;
@@ -119,6 +128,11 @@ export interface PackModule {
 	 * logged; the save stands.
 	 */
 	featuresChanged?: (ctx: PluginContext, before: import("./features.js").FeatureMap, after: import("./features.js").FeatureMap) => Promise<void>;
+	/**
+	 * A note under the module on the Features page (features/list), which stays reachable while the module is off
+	 * and its own pages are out of the sidebar: work left over from turning it off, say. Null: none.
+	 */
+	featureNotice?: (ctx: PluginContext, features: import("./features.js").FeatureMap) => Promise<FeatureNotice | null>;
 	/** Hosts for network:request, if any. */
 	allowedHosts?: string[];
 }

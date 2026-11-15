@@ -12,8 +12,22 @@ import { z } from "zod";
 
 import { parseInput } from "../shared.js";
 import { ensureTasks } from "./compose.js";
-import { FEATURES_SETTING, type FeatureMap, ctxFeatureState, featureCatalog, invalidateFeatures, recordDefaults, withRecordedDefaults } from "./features.js";
-import type { PackModule, TaskDef } from "./module.js";
+import { FEATURES_SETTING, type FeatureMap, ctxFeatureState, featureCatalog, invalidateFeatures, recordDefaults, resolveFeatures, withRecordedDefaults } from "./features.js";
+import type { FeatureNotice, PackModule, TaskDef } from "./module.js";
+
+/** Each module's note for its card on the Features page (work left over from turning it off, say), by module id. A note that can't be read is left out. */
+async function moduleNotices(ctx: any, modules: PackModule[], features: FeatureMap): Promise<Record<string, FeatureNotice>> {
+	const notices: Record<string, FeatureNotice> = {};
+	for (const m of modules) {
+		if (!m.featureNotice) continue;
+		const notice = await m.featureNotice(ctx, features).catch((error: unknown) => {
+			ctx.log.warn(`${m.id}: could not read its note for the Features page`, { error: String(error) });
+			return null;
+		});
+		if (notice) notices[m.id] = notice;
+	}
+	return notices;
+}
 
 export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 	return {
@@ -27,6 +41,7 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 				// Tasks that run only while their feature is on are scheduled or cancelled to match the switches.
 				await ensureTasks(ctx, tasks, state);
 				const known = new Set(featureCatalog().map((f) => f.id));
+				const notices = await moduleNotices(ctx, modules, state);
 				return {
 					modules: modules.map((m) => ({
 						id: m.id,
@@ -34,6 +49,7 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 						features: m.features
 							.filter((f) => known.has(f.id))
 							.map((f) => ({ ...f, enabled: state[f.id] ?? false, choice: choices[f.id] ?? false })),
+						...(notices[m.id] ? { notice: notices[m.id] } : {}),
 					})),
 				};
 			},
@@ -49,9 +65,11 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 				// Record the defaults first if they aren't yet (a fresh install's flag still counts); should that fail,
 				// the save records them as an existing site's.
 				await recordDefaults(ctx).catch((error: unknown) => ctx.log.warn("Could not record the feature defaults", { error: String(error) }));
-				// The switches as they applied before this save, for modules that act on a change (featuresChanged).
-				const before = modules.some((m) => m.featuresChanged) ? (await ctxFeatureState(ctx).catch(() => null))?.features : undefined;
-				const stored = withRecordedDefaults(await ctx.settings.get<FeatureMap>(FEATURES_SETTING), true);
+				const saved = await ctx.settings.get<FeatureMap>(FEATURES_SETTING);
+				// The switches as they applied before this save, for modules that act on a change (featuresChanged). From the
+				// same read the save builds on: if it fails the save fails, and no module misses a change it should act on.
+				const before = modules.some((m) => m.featuresChanged) ? resolveFeatures(saved) : undefined;
+				const stored = withRecordedDefaults(saved, true);
 				// Every switch in the request, in one write. A part sent with its module keeps its own value (a part
 				// turned on with its module off stays off until the module is on).
 				for (const [id, on] of Object.entries(features)) if (known.has(id)) stored[id] = on;
@@ -80,7 +98,9 @@ export function featuresRoutes(modules: PackModule[], tasks: TaskDef[]) {
 						500,
 					);
 				}
-				return { features: now, choices };
+				// With the modules' notes as they are after the save (what a module's featuresChanged left undone), so the page
+				// shows them without reading the list again.
+				return { features: now, choices, notices: await moduleNotices(ctx, modules, now) };
 			},
 		}),
 	};

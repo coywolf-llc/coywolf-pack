@@ -378,11 +378,6 @@ export function ChildPagesPanel(props: PanelProps) {
 	const pending = data.pendingParent;
 	return (
 		<div className="space-y-3">
-			{!data.enabled && (
-				<Muted>
-					Child Pages is off, so the Parent page field doesn't change URLs. Turn it on on <PackLink page="/features">the Features page</PackLink>.
-				</Muted>
-			)}
 			<dl className="space-y-2">
 				<Row label={data.published ? "URL" : "URL once published"}>
 					{data.url ? (
@@ -439,7 +434,7 @@ export function ChildPagesPanel(props: PanelProps) {
 			)}
 			{data.enabled && (!data.redirects || !data.slugChanges) && (
 				<Muted>
-					{!data.redirects ? "Redirect Manager is off" : "Slug changes (Redirect Manager) is off"}, so if this page or its parent moves, the old URL won't redirect. Turn it on on{" "}
+					{!data.redirects ? "Redirect Manager is off" : "Slug changes (Redirect Manager) is off"}, so if this page or its parent moves, the old URL won't redirect. Turn it on from{" "}
 					<PackLink page="/features">the Features page</PackLink>.
 				</Muted>
 			)}

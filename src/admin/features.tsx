@@ -3,16 +3,61 @@
  * The switches edit a draft (src/admin/features-draft.ts); the Save bar saves
  * every change in one request.
  */
-import { Banner, Switch } from "@cloudflare/kumo";
+import { Banner, Button, Switch } from "@cloudflare/kumo";
 import * as React from "react";
 
 import { CloudflareTokenCard } from "./cloudflare-token-card.js";
-import { missingRequirements, useFeatureDraft } from "./features-draft.js";
+import { PACK_API, apiPost, errorText } from "./api.js";
+import { type ModuleNotice, missingRequirements, useFeatureDraft } from "./features-draft.js";
 import { useManifestRefresh } from "./manifest.js";
 import { PageHeader, Loading } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { useSaveResult } from "./toast.js";
 import { resetUpdateStatus } from "./update-notice.js";
+
+const postPack = apiPost(PACK_API);
+
+/** A module's note under its description, with its action (which runs, then the notes are read again). */
+function Notice(props: { notice: ModuleNotice; onDone: () => Promise<void> }) {
+	const { notice } = props;
+	const [busy, setBusy] = React.useState(false);
+	const [error, setError] = React.useState<string>();
+	const run = async () => {
+		if (!notice.action) return;
+		setBusy(true);
+		setError(undefined);
+		try {
+			await postPack(notice.action.route, undefined, `${notice.action.label} failed`);
+			await props.onDone();
+		} catch (cause) {
+			setError(errorText(cause, `${notice.action.label} failed`));
+		} finally {
+			setBusy(false);
+		}
+	};
+	return (
+		<div className="mt-2 space-y-2 text-sm" role="status">
+			<p className="text-kumo-warning">{notice.text}</p>
+			{notice.items && notice.items.length > 0 && (
+				<ul role="list" className="list-disc space-y-1 ps-5 break-words">
+					{notice.items.map((item) => (
+						<li key={item}>{item}</li>
+					))}
+				</ul>
+			)}
+			{error && (
+				<p className="text-kumo-danger" role="alert">
+					{error}
+				</p>
+			)}
+			{notice.action && (
+				<Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => void run()}>
+					{busy ? "Working…" : notice.action.label}
+				</Button>
+			)}
+		</div>
+	);
+}
 
 export function FeaturesPage() {
 	const refreshManifest = useManifestRefresh();
@@ -70,6 +115,7 @@ export function FeaturesPage() {
 										Needs {missing.join(" and ")} on to do its whole job.
 									</p>
 								)}
+								{module.notice && <Notice notice={module.notice} onDone={features.refreshNotices} />}
 							</div>
 							<Switch className="shrink-0"
 								aria-label={`${main.label}: ${mainOn ? "on" : "off"}`}

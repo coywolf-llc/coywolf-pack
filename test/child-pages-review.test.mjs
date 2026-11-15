@@ -219,3 +219,351 @@ test("a collection without a title column still reads (slugs stand in); any othe
 	assert.equal(tree.nodes.get("p").title, null);
 	assert.equal(tree.nodes.get("p").effectiveParentId, "a");
 });
+
+// ── Redirects ──
+
+const { applyUrlMoves, loopingRule } = await import("../src/redirects/slug-changes.ts");
+const { ensureTable, saveRule } = await import("../src/redirects/rules.ts");
+const { settleCollection, settleSwitch, recheckCollection, movedPagesPurges, offNotice, readStatus, childPagesPack, MAX_MOVES, MAX_CHANGES } = pack;
+const status = (ctx) => ctx.state.kv.get("state:childPages:status") ?? { changes: [], open: {} };
+const snapshot = (ctx, collection = "pages") => ctx.state.kv.get(`state:childPages:paths:${collection}`);
+const byHand = (d1, source, target, extra = {}) => saveRule(d1, { source, target, note: "WordPress move", ...extra });
+
+test("applyUrlMoves: a rule someone else made that sends the new URL back to the old one (at once, or through other rules) is a loop: nothing written, the rule named", async () => {
+	const d1 = fakeD1();
+	const ctx = fakeCtx();
+	await ensureTable(d1);
+	await byHand(d1, "/coywolf-seo", "/apps/coywolf-seo/"); // coywolf.com's, from the WordPress move
+	await byHand(d1, "/pack", "/middle/?utm=1");
+	await byHand(d1, "/middle", "/apps/pack/"); // /pack → /middle → /apps/pack
+	await byHand(d1, "/off", "/apps/off/", { enabled: false }); // disabled: answers nothing
+	await saveRule(d1, { source: "/ours", target: "/apps/ours/", note: "Slug change: Ours" }); // ours at the new URL: removed, not a loop
+	await byHand(d1, "/away", "https://example.com/apps/away/"); // leaves the site: shadowed, not a loop
+	const move = (id, slug) => ({ collection: "pages", entryId: id, title: slug, from: `/apps/${slug}/`, to: `/${slug}/` });
+	const out = await applyUrlMoves(ctx, d1, [move("s", "coywolf-seo"), move("p", "pack"), move("o", "off"), move("u", "ours"), move("w", "away")]);
+	assert.deepEqual(out.loops.map((l) => [l.entryId, l.from, l.to, l.rule]), [
+		["s", "/apps/coywolf-seo/", "/coywolf-seo/", { source: "/coywolf-seo", target: "/apps/coywolf-seo/" }],
+		["p", "/apps/pack/", "/pack/", { source: "/pack", target: "/middle/?utm=1" }],
+	]);
+	assert.deepEqual(out.shadowed, [{ url: "/away/", rule: { source: "/away", target: "https://example.com/apps/away/" } }]);
+	assert.equal(out.written, 3);
+	assert.deepEqual(rules(d1), [
+		["/apps/away", "/away/"],
+		["/apps/off", "/off/"],
+		["/apps/ours", "/ours/"],
+		["/away", "https://example.com/apps/away/"],
+		["/coywolf-seo", "/apps/coywolf-seo/"],
+		["/middle", "/apps/pack/"],
+		["/off", "/apps/off/"],
+		["/pack", "/middle/?utm=1"],
+	], "no /apps/coywolf-seo → /coywolf-seo/ and no /apps/pack → /pack/");
+	assert.equal(ctx.state.remembered.get("pages:s").url, "/coywolf-seo/", "the page is at its new URL: Slug changes' next save sees no move");
+	assert.ok(ctx.state.logs.some(([level, message]) => level === "warn" && /loop|sends the new URL back/.test(message)));
+	assert.deepEqual(await loopingRule(d1, "/apps/coywolf-seo/", "/coywolf-seo/"), { source: "/coywolf-seo", target: "/apps/coywolf-seo/" });
+	assert.equal(await loopingRule(d1, "/elsewhere/", "/coywolf-seo/"), null);
+});
+
+const SEO = [page("a", "apps", "published", "Coywolf apps"), page("s", "coywolf-seo", "published", "Coywolf SEO"), page("p", "coywolf-pack", "published", "Coywolf Pack"), parent("s", "a"), parent("p", "a")].join("\n");
+
+test("turning the switch off with coywolf.com's hand-made rule: no loop is written, the Features page names the rule to delete, and Re-check adds the 301 once it's gone", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(SEO);
+	const ctx = fakeCtx({ childPages: false, redirects: true, "redirects.slugChanges": true });
+	const OFF = { ...ON, childPages: false };
+	try {
+		await ensureTable(d1);
+		await byHand(d1, "/coywolf-seo", "/apps/coywolf-seo/");
+		await settleSwitch(ctx, d1, OFF, false);
+		assert.deepEqual(rules(d1), [
+			["/apps/coywolf-pack", "/coywolf-pack/"],
+			["/coywolf-seo", "/apps/coywolf-seo/"],
+		]);
+		const open = status(ctx).open.pages;
+		assert.deepEqual(open.loops, [{ entryId: "s", title: "Coywolf SEO", from: "/apps/coywolf-seo/", to: "/coywolf-seo/", rule: { source: "/coywolf-seo", target: "/apps/coywolf-seo/" } }]);
+		assert.deepEqual(status(ctx).changes[0].loops, open.loops);
+		assert.deepEqual(snapshot(ctx), { paths: { s: "/apps/coywolf-seo/" }, at: snapshot(ctx).at, off: true }, "only the move that's still to make");
+		// The Child Pages page is out of the sidebar while it's off: the Features page says it.
+		const notice = await childPagesPack().featureNotice(ctx, OFF);
+		configureStoredParents(null);
+		assert.match(notice.text, /left 1 nested URL without a redirect/);
+		assert.match(notice.items[0], /Delete the redirect \/coywolf-seo → \/apps\/coywolf-seo\/ on the Redirect Manager page/);
+		assert.deepEqual(notice.action, { label: "Re-check redirects", route: "childPages/recheck" });
+		assert.equal(await childPagesPack().featureNotice(ctx, ON), null, "on: the Child Pages page lists it instead");
+		configureStoredParents(null);
+
+		// Re-check with the rule still there: still a loop, still listed.
+		await recheckCollection(ctx, d1, OFF, "pages");
+		assert.equal(status(ctx).open.pages.loops.length, 1);
+		assert.equal(rules(d1).some(([s]) => s === "/apps/coywolf-seo"), false);
+		// The rule is deleted on Redirect Manager: Re-check makes the 301, and nothing is left.
+		d1.raw.exec("DELETE FROM coywolf_redirects WHERE source = '/coywolf-seo'");
+		await recheckCollection(ctx, d1, OFF, "pages");
+		assert.deepEqual(rules(d1), [
+			["/apps/coywolf-pack", "/coywolf-pack/"],
+			["/apps/coywolf-seo", "/coywolf-seo/"],
+		]);
+		assert.equal(status(ctx).open.pages, undefined);
+		assert.equal(snapshot(ctx), undefined);
+		assert.equal(offNotice(await readStatus(ctx)), null);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("unpublishing Apps with that rule: its children's loops are listed, their old URLs stay in the snapshot, and the next settle makes the 301 once the rule is gone", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(SEO);
+	const ctx = fakeCtx();
+	try {
+		await ensureTable(d1);
+		await byHand(d1, "/coywolf-seo", "/apps/coywolf-seo/");
+		await settleCollection(ctx, d1, ON, "pages", null, "x");
+		d1.raw.exec("UPDATE ec_pages SET status = 'draft' WHERE id = 'a'");
+		await settleCollection(ctx, d1, ON, "pages", "a", "A page was unpublished");
+		assert.deepEqual(rules(d1), [
+			["/apps/coywolf-pack", "/coywolf-pack/"],
+			["/coywolf-seo", "/apps/coywolf-seo/"],
+		]);
+		assert.equal(status(ctx).open.pages.loops[0].rule.source, "/coywolf-seo");
+		assert.equal(snapshot(ctx).paths.s, "/apps/coywolf-seo/", "the move is still to make");
+		assert.equal(snapshot(ctx).paths.p, undefined);
+		d1.raw.exec("DELETE FROM coywolf_redirects WHERE source = '/coywolf-seo'");
+		await settleCollection(ctx, d1, ON, "pages", "x", "A page was published");
+		assert.deepEqual(rules(d1).find(([s]) => s === "/apps/coywolf-seo"), ["/apps/coywolf-seo", "/coywolf-seo/"]);
+		assert.equal(status(ctx).open.pages, undefined, "resolved: no longer listed");
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("a rule someone else made that sends a page's new URL elsewhere stays listed (with the rule) until it's gone", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(SEO);
+	const ctx = fakeCtx();
+	try {
+		await ensureTable(d1);
+		await byHand(d1, "/coywolf-seo", "/somewhere-else/");
+		await settleCollection(ctx, d1, ON, "pages", null, "x");
+		d1.raw.exec("UPDATE ec_pages SET status = 'draft' WHERE id = 'a'");
+		await settleCollection(ctx, d1, ON, "pages", "a", "A page was unpublished");
+		assert.deepEqual(status(ctx).open.pages.shadowed, [{ url: "/coywolf-seo/", rule: { source: "/coywolf-seo", target: "/somewhere-else/" } }]);
+		assert.equal(rules(d1).some(([s, t]) => s === "/apps/coywolf-seo" && t === "/coywolf-seo/"), true, "the 301 is written all the same");
+		// Another change that moves nothing: still listed.
+		await settleCollection(ctx, d1, ON, "pages", "x", "A page was published");
+		assert.equal(status(ctx).open.pages.shadowed.length, 1);
+		d1.raw.exec("DELETE FROM coywolf_redirects WHERE source = '/coywolf-seo'");
+		await settleCollection(ctx, d1, ON, "pages", "x", "A page was published");
+		assert.equal(status(ctx).open.pages, undefined);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test(`past ${MAX_MOVES} moves: a fixed order, the URLs that wait are listed, and the next settle (or Re-check) drains them`, async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const total = MAX_MOVES + 5;
+	const pad = (i) => String(i).padStart(3, "0");
+	// Inserted in reverse, so the order isn't the table's.
+	const children = Array.from({ length: total }, (_, i) => total - 1 - i).map((i) => `${page(`c${pad(i)}`, `child-${pad(i)}`)}\n${parent(`c${pad(i)}`, "a")}`).join("\n");
+	const d1 = fakeD1(`${page("a", "apps")}\n${children}`);
+	const ctx = fakeCtx();
+	const waiting = Array.from({ length: 5 }, (_, i) => `/apps/child-${pad(MAX_MOVES + i)}/`);
+	try {
+		await settleCollection(ctx, d1, ON, "pages", null, "x");
+		d1.raw.exec("UPDATE ec_pages SET slug = 'tools' WHERE id = 'a'");
+		await settleCollection(ctx, d1, ON, "pages", "a", "A page was published");
+		assert.equal(rules(d1).length, MAX_MOVES);
+		const change = status(ctx).changes[0];
+		assert.deepEqual([change.moved, change.written, change.skipped], [total, MAX_MOVES, 5]);
+		assert.deepEqual(change.skippedUrls, waiting, "the last five by old URL, whatever order the rows come in");
+		assert.deepEqual(status(ctx).open.pages.waiting.map((m) => m.from), waiting);
+		assert.equal(status(ctx).open.pages.waitingCount, 5);
+		for (const i of [MAX_MOVES, total - 1]) assert.equal(snapshot(ctx).paths[`c${pad(i)}`], `/apps/child-${pad(i)}/`, "the old URL stays in the snapshot");
+		assert.equal(snapshot(ctx).paths.c000, "/tools/child-000/");
+
+		// Any later change of the collection makes them.
+		await settleCollection(ctx, d1, ON, "pages", "c000", "A page was published");
+		assert.equal(rules(d1).length, total);
+		assert.deepEqual(waiting.filter((from) => !rules(d1).some(([s]) => `${s}/` === from)), []);
+		assert.equal(status(ctx).open.pages, undefined);
+		assert.deepEqual([status(ctx).changes[0].moved, status(ctx).changes[0].written, status(ctx).changes[0].skipped], [5, 5, 0]);
+		assert.equal(snapshot(ctx).paths[`c${pad(MAX_MOVES)}`], `/tools/child-${pad(MAX_MOVES)}/`);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("the switch's cap drains through Re-check, on and off", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const total = MAX_MOVES + 3;
+	const children = Array.from({ length: total }, (_, i) => `${page(`c${i}`, `child-${String(i).padStart(3, "0")}`)}\n${parent(`c${i}`, "a")}`).join("\n");
+	const d1 = fakeD1(`${page("a", "apps")}\n${children}`);
+	const ctx = fakeCtx();
+	const OFF = { ...ON, childPages: false };
+	try {
+		await settleSwitch(ctx, d1, OFF, false);
+		assert.equal(rules(d1).length, MAX_MOVES);
+		assert.equal(Object.keys(snapshot(ctx).paths).length, 3);
+		assert.match(offNotice(await readStatus(ctx)).items.at(-1), /3 more pages are over the limit of 200/);
+		await recheckCollection(ctx, d1, OFF, "pages");
+		assert.equal(rules(d1).length, total);
+		assert.equal(snapshot(ctx), undefined);
+		assert.equal(offNotice(await readStatus(ctx)), null);
+
+		await settleSwitch(ctx, d1, ON, true);
+		assert.equal(status(ctx).open.pages.waitingCount, 3);
+		assert.equal(Object.values(snapshot(ctx).paths).filter((path) => !path.startsWith("/apps/")).length, 3, "the flat URLs still to redirect stay in the snapshot");
+		await recheckCollection(ctx, d1, ON, "pages");
+		assert.equal(status(ctx).open.pages, undefined);
+		assert.equal(rules(d1).every(([s, t]) => !s.startsWith("/apps/") && t.startsWith("/apps/")), true, "every flat URL goes to its nested one");
+		assert.equal(rules(d1).length, total);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test(`the status keeps the last ${MAX_CHANGES} changes of every collection, and one collection's open issues don't replace another's`, async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(SITE);
+	const ctx = fakeCtx();
+	const docsOpen = { at: "2026-11-01T00:00:00.000Z", reason: "A page was published", waiting: [], waitingCount: 0, loops: [{ entryId: "z", title: "Z", from: "/a/z/", to: "/z/", rule: { source: "/z", target: "/a/z/" } }], shadowed: [] };
+	const docsChange = { at: "2026-11-01T00:00:00.000Z", collection: "docs", reason: "A page was published", moved: 1, written: 0, skipped: 0, redirectsOff: false, loops: docsOpen.loops };
+	ctx.state.kv.set("state:childPages:status", { changes: [docsChange], open: { docs: docsOpen } });
+	try {
+		await settleCollection(ctx, d1, ON, "pages", null, "x");
+		assert.deepEqual(status(ctx).changes, [docsChange], "a change that moved nothing isn't kept");
+		for (let i = 0; i < MAX_CHANGES + 2; i++) {
+			d1.raw.exec(`UPDATE ec_pages SET slug = 'apps-${i}' WHERE id = 'a'`);
+			await settleCollection(ctx, d1, ON, "pages", "a", "A page was published");
+		}
+		assert.equal(status(ctx).changes.length, MAX_CHANGES);
+		assert.equal(status(ctx).changes[0].collection, "pages");
+		assert.deepEqual(status(ctx).open.docs, docsOpen, "another collection's unresolved loop is still listed");
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("translations: only default-locale pages are compared and redirected (a translation's move would write a rule over the live default-locale page)", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(
+		[
+			page("a-en", "apps", "published", "Apps", "en", "A"),
+			page("a-fr", "apps", "published", "Apps FR", "fr", "A"),
+			page("p-en", "pack", "published", "Pack", "en", "P"),
+			page("p-fr", "pack", "published", "Pack FR", "fr", "P"),
+			"INSERT INTO _emdash_content_references VALUES ('e1','r1','P','A');",
+		].join("\n"),
+	);
+	const ctx = fakeCtx();
+	try {
+		await settleCollection(ctx, d1, ON, "pages", null, "x");
+		assert.deepEqual(snapshot(ctx).paths, { "p-en": "/apps/pack/" }, "no translations in the snapshot");
+		// The French parent is unpublished: the French child is top level, the English one stays where it is.
+		d1.raw.exec("UPDATE ec_pages SET status = 'draft' WHERE id = 'a-fr'");
+		await settleCollection(ctx, d1, ON, "pages", "a-fr", "A page was unpublished");
+		assert.deepEqual(rules(d1), [], "no /apps/pack → /pack/ over the live English page");
+		assert.equal((await read.collectionTree(d1, "pages", { on: true })).urls.get("p-en"), "/apps/pack/");
+		// The switch too.
+		await settleSwitch(ctx, d1, { ...ON, childPages: false }, false);
+		assert.deepEqual(rules(d1), [["/apps/pack", "/pack/"]], "one rule, for the default-locale page");
+		// A page with no locale at all counts as the default locale.
+		d1.raw.exec("UPDATE ec_pages SET locale = NULL WHERE id = 'p-en'; DELETE FROM coywolf_redirects;");
+		await settleSwitch(ctx, d1, ON, true);
+		assert.deepEqual(rules(d1), [["/pack", "/apps/pack/"]]);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("movedPagesPurges: each old and new path by prefix, paths under another left out, in calls of 100, everything past two calls", () => {
+	assert.deepEqual(movedPagesPurges([]), []);
+	assert.deepEqual(
+		movedPagesPurges([
+			{ from: "/apps/coywolf-pack/", to: "/tools/coywolf-pack/" },
+			{ from: "/apps/coywolf-pack/docs/", to: "/tools/coywolf-pack/docs/" },
+			{ from: "/apps/coywolf-pack-two/?x=1", to: "/tools/café/" },
+		]),
+		[{ pathPrefixes: ["/apps/coywolf-pack", "/apps/coywolf-pack-two", "/tools/caf%C3%A9", "/tools/coywolf-pack"] }],
+		"docs is under coywolf-pack (a prefix clears it); coywolf-pack-two isn't",
+	);
+	const many = (n) => Array.from({ length: n }, (_, i) => ({ from: `/apps/p${i}/`, to: `/tools/p${i}/` }));
+	assert.deepEqual(movedPagesPurges(many(50)).map((s) => s.pathPrefixes.length), [100]);
+	assert.deepEqual(movedPagesPurges(many(100)).map((s) => s.pathPrefixes.length), [100, 100]);
+	assert.deepEqual(movedPagesPurges(many(101)), [{ purgeEverything: true }]);
+	assert.deepEqual(movedPagesPurges([{ from: "/", to: "/home/" }]), [{ purgeEverything: true }], "the home page's prefix is every page");
+});
+
+test("a settle purges the cached pages at the moved pages' old and new URLs; the switch leaves that to the save's own purge", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(SITE);
+	const ctx = fakeCtx();
+	try {
+		await settleCollection(ctx, d1, ON, "pages", null, "x");
+		purges().length = 0;
+		await settleCollection(ctx, d1, ON, "pages", "x", "A page was published");
+		assert.deepEqual(purges(), [], "nothing moved: nothing purged");
+		d1.raw.exec("UPDATE ec_pages SET slug = 'tools' WHERE id = 'a'");
+		await settleCollection(ctx, d1, ON, "pages", "a", "A page was published");
+		assert.deepEqual(purges().filter((s) => "pathPrefixes" in s), [{ pathPrefixes: ["/apps/coywolf-pack", "/tools/coywolf-pack"] }], "the page below it too: /apps/coywolf-pack/docs/ is under the prefix");
+		assert.ok(purges().some((s) => s.tags?.includes("coywolf-redirects")), "and the cached redirects");
+		// With the redirects off the pages still moved: their cached HTML still goes.
+		purges().length = 0;
+		d1.raw.exec("UPDATE ec_pages SET slug = 'apps' WHERE id = 'a'");
+		await settleCollection(ctx, d1, { ...ON, redirects: false }, "pages", "a", "A page was published");
+		assert.deepEqual(purges(), [{ pathPrefixes: ["/apps/coywolf-pack", "/tools/coywolf-pack"] }]);
+		purges().length = 0;
+		await settleSwitch(ctx, d1, { ...ON, childPages: false }, false);
+		assert.equal(purges().some((s) => "pathPrefixes" in s), false);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("no snapshot: one is recorded from the current tree, and the change says pages it moved got no redirect; a snapshot that can't be read fails the settle and is left alone", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(SITE);
+	const ctx = fakeCtx();
+	try {
+		// The first parent ever chosen: only the page being published has one. Nothing to say.
+		const first = fakeD1([page("a", "apps"), page("p", "coywolf-pack"), parent("p", "a")].join("\n"));
+		const firstCtx = fakeCtx();
+		await settleCollection(firstCtx, first, ON, "pages", "p", "A page was published");
+		assert.deepEqual(status(firstCtx).changes, []);
+		assert.deepEqual(snapshot(firstCtx).paths, { p: "/apps/coywolf-pack/" });
+
+		// Other pages already have parents and there's no snapshot (deleted, or its write failed): said, and recorded.
+		d1.raw.exec("UPDATE ec_pages SET status = 'draft' WHERE id = 'a'");
+		await settleCollection(ctx, d1, ON, "pages", "a", "A page was unpublished");
+		assert.equal(status(ctx).changes[0].noSnapshot, true);
+		assert.ok(ctx.state.logs.some(([level, message]) => level === "warn" && /no earlier URLs/.test(message)));
+		assert.deepEqual(snapshot(ctx).paths, { d: "/coywolf-pack/docs/" }, "tracking starts again from the current URLs");
+
+		// The snapshot can't be read: nothing is compared with nothing, and it isn't overwritten.
+		const kept = snapshot(ctx);
+		const get = ctx.kv.get;
+		ctx.kv.get = async (key) => {
+			if (key.startsWith("state:childPages:paths:")) throw new Error("KV down");
+			return get(key);
+		};
+		d1.raw.exec("UPDATE ec_pages SET status = 'published' WHERE id = 'a'");
+		await assert.rejects(settleCollection(ctx, d1, ON, "pages", "a", "A page was published"), /KV down/);
+		ctx.kv.get = get;
+		assert.deepEqual(snapshot(ctx), kept);
+		assert.deepEqual(rules(d1), []);
+		// Re-check makes what the failed settle would have.
+		await recheckCollection(ctx, d1, ON, "pages");
+		assert.deepEqual(rules(d1), [
+			["/coywolf-pack", "/apps/coywolf-pack/"],
+			["/coywolf-pack/docs", "/apps/coywolf-pack/docs/"],
+		]);
+		// Re-check with no snapshot at all starts from the current URLs, and that isn't a problem to report.
+		ctx.state.kv.delete("state:childPages:paths:pages");
+		const changes = status(ctx).changes.length;
+		await recheckCollection(ctx, d1, ON, "pages");
+		assert.equal(status(ctx).changes.length, changes);
+		assert.deepEqual(snapshot(ctx).paths, { p: "/apps/coywolf-pack/", d: "/apps/coywolf-pack/docs/" });
+	} finally {
+		configureContentUrls({});
+	}
+});
