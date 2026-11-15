@@ -11,7 +11,8 @@
  * - the filter's status, "published" by default (there's no published_at
  *   rule: a published entry with a future date is listed);
  * - the locale: the filter's, else the request's, else the default locale
- *   when the site has more than one, matched with its alias codes;
+ *   when the site has more than one, matched with its alias codes (an empty
+ *   locale, `locale: ""`, is no locale filter);
  * - each taxonomy in `where` (category, tag…, the names EmDash declares for
  *   the collection): tagged with one of its slugs in that taxonomy, in the
  *   locale too; several taxonomies must all match;
@@ -22,7 +23,7 @@
  * getEmDashCollection to the end.
  *
  * Null too while Pagination is off (no query), and when the count can't be
- * read: the failure is noted (src/core/read-failures.ts), so the page rendered
+ * read (a query error, or no D1 binding): the failure is noted (src/core/read-failures.ts), so the page rendered
  * without its last-page link isn't kept in the edge cache.
  */
 import { COLLECTION_SLUG } from "../core/content-url.js";
@@ -124,7 +125,8 @@ const values = (value: unknown): string[] => (Array.isArray(value) ? value : [va
 export function countQuery(collection: string, filter: CountFilter, config: I18nConfig | null = i18nConfig()): { sql: string; binds: unknown[]; taxonomies: number } | number | null {
 	if (!COLLECTION_SLUG.test(collection)) return null;
 	const locale = listLocale(filter.locale, config);
-	const locales = locale === undefined ? null : JSON.stringify(localeCandidates(locale, config));
+	// An empty locale is no locale filter, as in EmDash's loader (`locale ? … : no clause`).
+	const locales = locale ? JSON.stringify(localeCandidates(locale, config)) : null;
 	let filters = "";
 	const filterBinds: unknown[] = [];
 	const names: string[] = [];
@@ -175,7 +177,7 @@ export async function countEntries(collection: string, filter: CountFilter = {},
 	if (query === null || typeof query === "number") return query;
 	try {
 		const db = typeof database === "string" ? ((await workerEnv())[database] as D1Database | undefined) : database;
-		if (!db) return null;
+		if (!db) throw new Error(`no D1 binding${typeof database === "string" ? ` named ${database}` : ""}`);
 		const row = await batchedFirst<{ known: number | null; n: number }>(db, db.prepare(query.sql).bind(...query.binds));
 		if (!row) throw new Error("the count query returned no row");
 		if (query.taxonomies && Number(row.known) < query.taxonomies) return null;

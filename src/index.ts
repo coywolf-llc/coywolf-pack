@@ -32,6 +32,7 @@ export type { BackupsOptions } from "./backups/module.js";
 export type { RedirectsOptions } from "./redirects/module.js";
 export type { VideosOptions } from "./videos/module.js";
 export type { RobotsOptions } from "./robots/module.js";
+export type { PaginationOptions } from "./pagination/pack.js";
 export type { CoywolfOptions } from "./options.js";
 export type { PrivateFormUploadsOptions } from "./formUploads/pack.js";
 export { privateFormUploads } from "./formUploads/pack.js";

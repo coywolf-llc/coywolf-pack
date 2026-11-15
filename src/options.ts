@@ -6,6 +6,7 @@ import type { CodeBlocksOptions } from "./codeBlocks/pack.js";
 import type { FilesOptions } from "./files/module.js";
 import type { DiscoveryOptions } from "./discovery/module.js";
 import type { LinksOptions } from "./links/module.js";
+import type { PaginationOptions } from "./pagination/pack.js";
 import type { RedirectsOptions } from "./redirects/module.js";
 import type { SchemaOptions } from "./schema/module.js";
 import type { SearchOptions } from "./search/module.js";
@@ -24,8 +25,11 @@ export interface CoywolfOptions {
 	redirects?: RedirectsOptions | false;
 	headings?: HeadingsOptions | false;
 	breadcrumbs?: BreadcrumbsOptions | false;
-	/** Pagination: numbered page links and /N/ page URLs for the theme's archives (no options; see docs/pagination.md). `false` leaves the module out. */
-	pagination?: Record<string, never> | false;
+	/**
+	 * Pagination and Short page URLs: numbered page links and /N/ page URLs for the theme's archives (docs/pagination.md).
+	 * `bases` lists the theme's archive routes under a prefix for the /page/N/ redirect. `false` leaves both modules out.
+	 */
+	pagination?: PaginationOptions | false;
 	codeBlocks?: CodeBlocksOptions | false;
 	schema?: SchemaOptions | false;
 	files?: FilesOptions | false;

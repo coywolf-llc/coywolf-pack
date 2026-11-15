@@ -8,11 +8,15 @@
  * The theme's routes parse the page number (parsePagePath, through
  * archivePage in ./pack.ts): only the theme knows which paths are archives.
  * The pack's middleware only turns `/page/N/` into `/N/` (legacyPageRedirect)
- * while Short page URLs is on. No imports, so `node --test` can load it.
+ * while Short page URLs is on; the `bases` option tells it which prefixes
+ * have archives whose own name could be "page". No imports, so `node --test` can load it.
  */
 
 /** A page number in a URL: 1–99999, no leading zero. */
 export const PAGE_NUMBER = /^[1-9]\d{0,4}$/;
+
+/** The highest page number a URL can name (PAGE_NUMBER), so the highest a nav links to (lastPage). */
+export const MAX_PAGE = 99_999;
 
 /** How a URL named its page: `/N/` ("short") or `/page/N/` ("folder"). */
 export type PageForm = "short" | "folder";
@@ -100,6 +104,24 @@ function joinPage(base: string, n: number, folder: boolean, slash: boolean): str
 	return `${base}${folder ? "/page" : ""}/${n}${slash ? "/" : ""}`;
 }
 
+/** A prefix route as the middleware knows it: its path segments, and how many segments after them always belong to the archive. */
+export interface PageBase {
+	prefix: string[];
+	minBase: number;
+}
+
+/**
+ * The `bases` option (`{ "/tag/": 1, "/search/": 1 }`) as a list, longest
+ * prefix first. A prefix with no segments ("/") or a count that isn't a whole
+ * number above 0 says nothing, and is left out.
+ */
+export function pageBases(bases: Record<string, number> | null | undefined): PageBase[] {
+	return Object.entries(bases ?? {})
+		.map(([prefix, minBase]) => ({ prefix: prefix.split("/").filter(Boolean), minBase: Math.floor(Number(minBase)) || 0 }))
+		.filter((base) => base.prefix.length > 0 && base.minBase > 0)
+		.sort((a, b) => b.prefix.length - a.prefix.length);
+}
+
 /**
  * The 301 the pack's middleware answers for an old `/page/N/` URL while Short
  * page URLs is on, in one hop: `/page/1/` goes to the base, and `/page/3`
@@ -107,11 +129,22 @@ function joinPage(base: string, n: number, folder: boolean, slash: boolean): str
  * is shared by every hostname the Worker answers), with the query string
  * kept. `slash`: the site's trailing-slash policy isn't "never". Null when
  * the path doesn't end in a page.
+ *
+ * Any path ending in `/page/N` counts, since the middleware doesn't know the
+ * theme's routes, except under a prefix in `bases` (pageBases) where "page"
+ * is one of the segments the archive always has: with `{ "/tag/": 1 }`,
+ * `/tag/page/2/` is the tag "page" (its page 2, in the short form), as the
+ * theme's parsePagePath with `minBase: 1` reads it, so it's left alone, while
+ * `/tag/page/page/2/` goes to `/tag/page/2/`.
  */
-export function legacyPageRedirect(pathname: string, search: string, options: { slash: boolean }): string | null {
+export function legacyPageRedirect(pathname: string, search: string, options: { slash: boolean; bases?: readonly PageBase[] }): string | null {
 	const match = /^(.*?)\/page\/([^/]+)\/?$/.exec(pathname);
 	if (!match || !PAGE_NUMBER.test(match[2])) return null;
 	const base = collapse(match[1]).replace(/\/+$/, "");
+	const segments = base.split("/").filter(Boolean);
+	// The longest listed prefix the path is under (pageBases sorts them).
+	const route = options.bases?.find((b) => b.prefix.every((segment, i) => segments[i] === segment));
+	if (route && segments.length - route.prefix.length < route.minBase) return null;
 	return `${joinPage(base, Number(match[2]), false, options.slash)}${search}`;
 }
 

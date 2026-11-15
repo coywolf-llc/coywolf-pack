@@ -13,9 +13,20 @@
  * At levels 1 and 2 a gap that would hide exactly one page shows that page
  * instead; at level 0 a gap always shows (3 of 20 reads "1 … 3 … 20"). With an
  * unknown last page (search, author archives) each level drops the last page
- * and its gap. From page 10,000 on (five-digit numbers) every width shows the
- * level 0 links. No imports, so `node --test` can load it.
+ * and its gap.
+ *
+ * Long numbers get fewer links, so the line never overflows: the widest
+ * number a nav shows is its last page, or with an unknown last page the
+ * furthest page it knows of (the next one, or the current one).
+ * - Up to 999: the table above.
+ * - 1,000 to 9,999 (four digits): levels 0 and 1 both show the level 0 links,
+ *   and level 2 shows current ± 1 (five four-digit links and the Previous and
+ *   Next text don't fit 32rem).
+ * - From 10,000 (five digits): every width shows the level 0 links.
+ *
+ * Imports only ./urls.ts (no imports of its own), so `node --test` can load it.
  */
+import { MAX_PAGE } from "./urls.js";
 
 export type PageLevel = 0 | 1 | 2;
 
@@ -24,17 +35,21 @@ export const PAGE_LEVELS: readonly PageLevel[] = [0, 1, 2];
 /** A page link, or a gap ("…") keyed by the page it follows. `levels` are the widths it shows at. */
 export type PageItem = { type: "page"; page: number; current: boolean; levels: PageLevel[] } | { type: "gap"; after: number; levels: PageLevel[] };
 
-/** How many pages either side of the current one each level shows. */
-const RADIUS: Record<PageLevel, number> = { 0: 0, 1: 1, 2: 2 };
+/** From this page number on (four digits), levels 0 and 1 show the level 0 links and level 2 shows current ± 1. */
+export const NARROWER_FROM = 1_000;
 
-/** From this last page on, every width shows the level 0 links (five-digit numbers don't fit the wider levels). */
+/** From this page number on (five digits), every width shows the level 0 links. */
 export const LEVEL_ZERO_FROM = 10_000;
 
-/** The pages and gaps one level shows, in order. */
-function levelItems(level: PageLevel, current: number, last: number | null, hasMore: boolean): Array<{ page: number } | { after: number }> {
-	const radius = RADIUS[level];
-	// With no known last page, the pages after the current one are known to exist only as far as the next one.
-	const upper = last ?? (hasMore ? current + 1 : current);
+/** How many pages either side of the current one each level shows, for the widest page number the nav shows. */
+function radii(widest: number): Record<PageLevel, number> {
+	if (widest >= LEVEL_ZERO_FROM) return { 0: 0, 1: 0, 2: 0 };
+	if (widest >= NARROWER_FROM) return { 0: 0, 1: 0, 2: 1 };
+	return { 0: 0, 1: 1, 2: 2 };
+}
+
+/** The pages and gaps one level shows, in order, with `radius` pages either side of the current one. */
+function levelItems(radius: number, current: number, last: number | null, upper: number): Array<{ page: number } | { after: number }> {
 	const pages = new Set<number>([1, current]);
 	if (last !== null) pages.add(last);
 	for (let p = Math.max(1, current - radius); p <= Math.min(upper, current + radius); p++) pages.add(p);
@@ -43,8 +58,8 @@ function levelItems(level: PageLevel, current: number, last: number | null, hasM
 	sorted.forEach((page, i) => {
 		const previous = sorted[i - 1];
 		if (previous !== undefined && page - previous > 1) {
-			// One hidden page: the wider levels show it rather than a gap the same size as the link.
-			if (level > 0 && page - previous === 2) out.push({ page: previous + 1 });
+			// One hidden page: a level with nearby pages shows it rather than a gap the same size as the link.
+			if (radius > 0 && page - previous === 2) out.push({ page: previous + 1 });
 			else out.push({ after: previous });
 		}
 		out.push({ page });
@@ -61,16 +76,13 @@ function levelItems(level: PageLevel, current: number, last: number | null, hasM
 export function pageItems(current: number, last: number | null, options: { hasMore?: boolean } = {}): PageItem[] {
 	const page = Math.max(1, Math.floor(current) || 1);
 	const end = last === null ? null : Math.max(page, Math.floor(last) || 1);
-	const hasMore = Boolean(options.hasMore);
-	if (end !== null && end >= LEVEL_ZERO_FROM) {
-		return levelItems(0, page, end, hasMore).map((item) =>
-			"page" in item ? { type: "page", page: item.page, current: item.page === page, levels: [...PAGE_LEVELS] } : { type: "gap", after: item.after, levels: [...PAGE_LEVELS] },
-		);
-	}
+	// With no known last page, the pages after the current one are known to exist only as far as the next one.
+	const upper = end ?? (options.hasMore ? page + 1 : page);
+	const radius = radii(upper);
 	const pages = new Map<number, PageLevel[]>();
 	const gaps = new Map<number, PageLevel[]>();
 	for (const level of PAGE_LEVELS) {
-		for (const item of levelItems(level, page, end, hasMore)) {
+		for (const item of levelItems(radius[level], page, end, upper)) {
 			const [map, key] = "page" in item ? [pages, item.page] : [gaps, item.after];
 			const levels = map.get(key) ?? [];
 			levels.push(level);
@@ -91,13 +103,14 @@ export function pageItems(current: number, last: number | null, options: { hasMo
  * than the current page, at least the next one when `hasMore`, and exactly
  * the current page when `hasMore` is false (the list ended here). So a count
  * that drifted from the list (an entry published or trashed in between) can't
- * link to a page that doesn't exist. Null when the count is null.
+ * link to a page that doesn't exist. Never more than MAX_PAGE (99999), the
+ * highest page a URL can name. Null when the count is null.
  */
 export function lastPage(count: number | null | undefined, perPage: number, current: number, hasMore?: boolean): number | null {
 	if (count === null || count === undefined || !Number.isFinite(count)) return null;
 	const page = Math.max(1, Math.floor(current) || 1);
-	if (hasMore === false) return page;
+	if (hasMore === false) return Math.min(MAX_PAGE, page);
 	const size = Math.max(1, Math.floor(perPage) || 1);
 	const counted = Math.ceil(Math.max(0, count) / size);
-	return Math.max(counted, hasMore ? page + 1 : page);
+	return Math.min(MAX_PAGE, Math.max(counted, hasMore ? page + 1 : page));
 }

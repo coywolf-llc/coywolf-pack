@@ -18,10 +18,18 @@
  *   }`, wellbeing.io `main li { margin; line-height }`). Theme them with the
  *   custom properties: `--cw-pagination-size` (2.75rem targets), `-font-size`,
  *   `-gap`, `-color`, `-border`, `-radius`, `-current-bg`, `-current-color`.
- *   Text decoration and the wrapper's margin are `:where()` defaults, which any
- *   theme rule overrides.
+ *   The wrapper's margin is a `:where()` default, which any theme rule
+ *   overrides.
+ * - The links' rules are `.cw-pagination .cw-pagination__list a` (two classes
+ *   and a type), so they win over a theme's link rules wherever the theme's
+ *   stylesheet comes in the page, hover included (wellbeing.io's
+ *   `:where(.wb-site) a:hover` has one class and a type, a tie with
+ *   `.cw-pagination__list a` that source order would decide).
  * - The current page is bold with a border (not only a color), never a box
- *   shadow (forced colors strip shadows). No transitions or animations.
+ *   shadow (forced colors strip shadows). The other links are set to normal
+ *   weight and no underline (underlined on hover and focus), so the current
+ *   page stands out on themes whose links are all bold (coywolf.com's and
+ *   wellbeing.io's `a { font-weight: bold }`). No transitions or animations.
  *
  * No imports, so `node --test` can load it.
  */
@@ -77,7 +85,7 @@ export const PAGINATION_CSS = `.cw-pagination-wrap {
 .cw-pagination__list > li[data-l]:not([data-l~="0"]) {
 	display: none;
 }
-.cw-pagination__list a {
+.cw-pagination .cw-pagination__list a {
 	display: flex;
 	flex: 1 1 auto;
 	align-items: center;
@@ -93,20 +101,19 @@ export const PAGINATION_CSS = `.cw-pagination-wrap {
 	color: var(--cw-pagination-color, currentColor);
 	font-size: var(--cw-pagination-font-size, 1rem);
 	font-variant-numeric: tabular-nums;
+	font-weight: normal;
 	line-height: 1;
+	text-decoration: none;
 }
-.cw-pagination__list a[aria-current="page"] {
+.cw-pagination .cw-pagination__list a:is(:hover, :focus-visible) {
+	text-decoration: underline;
+	text-underline-offset: 0.2em;
+}
+.cw-pagination .cw-pagination__list a[aria-current="page"] {
 	border: var(--cw-pagination-border, 2px solid currentColor);
 	background: var(--cw-pagination-current-bg, transparent);
 	color: var(--cw-pagination-current-color, var(--cw-pagination-color, currentColor));
 	font-weight: 700;
-}
-:where(.cw-pagination__list a) {
-	text-decoration: none;
-}
-:where(.cw-pagination__list a:is(:hover, :focus-visible)) {
-	text-decoration: underline;
-	text-underline-offset: 0.2em;
 }
 .cw-pagination__list .cw-pagination__arrow {
 	display: block;
@@ -132,7 +139,7 @@ export const PAGINATION_CSS = `.cw-pagination-wrap {
 	.cw-pagination__list > .cw-pagination__gap {
 		font-size: min(var(--cw-pagination-font-size, 1rem), 6.5cqi);
 	}
-	.cw-pagination__list a {
+	.cw-pagination .cw-pagination__list a {
 		padding: 0 clamp(1px, 0.75cqi, 4px);
 		font-size: min(var(--cw-pagination-font-size, 1rem), 6.5cqi);
 	}
@@ -155,7 +162,7 @@ export const PAGINATION_CSS = `.cw-pagination-wrap {
 	.cw-pagination__list > :is(.cw-pagination__prev, .cw-pagination__next) {
 		flex: 0 0 auto;
 	}
-	.cw-pagination__list :is(.cw-pagination__prev, .cw-pagination__next) a {
+	.cw-pagination .cw-pagination__list :is(.cw-pagination__prev, .cw-pagination__next) a {
 		padding: 0 0.75em;
 	}
 	.cw-pagination__list .cw-pagination__arrow {
@@ -182,10 +189,10 @@ export const PAGINATION_CSS = `.cw-pagination-wrap {
 	}
 }
 @media (forced-colors: active) {
-	.cw-pagination__list a {
+	.cw-pagination .cw-pagination__list a {
 		border-color: Canvas;
 	}
-	.cw-pagination__list a[aria-current="page"] {
+	.cw-pagination .cw-pagination__list a[aria-current="page"] {
 		border-color: CanvasText;
 	}
 }

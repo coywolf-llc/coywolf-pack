@@ -15,9 +15,10 @@
  * - every page link and gap says which levels it shows at (`data-l="0 1 2"`,
  *   see ./pages.ts), and the CSS (./css.ts) shows one level per width.
  *
- * Imports only ./pages.ts, so `node --test` can load it.
+ * Imports only ./pages.ts and ./urls.ts, so `node --test` can load it.
  */
 import { type PageItem, pageItems } from "./pages.js";
+import { MAX_PAGE } from "./urls.js";
 
 export interface PaginationMarkup {
 	/** The current page (1 or more). */
@@ -63,7 +64,8 @@ export function paginationHtml(o: PaginationMarkup): string {
 	const page = Math.max(1, Math.floor(o.page) || 1);
 	const last = o.last === null ? null : Math.max(page, Math.floor(o.last) || 1);
 	if (!hasOtherPages(page, last, o.hasMore)) return "";
-	const hasNext = last !== null ? page < last : Boolean(o.hasMore);
+	// No Next past the highest page a URL can name.
+	const hasNext = page < MAX_PAGE && (last !== null ? page < last : Boolean(o.hasMore));
 	const level = Math.min(6, Math.max(2, Math.floor(o.headingLevel ?? 2) || 2));
 	const id = escapeHtml(o.id);
 	const parts: string[] = [];
