@@ -13,6 +13,7 @@
  * const tree = await loadPageTree();
  * const match = resolvePagePath(tree, segments, { search: Astro.url.search, preview: isPreviewRequest() });
  * if (match && "redirect" in match) return Astro.redirect(match.redirect, 301);
+ * const page = match?.page;
  * ---
  * ```
  *
@@ -196,7 +197,8 @@ export async function loadPageTree(db?: D1Database | string, options: { collecti
 	});
 }
 
-export type PagePathMatch = { page: PageTreeItem; path: string } | { redirect: string };
+/** `redirect` comes with the page it leads to, for the redirect's cache tags (the page's id and tree.cacheTags). */
+export type PagePathMatch = { page: PageTreeItem; path: string } | { redirect: string; page: PageTreeItem };
 
 /**
  * True when EmDash accepted this request's `_preview` token (its middleware verifies the signature and puts
@@ -213,7 +215,8 @@ export function isPreviewRequest(): boolean {
  * `options.search` kept, for previews and tracking parameters) when it's the flat
  * one-segment form of a nested page (`/coywolf-pack/` → `/apps/coywolf-pack/`),
  * and null otherwise (another page's path, a post, or nothing: let the route go on).
- * Check category archives first: they win over pages.
+ * Check category archives first: they win over pages. Tell the two answers apart with
+ * `"redirect" in match`: both carry the page.
  *
  * Only published pages, unless `options.preview` is true: a draft or scheduled page answers
  * null at both its nested and its flat path, so neither a `{ page }` nor a redirect tells a
@@ -228,7 +231,7 @@ export function resolvePagePath(tree: PageTree, segments: readonly string[] | st
 	if (!page || (!page.published && options.preview !== true)) return null;
 	const requested = `/${parts.join("/")}`;
 	if (comparablePath(page.url) === requested) return { page, path: page.url };
-	if (parts.length === 1) return { redirect: `${encodePath(page.url)}${options.search ?? ""}` };
+	if (parts.length === 1) return { redirect: `${encodePath(page.url)}${options.search ?? ""}`, page };
 	return null;
 }
 

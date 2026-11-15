@@ -278,7 +278,7 @@ test("resolvePagePath: the page at its full path, a 301 from the flat path (quer
 	try {
 		const t = await themeTree(db);
 		assert.equal(theme.resolvePagePath(t, ["apps", "coywolf-pack"]).page.id, "p");
-		assert.deepEqual(theme.resolvePagePath(t, ["coywolf-pack"], { search: "?_preview=abc" }), { redirect: "/apps/coywolf-pack/?_preview=abc" });
+		assert.equal(theme.resolvePagePath(t, ["coywolf-pack"], { search: "?_preview=abc" }).redirect, "/apps/coywolf-pack/?_preview=abc");
 		assert.equal(theme.resolvePagePath(t, ["news", "coywolf-pack"]), null, "a post's category path with the same slug isn't the page's");
 		assert.equal(theme.resolvePagePath(t, ["coywolf-pack", "docs"]), null);
 		assert.equal(theme.resolvePagePath(t, "/apps/coywolf-pack/docs/").page.id, "d");

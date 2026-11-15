@@ -894,10 +894,12 @@ test("resolvePagePath: a draft or scheduled page answers null at its nested and 
 		}
 		// A preview route: the draft at its path, and EmDash's flat preview link redirected there with its token.
 		assert.equal(theme.resolvePagePath(tree, ["apps", "secret-launch"], { preview: true }).page.id, "s");
-		assert.deepEqual(theme.resolvePagePath(tree, ["secret-launch"], { search: "?_preview=tok", preview: true }), { redirect: "/apps/secret-launch/?_preview=tok" });
+		assert.equal(theme.resolvePagePath(tree, ["secret-launch"], { search: "?_preview=tok", preview: true }).redirect, "/apps/secret-launch/?_preview=tok");
 		// Published pages as before.
 		assert.equal(theme.resolvePagePath(tree, ["apps", "coywolf-pack"]).page.id, "p");
-		assert.deepEqual(theme.resolvePagePath(tree, ["coywolf-pack"]), { redirect: "/apps/coywolf-pack/" });
+		assert.equal(theme.resolvePagePath(tree, ["coywolf-pack"]).redirect, "/apps/coywolf-pack/");
+		assert.equal(theme.resolvePagePath(tree, ["coywolf-pack"]).page.id, "p", "with the page, for the redirect's cache tags");
+		assert.equal("redirect" in theme.resolvePagePath(tree, ["apps", "coywolf-pack"]), false);
 		assert.equal(tree.get("secret-launch").published, false, "get() still finds it, for a template that already has the entry");
 
 		// isPreviewRequest: only what EmDash's middleware verified, not a _preview parameter anyone can add.
