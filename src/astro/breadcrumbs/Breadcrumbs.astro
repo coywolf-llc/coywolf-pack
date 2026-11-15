@@ -7,12 +7,14 @@
  *
  * The trail is, in order: `items`, `page.breadcrumbs` (the theme's
  * PublicPageContext), the trail EmDashHead published for this path, or one
- * derived from the URL path. Unset options use the Breadcrumb Nav settings.
+ * derived from the URL path (with Child Pages on, parent pages named by their
+ * titles). Unset options use the Breadcrumb Nav settings.
  * Renders nothing while the `breadcrumbs` feature is off.
  *
  *   import { Breadcrumbs } from "@coywolf/emdash/astro";
  *   <Breadcrumbs page={page} />
  */
+import { pageTitlesByPath } from "../../childPages/read.js";
 import { siteFeatureOn } from "../../core/features.js";
 import { SEPARATORS, type SeparatorPreset, siteBreadcrumbsSettings } from "../../breadcrumbs/settings.js";
 import { type Crumb, capturedPage, cssString, resolveTrail } from "../../breadcrumbs/trail.js";
@@ -39,9 +41,13 @@ let sepStyle: string | undefined;
 if (await siteFeatureOn("breadcrumbs")) {
 	const settings = await siteBreadcrumbsSettings();
 	const captured = props.items || props.page ? null : capturedPage(`${Astro.url.pathname}${Astro.url.search}`);
+	const items = props.items ?? props.page?.breadcrumbs ?? captured?.items;
+	// Child Pages: a trail derived from the path names the parent pages by their titles.
+	const titles = !items && Astro.url.pathname.split("/").filter(Boolean).length > 1 ? await pageTitlesByPath().catch(() => null) : null;
 	trail = resolveTrail({
 		path: Astro.url.pathname,
-		items: props.items ?? props.page?.breadcrumbs ?? captured?.items,
+		items,
+		titles,
 		title: props.page?.pageTitle ?? props.page?.title ?? props.title ?? captured?.title,
 		homeLabel: props.homeLabel?.trim() || settings.homeLabel,
 		showHome: props.showHome ?? settings.showHome,

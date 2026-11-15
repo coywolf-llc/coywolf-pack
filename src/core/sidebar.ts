@@ -22,7 +22,7 @@ export interface SidebarPage {
 export const SIDEBAR_FOLDERS: ReadonlyArray<{ group: string; pages: readonly string[] }> = [
 	{ group: "Coywolf Pack", pages: ["/features", "/performance", "/cloudflare", "/insights", "/backups", "/alerts", "/wordpress-import"] },
 	{ group: "SEO", pages: ["/schema", "/social-images", "/discovery", "/robots", "/redirects", "/links", "/breadcrumbs"] },
-	{ group: "Content Tools", pages: ["/content-audit", "/headings", "/code-blocks", "/custom-blocks", "/reviews", "/ai", "/search"] },
+	{ group: "Content Tools", pages: ["/content-audit", "/child-pages", "/headings", "/code-blocks", "/custom-blocks", "/reviews", "/ai", "/search"] },
 	{ group: "Media Tools", pages: ["/images", "/videos", "/files", "/form-uploads"] },
 ];
 

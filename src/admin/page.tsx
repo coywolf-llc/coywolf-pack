@@ -3,7 +3,8 @@
  * boundary, lazy loading, toasts), the page header, the loading state, and
  * links to other admin pages and to the docs.
  */
-import { Banner, Button, Loader } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Loader } from "@cloudflare/kumo";
+import { Warning } from "@phosphor-icons/react";
 import * as React from "react";
 
 import { VERSION } from "../version.js";
@@ -39,6 +40,40 @@ export function Loading(props: { label?: string; className?: string; size?: "sm"
 			</span>
 			<span className="sr-only">{props.label ?? "Loading…"}</span>
 		</div>
+	);
+}
+
+/**
+ * Props for a button that can't be used right now but must keep the keyboard focus (a `disabled` button drops
+ * it to the page): it stays focusable and says it's unavailable. The click handler must ignore clicks itself.
+ */
+export const softDisabled = (off: boolean) => ({ "aria-disabled": off || undefined, className: "aria-disabled:cursor-not-allowed aria-disabled:opacity-50" });
+
+/**
+ * A warning as text: the icon carries the warning color, and the words keep the text color (Kumo's warning
+ * color is under 4.5:1 as small text on the light theme).
+ */
+export function WarningText(props: { children: React.ReactNode; className?: string; role?: "status" }) {
+	return (
+		<p className={`flex items-start gap-1.5 ${props.className ?? ""}`} role={props.role}>
+			<Warning className="mt-0.5 shrink-0 text-kumo-warning" aria-hidden="true" />
+			<span className="min-w-0">
+				<span className="sr-only">Warning: </span>
+				{props.children}
+			</span>
+		</p>
+	);
+}
+
+/** A badge for something to look at: outlined, with the warning icon (the filled warning badge's text is under 4.5:1). */
+export function WarningBadge(props: { children: React.ReactNode }) {
+	return (
+		<Badge variant="outline">
+			<span className="inline-flex items-center gap-1">
+				<Warning className="shrink-0 text-kumo-warning" aria-hidden="true" />
+				{props.children}
+			</span>
+		</Badge>
 	);
 }
 

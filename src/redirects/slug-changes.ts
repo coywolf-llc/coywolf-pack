@@ -16,12 +16,13 @@
 import type { PluginContext, RedirectAccessWithWrite } from "emdash";
 
 import { COLLECTION_SLUG, entryUrl, hostDefaultLocale, readCollections } from "../core/content-url.js";
+import { configuredSiteOrigin } from "../core/site.js";
 import { REDIRECTS_TAG, purgePageCache } from "../pageCache/lib.js";
 import { workerEnv } from "../shared.js";
 import { noteRedirectsChanged } from "./middleware.js";
 import { type EntrySnapshot, snapshotFromContent, snapshotFromRow } from "./removed-core.js";
-import { deleteRule, ensureTable, normalizePath, saveRule, sourceKey, storedForms } from "./rules.js";
-import { type PlanRule, SLUG_NOTE_PREFIX, planSlugChange } from "./slug-core.js";
+import { deleteRule, ensureTable, normalizePath, saveRule, sourceKey, storedForms, validate } from "./rules.js";
+import { type PlanRule, SLUG_NOTE_PREFIX, isOurs, planSlugChange } from "./slug-core.js";
 
 export const SLUG_CHANGES_FEATURE = "redirects.slugChanges";
 const STORE = "redirects_urls";
@@ -37,6 +38,7 @@ interface KnownUrl {
 const urls = (ctx: PluginContext) => (ctx.storage as Record<string, any>)[STORE] as {
 	get(id: string): Promise<KnownUrl | null>;
 	put(id: string, data: KnownUrl): Promise<void>;
+	putMany(items: Array<{ id: string; data: KnownUrl }>): Promise<void>;
 };
 
 const key = (collection: string, id: string) => `${collection}:${id}`;
@@ -122,6 +124,248 @@ export async function dropEmDashAuto(
 	return removed;
 }
 
+/** An entry whose URL changed without a save of its own: a parent page moved, or Child pages was turned on or off. */
+export interface UrlMove {
+	collection: string;
+	entryId: string;
+	/** For the rule's note ("Slug change: <title>"). */
+	title: string;
+	from: string;
+	to: string;
+}
+
+/** A redirect rule, as the admin names it: its source and where it sends readers. */
+export interface RuleRef {
+	source: string;
+	target: string;
+}
+
+/** A move whose 301 isn't written, because a rule someone else made (`rule`) sends its new URL back to the old one. */
+export interface MoveLoop extends UrlMove {
+	rule: RuleRef;
+}
+
+/** A page's new URL that a rule someone else made (`rule`) still sends elsewhere: the page can't be reached there. */
+export interface MoveShadow {
+	url: string;
+	rule: RuleRef;
+}
+
+type KnownRule = PlanRule & { enabled?: number | null };
+
+/** Rules followed from the new URL when looking for a way back to the old one (in memory, or one small read each). */
+export const LOOP_HOPS = 10;
+
+const bareHost = (host: string) => host.toLowerCase().replace(/^www\./, "");
+
+/**
+ * The site's own host names without `www.` (coywolf.com), for telling a rule whose target is a full URL on
+ * this site (`https://coywolf.com/apps/coywolf-seo/`) from one that leaves it (`https://media.coywolf.com/…`):
+ * the configured address (src/core/site.ts) and the one EmDash gives the plugin.
+ */
+export async function siteHosts(ctx: Pick<PluginContext, "site">): Promise<Set<string>> {
+	const hosts = new Set<string>();
+	const add = (value: unknown) => {
+		try {
+			if (typeof value === "string" && value.trim()) hosts.add(bareHost(new URL(value.trim()).hostname));
+		} catch {
+			// Not a URL: no host.
+		}
+	};
+	add(ctx.site?.url);
+	add(await workerEnv().then((env) => configuredSiteOrigin(env)).catch(() => null));
+	return hosts;
+}
+
+/**
+ * A rule's target as a path key (how sources are stored), or null when it leaves the site. A full URL (or
+ * `//host/path`) whose host is one of the site's own (`own`, bare; its `www.` twin counts) is its path.
+ */
+export function targetKey(target: string, own: ReadonlySet<string> = new Set()): string | null {
+	const path = (value: string) => sourceKey(value.split(/[?#]/)[0] as string);
+	if (target.startsWith("/") && !target.startsWith("//")) return path(target);
+	if (!own.size || !/^(https?:)?\/\//i.test(target)) return null;
+	try {
+		const url = new URL(target.startsWith("//") ? `https:${target}` : target);
+		return own.has(bareHost(url.hostname)) ? path(url.pathname) : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The rule that would make `from` → `to` a loop: an enabled exact rule at `to` that Slug changes didn't
+ * make and that sends readers back to `from`, at once or through other exact rules (up to LOOP_HOPS).
+ * coywolf.com has `/coywolf-seo` → `/apps/coywolf-seo/` from its WordPress move: a page that goes back to
+ * `/coywolf-seo/` must not get `/apps/coywolf-seo` → `/coywolf-seo/` while that rule exists. (Our own rule
+ * at `to` isn't one: planSlugChange deletes it.) `known` are rules already read, every rule at `to` among
+ * them (both callers that pass it have read the rules for the move's two URLs): with it, a move with no
+ * rule at `to` costs no query. Rules further along a chain are read here. `own` gives the site's own hosts
+ * (siteHosts), asked for only when a rule's target is a full URL. Null when the 301 is safe to write.
+ *
+ * Not seen: pattern (regex) rules, and a way back that takes more than LOOP_HOPS rules.
+ */
+export async function loopingRule(d1: D1Database, from: string, to: string, known?: Iterable<KnownRule>, own?: () => Promise<ReadonlySet<string>>): Promise<RuleRef | null> {
+	const goal = sourceKey(from);
+	const loaded = [...(known ?? [])];
+	const at = async (key: string): Promise<KnownRule[]> => {
+		const hit = loaded.filter((r) => sourceKey(r.source) === key);
+		if (hit.length) return hit;
+		const forms = storedForms(key);
+		const { results } = await d1
+			.prepare(`SELECT id, source, target, note, enabled FROM coywolf_redirects WHERE is_regex = 0 AND source IN (${forms.map(() => "?").join(", ")})`)
+			.bind(...forms)
+			.all<KnownRule>();
+		return results;
+	};
+	let hosts: ReadonlySet<string> | undefined;
+	const keyOf = async (target: string) => {
+		if (target.startsWith("/") && !target.startsWith("//")) return targetKey(target);
+		if (!own) return null;
+		hosts ??= await own().catch(() => new Set<string>());
+		return targetKey(target, hosts);
+	};
+	const start = sourceKey(to);
+	const atStart = known ? loaded.filter((r) => sourceKey(r.source) === start) : await at(start);
+	const first = atStart.find((r) => !isOurs(r) && r.enabled !== 0);
+	if (!first) return null;
+	const seen = new Set([start]);
+	let rule: KnownRule | undefined = first;
+	for (let hop = 0; rule && hop < LOOP_HOPS; hop++) {
+		const next = await keyOf(rule.target);
+		if (!next) return null;
+		if (next === goal) return { source: first.source, target: first.target };
+		if (seen.has(next)) return null;
+		seen.add(next);
+		rule = (await at(next)).find((r) => r.enabled !== 0);
+	}
+	return null;
+}
+
+/** siteHosts, read at most once however many rules ask. */
+export function memoHosts(ctx: Pick<PluginContext, "site">): () => Promise<ReadonlySet<string>> {
+	let hosts: Promise<Set<string>> | undefined;
+	return () => (hosts ??= siteHosts(ctx));
+}
+
+/** Moves read for related rules per query (each brings up to ~14 bound values; D1 allows 100). */
+const MOVES_PER_READ = 6;
+/** Statements per D1 batch when writing the rules. */
+const WRITES_PER_BATCH = 50;
+
+/** Every spelling a rule may store for these URLs as a source, and as a target (what related() matches). */
+function relatedKeys(urls: string[]): { sources: string[]; targets: string[] } {
+	const paths = urls.map(normalizePath);
+	return {
+		sources: [...new Set([...urls.flatMap((u) => storedForms(u)), ...paths])],
+		targets: [...new Set([...paths, ...paths.map((p) => sourceKey(p)), ...paths.map((p) => `${p}/`)])],
+	};
+}
+
+/**
+ * The 301s for entries whose URL changed together (the pages below a page that moved;
+ * every nested page when Child pages is turned on or off), planned like a slug change
+ * (src/redirects/slug-core.ts: earlier rules retargeted, rules from a URL that's live again
+ * removed, someone else's rule for the old URL kept) and written in batches: a cascade of
+ * a few hundred pages stays within D1's queries per invocation. Each entry's remembered
+ * URL is updated too, so its next save doesn't see a move. EmDash makes no redirects of its
+ * own for these (no slug changed), so there are none of its rows to remove.
+ *
+ * Rules someone else made are never changed. One at a page's new URL either:
+ * - sends it back to the old URL (`loops`): our 301 would make a loop, so nothing is written for
+ *   that move (its entry's remembered URL is still updated: the page is at its new URL);
+ * - sends it elsewhere (`shadowed`): our 301 is written, but the page can't be reached at its new URL.
+ * Both name the rule, for the admin to say which one to delete.
+ *
+ * Returns how many rules were written or kept, with `loops` and `shadowed`.
+ */
+export async function applyUrlMoves(ctx: PluginContext, d1: D1Database, moves: UrlMove[]): Promise<{ written: number; kept: number; shadowed: MoveShadow[]; loops: MoveLoop[] }> {
+	const real = moves.filter((m) => m.from && m.to && sourceKey(m.from) !== sourceKey(m.to));
+	if (!real.length) return { written: 0, kept: 0, shadowed: [], loops: [] };
+	await ensureTable(d1);
+	const rules = new Map<string, KnownRule>();
+	for (let i = 0; i < real.length; i += MOVES_PER_READ) {
+		const { sources, targets } = relatedKeys(real.slice(i, i + MOVES_PER_READ).flatMap((m) => [m.from, m.to]));
+		const { results } = await d1
+			.prepare(`SELECT id, source, target, note, enabled FROM coywolf_redirects WHERE is_regex = 0 AND (source IN (${sources.map(() => "?").join(", ")}) OR target IN (${targets.map(() => "?").join(", ")}))`)
+			.bind(...sources, ...targets)
+			.all<KnownRule>();
+		for (const rule of results) rules.set(rule.id, rule);
+	}
+	const writes: D1PreparedStatement[] = [];
+	const now = new Date().toISOString();
+	let written = 0;
+	let kept = 0;
+	const shadowed: MoveShadow[] = [];
+	const loops: MoveLoop[] = [];
+	const own = memoHosts(ctx);
+	for (const move of real) {
+		const keys = relatedKeys([move.from, move.to]);
+		const related = [...rules.values()].filter((r) => keys.sources.includes(r.source) || keys.targets.includes(r.target));
+		const inTheWay = related.find((r) => !isOurs(r) && r.enabled !== 0 && sourceKey(r.source) === sourceKey(move.to));
+		if (inTheWay) {
+			const loop = await loopingRule(d1, move.from, move.to, rules.values(), own);
+			if (loop) {
+				loops.push({ ...move, rule: loop });
+				continue;
+			}
+			shadowed.push({ url: move.to, rule: { source: inTheWay.source, target: inTheWay.target } });
+		}
+		const plan = planSlugChange(move.from, move.to, related);
+		if (plan.kind === "none") continue;
+		for (const id of plan.deleteIds) {
+			writes.push(d1.prepare("DELETE FROM coywolf_redirects WHERE id = ?").bind(id));
+			rules.delete(id);
+		}
+		for (const id of plan.retargetIds) {
+			writes.push(d1.prepare("UPDATE coywolf_redirects SET target = ?, updated_at = ? WHERE id = ?").bind(move.to, now, id));
+			const rule = rules.get(id);
+			if (rule) rule.target = move.to;
+		}
+		if (plan.keptManual) {
+			kept++;
+			continue;
+		}
+		let rule: ReturnType<typeof validate>;
+		try {
+			rule = validate({ source: move.from, target: move.to, type: 301, note: `${SLUG_NOTE_PREFIX} ${move.title}`.slice(0, 500) });
+		} catch (error) {
+			ctx.log.warn("Child pages: skipped a redirect that isn't valid", { from: move.from, to: move.to, error: String(error) });
+			continue;
+		}
+		const id = plan.upsert.id ?? crypto.randomUUID();
+		if (plan.upsert.id) {
+			writes.push(d1.prepare("UPDATE coywolf_redirects SET source = ?, target = ?, type = 301, enabled = 1, note = ?, updated_at = ? WHERE id = ?").bind(rule.source, rule.target, rule.note ?? null, now, id));
+		} else {
+			writes.push(
+				d1
+					.prepare("INSERT INTO coywolf_redirects (id, source, target, type, is_regex, enabled, note, created_at, updated_at) VALUES (?, ?, ?, 301, 0, 1, ?, ?, ?) ON CONFLICT(source, is_regex) DO UPDATE SET target = excluded.target, note = excluded.note, updated_at = excluded.updated_at")
+					.bind(id, rule.source, rule.target, rule.note ?? null, now, now),
+			);
+		}
+		rules.set(id, { id, source: rule.source, target: rule.target, note: rule.note ?? null });
+		written++;
+	}
+	for (let i = 0; i < writes.length; i += WRITES_PER_BATCH) await d1.batch(writes.slice(i, i + WRITES_PER_BATCH));
+	const store = urls(ctx) as ReturnType<typeof urls> | undefined;
+	if (typeof store?.putMany === "function") {
+		await store
+			.putMany(real.map((m) => ({ id: key(m.collection, m.entryId), data: { url: m.to, at: now } })))
+			.catch((error: unknown) => ctx.log.warn("Child pages: could not remember the new URLs", { error: String(error) }));
+	}
+	if (writes.length) {
+		await noteRedirectsChanged(d1);
+		await purgePageCache({ tags: [REDIRECTS_TAG] });
+	}
+	if (shadowed.length) ctx.log.warn("Child pages: other redirects send these pages' new URLs elsewhere; remove them on the Redirect Manager page", { urls: shadowed.slice(0, 20) });
+	if (loops.length) {
+		ctx.log.warn("Child pages: these moves got no redirect, because a redirect someone else made sends the new URL back to the old one; delete it on the Redirect Manager page", {
+			moves: loops.slice(0, 20).map((l) => ({ from: l.from, to: l.to, rule: `${l.rule.source} → ${l.rule.target}` })),
+		});
+	}
+	return { written, kept, shadowed, loops };
+}
+
 export function slugChangesModule(options: { database?: string }) {
 	async function db(): Promise<D1Database | undefined> {
 		try {
@@ -132,10 +376,11 @@ export function slugChangesModule(options: { database?: string }) {
 	}
 
 	const urlOf = (d1: D1Database, collection: string, entry: EntrySnapshot) =>
-		entry.slug ? entryUrl(d1, collection, { id: entry.id, slug: entry.slug, publishedAt: entry.publishedAt, locale: entry.locale }).catch(() => null) : Promise.resolve(null);
+		// Strict: a rule and a remembered URL are written from this. If Child Pages' parents can't be read there's no URL (and no settle), never the flat one.
+		entry.slug ? entryUrl(d1, collection, { id: entry.id, slug: entry.slug, publishedAt: entry.publishedAt, locale: entry.locale }, { strict: true }).catch(() => null) : Promise.resolve(null);
 
 	/** Every exact rule whose source or target is either URL. */
-	async function related(d1: D1Database, a: string, b: string): Promise<PlanRule[]> {
+	async function related(d1: D1Database, a: string, b: string): Promise<KnownRule[]> {
 		await ensureTable(d1);
 		const paths = [normalizePath(a), normalizePath(b)];
 		// Sources in every stored spelling (src/redirects/paths.ts storedForms); targets as written, with or without the slash.
@@ -143,15 +388,28 @@ export function slugChangesModule(options: { database?: string }) {
 		const targets = [...new Set([...paths, ...paths.map((p) => sourceKey(p)), ...paths.map((p) => `${p}/`)])];
 		const { results } = await d1
 			.prepare(
-				`SELECT id, source, target, note FROM coywolf_redirects WHERE is_regex = 0 AND (source IN (${sources.map(() => "?").join(", ")}) OR target IN (${targets.map(() => "?").join(", ")}))`,
+				`SELECT id, source, target, note, enabled FROM coywolf_redirects WHERE is_regex = 0 AND (source IN (${sources.map(() => "?").join(", ")}) OR target IN (${targets.map(() => "?").join(", ")}))`,
 			)
 			.bind(...sources, ...targets)
-			.all<PlanRule>();
+			.all<KnownRule>();
 		return results;
 	}
 
 	async function moved(ctx: PluginContext, d1: D1Database, collection: string, entry: EntrySnapshot, from: string, to: string) {
 		const rules = await related(d1, from, to);
+		// A rule someone else made sends the new URL back to the old one (a page that returns to a URL that was
+		// redirected by hand): ours would make a loop. Left unwritten, and said; Child Pages lists it when the page
+		// is one of its collections' (src/childPages/pack.ts), and adds the 301 once that rule is deleted.
+		const loop = await loopingRule(d1, from, to, rules, memoHosts(ctx));
+		if (loop) {
+			ctx.log.warn("Slug change: no redirect added, because another redirect sends the new URL back to the old one (a loop). Delete that redirect on the Redirect Manager page", {
+				collection,
+				from,
+				to,
+				rule: `${loop.source} → ${loop.target}`,
+			});
+			return;
+		}
 		const plan = planSlugChange(from, to, rules);
 		if (plan.kind === "none") return;
 		for (const id of plan.deleteIds) await deleteRule(d1, id);

@@ -28,6 +28,17 @@ export interface FeatureDef {
 	 * found there decides, so existing sites keep their choice.
 	 */
 	replaces?: string[];
+	/** Features this one needs to do its whole job: the Features page warns while one of them is off. */
+	requires?: string[];
+}
+
+/** A module's note on the Features page (PackModule.featureNotice). */
+export interface FeatureNotice {
+	text: string;
+	/** Listed under the text. */
+	items?: string[];
+	/** A button that POSTs to one of the pack's routes (no body), then reloads the list. */
+	action?: { label: string; route: string };
 }
 
 export interface AdminPageDef {
@@ -111,6 +122,23 @@ export interface PackModule {
 	storage?: Record<string, any>;
 	/** Capabilities this module needs (e.g. "network:request", "email:send"). */
 	capabilities?: string[];
+	/**
+	 * Runs after the Features page saves the switches (features/save), with the switches as
+	 * they applied before and after, whether or not this module's own changed. Errors are
+	 * logged; the save stands.
+	 */
+	featuresChanged?: (ctx: PluginContext, before: import("./features.js").FeatureMap, after: import("./features.js").FeatureMap) => Promise<void>;
+	/**
+	 * True when a content hook (content:after…) for this event must run on the switches as they are now, not as this
+	 * isolate read them up to FEATURES_TTL_MS ago: composeHooks then reads them fresh for every module (one settings
+	 * read). For a module whose hook writes something lasting from a switch (Child Pages' redirects). Must not query.
+	 */
+	freshSwitches?: (hook: string, event: { collection?: unknown }) => boolean;
+	/**
+	 * A note under the module on the Features page (features/list), which stays reachable while the module is off
+	 * and its own pages are out of the sidebar: work left over from turning it off, say. Null: none.
+	 */
+	featureNotice?: (ctx: PluginContext, features: import("./features.js").FeatureMap) => Promise<FeatureNotice | null>;
 	/** Hosts for network:request, if any. */
 	allowedHosts?: string[];
 }

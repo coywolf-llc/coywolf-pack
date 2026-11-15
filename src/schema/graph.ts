@@ -390,6 +390,14 @@ export function enrichImageObjects(node: Node, lookup: (url: string) => ImageInf
 
 // ── Breadcrumbs ──────────────────────────────────────────────────
 
+function safeDecodePath(path: string): string {
+	try {
+		return decodeURI(path);
+	} catch {
+		return path;
+	}
+}
+
 function humanize(segment: string): string {
 	let text = segment;
 	try {
@@ -404,9 +412,11 @@ function humanize(segment: string): string {
 /**
  * The breadcrumb trail for a page. `page.breadcrumbs` is used verbatim when
  * the theme provides it (`[]` means no breadcrumbs); otherwise it's derived
- * from the path: Home, each parent segment (humanized), then the page title.
+ * from the path: Home, each parent segment (its page's title from `titles`,
+ * keyed by decoded path without a trailing slash, else humanized), then the
+ * page title.
  */
-export function breadcrumbTrail(page: PublicPageContext, origin: string, homeLabel = "Home"): BreadcrumbItem[] {
+export function breadcrumbTrail(page: PublicPageContext, origin: string, homeLabel = "Home", titles?: ReadonlyMap<string, string> | null): BreadcrumbItem[] {
 	if (page.breadcrumbs !== undefined) return page.breadcrumbs;
 	const segments = (page.path || "/").split("/").filter(Boolean);
 	if (!segments.length) return [];
@@ -415,7 +425,8 @@ export function breadcrumbTrail(page: PublicPageContext, origin: string, homeLab
 	segments.forEach((segment, i) => {
 		const last = i === segments.length - 1;
 		const path = `/${segments.slice(0, i + 1).join("/")}${trailing || !last ? "/" : ""}`;
-		const name = last ? page.pageTitle || page.seo?.ogTitle || humanize(segment) : humanize(segment);
+		const known = last ? null : titles?.get(safeDecodePath(`/${segments.slice(0, i + 1).join("/")}`));
+		const name = last ? page.pageTitle || page.seo?.ogTitle || humanize(segment) : known || humanize(segment);
 		trail.push({ name, url: last ? pageUrl(page) : `${origin}${path}` });
 	});
 	return trail;
@@ -465,6 +476,8 @@ export interface GraphInput {
 	/** Include a BreadcrumbList (the schema.breadcrumbs feature). */
 	breadcrumbs: boolean;
 	homeLabel?: string;
+	/** Titles of the pages on the path, for a derived trail (Child Pages: pageTitlesByPath). */
+	breadcrumbTitles?: ReadonlyMap<string, string> | null;
 }
 
 export function isHome(page: PublicPageContext): boolean {
@@ -558,7 +571,7 @@ export function buildGraph(input: GraphInput): Node {
 
 	if (input.breadcrumbs) {
 		const explicit = page.breadcrumbs !== undefined;
-		const crumbs = breadcrumbNode(breadcrumbTrail(page, origin, input.homeLabel), `${url}#breadcrumb`, origin, explicit);
+		const crumbs = breadcrumbNode(breadcrumbTrail(page, origin, input.homeLabel, input.breadcrumbTitles), `${url}#breadcrumb`, origin, explicit);
 		if (crumbs) {
 			webpage.breadcrumb = { "@id": crumbs["@id"] };
 			nodes.push(crumbs);
@@ -659,8 +672,8 @@ function dedupeById(nodes: Node[]): Node[] {
 }
 
 /** A standalone BreadcrumbList document, for when breadcrumbs are on but the graph is off. */
-export function breadcrumbDocument(page: PublicPageContext, origin: string, homeLabel?: string): Node | null {
-	const node = breadcrumbNode(breadcrumbTrail(page, origin, homeLabel), `${pageUrl(page)}#breadcrumb`, origin, page.breadcrumbs !== undefined);
+export function breadcrumbDocument(page: PublicPageContext, origin: string, homeLabel?: string, titles?: ReadonlyMap<string, string> | null): Node | null {
+	const node = breadcrumbNode(breadcrumbTrail(page, origin, homeLabel, titles), `${pageUrl(page)}#breadcrumb`, origin, page.breadcrumbs !== undefined);
 	return node ? { "@context": "https://schema.org", ...node } : null;
 }
 

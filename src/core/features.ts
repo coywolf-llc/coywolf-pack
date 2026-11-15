@@ -275,6 +275,19 @@ export async function cachedCtxFeatures(ctx: SettingsCtx): Promise<FeatureMap> {
 	return features;
 }
 
+/**
+ * The switches read now, through the plugin context, whatever this isolate has cached. When they differ
+ * from the cached ones (saved in another isolate within the last FEATURES_TTL_MS), the isolate's cache is
+ * dropped too, so everything else in the request (the URL resolver's read of a switch) reads them again.
+ * For hooks that act on a switch in a way that outlasts the request (composeHooks: a module's freshSwitches).
+ */
+export async function freshCtxFeatures(ctx: SettingsCtx): Promise<FeatureMap> {
+	const features = await ctxFeatures(ctx);
+	const known = cached?.features;
+	if (known && Object.keys({ ...known, ...features }).some((id) => (known[id] ?? false) !== (features[id] ?? false))) invalidateFeatures();
+	return features;
+}
+
 /** For public routes: like requireFeature, but from the per-isolate cache (no settings read on most requests). */
 export async function requireCachedFeature(ctx: SettingsCtx, id: string): Promise<void> {
 	if (!isOn(await cachedCtxFeatures(ctx), id)) {

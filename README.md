@@ -30,6 +30,7 @@ Every module starts off on a new site. Turn on only the ones you want on the **F
 | [Search](docs/search.md) | Fast as-you-type results on EmDash's full-text search, a search box, and rate limiting |
 | [Link Manager](docs/links.md) | Every link in your content with its status, bulk replace, unlink and ignore, and inbound link counts with orphans |
 | [Content Audit](docs/content-audit.md) | A weekly report of missing SEO titles and descriptions, alt text and social images, thin and stale entries, heading problems and broken internal links, with trends |
+| [Child Pages](docs/child-pages.md) | Choose a page's parent in the editor: nested URLs (`/apps/coywolf-pack/`), breadcrumbs with the parents' titles, and 301s when a page moves |
 | [Headings & TOC](docs/headings.md) | Linkable headings and a Table of Contents block |
 | [Breadcrumb Nav](docs/breadcrumbs.md) | An accessible breadcrumb trail for themes and as a block |
 | [Pagination](docs/pagination.md) | Numbered page links for the theme's archives (first, nearby pages and last, on one line at every width) and short page URLs: page 3 is `/3/`, not `/page/3/` |

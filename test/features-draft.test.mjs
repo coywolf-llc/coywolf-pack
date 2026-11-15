@@ -238,3 +238,16 @@ test("refreshAdminManifest: invalidates [\"manifest\"] on the admin's own client
 	assert.equal(refreshAdminManifest({}), false, "no router");
 	assert.equal(refreshAdminManifest({ __TSR_ROUTER__: { ...router, options: { basepath: "/_emdash/admin", context: {} } } }), false, "no client");
 });
+
+test("missingRequirements: the features a module needs that the draft has off (a part counts as off while its module is)", async () => {
+	const { missingRequirements } = await import("../src/admin/features-draft.ts");
+	const modules = [
+		{ id: "redirects", label: "Redirect Manager", features: [{ id: "redirects", label: "Redirect Manager", description: "", enabled: true }, { id: "redirects.slugChanges", label: "Slug changes", description: "", enabled: true }] },
+		{ id: "childPages", label: "Child Pages", features: [{ id: "childPages", label: "Child Pages", description: "", enabled: true, requires: ["redirects", "redirects.slugChanges", "gone"] }] },
+	];
+	const childPages = modules[1].features[0];
+	assert.deepEqual(missingRequirements(childPages, { redirects: true, "redirects.slugChanges": true, childPages: true }, modules), []);
+	assert.deepEqual(missingRequirements(childPages, { redirects: true, "redirects.slugChanges": false }, modules), ["Slug changes"]);
+	assert.deepEqual(missingRequirements(childPages, { redirects: false, "redirects.slugChanges": true }, modules), ["Redirect Manager", "Slug changes"], "a part is off while its module is");
+	assert.deepEqual(missingRequirements({}, {}, modules), []);
+});

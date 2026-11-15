@@ -34,9 +34,20 @@ export interface Feature {
 	enabled: boolean;
 	/** Its own switch (src/core/features.ts featureChoices). */
 	choice?: boolean;
+	/** Features it needs to do its whole job (FeatureDef.requires): the page warns while one is off. */
+	requires?: string[];
+}
+
+/** A module's note under its card (PackModule.featureNotice): work left over from turning it off, say. */
+export interface ModuleNotice {
+	text: string;
+	items?: string[];
+	/** A button that POSTs to one of the pack's routes, then reads the list again. */
+	action?: { label: string; route: string };
 }
 
 export interface ModuleState {
+	notice?: ModuleNotice;
 	id: string;
 	label: string;
 	features: Feature[];
@@ -53,6 +64,16 @@ export function switchesOf(modules: ModuleState[]): Switches {
 /** The switches in `draft` that differ from `saved`: what Save sends. */
 export function changedSwitches(draft: Switches, saved: Switches): Switches {
 	return Object.fromEntries(Object.entries(draft).filter(([id, on]) => saved[id] !== on));
+}
+
+/**
+ * The features `feature` needs that would be off with these switches (a part counts as off
+ * while its module is), as labels, for the warning under a module that's on.
+ */
+export function missingRequirements(feature: Pick<Feature, "requires">, draft: Switches, modules: ModuleState[]): string[] {
+	const labels = new Map(modules.flatMap((m) => m.features.map((f) => [f.id, f.label] as const)));
+	const on = (id: string) => Boolean(draft[id]) && (!id.includes(".") || Boolean(draft[id.slice(0, id.indexOf("."))]));
+	return (feature.requires ?? []).filter((id) => labels.has(id) && !on(id)).map((id) => labels.get(id) as string);
 }
 
 /** A module's main switch (no "." in its id): it adds or removes the module's pages in the sidebar. */
@@ -188,6 +209,16 @@ export function useFeatureDraft(effects: FeatureDraftEffects, root: React.RefObj
 		return clean;
 	};
 
+	/** Read the modules' notes again (the switches and the draft stay as they are). */
+	const refreshNotices = async () => {
+		try {
+			const fresh = await fetchModules();
+			setModules((current) => (current ? current.map((m) => ({ ...m, notice: fresh.find((f) => f.id === m.id)?.notice })) : current));
+		} catch {
+			// The notes stay as they were.
+		}
+	};
+
 	const set = (id: string, on: boolean) => {
 		if (inFlight.current) return;
 		setDraft((d) => (d ? { ...d, [id]: on } : d));
@@ -211,13 +242,16 @@ export function useFeatureDraft(effects: FeatureDraftEffects, root: React.RefObj
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ features: changes }),
 			});
-			const out = await parseApiResponse<{ features: Switches; choices?: Switches }>(response, "Couldn't save");
+			const out = await parseApiResponse<{ features: Switches; choices?: Switches; notices?: Record<string, ModuleNotice> }>(response, "Couldn't save");
 			// The switches as stored now, which may include another admin's changes (the draft can't change while saving).
 			const next: Switches = {};
 			for (const id of Object.keys(saved)) next[id] = out.choices?.[id] ?? draft[id] ?? saved[id];
 			setSaved(next);
 			setDraft(next);
 			if (!settle(saved, next, true, { saved: true })) latest.current.saved();
+			// A module's note about what the save left undone (Child Pages, turned off) comes with the answer.
+			const notices = out.notices;
+			if (notices) setModules((current) => (current ? current.map((m) => ({ ...m, notice: notices[m.id] })) : current));
 		} catch (cause) {
 			const message = errorText(cause, "Couldn't save");
 			// Stored anyway? Read the switches back and keep only the user's changes on top (clean when they were stored).
@@ -243,5 +277,5 @@ export function useFeatureDraft(effects: FeatureDraftEffects, root: React.RefObj
 		}
 	};
 
-	return { modules, draft, dirty, saving, loadError, set, save, discard };
+	return { modules, draft, dirty, saving, loadError, set, save, discard, refreshNotices };
 }

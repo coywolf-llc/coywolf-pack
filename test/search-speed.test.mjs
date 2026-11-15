@@ -565,3 +565,59 @@ test("content hooks: publishing, unpublishing, deleting and saving published ent
 	assert.ok(writes.every(([k, v]) => k === "searchVersion" && /^[a-z0-9]+$/.test(v)));
 	invalidateFeatures();
 });
+
+// ── Child Pages ──
+
+test("Child Pages' parents are read with the search metadata, never per search; when they can't be read the search still answers, and that metadata isn't kept", async () => {
+	const { configureStoredParents } = await import("../src/core/content-url.ts");
+	const { readFailures } = await import("../src/core/read-failures.ts");
+	engine.invalidateSearchMeta();
+	const d1 = fixture();
+	let reads = 0;
+	let failing = false;
+	const stored = { parentOf: new Map([["a1", "team"]]), idOf: new Map() };
+	configureStoredParents({
+		collections: async () => {
+			reads++;
+			if (failing) throw new Error("D1 down");
+			return new Set(["pages"]);
+		},
+		parents: async () => {
+			reads++;
+			return stored;
+		},
+		fingerprint: () => "v",
+		// What the isolate read last (src/childPages/read.ts keeps it).
+		lastKnown: { collections: () => new Set(["pages"]), parents: () => stored },
+	});
+	const about = () => [{ id: "a1", slug: "about" }];
+	const error = console.error;
+	console.error = () => {};
+	try {
+		const meta = await engine.loadSearchMeta(d1, "DB", "cp1");
+		assert.ok(reads > 0, "read once, with the metadata");
+		const after = reads;
+		assert.equal((await engine.entryUrlsFromMeta(d1, meta, ["pages"], about)).get("pages:a1"), "/team/about");
+		assert.equal((await engine.entryUrlsFromMeta(d1, await engine.loadSearchMeta(d1, "DB", "cp1"), ["pages"], about)).get("pages:a1"), "/team/about");
+		assert.equal(reads, after, "searches build page URLs from the cached parents: no read each");
+
+		// The parents can't be read: this search answers with the last ones read (noted: not edge-cached)…
+		engine.invalidateSearchMeta();
+		failing = true;
+		const noted = readFailures();
+		const during = await engine.loadSearchMeta(d1, "DB", "cp2");
+		assert.ok(readFailures() > noted);
+		assert.equal((await engine.entryUrlsFromMeta(d1, during, ["pages"], about)).get("pages:a1"), "/team/about");
+		// …and the metadata isn't kept: the next search reads again instead of living with a fallback.
+		failing = false;
+		const before = reads;
+		const next = await engine.loadSearchMeta(d1, "DB", "cp2");
+		assert.ok(reads > before, "read again");
+		assert.notEqual(next, during);
+		assert.equal(await engine.loadSearchMeta(d1, "DB", "cp2"), next, "kept now");
+	} finally {
+		console.error = error;
+		configureStoredParents(null);
+		engine.invalidateSearchMeta();
+	}
+});

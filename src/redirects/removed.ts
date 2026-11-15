@@ -88,7 +88,8 @@ export function removedModule(options: Options) {
 	/** The entry's public path via the pack-wide resolver (honors the site's `urls` overrides). */
 	async function formerUrl(d1: D1Database, collection: string, entry: EntrySnapshot): Promise<string | null> {
 		if (!entry.slug) return null;
-		return entryUrl(d1, collection, { id: entry.id, slug: entry.slug, publishedAt: entry.publishedAt, locale: entry.locale }).catch(() => null);
+		// Strict: this URL is recorded (and may become a redirect's source). No URL rather than a nested page's flat one.
+		return entryUrl(d1, collection, { id: entry.id, slug: entry.slug, publishedAt: entry.publishedAt, locale: entry.locale }, { strict: true }).catch(() => null);
 	}
 
 	async function record(ctx: PluginContext, collection: string, reason: RemovalReason, taken: Taken | null) {

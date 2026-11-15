@@ -58,6 +58,8 @@ export interface CoywolfOptions {
 	updates?: Record<string, never> | false;
 	/** @deprecated Until 0.12.0 the Custom Blocks module was called Content Blocks; `contentBlocks: false` still leaves it out. */
 	contentBlocks?: Record<string, never> | false;
+	/** Child Pages: a "Parent page" field for nested page URLs (no options; set up on its page). `false` leaves the module out. */
+	childPages?: Record<string, never> | false;
 	/** WordPress import tools (no options yet). `false` leaves the module out. */
 	wpImport?: Record<string, never> | false;
 	/** Content Audit (no options; settings are on its page). `false` leaves the module out. */
@@ -81,6 +83,9 @@ export interface CoywolfOptions {
 	 * that have no parent in EmDash.
 	 */
 	termParents?: Record<string, Record<string, string>>;
-	/** Parent pages for `{pagepath}` URLs, slug → parent slug, e.g. `{ "coywolf-seo": "apps" }`. EmDash entries have no parent of their own. */
+	/**
+	 * Parent pages for `{pagepath}` URLs, slug → parent slug, e.g. `{ "coywolf-seo": "apps" }`. With Child Pages on,
+	 * a page's "Parent page" field wins; this fills in pages without one (and parents that aren't pages, like a category).
+	 */
 	pageParents?: Record<string, string>;
 }

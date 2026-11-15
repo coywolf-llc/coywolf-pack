@@ -531,3 +531,34 @@ test("a 404 at a path this isolate's redirect index doesn't know reads the rule 
 	await settled();
 	invalidateRedirectCache();
 });
+
+test("a Child Pages toggle (features/save): what an isolate still on the old switch renders afterwards (a 404 at a nested path, a theme's 301, a page) is cleared by the settling purge", async () => {
+	const db = d1();
+	freshIsolate(db);
+	// An isolate that read the switches before the save keeps them for up to FEATURES_TTL_MS, and stamps what it
+	// renders with the generation it read with them (one query: they always match). Rendered here before the save,
+	// which is the same stamp such an isolate gives after it.
+	const oldTag = generationTag(FIRST_GENERATION);
+	const stale = { notFound: cacheable(), redirect: cacheable(), page: cacheable() };
+	const pack = coywolfPack({}, []);
+	await pack(context("/apps/coywolf-pack/", stale.notFound), async () => new Response("<html>not found</html>", { status: 404, headers: { "content-type": "text/html" } }));
+	await pack(context("/coywolf-pack/", stale.redirect), async () => new Response(null, { status: 301, headers: { location: "/apps/coywolf-pack/" } }));
+	await (await pack(context("/apps/", stale.page), html)).text();
+	for (const [what, cache] of Object.entries(stale)) assert.ok(cache.tags.includes(oldTag), `${what}: ${cache.tags.join()}`);
+
+	// The Features page saves the switch: every cached page goes now…
+	await pack(context("/_emdash/api/plugins/coywolf-pack/features/save", undefined, "POST"), async () => Response.json({ features: { childPages: true } }));
+	await settled();
+	assert.deepEqual(globalThis.__purges, [{ purgeEverything: true }]);
+	// …and once every isolate must have the new switch, the first request claims the settling purge: the old generation's
+	// tag (and the "unknown" one), which is exactly what the stale isolates cached in between.
+	const saved = row(db);
+	assert.deepEqual(saved.settle, { tags: [oldTag, UNKNOWN_GENERATION_TAG] });
+	assert.equal(await claimSettle(db, Date.now() + TTL - 1000), null, "not before the switches' lifetime is over");
+	assert.deepEqual(await claimSettle(db, Date.now() + TTL + 20_000), { tags: [oldTag, UNKNOWN_GENERATION_TAG] });
+	// What this isolate renders with the new switch isn't touched by it.
+	const fresh = cacheable();
+	await (await pack(context("/apps/coywolf-pack/", fresh), html)).text();
+	assert.ok(fresh.tags.includes(generationTag(saved.id)) && !fresh.tags.includes(oldTag));
+	await settled();
+});

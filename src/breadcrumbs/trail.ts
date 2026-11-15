@@ -4,6 +4,7 @@
  * the page title for the last crumb and humanized path segments for the
  * ancestors.
  */
+import { comparablePath } from "../core/content-url.js";
 import { requestStore } from "../core/request-memo.js";
 
 export interface Crumb {
@@ -21,6 +22,8 @@ export interface TrailOptions {
 	homeLabel: string;
 	showHome: boolean;
 	showCurrent: boolean;
+	/** Page titles by path (decoded, no trailing slash): ancestors found here get their title (Child Pages). */
+	titles?: ReadonlyMap<string, string> | null;
 }
 
 /** "getting-started_now" → "Getting started now". */
@@ -63,7 +66,8 @@ export function resolveTrail(options: TrailOptions): Crumb[] {
 		segments.forEach((segment, i) => {
 			const url = `/${segments.slice(0, i + 1).join("/")}${trailingSlash ? "/" : ""}`;
 			const last = i === segments.length - 1;
-			trail.push({ name: last && options.title?.trim() ? options.title.trim() : humanize(segment), url });
+			const known = last ? null : options.titles?.get(comparablePath(url));
+			trail.push({ name: last && options.title?.trim() ? options.title.trim() : known || humanize(segment), url });
 		});
 	}
 

@@ -3,16 +3,67 @@
  * The switches edit a draft (src/admin/features-draft.ts); the Save bar saves
  * every change in one request.
  */
-import { Banner, Switch } from "@cloudflare/kumo";
+import { Banner, Button, Switch } from "@cloudflare/kumo";
 import * as React from "react";
 
 import { CloudflareTokenCard } from "./cloudflare-token-card.js";
-import { useFeatureDraft } from "./features-draft.js";
+import { PACK_API, apiPost, errorText } from "./api.js";
+import { type ModuleNotice, missingRequirements, useFeatureDraft } from "./features-draft.js";
 import { useManifestRefresh } from "./manifest.js";
-import { PageHeader, Loading } from "./page.js";
+import { PageHeader, Loading, WarningText, softDisabled } from "./page.js";
 import { SaveBar } from "./save-bar.js";
 import { useSaveResult } from "./toast.js";
 import { resetUpdateStatus } from "./update-notice.js";
+
+const postPack = apiPost(PACK_API);
+
+/** A module's note under its description, with its action (which runs, then the notes are read again). */
+function Notice(props: { notice: ModuleNotice; onDone: () => Promise<void>; headingId: string }) {
+	const { notice } = props;
+	const [busy, setBusy] = React.useState(false);
+	const [error, setError] = React.useState<string>();
+	const button = React.useRef<HTMLButtonElement>(null);
+	const run = async () => {
+		if (!notice.action || busy) return;
+		const action = button.current;
+		setBusy(true);
+		setError(undefined);
+		try {
+			await postPack(notice.action.route, undefined, `${notice.action.label} failed`);
+			await props.onDone();
+			// The note (and its button) goes once nothing is left: the keyboard focus goes to the module's heading, not the top of the page.
+			setTimeout(() => {
+				if (action && !action.isConnected) document.getElementById(props.headingId)?.focus();
+			}, 0);
+		} catch (cause) {
+			setError(errorText(cause, `${notice.action.label} failed`));
+		} finally {
+			setBusy(false);
+		}
+	};
+	return (
+		<div className="mt-2 space-y-2 text-sm" role="status">
+			<WarningText>{notice.text}</WarningText>
+			{notice.items && notice.items.length > 0 && (
+				<ul role="list" className="list-disc space-y-1 ps-5 break-words">
+					{notice.items.map((item) => (
+						<li key={item}>{item}</li>
+					))}
+				</ul>
+			)}
+			{error && (
+				<p className="text-kumo-danger" role="alert">
+					{error}
+				</p>
+			)}
+			{notice.action && (
+				<Button ref={button} type="button" size="sm" variant="secondary" {...softDisabled(busy)} onClick={() => void run()}>
+					{busy ? "Working…" : notice.action.label}
+				</Button>
+			)}
+		</div>
+	);
+}
 
 export function FeaturesPage() {
 	const refreshManifest = useManifestRefresh();
@@ -58,12 +109,21 @@ export function FeaturesPage() {
 				const [main, ...subs] = module.features;
 				if (!main) return null;
 				const mainOn = draft[main.id] ?? false;
+				const missing = mainOn ? missingRequirements(main, draft, modules) : [];
 				return (
 					<section key={module.id} className="rounded-lg border border-kumo-line">
 						<div className="flex items-start justify-between gap-4 p-4">
 							<div className="min-w-0">
-								<h2 className="text-base font-semibold">{main.label}</h2>
+								<h2 id={`cw-feature-${module.id}`} tabIndex={-1} className="text-base font-semibold outline-none">
+									{main.label}
+								</h2>
 								<p className="mt-1 text-sm text-kumo-subtle">{main.description}</p>
+								{missing.length > 0 && (
+									<WarningText className="mt-2 text-sm" role="status">
+										Needs {missing.join(" and ")} on to do its whole job.
+									</WarningText>
+								)}
+								{module.notice && <Notice notice={module.notice} onDone={features.refreshNotices} headingId={`cw-feature-${module.id}`} />}
 							</div>
 							<Switch className="shrink-0"
 								aria-label={`${main.label}: ${mainOn ? "on" : "off"}`}

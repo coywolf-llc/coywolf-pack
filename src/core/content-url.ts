@@ -21,9 +21,13 @@
  * SEO under News. Parents come from EmDash's taxonomy table (`parent_id`),
  * with the `termParents` option filling in terms that have none.
  * `{pagepath}` is the entry's slug with its parents' slugs in front
- * (`apps/coywolf-seo`); EmDash has no parent for entries, so they come from
- * the `pageParents` option. Collections without an override resolve the way
- * EmDash does (getPublicUrl inside the plugin context, url_pattern otherwise).
+ * (`apps/coywolf-seo`). EmDash has no parent for entries: with the Child
+ * pages feature on, they come from the collection's "Parent page" field
+ * (src/childPages, through configureStoredParents), and a collection with that
+ * field uses {pagepath} without configuration; the `pageParents` option fills
+ * in entries with no parent page. Collections without an override resolve the
+ * way EmDash does (getPublicUrl inside the plugin context, url_pattern
+ * otherwise).
  *
  * Configuration: coywolfPlugin() options reach createPlugin(), which
  * EmDash's generated plugins module (virtual:emdash/plugins) calls as the
@@ -40,6 +44,8 @@
  * locally. No locale prefix is applied to override patterns.
  */
 import type { PluginContext } from "emdash";
+
+import { noteReadFailure } from "./read-failures.js";
 
 // ── Pattern interpolation (pure) ─────────────────────────────────
 
@@ -170,7 +176,11 @@ export function applyTrailingSlash(path: string, policy: TrailingSlash | undefin
 	return bare;
 }
 
-/** The path an override pattern gives an entry, or null when a term token can't be filled. */
+/**
+ * The path an override pattern gives an entry, or null when a term token can't be filled.
+ * `patternSlash` false resolves the trailing slash the way EmDash resolves its url_pattern
+ * (none, unless the policy is "always"): the pattern a Child pages collection uses implicitly.
+ */
 export function overridePath(
 	pattern: string,
 	entry: {
@@ -183,11 +193,23 @@ export function overridePath(
 		pagePath?: string[] | null;
 	},
 	policy: TrailingSlash | undefined,
+	patternSlash = true,
 ): string | null {
 	const expanded = expandPattern(pattern);
 	const path = interpolateUrlPattern({ pattern: expanded, ...entry });
 	if (UNRESOLVED_TERM.test(path)) return null;
-	return applyTrailingSlash(path, policy, expanded.endsWith("/"));
+	return applyTrailingSlash(path, policy, patternSlash && expanded.endsWith("/"));
+}
+
+/**
+ * The pattern a collection with a parent field uses while Child pages is on: its URL
+ * pattern (or EmDash's default /<collection>/{slug}) with {pagepath} for {slug}. Null when
+ * the pattern has neither (it can't nest).
+ */
+export function pagePathPattern(urlPattern: string | null | undefined, collection: string): string | null {
+	const base = urlPattern ?? `/${collection}/{slug}`;
+	if (base.includes(PAGE_PATH)) return base;
+	return base.includes("{slug}") ? base.replace("{slug}", PAGE_PATH) : null;
 }
 
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -296,10 +318,149 @@ export function pageTrail(slug: string): string[] {
 	return ancestorTrail(slug, config.pageParents);
 }
 
+/** The `pageParents` option (slug → parent slug). */
+export function configuredPageParents(): ReadonlyMap<string, string> {
+	return config.pageParents;
+}
+
+// ── Stored parents (Child pages) ─────────────────────────────────
+
+/**
+ * A collection's parent pages from its "Parent page" field (the Child pages
+ * feature, src/childPages), as the URL resolver follows them.
+ */
+export interface StoredParents {
+	/**
+	 * Entry id → its parent's slug, for entries whose field has a value. Null when
+	 * the parent doesn't count for URLs (unpublished, in the trash, gone, or in a
+	 * loop): the entry is then top level, and the `pageParents` option doesn't apply
+	 * to it. Entries without a value aren't listed (the option applies).
+	 */
+	parentOf: ReadonlyMap<string, string | null>;
+	/** Slug → entry id, to follow the chain from an ancestor's slug (default locale first). */
+	idOf: ReadonlyMap<string, string>;
+}
+
+/** Child pages' answers for the resolver: which collections nest by their field, and their parents. */
+export interface StoredParentsProvider {
+	/** Collections with a parent field while the feature is on (empty while it's off). */
+	collections(source: UrlSource): Promise<ReadonlySet<string>>;
+	/** A collection's stored parents (null while the feature is off or when it has no field). */
+	parents(source: UrlSource, collection: string): Promise<StoredParents | null>;
+	/** Changes whenever stored parents may have (part of contentUrlFingerprint). */
+	fingerprint(): string;
+	/**
+	 * The answers of this isolate's last reads that worked, for a render whose read fails
+	 * (see parentsFailed): null or undefined when there are none yet.
+	 */
+	lastKnown?: {
+		collections(): ReadonlySet<string> | null;
+		parents(collection: string): StoredParents | null | undefined;
+	};
+}
+
+/** Child pages state handed to a resolver directly: as if the feature were on with these (null: as if off). */
+export interface ChildPagesState {
+	collections: ReadonlySet<string>;
+	parents(collection: string): StoredParents | null;
+}
+
+let storedParents: StoredParentsProvider | null = null;
+
+/**
+ * Child pages' answer couldn't be read (the switch, the collections with a parent field, or a
+ * collection's parents). Always noted, so a page rendered meanwhile stays out of the edge cache
+ * (src/core/read-failures.ts), and logged. Then:
+ *
+ * - `strict` (a caller that writes something from the URL: Slug changes' and Removed content's
+ *   redirects) rejects with ParentPagesUnreadable. Without the parents a nested page would get its
+ *   flat URL, and a 301 would be written from the live nested page to it. The caller skips what it
+ *   was doing (`urlOf(...).catch(() => null)`).
+ * - Everything else (pages, sitemaps, schema, breadcrumbs, search) keeps rendering through the
+ *   hiccup with `fallback`: this isolate's last answer that worked, else as if Child pages were off
+ *   (flat URLs, which the theme redirects). A site with the feature off is never failed by it.
+ */
+function parentsFailed<T>(error: unknown, strict: boolean | undefined, fallback: () => T): T {
+	if (!(error instanceof ParentPagesUnreadable)) {
+		noteReadFailure("child pages: parent pages");
+		console.error(`coywolf-pack: Child Pages: could not read the parent pages; ${strict ? "nothing is written from this read" : "using the last ones read (or none) for this render"}`, error);
+	}
+	if (strict) throw error instanceof ParentPagesUnreadable ? error : new ParentPagesUnreadable(error);
+	return fallback();
+}
+
+const NO_COLLECTIONS: ReadonlySet<string> = new Set();
+
+/**
+ * Child pages' parents couldn't be read, for a resolver that was asked to be `strict` (one whose URLs
+ * are written somewhere: a redirect rule, a remembered URL). Never thrown to a render.
+ */
+export class ParentPagesUnreadable extends Error {
+	override readonly cause: unknown;
+	constructor(cause: unknown) {
+		super(`Child Pages: the parent pages couldn't be read (${String((cause as { message?: unknown } | null)?.message ?? cause)})`);
+		this.name = "ParentPagesUnreadable";
+		this.cause = cause;
+	}
+}
+
+/** Set by the Child pages module when the plugin is created (null to remove it). */
+export function configureStoredParents(provider: StoredParentsProvider | null): void {
+	storedParents = provider;
+}
+
+/**
+ * Child pages as they are now, read once (null while the feature is off, or without the
+ * module), for a cache that keeps entry URLs with its own version (the search metadata).
+ * `ok` is false when a read failed and the state is the fallback (parentsFailed): good for
+ * this answer, not for keeping.
+ */
+export async function readChildPagesNow(source: UrlSource): Promise<{ state: ChildPagesState | null; ok: boolean }> {
+	const provider = storedParents;
+	if (!provider) return { state: null, ok: true };
+	let ok = true;
+	const failed = <T>(fallback: () => T) => (error: unknown) => {
+		ok = false;
+		return parentsFailed(error, false, fallback);
+	};
+	const collections = await provider.collections(source).catch(failed(() => provider.lastKnown?.collections() ?? NO_COLLECTIONS));
+	if (!collections.size) return { state: null, ok };
+	const parents = new Map<string, StoredParents | null>();
+	for (const collection of collections) parents.set(collection, await provider.parents(source, collection).catch(failed(() => provider.lastKnown?.parents(collection) ?? null)));
+	return { state: { collections, parents: (collection) => parents.get(collection) ?? null }, ok };
+}
+
+/** The state of readChildPagesNow (the fallback when a read failed). */
+export async function currentChildPagesState(source: UrlSource): Promise<ChildPagesState | null> {
+	return (await readChildPagesNow(source)).state;
+}
+
+/**
+ * The entry's slugs, root first: its parent page (stored), else its `pageParents`
+ * parent, and so on up. A stored parent that doesn't count (null) ends the chain
+ * there, so the entry is top level. Stops at a loop or after 32 levels.
+ */
+export function pageTrailFor(slug: string, id: string | null | undefined, stored: StoredParents | null | undefined): string[] {
+	if (!stored) return pageTrail(slug);
+	const trail = [slug];
+	let currentSlug = slug;
+	let currentId: string | undefined = id ?? stored.idOf.get(slug);
+	while (trail.length < MAX_DEPTH) {
+		let up: string | null | undefined;
+		if (currentId !== undefined && stored.parentOf.has(currentId)) up = stored.parentOf.get(currentId);
+		else up = config.pageParents.get(currentSlug);
+		if (!up || trail.includes(up)) break;
+		trail.unshift(up);
+		currentSlug = up;
+		currentId = stored.idOf.get(up);
+	}
+	return trail;
+}
+
 /** The URL configuration as text, for cache keys (answers with URLs change when it does). */
 export function contentUrlFingerprint(): string {
 	const pairs = (m: Map<string, unknown>) => [...m.entries()].map(([k, v]) => [k, v instanceof Map ? [...v.entries()] : v]);
-	return JSON.stringify([pairs(config.urls), config.trailingSlash ?? "", pairs(config.termParents), pairs(config.pageParents)]);
+	return JSON.stringify([pairs(config.urls), config.trailingSlash ?? "", pairs(config.termParents), pairs(config.pageParents), storedParents?.fingerprint() ?? ""]);
 }
 
 /** Collections the `urls` option routes. */
@@ -596,6 +757,18 @@ export interface EntryUrlResolverOptions {
 	collections?: ReadonlyMap<string, CollectionInfo>;
 	/** Term parents per taxonomy (e.g. from a per-isolate cache), instead of termParentMaps. */
 	termParents?: (taxonomies: string[]) => Promise<Map<string, Map<string, string>>>;
+	/**
+	 * Child pages state to use instead of the live one (the feature switch and the
+	 * stored parents): null resolves as if the feature were off. For comparing URLs
+	 * before and after a change (src/childPages).
+	 */
+	childPages?: ChildPagesState | null;
+	/**
+	 * For a caller that writes something from the URLs (a redirect rule, a remembered URL): reject
+	 * with ParentPagesUnreadable when Child pages' parents can't be read, instead of resolving with
+	 * the last ones read or none (see parentsFailed). Renders leave it off.
+	 */
+	strict?: boolean;
 }
 
 interface CollectionRoute {
@@ -603,6 +776,28 @@ interface CollectionRoute {
 	pattern: string | null;
 	override: boolean;
 	routable: boolean;
+	/** The {pagepath} pattern Child pages gives a collection with a parent field: trailing slash as EmDash resolves it. */
+	implicit?: boolean;
+}
+
+/**
+ * Child pages for a resolver: the state it was given, else the provider's (null without a provider).
+ * A provider that can't answer: see parentsFailed (a strict resolver rejects; a render falls back).
+ */
+function childPagesView(source: UrlSource, options: EntryUrlResolverOptions) {
+	if (options.childPages !== undefined) {
+		const state = options.childPages;
+		return {
+			collections: async () => state?.collections ?? (new Set() as ReadonlySet<string>),
+			parents: async (collection: string) => (state && state.collections.has(collection) ? state.parents(collection) : null),
+		};
+	}
+	const provider = storedParents;
+	return {
+		collections: async () => (provider ? await provider.collections(source).catch((error) => parentsFailed(error, options.strict, () => provider.lastKnown?.collections() ?? NO_COLLECTIONS)) : NO_COLLECTIONS),
+		parents: async (collection: string) =>
+			provider ? await provider.parents(source, collection).catch((error) => parentsFailed(error, options.strict, () => provider.lastKnown?.parents(collection) ?? null)) : null,
+	};
 }
 
 export interface EntryUrlResolver {
@@ -622,6 +817,15 @@ export function createEntryUrlResolver(source: UrlSource, options: EntryUrlResol
 	let policy: Promise<TrailingSlash> | null = null;
 	const getPolicy = () => (policy ??= trailingPolicy(source));
 	const parents = new Map<string, Promise<Map<string, string>>>();
+	const childPages = childPagesView(source, options);
+	let nesting: Promise<ReadonlySet<string>> | null = null;
+	const nested = () => (nesting ??= childPages.collections());
+	const storedByCollection = new Map<string, Promise<StoredParents | null>>();
+	const stored = (collection: string) => {
+		let hit = storedByCollection.get(collection);
+		if (!hit) storedByCollection.set(collection, (hit = childPages.parents(collection)));
+		return hit;
+	};
 
 	/** Term parents per taxonomy, loaded once per resolver (taxonomies not seen yet in one query). */
 	async function termParents(taxonomies: string[]): Promise<Map<string, Map<string, string>>> {
@@ -641,14 +845,23 @@ export function createEntryUrlResolver(source: UrlSource, options: EntryUrlResol
 			r = (async (): Promise<CollectionRoute | null> => {
 				const override = urlOverride(collection);
 				if (override) return { pattern: override, override: true, routable: true };
+				// Child pages: a collection with a parent field nests by {pagepath} on its own.
+				const implicit = (await nested()).has(collection);
+				const withPagePath = (route: CollectionRoute): CollectionRoute => {
+					const pattern = implicit ? pagePathPattern(route.pattern, collection) : null;
+					return pattern ? { ...route, pattern, override: true, implicit: true } : route;
+				};
 				if (isD1(source)) {
 					const known = options.collections;
-					const info = known ? known.get(collection) : (await readCollections(source, [collection]).catch(() => new Map<string, CollectionInfo>())).get(collection);
-					return { pattern: info?.urlPattern ?? null, override: false, routable: true };
+					// A collection that nests by its field needs its real pattern: for a strict resolver a failed read rejects
+					// rather than answer with EmDash's default (/<collection>/…), which Slug changes would redirect the live page to.
+					const none = () => new Map<string, CollectionInfo>();
+					const info = known ? known.get(collection) : (await readCollections(source, [collection]).catch((error) => (implicit ? parentsFailed(error, options.strict, none) : none()))).get(collection);
+					return withPagePath({ pattern: info?.urlPattern ?? null, override: false, routable: true });
 				}
 				const info = await source.schema?.getCollection(collection).catch(() => null);
 				if (!info) return null;
-				return { pattern: info.urlPattern ?? null, override: false, routable: info.routable };
+				return withPagePath({ pattern: info.urlPattern ?? null, override: false, routable: info.routable });
 			})();
 			routes.set(collection, r);
 		}
@@ -705,13 +918,14 @@ export function createEntryUrlResolver(source: UrlSource, options: EntryUrlResol
 			const pathTaxonomies = patternTermPathTaxonomies(r.pattern);
 			const usesPagePath = patternUsesPagePath(r.pattern);
 			const prefilled = usable.every((e) => e.terms !== undefined);
-			const [terms, termParentsByTaxonomy] = await Promise.all([
+			const [terms, termParentsByTaxonomy, pageParents] = await Promise.all([
 				!taxonomies.length
 					? new Map<string, Record<string, string>>()
 					: prefilled
 						? new Map(usable.map((e) => [e.id, e.terms as Record<string, string>]))
 						: primaryTerms(source, collection, usable.map((e) => e.id), taxonomies),
 				pathTaxonomies.length ? termParents(pathTaxonomies) : new Map<string, Map<string, string>>(),
+				usesPagePath ? stored(collection) : null,
 			]);
 			for (const e of usable) {
 				const entryTerms = terms.get(e.id);
@@ -721,7 +935,8 @@ export function createEntryUrlResolver(source: UrlSource, options: EntryUrlResol
 					if (leaf) (termPaths ??= {})[taxonomy] = ancestorTrail(leaf, termParentsByTaxonomy.get(taxonomy));
 				}
 				const slug = e.slug as string;
-				out.set(e.id, overridePath(r.pattern, { collection, id: e.id, slug, date: dateOf(e), terms: entryTerms, termPaths, pagePath: usesPagePath ? pageTrail(slug) : null }, trailing));
+				const pagePath = usesPagePath ? pageTrailFor(slug, e.id, pageParents) : null;
+				out.set(e.id, overridePath(r.pattern, { collection, id: e.id, slug, date: dateOf(e), terms: entryTerms, termPaths, pagePath }, trailing, !r.implicit));
 			}
 			return out;
 		}
@@ -755,8 +970,8 @@ export function createEntryUrlResolver(source: UrlSource, options: EntryUrlResol
 }
 
 /** Root-relative public path of one entry, or null. */
-export async function entryUrl(source: UrlSource, collection: string, entry: EntryRef): Promise<string | null> {
-	return createEntryUrlResolver(source).url(collection, entry);
+export async function entryUrl(source: UrlSource, collection: string, entry: EntryRef, options: Pick<EntryUrlResolverOptions, "strict"> = {}): Promise<string | null> {
+	return createEntryUrlResolver(source, options).url(collection, entry);
 }
 
 /** Root-relative public paths of a list of entries (terms and dates read in batches), keyed by id. */
@@ -855,6 +1070,11 @@ export async function matchEntryPath(source: UrlSource, path: string): Promise<M
 		if (found) return found;
 	}
 
+	// Child pages: collections with a parent field nest by {pagepath} (EmDash's own resolution would miss them).
+	// (A read that fails: the last collections read, else none, and the page isn't edge-cached. See parentsFailed.)
+	const provider = storedParents;
+	const nested = provider ? await provider.collections(source).catch((error) => parentsFailed(error, false, () => provider.lastKnown?.collections() ?? NO_COLLECTIONS)) : NO_COLLECTIONS;
+
 	if (isD1(source)) {
 		let rows: Array<{ slug: string; url_pattern: string | null; routable?: number | null }> = [];
 		try {
@@ -864,10 +1084,19 @@ export async function matchEntryPath(source: UrlSource, path: string): Promise<M
 		}
 		for (const row of rows) {
 			if (config.urls.has(row.slug) || row.routable === 0) continue;
-			const found = await matchPattern(source, resolver, row.slug, row.url_pattern ?? `/${row.slug}/{slug}`, wanted);
+			const pattern = (nested.has(row.slug) ? pagePathPattern(row.url_pattern, row.slug) : null) ?? row.url_pattern ?? `/${row.slug}/{slug}`;
+			const found = await matchPattern(source, resolver, row.slug, pattern, wanted);
 			if (found) return found;
 		}
 		return null;
+	}
+
+	for (const collection of nested) {
+		if (config.urls.has(collection)) continue;
+		const info = await source.schema?.getCollection(collection).catch(() => null);
+		const pattern = info?.routable ? pagePathPattern(info.urlPattern, collection) : null;
+		const found = pattern ? await matchPattern(source, resolver, collection, pattern, wanted) : null;
+		if (found) return found;
 	}
 
 	// Context: EmDash's resolver for url_pattern collections, then the default /<collection>/<slug>.

@@ -9,7 +9,7 @@ import { test } from "node:test";
 
 import "./ts-resolve.mjs";
 
-const { packPageOn, adminManifest, EDITOR_PANELS, LIST_COLUMNS, ADMIN_ROLE } = await import("../src/admin/extensions.ts");
+const { packPageOn, adminManifest, collectionHasField, extensionShows, EDITOR_PANELS, LIST_COLUMNS, ADMIN_ROLE } = await import("../src/admin/extensions.ts");
 const { goTo } = await import("../src/admin/router.ts");
 const { summarizeEntryLinks } = await import("../src/links/store.ts");
 
@@ -39,23 +39,36 @@ test("a panel shows while its module's page is in the admin's sidebar (the manif
 });
 
 test("the panels and the column: valid for EmDash (ids, titles, finite order and role), admins only, one per module page", () => {
-	assert.deepEqual(EDITOR_PANELS.map((p) => [p.id, p.page]), [["schema", "/schema"], ["ai", "/ai"], ["links", "/links"]]);
+	assert.deepEqual(EDITOR_PANELS.map((p) => [p.id, p.page]), [["childPages", "/child-pages"], ["schema", "/schema"], ["ai", "/ai"], ["links", "/links"]]);
 	for (const panel of [...EDITOR_PANELS, ...LIST_COLUMNS]) {
 		assert.ok(panel.id.trim() && (panel.title ?? panel.label).trim(), panel.id);
 		assert.ok(Number.isFinite(panel.order) && Number.isFinite(panel.minRole), panel.id);
 		assert.equal(panel.minRole, ADMIN_ROLE, "the routes need plugins:manage");
 	}
 	assert.equal(new Set(EDITOR_PANELS.map((p) => p.id)).size, EDITOR_PANELS.length);
-	assert.deepEqual(LIST_COLUMNS.map((c) => [c.id, c.page, c.align]), [["links", "/links", "end"]]);
+	assert.deepEqual(LIST_COLUMNS.map((c) => [c.id, c.page, c.align]), [["parent", "/child-pages", "start"], ["links", "/links", "end"]]);
 	// The admin entry exports them under the names EmDash reads, with a predicate per page and the component per id.
 	const index = readFileSync(new URL("../src/admin/index.tsx", import.meta.url), "utf8");
 	assert.match(index, /export \{ contentEditorPanels, contentListColumns \} from "\.\/editor-panels\.js";/);
 	const panels = readFileSync(new URL("../src/admin/editor-panels.tsx", import.meta.url), "utf8");
-	assert.match(panels, /export const contentEditorPanels = EDITOR_PANELS\.map\(\(\{ page, \.\.\.panel \}\) => \(\{ \.\.\.panel, component: PANEL_COMPONENTS\[panel\.id\], collections: \(\) => packPageOn\(page\) \}\)\);/);
-	assert.match(panels, /export const contentListColumns = LIST_COLUMNS\.map\(\(\{ page, \.\.\.column \}\) => \(\{ \.\.\.column, cell: LinksCell, collections: \(\) => packPageOn\(page\) \}\)\);/);
-	// The column's cells share one request per page (pageLinks, keyed by collection and the page's ids).
+	assert.match(panels, /export const contentEditorPanels = EDITOR_PANELS\.map\(\(\{ page, \.\.\.panel \}\) => \(\{ \.\.\.panel, component: PANEL_COMPONENTS\[panel\.id\], collections: \(collection: string\) => extensionShows\(panel\.id, page, collection\) \}\)\);/);
+	assert.match(panels, /export const contentListColumns = LIST_COLUMNS\.map\(\(\{ page, \.\.\.column \}\) => \(\{ \.\.\.column, cell: COLUMN_CELLS\[column\.id\], collections: \(collection: string\) => extensionShows\(column\.id, page, collection\) \}\)\);/);
+	// The columns' cells share one request per page (pageLinks, pageParents: keyed by collection and the page's ids).
 	assert.match(panels, /pageLinks\(props\.collection, ids\)/);
+	assert.match(panels, /pageParents\(props\.collection, ids\)/);
 	assert.doesNotMatch(panels, /@tanstack\/react-query/, "a second React Query copy in dev has no client");
+});
+
+test("Child Pages' panel and Parent column show only in collections with the Parent page field (a reference field in the manifest)", () => {
+	const withField = (fields) => ({ ...manifest(["/child-pages", "/links"]), collections: { pages: { fields }, posts: { fields: { title: { kind: "string" } } } } });
+	const on = scope(withField({ parent_page: { kind: "reference" } }));
+	assert.equal(extensionShows("childPages", "/child-pages", "pages", on), true);
+	assert.equal(extensionShows("parent", "/child-pages", "pages", on), true);
+	assert.equal(extensionShows("childPages", "/child-pages", "posts", on), false, "no field on posts");
+	assert.equal(extensionShows("links", "/links", "posts", on), true, "the Links column needs no field");
+	assert.equal(extensionShows("childPages", "/child-pages", "pages", scope(withField({ parent_page: { kind: "string" } }))), false, "a parent_page that isn't a reference");
+	assert.equal(extensionShows("childPages", "/child-pages", "pages", scope({ ...withField({ parent_page: { kind: "reference" } }), plugins: manifest(["/links"]).plugins })), false, "Child Pages is off");
+	assert.equal(collectionHasField("pages", "parent_page", scope(undefined)), false, "no manifest yet");
 });
 
 test("the Schema panel's link opens the entry's override: the query string goes to the router as search params", () => {

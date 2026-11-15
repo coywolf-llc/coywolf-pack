@@ -3,7 +3,7 @@
  */
 import type { PluginContext } from "emdash";
 
-import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn, recordDefaults } from "./features.js";
+import { type FeatureMap, cachedCtxFeatures, freshCtxFeatures, ctxFeatures, isOn, knownFeatures, recordDefaults } from "./features.js";
 import type { PackModule, TaskDef } from "./module.js";
 import { noteReadFailure } from "./read-failures.js";
 import { requestStore } from "./request-memo.js";
@@ -56,6 +56,23 @@ export function hookCapabilities(modules: PackModule[]): string[] {
 
 /** Hooks whose results are collected from every module. */
 const COLLECTING = new Set(["page:metadata", "page:fragments"]);
+/**
+ * Content policy hooks: a module may refuse the action with `{ cancel: true, reason }`,
+ * which EmDash shows the editor. The first refusal answers; a module that fails is
+ * logged and doesn't block (the pack never refuses a publish because of its own error).
+ */
+const POLICY = new Set(["content:beforePublish", "content:beforeSchedule", "content:beforeUnpublish"]);
+
+/** EmDash's limit on a refusal's reason, in code points (plugins/content-policy.ts MAX_CONTENT_POLICY_REASON_LENGTH). */
+export const POLICY_REASON_MAX = 500;
+/**
+ * A refusal's reason within EmDash's limit: it throws on a longer one, and with errorPolicy "continue"
+ * (below) the action would then go through, so a module's long message must not undo its own refusal.
+ */
+export function policyReason(reason: string): string {
+	const chars = [...reason];
+	return chars.length > POLICY_REASON_MAX ? `${chars.slice(0, POLICY_REASON_MAX - 1).join("")}…` : reason;
+}
 
 /**
  * EmDash gives a hook 5 seconds (define-plugin.ts), then renders the page
@@ -111,7 +128,7 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 	const names = new Set<string>();
 	for (const module of modules) for (const name of Object.keys(module.hooks ?? {})) names.add(name);
 
-	const hooks: Record<string, Handler | { handler: Handler; timeout?: number; priority?: number }> = {};
+	const hooks: Record<string, Handler | { handler: Handler; timeout?: number; priority?: number; errorPolicy?: "continue" | "abort" }> = {};
 
 	for (const name of names) {
 		if (name === "cron" || name === "plugin:activate" || name === "plugin:install") continue; // Composed below.
@@ -142,8 +159,24 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 			} };
 			continue;
 		}
+		// Content writes a module says need the switches as they are now (PackModule.freshSwitches): Child Pages, for a
+		// collection whose pages can nest. A publish in an isolate that still has the old switch would otherwise skip
+		// Child Pages' hooks, or run them, the wrong way round, and Slug changes would redirect to the wrong URL.
+		const mayNeedFresh = name.startsWith("content:after") && modules.some((m) => m.freshSwitches);
 		const run: Handler = async (event, ctx) => {
-			const features = await cachedCtxFeatures(ctx);
+			const fresh = mayNeedFresh && modules.some((m) => m.freshSwitches?.(name, event ?? {}) === true);
+			// A fresh read that fails must not skip every module's hook for this save (the page cache's purge, Slug changes,
+			// search): the switches this isolate has stand in, read again if they've expired, else the last ones it read.
+			const features = fresh
+				? await freshCtxFeatures(ctx).catch(async (error: unknown) => {
+						ctx.log.warn(`${name}: the switches couldn't be read fresh; using the ones this isolate has`, { error: String(error) });
+						return cachedCtxFeatures(ctx).catch((again: unknown) => {
+							const known = knownFeatures();
+							if (!known) throw again;
+							return known;
+						});
+					})
+				: await cachedCtxFeatures(ctx);
 			if (COLLECTING.has(name)) {
 				const out: unknown[] = [];
 				for (const module of participants) {
@@ -173,6 +206,18 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 				}
 				return changed ? content : undefined;
 			}
+			if (POLICY.has(name)) {
+				for (const module of participants) {
+					if (!isOn(features, hookFeature(module, name))) continue;
+					try {
+						const decision = (await module.hooks?.[name as "content:beforePublish"]?.(event, ctx)) as { cancel?: unknown; reason?: unknown } | undefined;
+						if (decision?.cancel === true && typeof decision.reason === "string") return { cancel: true, reason: policyReason(decision.reason) };
+					} catch (error) {
+						ctx.log.error(`${module.id}: ${name} failed`, { error: String(error) });
+					}
+				}
+				return undefined;
+			}
 			for (const module of participants) {
 				if (!isOn(features, hookFeature(module, name))) continue;
 				try {
@@ -183,6 +228,22 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 			}
 			return undefined;
 		};
+		if (POLICY.has(name)) {
+			// EmDash's default for a native hook that throws or times out is to refuse the action ("abort"):
+			// the pack's own failure (a settings read, a slow D1) must not stop a publish.
+			hooks[name] = {
+				errorPolicy: "continue",
+				handler: async (event, ctx) => {
+					try {
+						return await run(event, ctx);
+					} catch (error) {
+						ctx.log.error(`${name} failed`, { error: String(error) });
+						return undefined;
+					}
+				},
+			};
+			continue;
+		}
 		hooks[name] = COLLECTING.has(name) ? noteIfLate(run) : run;
 	}
 
