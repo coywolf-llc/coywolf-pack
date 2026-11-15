@@ -9,7 +9,8 @@
  * - newly broken links (Link Manager's broken links not seen at the last check);
  * - the Cloudflare bill estimate over the threshold (the usage card's reading);
  * - a Coywolf Pack update (the update check's answer);
- * - a content audit that found more problems than the run before.
+ * - a content audit that found more problems than the run before;
+ * - Buttondown drafts that couldn't be made, updated or deleted for over an hour.
  * Everything new goes out in one email. Each issue is sent at most once a
  * day, and a lasting condition (the bill, an update) once until it clears.
  */
@@ -21,6 +22,7 @@ import { siteName as readSiteName } from "../core/site.js";
 import { DeadlineError, withDeadline } from "../core/single-flight.js";
 import { readTaskOutcome } from "../core/task-health.js";
 import { BACKUPS_TASK } from "../backups/module.js";
+import { failingRecords } from "../buttondown/store.js";
 import { CHECK_INFO } from "../audit/checks.js";
 import { getReport, worsened } from "../audit/run.js";
 import { type UrlRow, getCounts, urls } from "../links/store.js";
@@ -32,7 +34,7 @@ import { type EmailSection, MAX_RECIPIENTS, buildEmail, parseRecipients, today }
 export const SETTINGS_KEY = "alertsSettings";
 export const STATE_KEY = "alerts:state";
 
-export const ALERT_TYPES = ["backupFailed", "brokenLinks", "bill", "update", "auditWorsened"] as const;
+export const ALERT_TYPES = ["backupFailed", "brokenLinks", "bill", "update", "auditWorsened", "buttondownFailed"] as const;
 export type AlertType = (typeof ALERT_TYPES)[number];
 
 export const ALERT_INFO: Record<AlertType, { label: string; description: string; feature: string }> = {
@@ -41,6 +43,7 @@ export const ALERT_INFO: Record<AlertType, { label: string; description: string;
 	bill: { label: "Cloudflare bill estimate", description: "The 30-day bill estimate from the Cloudflare usage card is over your threshold.", feature: "" },
 	update: { label: "Coywolf Pack update", description: "A newer Coywolf Pack is on npm (from the daily update check).", feature: "updates" },
 	auditWorsened: { label: "Content audit worsened", description: "The latest content audit found more of a problem than the run before.", feature: "audit" },
+	buttondownFailed: { label: "Buttondown draft failed", description: "A Buttondown draft couldn't be created, updated or deleted for over an hour (Buttondown Drafts).", feature: "buttondown" },
 };
 
 export interface AlertsSettings {
@@ -54,7 +57,7 @@ export interface AlertsSettings {
 export const ALERTS_DEFAULTS: AlertsSettings = {
 	recipients: "admins",
 	emails: [],
-	alerts: { backupFailed: true, brokenLinks: true, bill: true, update: true, auditWorsened: true },
+	alerts: { backupFailed: true, brokenLinks: true, bill: true, update: true, auditWorsened: true, buttondownFailed: true },
 	billThreshold: 0,
 };
 
@@ -292,6 +295,26 @@ export async function gatherIssues(ctx: PluginContext, settings: AlertsSettings,
 				});
 			}
 			seen.auditSeen = report.finishedAt;
+		}
+	}
+
+	if (wants("buttondownFailed")) {
+		const failing = await failingRecords(ctx, now).catch(() => []);
+		if (failing.length) {
+			issues.push({
+				type: "buttondownFailed",
+				// One key for all of them: at most one email a day while drafts keep failing, listing the ones failing then.
+				key: "buttondown-failed",
+				section: {
+					title: failing.length === 1 ? "A Buttondown draft couldn't be created" : `${failing.length} Buttondown drafts couldn't be created`,
+					lines: [
+						...failing.slice(0, 10).map((r) => `${r.title || `${r.collection} ${r.entryId}`}: ${r.lastError?.message ?? "unknown error"}`),
+						...(failing.length > 10 ? [`and ${failing.length - 10} more`] : []),
+					],
+					page: "/buttondown",
+					pageLabel: "Open Buttondown Drafts",
+				},
+			});
 		}
 	}
 	return issues;

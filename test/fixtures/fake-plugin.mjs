@@ -48,6 +48,12 @@ export function fakeCollection() {
 			bump(id);
 			return { applied: true, revision: revisions.get(id) };
 		},
+		async compareAndDelete(id, expected) {
+			if (!rows.has(id) || revisions.get(id) !== expected) return { applied: false };
+			rows.delete(id);
+			revisions.delete(id);
+			return { applied: true };
+		},
 		async getMany(ids) {
 			check(ids.length + 2);
 			return new Map(ids.filter((id) => rows.has(id)).map((id) => [id, structuredClone(rows.get(id))]));

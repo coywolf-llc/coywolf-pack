@@ -66,6 +66,8 @@ export interface CoywolfOptions {
 	audit?: Record<string, never> | false;
 	/** Alerts & Digest (no options; settings are on its page). `false` leaves the module out. */
 	alerts?: Record<string, never> | false;
+	/** Buttondown Drafts: the site database's binding (default "DB"). `false` leaves the module out. */
+	buttondown?: import("./buttondown/pack.js").ButtondownOptions | false;
 	/** Social Images: the media bucket's binding (default "MEDIA"). `false` leaves the module out. */
 	socialImages?: import("./social/pack.js").SocialImagesOptions | false;
 	/**

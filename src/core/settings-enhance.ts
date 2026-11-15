@@ -5,8 +5,8 @@
  * as plain text and can't hide a field, so the pack middleware adds this small
  * script to admin pages. On that page it:
  *
- * - swaps the description of the four fields people fill in (the Cloudflare
- *   API token, the AI, Fathom and Google keys) for a short line plus the
+ * - swaps the description of the five fields people fill in (the Cloudflare
+ *   API token, the AI, Fathom, Google and Buttondown keys) for a short line plus the
  *   guides in closed <details> (the same ones the module pages show);
  * - hides the older tokens the Cloudflare API token replaces while they're
  *   empty, and puts the saved ones behind a closed "Older tokens (N)" toggle;

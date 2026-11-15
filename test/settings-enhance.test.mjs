@@ -9,10 +9,13 @@ const { settingsEnhanceScript, settingsGuideHtml, settingsPageData, injectAdminE
 const { SECRET_SETTINGS, OLDER_SECRET_KEYS } = await import("../src/core/secrets.ts");
 const { tokenFormUrl, CLOUDFLARE_TOKEN_FORM } = await import("../src/core/guide-content.ts");
 
-test("four fields get guides: the Cloudflare API token, the AI key, Fathom and Google", () => {
+test("five fields get guides: the Cloudflare API token, the AI key, Fathom, Google and Buttondown", () => {
 	const html = settingsGuideHtml();
-	const { cloudflareApiToken, aiApiKey, insightsFathomApiKey, insightsGoogleServiceAccount } = SECRET_SETTINGS;
-	assert.deepEqual(Object.keys(html).sort(), [cloudflareApiToken.label, aiApiKey.label, insightsFathomApiKey.label, insightsGoogleServiceAccount.label].sort());
+	const { cloudflareApiToken, aiApiKey, insightsFathomApiKey, insightsGoogleServiceAccount, buttondownApiKey } = SECRET_SETTINGS;
+	assert.deepEqual(Object.keys(html).sort(), [cloudflareApiToken.label, aiApiKey.label, insightsFathomApiKey.label, insightsGoogleServiceAccount.label, buttondownApiKey.label].sort());
+	// Buttondown's guide asks for the least-privilege key: Emails and drafts → Write, everything else None.
+	assert.match(html[buttondownApiKey.label], /Emails and drafts<\/strong>: Write/);
+	assert.match(html[buttondownApiKey.label], /Sending<\/strong> included\): None/);
 	assert.equal((html[aiApiKey.label].match(/<details/g) ?? []).length, 3);
 	// The token's guide is the one pre-filled form, with the zone policy advice.
 	const token = html[cloudflareApiToken.label];
@@ -25,7 +28,7 @@ test("the script carries the older and hidden fields by their labels, and the ol
 	const data = settingsPageData();
 	assert.deepEqual(data.older, OLDER_SECRET_KEYS.map((key) => SECRET_SETTINGS[key].label));
 	assert.deepEqual(data.hidden, [SECRET_SETTINGS.videosWebhookSecret.label]);
-	// None of the four fields people fill in is hidden or tucked away.
+	// None of the five fields people fill in is hidden or tucked away.
 	for (const label of Object.keys(data.guides)) assert.ok(!data.older.includes(label) && !data.hidden.includes(label), label);
 	const script = settingsEnhanceScript();
 	for (const label of [...data.older, ...data.hidden]) assert.ok(script.includes(JSON.stringify(label)), `the script names ${label}`);

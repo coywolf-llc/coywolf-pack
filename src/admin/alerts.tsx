@@ -16,7 +16,7 @@ import { useSaveResult, useToast } from "./toast.js";
 
 const post = apiPost(`${PACK_API}/alerts`, { body: {} });
 
-type AlertType = "backupFailed" | "brokenLinks" | "bill" | "update" | "auditWorsened";
+type AlertType = "backupFailed" | "brokenLinks" | "bill" | "update" | "auditWorsened" | "buttondownFailed";
 
 interface Settings {
 	recipients: "admins" | "list";
@@ -53,6 +53,7 @@ const FEATURE_NAMES: Record<string, { label: string; page: string }> = {
 	"links.check": { label: "Scheduled link checking", page: "/links" },
 	updates: { label: "Update check", page: "/features" },
 	audit: { label: "Content Audit", page: "/features" },
+	buttondown: { label: "Buttondown Drafts", page: "/features" },
 };
 
 const C = (props: { children: React.ReactNode }) => <code className="rounded bg-kumo-tint px-1 py-0.5 text-xs">{props.children}</code>;
