@@ -16,6 +16,7 @@
 import type { PluginContext, RedirectAccessWithWrite } from "emdash";
 
 import { COLLECTION_SLUG, entryUrl, hostDefaultLocale, readCollections } from "../core/content-url.js";
+import { configuredSiteOrigin } from "../core/site.js";
 import { REDIRECTS_TAG, purgePageCache } from "../pageCache/lib.js";
 import { workerEnv } from "../shared.js";
 import { noteRedirectsChanged } from "./middleware.js";
@@ -152,10 +153,45 @@ export interface MoveShadow {
 
 type KnownRule = PlanRule & { enabled?: number | null };
 
-/** Rules followed from the new URL when looking for a way back to the old one. */
-const LOOP_HOPS = 5;
-/** A rule's target as a path key (how sources are stored), or null when it leaves the site. */
-const targetKey = (target: string) => (target.startsWith("/") && !target.startsWith("//") ? sourceKey(target.split(/[?#]/)[0] as string) : null);
+/** Rules followed from the new URL when looking for a way back to the old one (in memory, or one small read each). */
+export const LOOP_HOPS = 10;
+
+const bareHost = (host: string) => host.toLowerCase().replace(/^www\./, "");
+
+/**
+ * The site's own host names without `www.` (coywolf.com), for telling a rule whose target is a full URL on
+ * this site (`https://coywolf.com/apps/coywolf-seo/`) from one that leaves it (`https://media.coywolf.com/…`):
+ * the configured address (src/core/site.ts) and the one EmDash gives the plugin.
+ */
+export async function siteHosts(ctx: Pick<PluginContext, "site">): Promise<Set<string>> {
+	const hosts = new Set<string>();
+	const add = (value: unknown) => {
+		try {
+			if (typeof value === "string" && value.trim()) hosts.add(bareHost(new URL(value.trim()).hostname));
+		} catch {
+			// Not a URL: no host.
+		}
+	};
+	add(ctx.site?.url);
+	add(await workerEnv().then((env) => configuredSiteOrigin(env)).catch(() => null));
+	return hosts;
+}
+
+/**
+ * A rule's target as a path key (how sources are stored), or null when it leaves the site. A full URL (or
+ * `//host/path`) whose host is one of the site's own (`own`, bare; its `www.` twin counts) is its path.
+ */
+export function targetKey(target: string, own: ReadonlySet<string> = new Set()): string | null {
+	const path = (value: string) => sourceKey(value.split(/[?#]/)[0] as string);
+	if (target.startsWith("/") && !target.startsWith("//")) return path(target);
+	if (!own.size || !/^(https?:)?\/\//i.test(target)) return null;
+	try {
+		const url = new URL(target.startsWith("//") ? `https:${target}` : target);
+		return own.has(bareHost(url.hostname)) ? path(url.pathname) : null;
+	} catch {
+		return null;
+	}
+}
 
 /**
  * The rule that would make `from` → `to` a loop: an enabled exact rule at `to` that Slug changes didn't
@@ -164,9 +200,12 @@ const targetKey = (target: string) => (target.startsWith("/") && !target.startsW
  * `/coywolf-seo/` must not get `/apps/coywolf-seo` → `/coywolf-seo/` while that rule exists. (Our own rule
  * at `to` isn't one: planSlugChange deletes it.) `known` are rules already read, every rule at `to` among
  * them (both callers that pass it have read the rules for the move's two URLs): with it, a move with no
- * rule at `to` costs no query. Rules further along a chain are read here. Null when the 301 is safe to write.
+ * rule at `to` costs no query. Rules further along a chain are read here. `own` gives the site's own hosts
+ * (siteHosts), asked for only when a rule's target is a full URL. Null when the 301 is safe to write.
+ *
+ * Not seen: pattern (regex) rules, and a way back that takes more than LOOP_HOPS rules.
  */
-export async function loopingRule(d1: D1Database, from: string, to: string, known?: Iterable<KnownRule>): Promise<RuleRef | null> {
+export async function loopingRule(d1: D1Database, from: string, to: string, known?: Iterable<KnownRule>, own?: () => Promise<ReadonlySet<string>>): Promise<RuleRef | null> {
 	const goal = sourceKey(from);
 	const loaded = [...(known ?? [])];
 	const at = async (key: string): Promise<KnownRule[]> => {
@@ -179,6 +218,13 @@ export async function loopingRule(d1: D1Database, from: string, to: string, know
 			.all<KnownRule>();
 		return results;
 	};
+	let hosts: ReadonlySet<string> | undefined;
+	const keyOf = async (target: string) => {
+		if (target.startsWith("/") && !target.startsWith("//")) return targetKey(target);
+		if (!own) return null;
+		hosts ??= await own().catch(() => new Set<string>());
+		return targetKey(target, hosts);
+	};
 	const start = sourceKey(to);
 	const atStart = known ? loaded.filter((r) => sourceKey(r.source) === start) : await at(start);
 	const first = atStart.find((r) => !isOurs(r) && r.enabled !== 0);
@@ -186,7 +232,7 @@ export async function loopingRule(d1: D1Database, from: string, to: string, know
 	const seen = new Set([start]);
 	let rule: KnownRule | undefined = first;
 	for (let hop = 0; rule && hop < LOOP_HOPS; hop++) {
-		const next = targetKey(rule.target);
+		const next = await keyOf(rule.target);
 		if (!next) return null;
 		if (next === goal) return { source: first.source, target: first.target };
 		if (seen.has(next)) return null;
@@ -194,6 +240,12 @@ export async function loopingRule(d1: D1Database, from: string, to: string, know
 		rule = (await at(next)).find((r) => r.enabled !== 0);
 	}
 	return null;
+}
+
+/** siteHosts, read at most once however many rules ask. */
+export function memoHosts(ctx: Pick<PluginContext, "site">): () => Promise<ReadonlySet<string>> {
+	let hosts: Promise<Set<string>> | undefined;
+	return () => (hosts ??= siteHosts(ctx));
 }
 
 /** Moves read for related rules per query (each brings up to ~14 bound values; D1 allows 100). */
@@ -246,12 +298,13 @@ export async function applyUrlMoves(ctx: PluginContext, d1: D1Database, moves: U
 	let kept = 0;
 	const shadowed: MoveShadow[] = [];
 	const loops: MoveLoop[] = [];
+	const own = memoHosts(ctx);
 	for (const move of real) {
 		const keys = relatedKeys([move.from, move.to]);
 		const related = [...rules.values()].filter((r) => keys.sources.includes(r.source) || keys.targets.includes(r.target));
 		const inTheWay = related.find((r) => !isOurs(r) && r.enabled !== 0 && sourceKey(r.source) === sourceKey(move.to));
 		if (inTheWay) {
-			const loop = await loopingRule(d1, move.from, move.to, rules.values());
+			const loop = await loopingRule(d1, move.from, move.to, rules.values(), own);
 			if (loop) {
 				loops.push({ ...move, rule: loop });
 				continue;
@@ -347,7 +400,7 @@ export function slugChangesModule(options: { database?: string }) {
 		// A rule someone else made sends the new URL back to the old one (a page that returns to a URL that was
 		// redirected by hand): ours would make a loop. Left unwritten, and said; Child Pages lists it when the page
 		// is one of its collections' (src/childPages/pack.ts), and adds the 301 once that rule is deleted.
-		const loop = await loopingRule(d1, from, to, rules);
+		const loop = await loopingRule(d1, from, to, rules, memoHosts(ctx));
 		if (loop) {
 			ctx.log.warn("Slug change: no redirect added, because another redirect sends the new URL back to the old one (a loop). Delete that redirect on the Redirect Manager page", {
 				collection,

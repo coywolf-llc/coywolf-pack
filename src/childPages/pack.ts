@@ -30,7 +30,7 @@ import { MAX_PURGE_OPERATIONS } from "../core/generation.js";
 import { type PurgeScope, purgePageCache } from "../pageCache/lib.js";
 import { ensureTable, sourceKey, storedForms } from "../redirects/rules.js";
 import { SLUG_NOTE_PREFIX } from "../redirects/slug-core.js";
-import { type MoveLoop, type MoveShadow, type RuleRef, SLUG_CHANGES_FEATURE, type UrlMove, applyUrlMoves, loopingRule } from "../redirects/slug-changes.js";
+import { type MoveLoop, type MoveShadow, type RuleRef, SLUG_CHANGES_FEATURE, type UrlMove, applyUrlMoves, loopingRule, memoHosts } from "../redirects/slug-changes.js";
 import { parseInput } from "../shared.js";
 import { CHILD_PAGES_FEATURE, type CollectionMeta, type CollectionTree, VERSION_SETTING, childPagesProvider, collectionTree, couldNest, databaseFor, invalidatePageTrees, readChildPagesState, readMeta, readTree } from "./read.js";
 import { DIGIT_SLUG, PARENT_FIELD, type PageNode, type PageTreeData, ancestorsOf, childrenOf, loopWith, storedParentsOf, warningsFor } from "./tree.js";
@@ -49,6 +49,15 @@ registerFeatures(FEATURES);
 
 /** Most redirects written for one change (a page that moved, a parent that went away, the switch); the rest wait for the next change or Re-check. */
 export const MAX_MOVES = 200;
+/**
+ * Moves that would loop with a rule someone else made get no redirect, so they don't count toward MAX_MOVES:
+ * the moves after them are taken in their place, for up to this many rounds a change (each reads its moves'
+ * rules), so loops at the front of the order never keep the rest waiting.
+ */
+export const MAX_MOVE_ROUNDS = 4;
+const REASON_ON = "Child Pages turned on";
+const REASON_OFF = "Child Pages turned off";
+const REASON_RECHECK = "Redirects re-checked";
 /** Changes kept for the Child Pages page (newest first). */
 export const MAX_CHANGES = 10;
 /** URLs kept in one list of a status (the counts are always whole). */
@@ -120,9 +129,20 @@ export interface OpenIssues {
 	shadowed: MoveShadow[];
 }
 
+/** A save of the switch whose redirects couldn't all be worked out: Re-check redirects makes them. */
+export interface Unsettled {
+	at: string;
+	/** What the switch was turned to. */
+	on: boolean;
+	error: string;
+	/** The collections still to settle; none listed: every collection with the field (they couldn't be read). */
+	collections?: string[];
+}
+
 export interface StoredStatus {
 	changes: ChangeStatus[];
 	open: Record<string, OpenIssues>;
+	unsettled?: Unsettled;
 }
 
 const NO_PARENTS: StoredParents = { parentOf: new Map(), idOf: new Map() };
@@ -182,7 +202,24 @@ const redirectsOn = (features: FeatureMap) => isOn(features, "redirects") && isO
 
 export async function readStatus(ctx: PluginContext): Promise<StoredStatus> {
 	const stored = await ctx.kv.get<Partial<StoredStatus>>(STATUS_KEY).catch(() => null);
-	return { changes: Array.isArray(stored?.changes) ? stored.changes : [], open: stored?.open && typeof stored.open === "object" ? stored.open : {} };
+	return {
+		changes: Array.isArray(stored?.changes) ? stored.changes : [],
+		open: stored?.open && typeof stored.open === "object" ? stored.open : {},
+		...(stored?.unsettled && typeof stored.unsettled === "object" ? { unsettled: stored.unsettled } : {}),
+	};
+}
+
+/** Keep (or with null, clear) the switch save that's still to settle. Never fails its caller. */
+async function setUnsettled(ctx: PluginContext, unsettled: Unsettled | null): Promise<void> {
+	try {
+		const status = await readStatus(ctx);
+		if (!unsettled && !status.unsettled) return;
+		if (unsettled) status.unsettled = unsettled;
+		else delete status.unsettled;
+		await ctx.kv.set(STATUS_KEY, status);
+	} catch (error) {
+		ctx.log.warn("Child pages: could not keep the switch's unfinished redirects for the Features page", { error: String(error) });
+	}
 }
 
 /**
@@ -272,15 +309,27 @@ const ref = (move: UrlMove): MoveRef => ({ entryId: move.entryId, title: move.ti
 const byFrom = (a: UrlMove, b: UrlMove) => (a.from < b.from ? -1 : a.from > b.from ? 1 : a.entryId < b.entryId ? -1 : a.entryId > b.entryId ? 1 : 0);
 
 /**
- * Redirect the pages that moved (the first MAX_MOVES, in a fixed order), purge their cached pages, and
- * say what happened. `purge: false` when the caller's request clears every page anyway (a save of the switches).
+ * Redirect the pages that moved (the first MAX_MOVES that don't loop with a rule someone else made, in a
+ * fixed order), purge their cached pages, and say what happened. `purge: false` when the caller's request
+ * clears every page anyway (a save of the switches).
  */
 async function applyMoves(ctx: PluginContext, db: D1Database, features: FeatureMap, collection: string, moves: UrlMove[], reason: string, options: { purge?: boolean } = {}): Promise<Applied> {
 	const ordered = [...moves].sort(byFrom);
-	const now = ordered.slice(0, MAX_MOVES);
-	const later = ordered.slice(MAX_MOVES);
 	const off = !redirectsOn(features);
-	const result = off || !now.length ? { written: 0, shadowed: [] as MoveShadow[], loops: [] as MoveLoop[] } : await applyUrlMoves(ctx, db, now);
+	const result = { written: 0, shadowed: [] as MoveShadow[], loops: [] as MoveLoop[] };
+	let later = ordered;
+	if (!off) {
+		// A loop writes nothing, so the next move takes its place (MAX_MOVE_ROUNDS): loops sorted first can't stall the rest.
+		for (let round = 0, room = MAX_MOVES; round < MAX_MOVE_ROUNDS && later.length && room > 0; round++) {
+			const now = later.slice(0, room);
+			later = later.slice(now.length);
+			const applied = await applyUrlMoves(ctx, db, now);
+			result.written += applied.written;
+			result.shadowed.push(...applied.shadowed);
+			result.loops.push(...applied.loops);
+			room -= now.length - applied.loops.length;
+		}
+	}
 	// With the redirects off nothing waits: the snapshot moves on, as it always has.
 	const waiting = off ? [] : later.map(ref);
 	const loops: LoopRef[] = result.loops.map((l) => ({ ...ref(l), rule: l.rule }));
@@ -288,7 +337,7 @@ async function applyMoves(ctx: PluginContext, db: D1Database, features: FeatureM
 	if (ordered.length && options.purge !== false) {
 		for (const scope of movedPagesPurges(ordered)) await purgePageCache(scope);
 	}
-	if (later.length && !off) ctx.log.warn("Child pages: too many pages moved at once; the rest get their redirects with the next change, or Re-check redirects on the Child Pages page", { collection, moved: moves.length, max: MAX_MOVES });
+	if (waiting.length) ctx.log.warn("Child pages: too many pages moved at once; the rest get their redirects with the next change, or Re-check redirects on the Child Pages page", { collection, moved: moves.length, max: MAX_MOVES });
 	const change: ChangeStatus = {
 		at: new Date().toISOString(),
 		collection,
@@ -305,14 +354,35 @@ async function applyMoves(ctx: PluginContext, db: D1Database, features: FeatureM
 	return { change, unapplied, waiting, loops, shadowed: result.shadowed };
 }
 
-/** The collection's open issues after a settle: what still waits, loops, and the shadowed URLs (these and earlier ones) that are still shadowed. */
-const openAfter = (db: D1Database, applied: Applied, exceptLoop: LoopRef | null) => async (earlier: OpenIssues | undefined): Promise<OpenIssues | null> => {
-	const candidates = [...applied.shadowed, ...(earlier?.shadowed ?? []).filter((e) => !applied.shadowed.some((s) => sameShadow(s, e)))];
+/** The URLs (as path keys) the collection's tracked pages are at now. */
+function liveUrls(tree: PageTreeData, urls: ReadonlyMap<string, string | null>): Set<string> {
+	const live = new Set<string>();
+	for (const node of tree.nodes.values()) {
+		const url = tracked(tree, node) ? urls.get(node.id) : null;
+		if (url) live.add(sourceKey(url));
+	}
+	return live;
+}
+
+/**
+ * The collection's open issues after a settle: what still waits, loops, and the shadowed URLs (these and
+ * earlier ones) that are still shadowed. An earlier one drops out once no page is at its URL (`live`: the
+ * page moved again, or was unpublished) or the rule in its way is gone.
+ */
+const openAfter = (db: D1Database, applied: Applied, exceptLoop: LoopRef | null, live: ReadonlySet<string>) => async (earlier: OpenIssues | undefined): Promise<OpenIssues | null> => {
+	const candidates = [...applied.shadowed, ...(earlier?.shadowed ?? []).filter((e) => live.has(sourceKey(e.url)) && !applied.shadowed.some((s) => sameShadow(s, e)))];
 	const shadowed = applied.change.redirectsOff ? [] : await stillShadowed(db, candidates).catch(() => candidates);
 	const loops = exceptLoop ? [exceptLoop, ...applied.loops] : applied.loops;
 	if (!applied.waiting.length && !loops.length && !shadowed.length) return null;
 	return { at: applied.change.at, reason: applied.change.reason, waiting: applied.waiting.slice(0, LISTED), waitingCount: applied.waiting.length, loops: loops.slice(0, LISTED), shadowed: shadowed.slice(0, LISTED) };
 };
+
+/**
+ * Whether a change goes in the history. A Re-check that added no redirect isn't kept (clicking it again and
+ * again would push the real changes out); the open issues are still worked out again.
+ */
+const notable = (change: ChangeStatus, recheck: boolean | undefined) =>
+	recheck ? change.written > 0 || (change.redirectsOff && change.moved > 0) : change.moved > 0 || Boolean(change.noSnapshot) || Boolean(change.loops?.length);
 
 /**
  * After a change to a collection's published pages: compare every page's URL with the
@@ -326,7 +396,7 @@ const openAfter = (db: D1Database, applied: Applied, exceptLoop: LoopRef | null)
  *   pages already have parents the change says so (`noSnapshot`), since pages it moved got no redirect.
  * - A snapshot that can't be read rejects: the settle is left to the next change (the snapshot is unchanged).
  */
-export async function settleCollection(ctx: PluginContext, db: D1Database, features: FeatureMap, collection: string, except: string | null, reason: string): Promise<void> {
+export async function settleCollection(ctx: PluginContext, db: D1Database, features: FeatureMap, collection: string, except: string | null, reason: string, options: { recheck?: boolean } = {}): Promise<void> {
 	invalidatePageTrees();
 	const meta = (await readMeta(db)).find((m) => m.collection === collection);
 	if (!meta?.field) return;
@@ -353,7 +423,7 @@ export async function settleCollection(ctx: PluginContext, db: D1Database, featu
 			}
 			// The entry that changed is Slug changes' to redirect. It won't when that would loop with a rule someone
 			// else made (src/redirects/slug-changes.ts loopingRule): listed here, and made once that rule is gone.
-			const rule = redirectsOn(features) ? await ensureTable(db).then(() => loopingRule(db, was, now)) : null;
+			const rule = redirectsOn(features) ? await ensureTable(db).then(() => loopingRule(db, was, now, undefined, memoHosts(ctx))) : null;
 			if (rule) {
 				exceptLoop = { ...ref(move), rule };
 				keep.set(node.id, was);
@@ -369,54 +439,117 @@ export async function settleCollection(ctx: PluginContext, db: D1Database, featu
 	await ctx.kv.set(snapshotKey(collection), snapshotOf(current, base, keep));
 	const change: ChangeStatus = { ...applied.change, ...(noSnapshot ? { noSnapshot: true } : {}), ...(exceptLoop ? { loops: [exceptLoop, ...(applied.change.loops ?? [])].slice(0, LISTED) } : {}) };
 	// Only changes that did or left something are kept: an ordinary publish that moved nothing doesn't push them out.
-	const notable = change.moved > 0 || noSnapshot || Boolean(change.loops?.length);
-	await recordChange(ctx, collection, notable ? change : null, openAfter(db, applied, exceptLoop));
+	await recordChange(ctx, collection, notable(change, options.recheck) ? change : null, openAfter(db, applied, exceptLoop, liveUrls(tree, current.urls)));
 }
 
 /**
- * The switch was turned on or off: redirect every published page whose URL changes
- * (nested → flat when off, flat → nested when on), and start the snapshot afresh. Moves
- * that got no redirect stay in it (when off: only those), for Re-check to make.
+ * One collection after the switch was turned on or off: redirect every published page whose URL changes
+ * (nested → flat when off, flat → nested when on), and start the snapshot afresh. Moves that got no
+ * redirect stay in it (when off: only those), for Re-check to make. Worked out from the page tree, not the
+ * snapshot, so it can run again (Re-check, after a save that failed part-way): the rules it already made stay.
+ */
+async function switchCollection(ctx: PluginContext, db: D1Database, features: FeatureMap, collection: string, on: boolean, reason: string, options: { purge?: boolean; recheck?: boolean } = {}): Promise<void> {
+	const [withParents, without] = await Promise.all([collectionTree(db, collection, { on: true }), collectionTree(db, collection, { on: false })]);
+	if (!withParents || !without) return;
+	const { tree } = withParents;
+	const moves: UrlMove[] = [];
+	for (const node of tree.nodes.values()) {
+		if (!tracked(tree, node)) continue;
+		const nested = withParents.urls.get(node.id);
+		const flat = without.urls.get(node.id);
+		if (!nested || !flat || comparablePath(nested) === comparablePath(flat)) continue;
+		moves.push({ collection, entryId: node.id, title: titleOf(node), from: on ? flat : nested, to: on ? nested : flat });
+	}
+	const applied = await applyMoves(ctx, db, features, collection, moves, reason, { purge: options.purge });
+	const keep = new Map([...applied.unapplied].map(([id, move]) => [id, move.from]));
+	if (on) {
+		const base = await baseUrls(db, await readChildPagesState(db), collection, tree);
+		await ctx.kv.set(snapshotKey(collection), snapshotOf(withParents, base, keep));
+	} else if (keep.size) await ctx.kv.set(snapshotKey(collection), { paths: Object.fromEntries(keep), at: new Date().toISOString(), off: true } satisfies Snapshot);
+	else await ctx.kv.delete(snapshotKey(collection));
+	await recordChange(ctx, collection, !options.recheck || notable(applied.change, true) ? applied.change : null, openAfter(db, applied, null, liveUrls(tree, on ? withParents.urls : without.urls)));
+}
+
+/** A save of the switch that couldn't settle every collection. `failures` name them (null: none could be read). */
+export class SwitchUnsettled extends Error {
+	readonly failures: Array<{ collection: string | null; error: unknown }>;
+	constructor(failures: Array<{ collection: string | null; error: unknown }>) {
+		super(String((failures[0]?.error as { message?: unknown } | null)?.message ?? failures[0]?.error));
+		this.name = "SwitchUnsettled";
+		this.failures = failures;
+	}
+}
+
+/**
+ * The switch was turned on or off: settle every collection with the field (switchCollection). One that
+ * fails doesn't stop the others; the failures are thrown together (SwitchUnsettled) once the rest is done.
  */
 export async function settleSwitch(ctx: PluginContext, db: D1Database, features: FeatureMap, on: boolean): Promise<void> {
 	invalidatePageTrees();
-	const nesting = (await readMeta(db)).filter((m) => m.field);
-	for (const meta of nesting) {
-		const [withParents, without] = await Promise.all([collectionTree(db, meta.collection, { on: true }), collectionTree(db, meta.collection, { on: false })]);
-		if (!withParents || !without) continue;
-		const { tree } = withParents;
-		const moves: UrlMove[] = [];
-		for (const node of tree.nodes.values()) {
-			if (!tracked(tree, node)) continue;
-			const nested = withParents.urls.get(node.id);
-			const flat = without.urls.get(node.id);
-			if (!nested || !flat || comparablePath(nested) === comparablePath(flat)) continue;
-			moves.push({ collection: meta.collection, entryId: node.id, title: titleOf(node), from: on ? flat : nested, to: on ? nested : flat });
-		}
-		// The save of the switches clears every cached page itself (and again once every isolate has them).
-		const applied = await applyMoves(ctx, db, features, meta.collection, moves, on ? "Child Pages turned on" : "Child Pages turned off", { purge: false });
-		const keep = new Map([...applied.unapplied].map(([id, move]) => [id, move.from]));
-		if (on) {
-			const base = await baseUrls(db, await readChildPagesState(db), meta.collection, tree);
-			await ctx.kv.set(snapshotKey(meta.collection), snapshotOf(withParents, base, keep));
-		} else if (keep.size) await ctx.kv.set(snapshotKey(meta.collection), { paths: Object.fromEntries(keep), at: new Date().toISOString(), off: true } satisfies Snapshot);
-		else await ctx.kv.delete(snapshotKey(meta.collection)).catch(() => false);
-		await recordChange(ctx, meta.collection, applied.change, openAfter(db, applied, null));
+	const failures: SwitchUnsettled["failures"] = [];
+	let nesting: CollectionMeta[] = [];
+	try {
+		nesting = (await readMeta(db)).filter((m) => m.field);
+	} catch (error) {
+		failures.push({ collection: null, error });
 	}
-	await bumpVersion(ctx);
+	for (const meta of nesting) {
+		try {
+			// The save of the switches clears every cached page itself (and again once every isolate has them).
+			await switchCollection(ctx, db, features, meta.collection, on, on ? REASON_ON : REASON_OFF, { purge: false });
+		} catch (error) {
+			failures.push({ collection: meta.collection, error });
+		}
+	}
+	try {
+		await bumpVersion(ctx);
+	} catch (error) {
+		if (!failures.length) failures.push({ collection: null, error });
+	}
+	if (failures.length) throw new SwitchUnsettled(failures);
+}
+
+/**
+ * settleSwitch for a save of the switches (featuresChanged). When it fails, the feature is still on or off
+ * as saved, so what's missing must be findable: each failure goes in the history, and the save is kept as
+ * unsettled, which the Features page shows while the switch is off (offNotice) and Re-check redirects
+ * finishes (recheckCollection). Never rejects.
+ */
+export async function switchChanged(ctx: PluginContext, db: D1Database, features: FeatureMap, on: boolean): Promise<void> {
+	const reason = on ? REASON_ON : REASON_OFF;
+	try {
+		await settleSwitch(ctx, db, features, on);
+		await setUnsettled(ctx, null);
+	} catch (error) {
+		const failures = error instanceof SwitchUnsettled ? error.failures : [{ collection: null, error }];
+		ctx.log.error("Child pages: the switch was saved, but its redirects couldn't all be worked out; Re-check redirects makes them", { on, failures: failures.map((f) => ({ collection: f.collection, error: String(f.error) })) });
+		for (const failure of failures) await recordFailure(ctx, failure.collection ?? ALL_COLLECTIONS, reason, failure.error);
+		const all = failures.some((f) => f.collection === null);
+		await setUnsettled(ctx, { at: new Date().toISOString(), on, error: failureText(failures[0]?.error), ...(all ? {} : { collections: failures.map((f) => f.collection as string) }) });
+	}
 }
 
 /**
  * Re-check a collection's redirects (the Child Pages page, and the Features page while the switch is off):
- * with the switch on, a settle with no entry left out, which makes the redirects that still wait and starts
- * tracking from the current URLs when there was no snapshot; with it off, the redirects left over from
- * turning it off (nested → flat).
+ * - with the switch on, a settle with no entry left out, which makes the redirects that still wait and
+ *   starts tracking from the current URLs when there was no snapshot;
+ * - with it off, the redirects left over from turning it off (nested → flat);
+ * - when the save of the switch didn't finish for this collection (`unsettled`, or with the switch off a
+ *   snapshot from while it was on), the switch's own settle again.
  */
-export async function recheckCollection(ctx: PluginContext, db: D1Database, features: FeatureMap, collection: string): Promise<void> {
-	const reason = "Redirects re-checked";
-	if (isOn(features, CHILD_PAGES_FEATURE)) return settleCollection(ctx, db, features, collection, null, reason);
+export async function recheckCollection(ctx: PluginContext, db: D1Database, features: FeatureMap, collection: string, options: { unsettled?: boolean } = {}): Promise<void> {
+	const reason = REASON_RECHECK;
+	if (isOn(features, CHILD_PAGES_FEATURE)) {
+		if (options.unsettled) {
+			invalidatePageTrees();
+			return switchCollection(ctx, db, features, collection, true, reason, { recheck: true });
+		}
+		return settleCollection(ctx, db, features, collection, null, reason, { recheck: true });
+	}
 	invalidatePageTrees();
 	const left = await ctx.kv.get<Snapshot>(snapshotKey(collection));
+	// Turning the switch off replaces the snapshot or deletes it: one from while it was on means that didn't finish.
+	if (options.unsettled || (left?.paths && !left.off)) return switchCollection(ctx, db, features, collection, false, reason, { recheck: true });
 	if (!left?.off) return;
 	const without = await collectionTree(db, collection, { on: false });
 	if (!without) return;
@@ -430,33 +563,53 @@ export async function recheckCollection(ctx: PluginContext, db: D1Database, feat
 	const keep = new Map([...applied.unapplied].map(([id, move]) => [id, move.from]));
 	if (keep.size) await ctx.kv.set(snapshotKey(collection), { paths: Object.fromEntries(keep), at: new Date().toISOString(), off: true } satisfies Snapshot);
 	else await ctx.kv.delete(snapshotKey(collection)).catch(() => false);
-	await recordChange(ctx, collection, applied.change, openAfter(db, applied, null));
+	await recordChange(ctx, collection, notable(applied.change, true) ? applied.change : null, openAfter(db, applied, null, liveUrls(without.tree, without.urls)));
 }
 
 /** How a rule reads in a message: its source and target. */
 export const ruleText = (rule: RuleRef) => `${rule.source} → ${rule.target}`;
 
 /**
- * What turning the switch off left without a redirect, for the Features page: loops (with the rule to
- * delete) and moves over MAX_MOVES, with Re-check redirects to make them. Null when nothing is left.
+ * What turning the switch off left undone, for the Features page (the Child Pages page is out of the sidebar
+ * then), with Re-check redirects to finish it. Null when nothing is left.
+ * - A save that failed part-way (`unsettled`): some nested URLs have no redirect yet.
+ * - Loops (with the rule to delete) and moves over MAX_MOVES: no redirect yet.
+ * - Shadowed pages (with the rule in the way): redirected, but the page can't be reached at its new URL.
  */
 export function offNotice(status: StoredStatus): FeatureNotice | null {
 	const open = Object.values(status.open);
 	const loops = open.flatMap((o) => o.loops);
 	const waiting = open.reduce((n, o) => n + o.waitingCount, 0);
-	if (!loops.length && !waiting) return null;
+	const shadowed = open.flatMap((o) => o.shadowed);
+	const failed = status.unsettled && !status.unsettled.on ? status.unsettled : null;
+	if (!loops.length && !waiting && !shadowed.length && !failed) return null;
+	const count = (n: number) => n.toLocaleString("en-US");
+	const text: string[] = [];
+	if (failed) text.push(`Turning Child Pages off didn't finish (${failed.error}), so nested URLs may have no redirect to the page's new URL. Click Re-check redirects to add them.`);
+	if (loops.length || waiting) {
+		text.push(
+			`Turning Child Pages off left ${count(loops.length + waiting)} nested ${loops.length + waiting === 1 ? "URL" : "URLs"} without a redirect to the page's new URL. ${loops.length ? "Delete the redirects listed, then click" : "Click"} Re-check redirects to add ${waiting > MAX_MOVES ? `the next ${MAX_MOVES}` : "them"}.`,
+		);
+	}
+	if (shadowed.length) {
+		text.push(
+			`Another redirect sends ${shadowed.length === 1 ? "1 page's new URL" : `${count(shadowed.length)} pages' new URLs`} elsewhere, so ${shadowed.length === 1 ? "that page" : "those pages"} can't be reached there. Delete or change the ${shadowed.length === 1 ? "redirect" : "redirects"} listed, then click Re-check redirects.`,
+		);
+	}
 	const items = loops.map((l) => `Delete the redirect ${ruleText(l.rule)} on the Redirect Manager page: it sends ${l.to} back to ${l.from}, so a redirect from ${l.from} would loop, and “${l.title}” can't be reached at ${l.to}.`);
-	if (waiting) items.push(`${waiting.toLocaleString("en-US")} more ${waiting === 1 ? "page is" : "pages are"} over the limit of ${MAX_MOVES} redirects a change.`);
-	return {
-		text: `Turning Child Pages off left ${(loops.length + waiting).toLocaleString("en-US")} nested ${loops.length + waiting === 1 ? "URL" : "URLs"} without a redirect to the page's new URL. ${loops.length ? "Delete the redirects listed, then click" : "Click"} Re-check redirects to add ${waiting > MAX_MOVES ? `the next ${MAX_MOVES}` : "them"}.`,
-		items,
-		action: { label: "Re-check redirects", route: "childPages/recheck" },
-	};
+	for (const s of shadowed) items.push(`Delete or change the redirect ${ruleText(s.rule)} on the Redirect Manager page: a page is at ${s.url} now, and that redirect sends its visitors elsewhere.`);
+	if (waiting) items.push(`${count(waiting)} more ${waiting === 1 ? "page is" : "pages are"} over the limit of ${MAX_MOVES} redirects a change.`);
+	return { text: text.join(" "), items, action: { label: "Re-check redirects", route: "childPages/recheck" } };
 }
+
+/** Stands for every collection in a change that couldn't read which collections nest. */
+export const ALL_COLLECTIONS = "";
+
+const failureText = (error: unknown) => String((error as { message?: unknown } | null)?.message ?? error).slice(0, 300);
 
 /** A settle that failed: said on the Child Pages page (its redirects are made by the next change, or Re-check). */
 async function recordFailure(ctx: PluginContext, collection: string, reason: string, error: unknown): Promise<void> {
-	const change: ChangeStatus = { at: new Date().toISOString(), collection, reason, moved: 0, written: 0, skipped: 0, redirectsOff: false, failed: String((error as { message?: unknown } | null)?.message ?? error).slice(0, 300) };
+	const change: ChangeStatus = { at: new Date().toISOString(), collection, reason, moved: 0, written: 0, skipped: 0, redirectsOff: false, failed: failureText(error) };
 	await recordChange(ctx, collection, change, async (earlier) => earlier ?? null);
 }
 
@@ -596,13 +749,15 @@ export async function importPlan(db: D1Database, ct: CollectionTree): Promise<Im
 			continue;
 		}
 		Object.assign(row, { entryId: node.id, title: titleOf(node), url: ct.urls.get(node.id) ?? null });
-		if (!parent) {
-			rows.push({ ...row, action: "keep", reason: "parentNotPage" });
+		if (parent) Object.assign(row, { parentId: parent.id, parentTitle: titleOf(parent) });
+		// A page whose field is set is the editor's now, whatever the option says (its parent there may not even be a page).
+		if (node.hasParent) {
+			const same = Boolean(parent) && node.parentId === parent?.id;
+			rows.push({ ...row, action: same ? "done" : "skip", ...(same ? {} : { reason: "otherParent" }) });
 			continue;
 		}
-		Object.assign(row, { parentId: parent.id, parentTitle: titleOf(parent) });
-		if (node.hasParent) {
-			rows.push({ ...row, action: node.parentId === parent.id ? "done" : "skip", ...(node.parentId === parent.id ? {} : { reason: "otherParent" }) });
+		if (!parent) {
+			rows.push({ ...row, action: "keep", reason: "parentNotPage" });
 			continue;
 		}
 		// The import sets the parent and publishes the page: a draft or a scheduled page would go live.
@@ -638,7 +793,7 @@ export async function importPlan(db: D1Database, ct: CollectionTree): Promise<Im
 /** The recent changes and each collection's open issues, as the Child Pages page lists them. */
 async function statusFor(ctx: PluginContext, meta: CollectionMeta[]): Promise<{ changes: Array<ChangeStatus & { label: string }>; open: Array<OpenIssues & { collection: string; label: string }> }> {
 	const status = await readStatus(ctx);
-	const label = (collection: string) => meta.find((m) => m.collection === collection)?.label ?? collection;
+	const label = (collection: string) => (collection === ALL_COLLECTIONS ? "Every collection" : (meta.find((m) => m.collection === collection)?.label ?? collection));
 	return {
 		changes: status.changes.map((c) => ({ ...c, label: label(c.collection) })),
 		open: Object.entries(status.open).map(([collection, open]) => ({ ...open, collection, label: label(collection) })),
@@ -788,15 +943,26 @@ function childPagesRoutes() {
 					const features = await ctxFeatures(ctx);
 					invalidatePageTrees();
 					const meta = await readMeta(db);
+					const nesting = meta.filter((c) => c.field);
+					// A save of the switch that didn't finish (switchChanged), if it was a save to what the switch is now: its collections get the switch's settle again.
+					const { unsettled } = await readStatus(ctx);
+					const retry = unsettled && unsettled.on === isOn(features, CHILD_PAGES_FEATURE) ? new Set(unsettled.collections ?? nesting.map((c) => c.collection)) : new Set<string>();
+					let bumped = true;
+					if (unsettled) bumped = await bumpVersion(ctx).then(() => true, () => false);
 					const failed: string[] = [];
-					for (const m of meta.filter((c) => c.field)) {
+					for (const m of nesting) {
 						try {
-							await recheckCollection(ctx, db, features, m.collection);
+							await recheckCollection(ctx, db, features, m.collection, { unsettled: retry.has(m.collection) });
+							retry.delete(m.collection);
 						} catch (error) {
 							ctx.log.error("Child pages: Re-check redirects failed", { collection: m.collection, error: String(error) });
-							await recordFailure(ctx, m.collection, "Redirects re-checked", error);
+							await recordFailure(ctx, m.collection, REASON_RECHECK, error);
 							failed.push(m.label);
 						}
+					}
+					if (unsettled) {
+						const left = nesting.filter((c) => retry.has(c.collection)).map((c) => c.collection);
+						await setUnsettled(ctx, left.length || !bumped ? { ...unsettled, collections: left } : null);
 					}
 					if (failed.length) throw new PluginRouteError("RECHECK_FAILED", `Couldn't re-check ${failed.join(", ")}. Try again in a moment.`, 500);
 					return statusFor(ctx, meta);
@@ -883,9 +1049,10 @@ export function childPagesPack(): PackModule {
 			const db = await databaseFor();
 			if (!db) {
 				ctx.log.error("Child pages: the site's D1 database (DB) isn't available, so the switch made no redirects");
+				await setUnsettled(ctx, { at: new Date().toISOString(), on: now, error: "The site's D1 database (DB) wasn't available" });
 				return;
 			}
-			await settleSwitch(ctx, db, after, now);
+			await switchChanged(ctx, db, after, now);
 		},
 		// A save in a collection whose pages can nest runs on the switch as it is now, in whichever isolate handles it: for
 		// up to five minutes after a toggle another isolate still has the old one, and would settle (or Slug changes would

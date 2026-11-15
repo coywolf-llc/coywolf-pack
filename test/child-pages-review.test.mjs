@@ -1103,3 +1103,301 @@ test("a publish in an isolate that still has the old switch settles the right wa
 		s.close();
 	}
 });
+
+// ── The final verification's findings ──
+
+const { MAX_MOVE_ROUNDS } = pack;
+const { LOOP_HOPS, targetKey } = await import("../src/redirects/slug-changes.ts");
+
+test("a save of the switch whose settle fails is listed, shows on the Features page with Re-check, and Re-check writes the nested → flat 301s", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	let failing = false;
+	const s = site(SITE, { modules: ["childPages"], d1: { fail: (q) => failing && TREE_READ.test(q) } });
+	const mod = s.modules[0];
+	const OFF = { ...ON, childPages: false };
+	const storeOff = () => {
+		s.d1.raw.prepare("UPDATE options SET value = ? WHERE name = ?").run(JSON.stringify({ ...SWITCHES, childPages: false }), FEATURES_ROW);
+		s.ctx.state.settings.set("features", { ...SWITCHES, childPages: false });
+		invalidateFeatures();
+	};
+	try {
+		await s.call("content:afterPublish", s.event("x"));
+		assert.equal(snapshot(s.ctx).paths.p, "/apps/coywolf-pack/", "tracking while on");
+		// The switch is saved off, and one D1 read fails while its redirects are worked out.
+		storeOff();
+		failing = true;
+		await mod.featuresChanged(s.ctx, ON, OFF); // Never rejects: the save itself went through.
+		failing = false;
+		assert.deepEqual(rules(s.d1), []);
+		const failed = status(s.ctx).changes[0];
+		assert.deepEqual([failed.collection, failed.reason], ["pages", "Child Pages turned off"]);
+		assert.match(failed.failed, /transient/);
+		assert.deepEqual([status(s.ctx).unsettled.on, status(s.ctx).unsettled.collections], [false, ["pages"]]);
+		assert.ok(s.ctx.state.logs.some(([level, message]) => level === "error" && /redirects couldn't all be worked out/.test(message)));
+		assert.notEqual(s.ctx.state.settings.get("childPagesVersion"), undefined, "the URLs changed whatever happened to the redirects");
+		// The Features page says so, with the button.
+		const notice = await mod.featureNotice(s.ctx, OFF);
+		assert.match(notice.text, /^Turning Child Pages off didn't finish \(.*transient.*\), so nested URLs may have no redirect/);
+		assert.deepEqual(notice.action, { label: "Re-check redirects", route: "childPages/recheck" });
+		assert.equal(await mod.featureNotice(s.ctx, ON), null);
+
+		// Re-check fails too: still listed.
+		const recheck = mod.routes["childPages/recheck"];
+		failing = true;
+		await assert.rejects(recheck.handler({ ...s.ctx, input: undefined }), /Couldn't re-check Pages/);
+		failing = false;
+		assert.deepEqual(status(s.ctx).unsettled.collections, ["pages"]);
+		assert.notEqual(await mod.featureNotice(s.ctx, OFF), null);
+
+		// Re-check works: the 301s the switch should have made, and nothing left to say.
+		const answer = await recheck.handler({ ...s.ctx, input: undefined });
+		assert.deepEqual(rules(s.d1), [
+			["/apps/coywolf-pack", "/coywolf-pack/"],
+			["/apps/coywolf-pack/docs", "/docs/"],
+		]);
+		assert.deepEqual([answer.changes[0].reason, answer.changes[0].written], ["Redirects re-checked", 2]);
+		assert.equal(status(s.ctx).unsettled, undefined);
+		assert.equal(snapshot(s.ctx), undefined);
+		assert.equal(await mod.featureNotice(s.ctx, OFF), null);
+		// And again: nothing more to do, and nothing new in the history.
+		const before = status(s.ctx).changes.length;
+		await recheck.handler({ ...s.ctx, input: undefined });
+		assert.equal(status(s.ctx).changes.length, before);
+	} finally {
+		s.close();
+	}
+});
+
+test("a failed save of the switch with no record of it: an off-state Re-check still finds the snapshot from while it was on", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(SITE);
+	const ctx = fakeCtx({ childPages: false, redirects: true, "redirects.slugChanges": true });
+	const OFF = { ...ON, childPages: false };
+	try {
+		await settleCollection(ctx, d1, ON, "pages", null, "x");
+		ctx.state.kv.delete("state:childPages:status");
+		await recheckCollection(ctx, d1, OFF, "pages");
+		assert.deepEqual(rules(d1), [
+			["/apps/coywolf-pack", "/coywolf-pack/"],
+			["/apps/coywolf-pack/docs", "/docs/"],
+		]);
+		assert.equal(snapshot(ctx), undefined);
+		// With no snapshot and nothing unsettled, an off-state Re-check reads no tree.
+		const before = d1.counts.roundTrips;
+		await recheckCollection(ctx, d1, OFF, "pages");
+		assert.equal(d1.counts.roundTrips, before);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("a save turning the switch on that fails: Re-check on the Child Pages page makes the flat → nested 301s", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	let failing = false;
+	const s = site(SITE, { modules: ["childPages"], d1: { fail: (q) => failing && TREE_READ.test(q) } });
+	const mod = s.modules[0];
+	try {
+		failing = true;
+		await mod.featuresChanged(s.ctx, { ...ON, childPages: false }, ON);
+		failing = false;
+		assert.deepEqual(rules(s.d1), []);
+		assert.equal(status(s.ctx).unsettled.on, true);
+		assert.equal(await mod.featureNotice(s.ctx, ON), null, "on: the Child Pages page lists the failed change");
+		await mod.routes["childPages/recheck"].handler({ ...s.ctx, input: undefined });
+		assert.deepEqual(rules(s.d1), [
+			["/coywolf-pack", "/apps/coywolf-pack/"],
+			["/docs", "/apps/coywolf-pack/docs/"],
+		]);
+		assert.equal(status(s.ctx).unsettled, undefined);
+		assert.equal(snapshot(s.ctx).paths.d, "/apps/coywolf-pack/docs/");
+	} finally {
+		s.close();
+	}
+});
+
+test("a hand-made rule whose target is a full URL on the site's own host is a loop too (www or not); another host isn't", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(`${SEO}\n${page("m", "media-kit")}\n${parent("m", "a")}`);
+	const ctx = { ...fakeCtx({ childPages: false, redirects: true, "redirects.slugChanges": true }), site: { url: "https://coywolf.com" } };
+	const OFF = { ...ON, childPages: false };
+	try {
+		const own = new Set(["coywolf.com"]);
+		assert.deepEqual(
+			["/apps/x/?a=1", "https://coywolf.com/apps/x/", "https://www.coywolf.com/apps/x#top", "//coywolf.com/apps/x/", "http://COYWOLF.com/apps/x/", "https://media.coywolf.com/apps/x/", "https://example.com/apps/x/", "mailto:jon@coywolf.com"].map((t) => targetKey(t, own)),
+			["/apps/x", "/apps/x", "/apps/x", "/apps/x", "/apps/x", null, null, null],
+		);
+		assert.equal(targetKey("https://coywolf.com/apps/x/"), null, "without the site's hosts a full URL leaves the site");
+		await ensureTable(d1);
+		await byHand(d1, "/coywolf-seo", "https://coywolf.com/apps/coywolf-seo/");
+		await byHand(d1, "/coywolf-pack", "https://www.coywolf.com/apps/coywolf-pack/");
+		await byHand(d1, "/media-kit", "https://media.coywolf.com/apps/media-kit/");
+		await settleSwitch(ctx, d1, OFF, false);
+		assert.deepEqual(rules(d1), [
+			["/apps/media-kit", "/media-kit/"],
+			["/coywolf-pack", "https://www.coywolf.com/apps/coywolf-pack/"],
+			["/coywolf-seo", "https://coywolf.com/apps/coywolf-seo/"],
+			["/media-kit", "https://media.coywolf.com/apps/media-kit/"],
+		], "no /apps/coywolf-seo → /coywolf-seo/ and no /apps/coywolf-pack → /coywolf-pack/");
+		const open = status(ctx).open.pages;
+		assert.deepEqual(open.loops.map((l) => [l.entryId, l.rule.target]), [["p", "https://www.coywolf.com/apps/coywolf-pack/"], ["s", "https://coywolf.com/apps/coywolf-seo/"]]);
+		assert.deepEqual(open.shadowed.map((x) => x.url), ["/media-kit/"], "another host: the redirect is written, and the page is listed as unreachable");
+		// Slug changes asks the same way (a page that goes back to the URL the rule redirects).
+		assert.deepEqual(await loopingRule(d1, "/apps/coywolf-seo/", "/coywolf-seo/", undefined, async () => own), { source: "/coywolf-seo", target: "https://coywolf.com/apps/coywolf-seo/" });
+		assert.equal(await loopingRule(d1, "/apps/coywolf-seo/", "/coywolf-seo/"), null, "not asked for the site's hosts: as before");
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test(`loopingRule follows a way back of up to ${LOOP_HOPS} rules`, async () => {
+	const d1 = fakeD1();
+	await ensureTable(d1);
+	const chain = async (name, hops) => {
+		// /name → /name-1 → … → /apps/name, in `hops` rules.
+		for (let i = 0; i < hops; i++) await byHand(d1, i ? `/${name}-${i}` : `/${name}`, i === hops - 1 ? `/apps/${name}/` : `/${name}-${i + 1}/`);
+		return loopingRule(d1, `/apps/${name}/`, `/${name}/`);
+	};
+	assert.deepEqual(await chain("six", 6), { source: "/six", target: "/six-1/" });
+	assert.deepEqual(await chain("ten", LOOP_HOPS), { source: "/ten", target: "/ten-1/" });
+	assert.equal(await chain("eleven", LOOP_HOPS + 1), null, "past the limit: not seen (docs/child-pages.md)");
+});
+
+test("a failed fresh read of the switches doesn't skip the hooks of a page's save: every module runs on the switches this isolate has", async () => {
+	const { cachedCtxFeatures } = await import("../src/core/features.ts");
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const s = site(SITE, { modules: [] });
+	const ran = [];
+	const watcher = (id, feature) => ({
+		id,
+		label: id,
+		features: [{ id: feature, label: id, description: "", default: true }],
+		hooks: {
+			"content:afterSave": async (event) => void ran.push(`${id}:afterSave:${event.collection}`),
+			"content:afterPublish": async (event) => void ran.push(`${id}:afterPublish:${event.collection}`),
+		},
+	});
+	// Child Pages (which asks for the fresh read), then two modules that only watch: one on, one off.
+	const { hooks } = composeHooks([pack.childPagesPack(), watcher("purge", "redirects"), watcher("offModule", "redirects.trashPrompt")], { tasks: [] });
+	const call = (name, event) => (typeof hooks[name] === "function" ? hooks[name] : hooks[name].handler)(event, s.ctx);
+	const post = { collection: "posts", content: { id: "q", slug: "hello", status: "published", locale: "en", data: { title: "Hello" } } };
+	const get = s.ctx.settings.get;
+	try {
+		await cachedCtxFeatures(s.ctx); // This isolate has the switches.
+		s.ctx.settings.get = async () => { throw new Error("D1 down"); };
+		for (const name of ["content:afterSave", "content:afterPublish"]) {
+			await call(name, s.event("x"));
+			await call(name, post);
+		}
+		assert.deepEqual(ran, ["purge:afterSave:pages", "purge:afterSave:posts", "purge:afterPublish:pages", "purge:afterPublish:posts"], "pages and posts alike, and only the module that's on");
+		assert.ok(s.ctx.state.logs.some(([level, message]) => level === "warn" && /switches couldn't be read fresh/.test(message)));
+		assert.notEqual(s.ctx.state.settings.get("childPagesVersion"), undefined, "Child Pages' own hook ran too (the cached switch is on)");
+		// The cache has expired as well: the switches this isolate last read still stand in.
+		invalidateFeatures();
+		ran.length = 0;
+		await call("content:afterPublish", s.event("x"));
+		assert.deepEqual(ran, ["purge:afterPublish:pages"]);
+	} finally {
+		s.ctx.settings.get = get;
+		s.close();
+	}
+});
+
+test("the Features page's notice lists shadowed pages; a shadowed URL no page is at anymore drops out", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(SEO);
+	const ctx = fakeCtx({ childPages: false, redirects: true, "redirects.slugChanges": true });
+	const OFF = { ...ON, childPages: false };
+	try {
+		await ensureTable(d1);
+		await byHand(d1, "/coywolf-seo", "/old-seo-page/");
+		await settleSwitch(ctx, d1, OFF, false);
+		assert.deepEqual(status(ctx).open.pages.shadowed, [{ url: "/coywolf-seo/", rule: { source: "/coywolf-seo", target: "/old-seo-page/" } }]);
+		const notice = offNotice(await readStatus(ctx));
+		assert.match(notice.text, /^Another redirect sends 1 page's new URL elsewhere, so that page can't be reached there\./);
+		assert.deepEqual(notice.items, ["Delete or change the redirect /coywolf-seo → /old-seo-page/ on the Redirect Manager page: a page is at /coywolf-seo/ now, and that redirect sends its visitors elsewhere."]);
+		assert.deepEqual(notice.action, { label: "Re-check redirects", route: "childPages/recheck" });
+		// Still there after a Re-check, while the rule and the page are.
+		await settleSwitch(ctx, d1, ON, true);
+		await recheckCollection(ctx, d1, ON, "pages");
+		assert.equal(status(ctx).open.pages, undefined, "on again: the page is at /apps/coywolf-seo/, so nothing is at /coywolf-seo/ for the rule to shadow");
+
+		// A page that's unpublished after its URL was shadowed.
+		await settleSwitch(ctx, d1, OFF, false);
+		assert.equal(status(ctx).open.pages.shadowed.length, 1);
+		await settleSwitch(ctx, d1, ON, true);
+		ctx.state.kv.set("state:childPages:status", { changes: [], open: { pages: { at: "", reason: "", waiting: [], waitingCount: 0, loops: [], shadowed: [{ url: "/coywolf-seo/", rule: { source: "/coywolf-seo", target: "/old-seo-page/" } }] } } });
+		await settleCollection(ctx, d1, ON, "pages", "p", "A page was published");
+		assert.equal(status(ctx).open.pages, undefined, "stale: no tracked page is at /coywolf-seo/");
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("the import's dry run: a page whose Parent page is already set is skipped as otherParent even when the option's parent isn't a page", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" }, pageParents: { "coywolf-pack": "plugins", docs: "coywolf-pack", about: "plugins", apps: "coywolf-pack" } });
+	const d1 = fakeD1(SITE);
+	try {
+		const ct = await read.collectionTree(d1, "pages", { on: true });
+		const rows = Object.fromEntries((await importPlan(d1, ct)).map((r) => [r.slug, [r.action, r.reason, r.parentId]]));
+		assert.deepEqual(rows, {
+			"coywolf-pack": ["skip", "otherParent", undefined], // The field says Apps; "plugins" isn't a page.
+			docs: ["done", undefined, "p"],
+			about: ["keep", "parentNotPage", undefined], // No field value: it stays in the option.
+			apps: ["skip", "loop", "p"],
+		});
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test(`loops at the front of the order don't use up the ${MAX_MOVES}: the moves after them get their redirects in the same change`, async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const loops = MAX_MOVES + 5;
+	const pad = (i) => String(i).padStart(3, "0");
+	const looping = Array.from({ length: loops }, (_, i) => `${page(`l${pad(i)}`, `aa-${pad(i)}`)}\n${parent(`l${pad(i)}`, "a")}`).join("\n");
+	const fine = Array.from({ length: 10 }, (_, i) => `${page(`z${i}`, `zz-${i}`)}\n${parent(`z${i}`, "a")}`).join("\n");
+	const d1 = fakeD1(`${page("a", "apps")}\n${looping}\n${fine}`);
+	const ctx = fakeCtx({ childPages: false, redirects: true, "redirects.slugChanges": true });
+	const OFF = { ...ON, childPages: false };
+	try {
+		await ensureTable(d1);
+		// Every aa- page has a hand-made rule from its flat URL to its nested one (a WordPress move's).
+		d1.raw.exec(Array.from({ length: loops }, (_, i) => `INSERT INTO coywolf_redirects (id, source, target, type, is_regex, enabled, note, created_at, updated_at) VALUES ('h${i}', '/aa-${pad(i)}', '/apps/aa-${pad(i)}/', 301, 0, 1, 'WordPress move', '', '');`).join("\n"));
+		await settleSwitch(ctx, d1, OFF, false);
+		const ours = rules(d1).filter(([source]) => source.startsWith("/apps/"));
+		assert.deepEqual(ours.map(([source]) => source), Array.from({ length: 10 }, (_, i) => `/apps/zz-${i}`), "all ten, though 205 loops sort before them");
+		const change = status(ctx).changes[0];
+		assert.deepEqual([change.moved, change.written, change.skipped, status(ctx).open.pages.waitingCount], [loops + 10, 10, 0, 0]);
+		assert.equal(Object.keys(snapshot(ctx).paths).length, loops, "every loop's old URL waits for its rule to go");
+		assert.ok(MAX_MOVE_ROUNDS >= 2);
+
+		// Re-check with the rules still there writes nothing new, and isn't kept in the history.
+		const history = status(ctx).changes.length;
+		await recheckCollection(ctx, d1, OFF, "pages");
+		await recheckCollection(ctx, d1, OFF, "pages");
+		assert.equal(status(ctx).changes.length, history);
+		assert.equal(status(ctx).open.pages.loops.length, 50, "the open issues are still worked out (the first 50 listed)");
+		// One rule is deleted: that Re-check added a redirect, so it's kept.
+		d1.raw.exec("DELETE FROM coywolf_redirects WHERE id = 'h0'");
+		await recheckCollection(ctx, d1, OFF, "pages");
+		assert.deepEqual([status(ctx).changes.length, status(ctx).changes[0].reason, status(ctx).changes[0].written], [history + 1, "Redirects re-checked", 1]);
+	} finally {
+		configureContentUrls({});
+	}
+});
+
+test("a Re-check with the switch on that adds nothing isn't kept in the history either; one made with the redirects off is (its pages lost their 301s)", async () => {
+	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
+	const d1 = fakeD1(SITE);
+	const ctx = fakeCtx();
+	try {
+		await settleCollection(ctx, d1, ON, "pages", null, "x");
+		for (let i = 0; i < 3; i++) await recheckCollection(ctx, d1, ON, "pages");
+		assert.deepEqual(status(ctx).changes, []);
+		d1.raw.exec("UPDATE ec_pages SET slug = 'tools' WHERE id = 'a'");
+		await recheckCollection(ctx, d1, { ...ON, redirects: false }, "pages");
+		assert.deepEqual([status(ctx).changes.length, status(ctx).changes[0].moved, status(ctx).changes[0].redirectsOff], [1, 2, true]);
+	} finally {
+		configureContentUrls({});
+	}
+});
