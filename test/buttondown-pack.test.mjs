@@ -212,7 +212,9 @@ test("Alerts: buttondownFailed lists records in error for over an hour, when But
 	assert.equal((await alerts.checkAlerts(off, NOW + 2 * 86_400_000)).issues, 0);
 });
 
-test("the sidebar lists the page", async () => {
+test("the sidebar and the README list the page", async () => {
 	const { SIDEBAR_FOLDERS } = await import("../src/core/sidebar.ts");
 	assert.deepEqual(SIDEBAR_FOLDERS[0].pages.slice(5, 7), ["/alerts", "/buttondown"]);
+	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+	assert.match(readme, /^\| \[Buttondown Drafts\]\(docs\/buttondown\.md\) \|/m);
 });
