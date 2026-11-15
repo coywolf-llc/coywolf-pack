@@ -933,7 +933,7 @@ async function inRequest(store, run) {
 	}
 }
 
-test("resolvePagePath: a draft or scheduled page answers null at its nested and its flat path (no page, no redirect), unless the route says it's a preview", async () => {
+test("resolvePagePath: a draft or scheduled page answers null at its nested and its flat path (no page, no redirect), unless it's the page this request previews", async () => {
 	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
 	const d1 = fakeD1([page("a", "apps"), page("s", "secret-launch", "draft"), page("q", "soon", "scheduled"), page("p", "coywolf-pack"), parent("s", "a"), parent("q", "a"), parent("p", "a")].join("\n"));
 	try {
@@ -943,9 +943,30 @@ test("resolvePagePath: a draft or scheduled page answers null at its nested and 
 			assert.equal(theme.resolvePagePath(tree, ["apps", slug]), null);
 			assert.equal(theme.resolvePagePath(tree, ["apps", slug], { preview: false }), null);
 		}
-		// A preview route: the draft at its path, and EmDash's flat preview link redirected there with its token.
-		assert.equal(theme.resolvePagePath(tree, ["apps", "secret-launch"], { preview: true }).page.id, "s");
-		assert.equal(theme.resolvePagePath(tree, ["secret-launch"], { search: "?_preview=tok", preview: true }).redirect, "/apps/secret-launch/?_preview=tok");
+		// A preview route: the previewed draft at its path, and EmDash's flat preview link redirected there with its token.
+		const token = { collection: "pages", id: "s" };
+		assert.equal(theme.resolvePagePath(tree, ["apps", "secret-launch"], { preview: token }).page.id, "s");
+		assert.equal(theme.resolvePagePath(tree, ["secret-launch"], { search: "?_preview=tok", preview: token }).redirect, "/apps/secret-launch/?_preview=tok");
+		assert.equal(theme.resolvePagePath(tree, ["secret-launch"], { preview: { collection: "pages", id: "secret-launch" } }).page.id, "s", "EmDash takes a token made for the slug too");
+		// The same token on another draft: null at both paths, so the 301 doesn't say where that draft will live.
+		assert.equal(theme.resolvePagePath(tree, ["soon"], { search: "?_preview=tok", preview: token }), null);
+		assert.equal(theme.resolvePagePath(tree, ["apps", "soon"], { preview: token }), null);
+		assert.equal(theme.resolvePagePath(tree, ["secret-launch"], { preview: { collection: "posts", id: "s" } }), null, "a token for another collection's entry with that id");
+		// No token: null, whatever the route passes.
+		for (const preview of [undefined, null, false, true]) {
+			assert.equal(theme.resolvePagePath(tree, ["secret-launch"], { search: "?_preview=made-up", preview }), null);
+			assert.equal(theme.resolvePagePath(tree, ["apps", "secret-launch"], { preview }), null);
+		}
+		// `preview: true` (what `preview: isPreviewRequest()` passes) reads the previewed entry from the request: still only that entry.
+		await inRequest({ preview: token }, async () => {
+			assert.deepEqual(theme.previewedEntry(), token);
+			assert.equal(theme.resolvePagePath(tree, ["apps", "secret-launch"], { preview: theme.isPreviewRequest() }).page.id, "s");
+			assert.equal(theme.resolvePagePath(tree, ["secret-launch"], { search: "?_preview=tok", preview: true }).redirect, "/apps/secret-launch/?_preview=tok");
+			assert.equal(theme.resolvePagePath(tree, ["secret-launch"], { search: "?_preview=tok", preview: theme.previewedEntry() }).redirect, "/apps/secret-launch/?_preview=tok");
+			assert.equal(theme.resolvePagePath(tree, ["soon"], { search: "?_preview=tok", preview: true }), null);
+			assert.equal(theme.resolvePagePath(tree, ["apps", "soon"], { preview: theme.previewedEntry() }), null);
+			assert.equal(theme.resolvePagePath(tree, ["apps", "secret-launch"], { preview: false }), null, "a route that doesn't serve previews");
+		});
 		// Published pages as before.
 		assert.equal(theme.resolvePagePath(tree, ["apps", "coywolf-pack"]).page.id, "p");
 		assert.equal(theme.resolvePagePath(tree, ["coywolf-pack"]).redirect, "/apps/coywolf-pack/");
@@ -963,6 +984,9 @@ test("resolvePagePath: a draft or scheduled page answers null at its nested and 
 });
 
 test("get(): a published page wins over an unpublished one with the same slug, whatever their locales", async () => {
+		assert.equal(theme.previewedEntry(), null);
+		assert.equal(await inRequest({}, async () => theme.previewedEntry()), null);
+		assert.equal(await inRequest({ preview: { collection: "pages" } }, async () => theme.previewedEntry()), null, "not the shape EmDash sets");
 	configureContentUrls({ urls: { pages: "/{pagepath}/" } });
 	const d1 = fakeD1([page("x-en", "about", "draft", "About (draft)", "en", "X"), page("x-fr", "about", "published", "À propos", "fr", "X")].join("\n"));
 	try {

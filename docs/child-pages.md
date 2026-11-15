@@ -55,17 +55,19 @@ Plugins can't add fields themselves, so **Set up** asks EmDash's schema API to a
 
 ## Your theme
 
-EmDash's own routing doesn't know about parents, so the theme's catch-all route has to look pages up by their whole path. The pack gives it four helpers from `@coywolf/emdash/astro`:
+EmDash's own routing doesn't know about parents, so the theme's catch-all route has to look pages up by their whole path. The pack gives it five helpers from `@coywolf/emdash/astro`:
 
 - `loadPageTree(db?, { collection? })`: every page of a collection ("pages" unless you say otherwise) with its URL, read once per request. `db` is the D1 binding or its name (default `DB`).
 - `resolvePagePath(tree, segments, { search, preview })`: the page a path names. Its answers:
   - `{ page, path }` when the path is the page's URL;
   - `{ redirect, page }` when it's the flat, one-segment form of a nested page (`/coywolf-pack/` → `/apps/coywolf-pack/`, with the query string kept);
   - `null` for anything else.
-- `isPreviewRequest()`: true when EmDash accepted this request's `_preview` token.
+- `previewedEntry()`: the entry EmDash accepted this request's `_preview` token for, as `{ collection, id }`, or `null`. `isPreviewRequest()` is true when there is one.
 - `nestMenuUrls(menu, tree)`: EmDash's menus with nested page URLs.
 
-**Drafts stay hidden.** `resolvePagePath` only answers for published pages. A draft or scheduled page gets `null` at its nested path and at its flat one, so neither a page nor a redirect tells a visitor that it exists or where it will be. A route that serves EmDash's previews passes `preview: isPreviewRequest()`: then the draft's path resolves, and EmDash's flat preview link redirects to it with its token. `getEmDashEntry` still decides whether the draft's content is shown. Don't pass `preview: true` because the URL has a `_preview` parameter: anyone can add one.
+**Drafts stay hidden.** `resolvePagePath` only answers for published pages. A draft or scheduled page gets `null` at its nested path and at its flat one, so neither a page nor a redirect tells a visitor that it exists or where it will be. A route that serves EmDash's previews passes `preview: previewedEntry()`: then the path of the one draft the token was issued for resolves, and EmDash's flat preview link redirects to it with its token. Every other draft still gets `null`, so a preview link for one page doesn't show where another draft will live. `getEmDashEntry` still decides whether the draft's content is shown.
+
+`preview` also takes `true` or `false`. `true` reads the previewed entry from the request, so `preview: isPreviewRequest()` hides other drafts too, and a `_preview` parameter that EmDash didn't accept opens nothing either way.
 
 The tree has what a page template needs:
 
@@ -86,7 +88,7 @@ coywolf.com's `src/pages/[...path].astro` serves pages, posts and category archi
 
 ```astro
 ---
-import { isPreviewRequest, loadPageTree, resolvePagePath } from "@coywolf/emdash/astro";
+import { loadPageTree, previewedEntry, resolvePagePath } from "@coywolf/emdash/astro";
 // …
 // Started with the route's other reads and not waited for yet, so it travels with them. Only for a URL that
 // could be a page or a post: the home page, search and their numbered pages never load it.
@@ -99,7 +101,7 @@ const index = await getCategoryIndex();
 } else if (!paged) {
 	// Not a category archive: the page this path names, or the nested URL of a flat one (EmDash's View and preview links).
 	const tree = await treeRead;
-	const pageMatch = tree ? resolvePagePath(tree, segments, { search: Astro.url.search, preview: isPreviewRequest() }) : null;
+	const pageMatch = tree ? resolvePagePath(tree, segments, { search: Astro.url.search, preview: previewedEntry() }) : null;
 	if (tree && pageMatch) {
 		// The page's own id and its parents': a new slug or parent, or a parent's publish, clears the page and this redirect.
 		const tags = [pageMatch.page.id, ...tree.cacheTags(pageMatch.page.slug)];
@@ -121,7 +123,7 @@ const index = await getCategoryIndex();
 - **The tree is loaded only when a page lookup is needed.** A category archive answers before the tree is waited for, and the home page and search never start it. A post's URL does load it (pages win over posts, so the route has to know the path isn't a page's), alongside the post's own lookup rather than before it.
 - **The page's entry is read only for a path that is a page's.** The old route read `getEmDashEntry("pages", slug)` for every one-segment URL.
 - **The redirect keeps the query string**, so EmDash's preview links (`/coywolf-pack/?_preview=…`) still open the preview.
-- **A draft stays a 404** at both of its paths unless EmDash accepted the request's preview token.
+- **A draft stays a 404** at both of its paths unless EmDash accepted the request's preview token and the token is for that page.
 - `entry.id` is the page's slug in EmDash's query results, which is what the tree's methods take.
 
 ### coywolf.com's page template

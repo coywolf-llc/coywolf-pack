@@ -9,9 +9,9 @@
  *
  * ```astro
  * ---
- * import { isPreviewRequest, loadPageTree, resolvePagePath } from "@coywolf/emdash/astro";
+ * import { loadPageTree, previewedEntry, resolvePagePath } from "@coywolf/emdash/astro";
  * const tree = await loadPageTree();
- * const match = resolvePagePath(tree, segments, { search: Astro.url.search, preview: isPreviewRequest() });
+ * const match = resolvePagePath(tree, segments, { search: Astro.url.search, preview: previewedEntry() });
  * if (match && "redirect" in match) return Astro.redirect(match.redirect, 301);
  * const page = match?.page;
  * ---
@@ -216,13 +216,30 @@ export async function loadPageTree(db?: D1Database | string, options: { collecti
 /** `redirect` comes with the page it leads to, for the redirect's cache tags (the page's id and tree.cacheTags). */
 export type PagePathMatch = { page: PageTreeItem; path: string } | { redirect: string; page: PageTreeItem };
 
+/** The entry a preview token was issued for. `id` is the entry's id, or its slug: EmDash accepts either in a token. */
+export interface PreviewedEntry {
+	collection: string;
+	id: string;
+}
+
 /**
- * True when EmDash accepted this request's `_preview` token (its middleware verifies the signature and puts
- * the previewed entry in the request context). For resolvePagePath's `preview` option. Not the same as the
- * URL having a `_preview` parameter, which anyone can add.
+ * The entry EmDash is previewing in this request, or null: its middleware verifies the `_preview` token's
+ * signature and puts the entry the token was issued for in the request context. For resolvePagePath's
+ * `preview` option. A token is for one entry, so this isn't leave to see other drafts; and it's not the
+ * same as the URL having a `_preview` parameter, which anyone can add.
+ */
+export function previewedEntry(): PreviewedEntry | null {
+	const preview = (requestStore() as { preview?: { collection?: unknown; id?: unknown } } | undefined)?.preview;
+	if (!preview || typeof preview.collection !== "string" || typeof preview.id !== "string" || !preview.id) return null;
+	return { collection: preview.collection, id: preview.id };
+}
+
+/**
+ * True when EmDash accepted this request's `_preview` token (for any entry: previewedEntry() says which).
+ * `preview: isPreviewRequest()` on resolvePagePath still shows only the previewed entry's draft.
  */
 export function isPreviewRequest(): boolean {
-	return Boolean((requestStore() as { preview?: unknown } | undefined)?.preview);
+	return previewedEntry() !== null;
 }
 
 /**
@@ -234,17 +251,28 @@ export function isPreviewRequest(): boolean {
  * Check category archives first: they win over pages. Tell the two answers apart with
  * `"redirect" in match`: both carry the page.
  *
- * Only published pages, unless `options.preview` is true: a draft or scheduled page answers
- * null at both its nested and its flat path, so neither a `{ page }` nor a redirect tells a
- * visitor that it exists or where it will be. Pass `preview: isPreviewRequest()` on a route
- * that serves EmDash's previews; getEmDashEntry still decides whether the draft is shown.
+ * Only published pages, and the one page this request previews: any other draft or scheduled
+ * page answers null at both its nested and its flat path, so neither a `{ page }` nor a redirect
+ * tells a visitor (or someone holding a preview link for another page) that it exists or where
+ * it will be. On a route that serves EmDash's previews pass `preview: previewedEntry()`, the
+ * entry EmDash verified a token for; `preview: true` (and so `preview: isPreviewRequest()`)
+ * reads the same entry from the request itself. getEmDashEntry still decides whether the
+ * draft is shown.
  */
-export function resolvePagePath(tree: PageTree, segments: readonly string[] | string, options: { search?: string; preview?: boolean } = {}): PagePathMatch | null {
+export function resolvePagePath(
+	tree: PageTree,
+	segments: readonly string[] | string,
+	options: { search?: string; preview?: boolean | PreviewedEntry | null } = {},
+): PagePathMatch | null {
 	const parts = typeof segments === "string" ? comparablePath(segments).split("/").filter(Boolean) : segments.filter(Boolean);
 	const slug = parts[parts.length - 1];
 	if (!slug) return null;
 	const page = tree.get(slug);
-	if (!page || (!page.published && options.preview !== true)) return null;
+	if (!page) return null;
+	if (!page.published) {
+		const previewed = options.preview === true ? previewedEntry() : options.preview || null;
+		if (!previewed || previewed.collection !== tree.collection || (previewed.id !== page.id && previewed.id !== page.slug)) return null;
+	}
 	const requested = `/${parts.join("/")}`;
 	if (comparablePath(page.url) === requested) return { page, path: page.url };
 	if (parts.length === 1) return { redirect: `${encodePath(page.url)}${options.search ?? ""}`, page };
