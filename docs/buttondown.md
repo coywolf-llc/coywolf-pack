@@ -156,6 +156,7 @@ The body:
 | Quote, Testimonial | A block quote, then who said it |
 | Podcast links | The heading, then a list of the services |
 | Review | The item, the rating ("4.5 / 5"), the pros and the cons |
+| Table | An HTML table in Buttondown's own table style, with borders, cell padding and a shaded header row. The first row is the header |
 | Embed, button | Its label (or URL) as a link. A YouTube player embed (`youtube.com/embed/<id>` or `youtube-nocookie.com/embed/<id>`) links to `https://www.youtube.com/watch?v=<id>`. A Vimeo one (`player.vimeo.com/video/<id>`) links to `https://vimeo.com/<id>`. Other embeds keep their URL |
 | Table of contents, breadcrumbs | Left out: they're navigation |
 | Anything else | "Part of this post isn't shown in email. Read it on coywolf.com.", linking to the post, and a warning naming the block |

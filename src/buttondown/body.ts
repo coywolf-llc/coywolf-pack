@@ -11,7 +11,8 @@
  *   made with portableTextToMarkdown directly, never Discovery's .md builder;
  * - holds each Portable Text field of the collection in field order, with
  *   relative links made absolute, images resized and in a format email apps
- *   show, and the Pack's blocks as Markdown (src/buttondown/blocks.ts);
+ *   show, the Pack's blocks as Markdown, and each table as an HTML table
+ *   in Buttondown's own table style (src/buttondown/blocks.ts);
  * - has its template code ({{, {% or {#) escaped piece by piece, so Buttondown
  *   prints it instead of running it (src/buttondown/template.ts). The public
  *   .md pages don't get this: it's for Buttondown only;
@@ -24,7 +25,7 @@
 import { portableTextToMarkdown } from "../discovery/markdown.js";
 import { imageCdn, mediaFile, parseCdnUrl } from "../images/lib.js";
 import type { DisclosureSettings, PodcastSettings } from "../customBlocks/render.js";
-import { type EmailFile, markdownUrl, renderUnknownBlock } from "./blocks.js";
+import { type EmailFile, markdownUrl, renderTableBlock, renderUnknownBlock } from "./blocks.js";
 import type { DraftFields } from "./client.js";
 import { BUTTONDOWN_LIMITS } from "./keys.js";
 import { TEMPLATE_CODE, VERBATIM_OPEN, escapeTemplateBlock, escapeTemplateLines } from "./template.js";
@@ -181,7 +182,7 @@ export async function buildEmail(source: EmailSource): Promise<BuiltEmail> {
 	};
 
 	let content = source.bodyFields
-		.map((value) => portableTextToMarkdown(value, { absolute, image: (url) => image(url), unknownBlock: (block) => renderUnknownBlock(block, ctx), rendered: (markdown, block) => escapeTemplateBlock(markdown, block._type) }))
+		.map((value) => portableTextToMarkdown(value, { absolute, image: (url) => image(url), unknownBlock: (block) => renderUnknownBlock(block, ctx), table: (block) => renderTableBlock(block, ctx), rendered: (markdown, block) => escapeTemplateBlock(markdown, block._type) }))
 		.filter(Boolean)
 		.join("\n\n");
 	// A leading horizontal rule would read as the start of frontmatter: it says nothing at the top of an email anyway.

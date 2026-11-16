@@ -11,8 +11,9 @@
  * Only those pieces are wrapped, never the whole body: a template variable
  * added to the draft in Buttondown (`{{ subscriber.metadata.first_name }}`)
  * keeps working. A piece is the code inside a fence (first line to last), a
- * table cell, or one line's text after its quote, list or heading marker.
- * The tags sit on the content's own lines: no line is added.
+ * table cell (what's inside its `<th>` or `<td>`), or one line's text after
+ * its quote, list or heading marker. The tags sit on the content's own
+ * lines: no line is added.
  *
  * A piece verbatim can't hold safely is rewritten with `{% templatetag … %}`
  * instead (needsTemplatetag): one that has "endverbatim" in it, or whose last
@@ -86,19 +87,22 @@ export function escapeTemplateLines(markdown: string): string {
 		.join("\n");
 }
 
-/** A Markdown table: each cell with template code is wrapped, between its pipes (a `\|` is part of its cell). */
+/** One cell's line in the email's HTML table (src/buttondown/blocks.ts renderTableBlock): the opening tag, what's inside, the closing tag. */
+const TABLE_CELL = /^(<(t[hd])(?: colspan="\d+")?>)(.*)(<\/\2>)$/;
+
+/**
+ * The email's HTML table, which has one cell on each line: each cell with template code is wrapped inside its
+ * `<th>` or `<td>`. Any other line with template code (there's none in the table as it's written) is wrapped whole.
+ */
 export function escapeTemplateTable(markdown: string): string {
 	if (!TEMPLATE_CODE.test(markdown)) return markdown;
 	return markdown
 		.split("\n")
-		.map((line) =>
-			TEMPLATE_CODE.test(line)
-				? line
-						.split(/(?<!\\)\|/)
-						.map(escapePiece)
-						.join("|")
-				: line,
-		)
+		.map((line) => {
+			if (!TEMPLATE_CODE.test(line)) return line;
+			const cell = TABLE_CELL.exec(line);
+			return cell ? `${cell[1]}${escapePiece(cell[3] ?? "")}${cell[4]}` : escapePiece(line);
+		})
 		.join("\n");
 }
 

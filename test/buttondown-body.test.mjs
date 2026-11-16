@@ -10,12 +10,20 @@ import { test } from "node:test";
 import "./ts-resolve.mjs";
 
 const { buildEmail, emailImage, imageValueUrl, MODE_COMMENT, siteHost, entryKey, packMetadata } = await import("../src/buttondown/body.ts");
-const { renderUnknownBlock, richToMarkdown, watchUrl } = await import("../src/buttondown/blocks.ts");
+const { renderTableBlock, renderUnknownBlock, richToMarkdown, watchUrl } = await import("../src/buttondown/blocks.ts");
 const lib = await import("../src/images/lib.ts");
 
 const span = (text, marks = []) => ({ _type: "span", _key: Math.random().toString(36).slice(2), text, marks });
 const block = (children, extra = {}) => ({ _type: "block", _key: "b", style: "normal", markDefs: [], children, ...extra });
 const image = (url, extra = {}) => ({ _type: "image", _key: Math.random().toString(36).slice(2), asset: { url }, alt: "Alt", ...extra });
+/** A table block: each row is a list of cells, a cell is its text or its spans. */
+const tableCell = (content, extra = {}) => ({ _type: "tableCell", _key: Math.random().toString(36).slice(2), content: typeof content === "string" ? [span(content)] : content, ...extra });
+const tableBlock = (rows, extra = {}) => ({ _type: "table", _key: "t", rows: rows.map((cells) => ({ _type: "tableRow", cells: cells.map((c) => (c?._type === "tableCell" ? c : tableCell(c))) })), ...extra });
+/** The email's HTML table, from each cell's inner HTML: the first row is the header. */
+const tableHtml = ([head, ...rows]) => {
+	const row = (cells, tag) => ["<tr>", ...cells.map((c) => `<${tag}>${c}</${tag}>`), "</tr>"];
+	return ['<table class="buttondown-block-styled">', "<thead>", ...row(head, "th"), "</thead>", ...(rows.length ? ["<tbody>", ...rows.flatMap((r) => row(r, "td")), "</tbody>"] : []), "</table>"].join("\n");
+};
 
 const source = (extra = {}) => ({
 	collection: "posts",
@@ -278,12 +286,139 @@ test("template code: inline code, a heading, a quote line and an image's alt tex
 	assert.equal(img.printed, "![{{ x }}](https://x.example/a.jpg)");
 });
 
-test("template code: a table cell is wrapped between its pipes; the other cells and the rule row are untouched", async () => {
-	const cell = (text, marks = []) => ({ _type: "tableCell", _key: text, content: [span(text, marks)] });
-	const table = { _type: "table", _key: "t", rows: [{ _type: "tableRow", cells: [cell("Tag"), cell("Prints")] }, { _type: "tableRow", cells: [cell("{{ a|upper }}", ["code"]), cell("A")] }, { _type: "tableRow", cells: [cell("x"), cell("{% now %} and {")] }] };
+test("template code: a table cell is wrapped inside its <th> or <td>; the other cells and the table's own tags are untouched", async () => {
+	const table = tableBlock([["Variable", "Prints"], [[span("{{ a|upper }}", ["code"])], "A"], ["x", "{% now %} and {"], ["Email", "{{ subscriber.email }}"]]);
 	const out = await escaped([table]);
-	assert.equal(out.body, ["| Tag | Prints |", "| --- | --- |", `| ${V("`{{ a\\|upper }}`")} | A |`, `| x | ${"{% templatetag openblock %} now {% templatetag closeblock %} and {% templatetag openbrace %}"} |`].join("\n"));
-	assert.equal(out.printed, ["| Tag | Prints |", "| --- | --- |", "| `{{ a\\|upper }}` | A |", "| x | {% now %} and { |"].join("\n"), "the pipes are where they were");
+	assert.equal(
+		out.body,
+		tableHtml([
+			["Variable", "Prints"],
+			[V("<code>{{ a|upper }}</code>"), "A"],
+			["x", "{% templatetag openblock %} now {% templatetag closeblock %} and {% templatetag openbrace %}"],
+			["Email", V("{{ subscriber.email }}")],
+		]),
+	);
+	assert.equal(out.printed, tableHtml([["Variable", "Prints"], ["<code>{{ a|upper }}</code>", "A"], ["x", "{% now %} and {"], ["Email", "{{ subscriber.email }}"]]), "Buttondown prints each cell as written");
+	assert.equal(out.printed, renderTableBlock(table, { absolute: (u) => u }), "which is the table before the escape");
+	// A header cell, a cell that spans columns, and template code inside a link and next to escaped HTML.
+	const more = tableBlock([["{{ head }}"], [tableCell([span("if a < b {% x %}", ["k"])], { colspan: 2, markDefs: [{ _key: "k", _type: "link", href: "https://x.example/p/{{ id }}/" }] })]]);
+	const moreOut = await escaped([more]);
+	assert.equal(moreOut.body, ['<table class="buttondown-block-styled">', "<thead>", "<tr>", `<th>${V("{{ head }}")}</th>`, "<th></th>", "</tr>", "</thead>", "<tbody>", "<tr>", `<td colspan="2">${V('<a href="https://x.example/p/{{%20id%20}}/">if a &lt; b {% x %}</a>')}</td>`, "</tr>", "</tbody>", "</table>"].join("\n"));
+	assert.equal(moreOut.printed, renderTableBlock(more, { absolute: (u) => u }));
+	// A line that isn't a cell's (the table never writes one) is wrapped whole: nothing in a table can reach Django.
+	const { escapeTemplateBlock } = await import("../src/buttondown/template.ts");
+	assert.equal(escapeTemplateBlock("| a | {{ b }} |\n| --- | --- |", "table"), `${V("| a | {{ b }} |")}\n| --- | --- |`);
+	assert.equal(escapeTemplateBlock("<td>{{ a }}</td><td>b</td>", "table"), `<td>${V("{{ a }}</td><td>b")}</td>`, "two cells on a line: one wrap, first tag to last");
+	assert.equal(django(escapeTemplateBlock("<td>a {{</td><td>b }}</td>", "table")), "<td>a {{</td><td>b }}</td>");
+});
+
+test("a table goes out as an HTML table in Buttondown's own table style: the first row in <thead> with <th>, the rest in <tbody> with <td>", async () => {
+	// The live case (2026-11-15): the pipe table came out as "Classic Outlook No", with no borders or padding.
+	const table = tableBlock([["Email app", "Shows WebP"], ["Apple Mail", "Yes"], ["Classic Outlook", "No"]]);
+	const built = await buildEmail(source({ bodyFields: [[block([span("Before.")]), table, block([span("After.")])]], footerLink: false }));
+	const html = [
+		'<table class="buttondown-block-styled">',
+		"<thead>",
+		"<tr>",
+		"<th>Email app</th>",
+		"<th>Shows WebP</th>",
+		"</tr>",
+		"</thead>",
+		"<tbody>",
+		"<tr>",
+		"<td>Apple Mail</td>",
+		"<td>Yes</td>",
+		"</tr>",
+		"<tr>",
+		"<td>Classic Outlook</td>",
+		"<td>No</td>",
+		"</tr>",
+		"</tbody>",
+		"</table>",
+	].join("\n");
+	// One HTML block: on its own lines, a blank line before and after, none inside, and no line indented.
+	assert.equal(built.fields.body, `${MODE_COMMENT}\nBefore.\n\n${html}\n\nAfter.\n`);
+	assert.deepEqual(built.warnings, []);
+	assert.doesNotMatch(built.fields.body, /\|/, "no pipe table");
+	// The header row is the first row, whatever the cells say (the shared converter's rule for its pipe table).
+	const flagged = tableBlock([[tableCell("a", { isHeader: false }), "b"], [tableCell("c", { isHeader: true }), "d"]]);
+	assert.equal(renderTableBlock(flagged, { absolute: (u) => u }), tableHtml([["a", "b"], ["c", "d"]]));
+	// A header row alone has no <tbody>; a short row is filled; a cell that spans columns keeps its colspan; no rows, no table.
+	const abs = { absolute: (u) => u };
+	assert.equal(renderTableBlock(tableBlock([["a", "b"]]), abs), tableHtml([["a", "b"]]));
+	assert.equal(renderTableBlock(tableBlock([["a", "b", "c"], ["d"], [tableCell("wide", { colspan: 2 }), "e"]]), abs), ['<table class="buttondown-block-styled">', "<thead>", "<tr>", "<th>a</th>", "<th>b</th>", "<th>c</th>", "</tr>", "</thead>", "<tbody>", "<tr>", "<td>d</td>", "<td></td>", "<td></td>", "</tr>", "<tr>", '<td colspan="2">wide</td>', "<td>e</td>", "</tr>", "</tbody>", "</table>"].join("\n"));
+	assert.equal(renderTableBlock(tableBlock([]), abs), null);
+	assert.equal(renderTableBlock(tableBlock([[]]), abs), null);
+	assert.equal((await buildEmail(noFooter([tableBlock([]), block([span("Only this.")])]))).fields.body, `${MODE_COMMENT}\nOnly this.\n`);
+});
+
+test("a table's cells are HTML: &, <, > and quotes escaped, Markdown characters as written", async () => {
+	const out = await escaped([tableBlock([['R&D <b>"quoted"</b> it\'s', "a > b"], ["*not em* _nor_ `code` [x](y) | pipe \\ # 1.", "</td></tr></table><script>alert(1)</script>"]])]);
+	assert.equal(out.body, tableHtml([["R&amp;D &lt;b&gt;&quot;quoted&quot;&lt;/b&gt; it&#39;s", "a &gt; b"], ["*not em* _nor_ `code` [x](y) | pipe \\ # 1.", "&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;&lt;script&gt;alert(1)&lt;/script&gt;"]]));
+	assert.equal(out.body.match(/<\/?table/g).length, 2, "a cell can't close the table or open another");
+});
+
+test("a table's cells keep bold, italic, code, strike-through and line breaks as HTML", async () => {
+	const out = await escaped([
+		tableBlock([
+			["Mark", "Shown"],
+			[[span("bold", ["strong"]), span(" and "), span("italic", ["em"])], [span("npm run <build>", ["code"]), span(" then "), span("gone", ["strike-through"])]],
+			[[span("both", ["strong", "em"])], "One\nTwo\r\nThree"],
+			[[span("First"), { _type: "break" }, span("Second")], [span("  padded  ")]],
+			[[span("\n\nmiddle\n\nlines\n")], [span(" ", ["strong"]), span("")]],
+		]),
+	]);
+	assert.equal(
+		out.body,
+		tableHtml([
+			["Mark", "Shown"],
+			["<strong>bold</strong> and <em>italic</em>", "<code>npm run &lt;build&gt;</code> then <s>gone</s>"],
+			["<strong><em>both</em></strong>", "One<br>Two<br>Three"],
+			["First<br>Second", "padded"],
+			["<br><br>middle<br><br>lines<br>", ""],
+		]),
+	);
+	assert.doesNotMatch(out.body, /\n\s*\n/, "no blank line inside the table, whatever the cells hold");
+	assert.doesNotMatch(out.body, /^[ \t]/m, "and no indented line");
+});
+
+test("a table's links: relative made absolute, the table's and the cell's own link marks, javascript: and data: refused", async () => {
+	const defs = [{ _key: "rel", _type: "link", href: "/pricing/?a=1&b=2" }, { _key: "js", _type: "link", href: "javascript:alert(1)" }, { _key: "data", _type: "link", href: " DATA:text/html,x" }, { _key: "abs", _type: "link", href: 'https://x.example/a"b' }];
+	const out = await escaped([
+		tableBlock(
+			[
+				["Link", "Out"],
+				[[span("Pricing", ["rel"])], [span("Run", ["js"]), span(" "), span("Data", ["data"])]],
+				[[span("Quoted", ["abs"])], tableCell([span("Bold link", ["strong", "own"]), span(" #top", ["hash"])], { markDefs: [{ _key: "own", _type: "link", href: "about/" }, { _key: "hash", _type: "link", href: "#top" }] })],
+			],
+			{ markDefs: defs },
+		),
+	]);
+	assert.equal(
+		out.body,
+		tableHtml([
+			["Link", "Out"],
+			['<a href="https://coywolf.com/pricing/?a=1&amp;b=2">Pricing</a>', "Run Data"],
+			['<a href="https://x.example/a&quot;b">Quoted</a>', '<a href="https://coywolf.com/about/"><strong>Bold link</strong></a><a href="#top"> #top</a>'],
+		]),
+	);
+	assert.doesNotMatch(out.body, /javascript:|data:/i);
+});
+
+test("a table is the email's alone: the public .md keeps its pipe table, and the same blocks give the same hash", async () => {
+	const { portableTextToMarkdown } = await import("../src/discovery/markdown.ts");
+	const blocks = [tableBlock([["Variable", "Prints"], ["Email", "{{ subscriber.email }}"], [[span("a|b", ["strong"])], "One\nTwo"]])];
+	assert.equal(portableTextToMarkdown(blocks), "| Variable | Prints |\n| --- | --- |\n| Email | {{ subscriber.email }} |\n| **a\\|b** | One<br>Two |");
+	assert.equal(portableTextToMarkdown(blocks, { absolute: (u) => u }), portableTextToMarkdown(blocks), "no table hook, no change");
+	assert.equal(portableTextToMarkdown(blocks, { table: () => "T" }), "T", "the hook's answer is the table");
+	assert.equal(portableTextToMarkdown([...blocks, block([span("x")])], { table: () => null }), "x", "null leaves it out");
+	const one = await buildEmail(noFooter(blocks));
+	assert.equal(one.fields.body, `${MODE_COMMENT}\n${tableHtml([["Variable", "Prints"], ["Email", V("{{ subscriber.email }}")], ["<strong>a|b</strong>", "One<br>Two"]])}\n`);
+	assert.equal((await buildEmail(noFooter(blocks))).hash, one.hash);
+	// The pipe table's body, as it was before: a post with a table gets one new write.
+	const { emailHash } = await import("../src/buttondown/body.ts");
+	const { metadata: _metadata, ...shown } = one.fields;
+	assert.notEqual(one.hash, await emailHash({ ...shown, body: `${MODE_COMMENT}\n${portableTextToMarkdown(blocks)}\n` }));
 });
 
 test("template code: a list item is wrapped after its marker, nested and numbered ones too", async () => {
@@ -337,14 +472,13 @@ test("template code: content with {% endverbatim pack %} in it, or a tag opening
 	assert.equal(escapeTemplateText("{% a\n{{ b }}"), V("{% a\n{{ b }}"));
 	assert.equal(escapeTemplateText("{{ b }}\n{% a"), "{% templatetag openvariable %} b {% templatetag closevariable %}\n{% templatetag openblock %} a");
 	// Whatever is on the rest of the line can't join an escaped piece: a cell ending in "{{" next to a cell with "}}".
-	const cell = (text) => ({ _type: "tableCell", _key: text, content: [span(text)] });
-	const row = await escaped([{ _type: "table", _key: "t", rows: [{ _type: "tableRow", cells: [cell("a {{"), cell("b }}"), cell("{{ c }}")] }] }]);
-	assert.equal(row.printed, "| a {{ | b }} | {{ c }} |\n| --- | --- | --- |");
+	const row = await escaped([tableBlock([["a {{", "b }}", "{{ c }}"]])]);
+	assert.equal(row.printed, tableHtml([["a {{", "b }}", "{{ c }}"]]));
 	// The same for a cell that ends with "{" (with verbatim, "{" + the closing tag + a later "}}" would read as one variable),
 	// and for a lone "{" in a rewritten cell (the same, with the templatetag after it).
 	for (const cells of [["{{ a }} then {", "b }}"], ["{}} {{ a", "b }}"], ["{# a #} {", "b #}"]]) {
-		const out = await escaped([{ _type: "table", _key: "t", rows: [{ _type: "tableRow", cells: cells.map(cell) }] }]);
-		assert.equal(out.printed, `| ${cells.join(" | ")} |\n| --- | --- |`, cells[0]);
+		const out = await escaped([tableBlock([cells])]);
+		assert.equal(out.printed, tableHtml([cells]), cells[0]);
 	}
 });
 
@@ -362,11 +496,16 @@ test("template code: any mix of it comes out of Buttondown as it was written, wi
 	for (let i = 0; i < 600; i++) {
 		const code = Array.from({ length: 1 + next(8) }, () => bits[next(bits.length)]).join("");
 		if (!code.trim()) continue;
-		for (const blocks of [[{ _type: "code", _key: "c", code }], [block([span("a "), span(code, ["code"]), span(` b ${code}`)])], [block([span(code)], { listItem: "bullet", level: 1 })]]) {
+		// A table's cells are HTML, written here by hand: the header, a body cell, and a cell with the mix as code.
+		const html = code.split("\n").map((line) => line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")).join("<br>");
+		const table = tableBlock([[code, "Head"], ["plain {", code], [[span(code, ["code"])], `}} ${code}`]]);
+		const tableAsWritten = tableHtml([[html.trim(), "Head"], ["plain {", html.trim()], [`<code>${html}</code>`, `}} ${html}`.trim()]]);
+		for (const [blocks, written] of [[[{ _type: "code", _key: "c", code }]], [[block([span("a "), span(code, ["code"]), span(` b ${code}`)])]], [[block([span(code)], { listItem: "bullet", level: 1 })]], [[table], tableAsWritten]]) {
 			const escapedBody = (await buildEmail(noFooter(blocks))).fields.body;
 			const { portableTextToMarkdown } = await import("../src/discovery/markdown.ts");
 			const ran = [];
-			assert.equal(django(escapedBody, ran), `${MODE_COMMENT}\n${portableTextToMarkdown(blocks)}\n`, JSON.stringify(code));
+			assert.equal(django(escapedBody, ran), `${MODE_COMMENT}\n${written ?? portableTextToMarkdown(blocks)}\n`, JSON.stringify(code));
+			if (written) assert.doesNotMatch(escapedBody, /\n\s*\n/, JSON.stringify(code));
 			assert.deepEqual(ran, [], JSON.stringify(code));
 			if (escapedBody.includes("templatetag")) fallbacks++;
 		}

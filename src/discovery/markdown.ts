@@ -8,9 +8,11 @@
  * depth, with strong/em/code/strike-through and link marks), images, code,
  * horizontal breaks, and tables. Anything else (embeds, buttons, custom
  * plugin blocks) is skipped rather than guessed at, unless the caller passes
- * `unknownBlock` (Buttondown Drafts does, for its email bodies). `rendered`
- * lets a caller change a block's finished Markdown (Buttondown Drafts
- * escapes template code there); without it the output is as before.
+ * `unknownBlock` (Buttondown Drafts does, for its email bodies). `table`
+ * lets a caller write a table its own way (Buttondown Drafts writes an HTML
+ * table). `rendered` lets a caller change a block's finished Markdown
+ * (Buttondown Drafts escapes template code there). Without them the output
+ * is as before.
  */
 import { cdnOriginalUrl } from "../images/lib.js";
 
@@ -27,6 +29,11 @@ export interface MarkdownOptions {
 	image?: (url: string, block: Node) => string;
 	/** Markdown for a block type this converter doesn't know (null: left out). Default: every such block is left out. */
 	unknownBlock?: (block: Node) => string | null;
+	/**
+	 * What a table block becomes (null: left out). Default: a Markdown pipe table. Buttondown Drafts writes an HTML
+	 * table with it, which Buttondown styles.
+	 */
+	table?: (block: Node) => string | null;
 	/**
 	 * Called with each block's finished Markdown (each list item on its own) and the block. What it returns is used.
 	 * Default: the Markdown as it is. Buttondown Drafts escapes template code with it.
@@ -61,7 +68,8 @@ export function escapeLineStart(line: string): string {
 	return line.replace(/^(\s*)([#>+-]|\d+[.)])(?=\s|$)/, (_m, space: string, marker: string) => `${space}${marker.replace(/([#>+\-.)])/, "\\$1")}`);
 }
 
-function safeHref(href: unknown, options: MarkdownOptions): string | null {
+/** A link's URL, made absolute and safe inside Markdown's `(…)`, or null for none or a dangerous scheme. */
+export function safeHref(href: unknown, options: MarkdownOptions): string | null {
 	if (typeof href !== "string" || !href.trim() || DANGEROUS_SCHEME.test(href)) return null;
 	const url = options.absolute ? options.absolute(href.trim()) : href.trim();
 	return url.replace(/[()\s]/g, (c) => encodeURIComponent(c));
@@ -255,7 +263,7 @@ export function portableTextToMarkdown(value: unknown, options: MarkdownOptions 
 				rendered = "---";
 				break;
 			case "table":
-				rendered = renderTable(block, options);
+				rendered = options.table ? options.table(block) : renderTable(block, options);
 				break;
 			default:
 				// Unknown block types are skipped, unless the caller renders them.

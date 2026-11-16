@@ -5,11 +5,15 @@
  * so nothing disappears from the email without a trace. The table of contents
  * and breadcrumbs are left out on purpose: they're navigation.
  *
+ * Also the one block it writes differently from the shared converter: a
+ * table, as an HTML table in Buttondown's own table style (renderTableBlock).
+ *
  * Pure (no I/O): what it needs from the site (the post's URL, file details,
  * the Custom Blocks settings, the email image rule) is passed in.
  */
 import { BLOCK_TYPES, DEFAULT_DISCLOSURE, DEFAULT_PODCAST, DEFAULT_SUMMARY, type DisclosureSettings, NOTE_VARIANTS, PODCAST_SERVICES, type PodcastSettings, normalizeDetails, normalizeDisclosure, normalizeNote, normalizePodcast, normalizeQuote, normalizeTestimonial } from "../customBlocks/render.js";
-import { escapeLineStart, escapeText } from "../discovery/markdown.js";
+import { escapeHtml } from "../customBlocks/rich.js";
+import { escapeLineStart, escapeText, safeHref } from "../discovery/markdown.js";
 import { formatSize } from "../files/format.js";
 import { BLOCK_TYPE as FILE_BLOCK } from "../files/walker.js";
 import { BREADCRUMBS_BLOCK } from "../breadcrumbs/stamp.js";
@@ -47,6 +51,7 @@ export interface BlockContext {
 /** Blocks left out without a warning: navigation that means nothing in an email. */
 export const NAVIGATION_BLOCKS: ReadonlySet<string> = new Set([TOC_BLOCK, BREADCRUMBS_BLOCK]);
 
+const isRecord = (value: unknown): value is Node => typeof value === "object" && value !== null && !Array.isArray(value);
 const str = (v: unknown) => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
 
 /** A link's URL as Markdown takes it: absolute, with spaces and parentheses encoded. Null for anything that isn't http(s), mailto or site-relative. */
@@ -306,4 +311,71 @@ export function renderUnknownBlock(block: Node, ctx: BlockContext): string | nul
 		default:
 			return placeholder(block, ctx);
 	}
+}
+
+/** Buttondown styles only its own tables (borders, cell padding, a shaded header), which carry this class. */
+export const TABLE_CLASS = "buttondown-block-styled";
+
+/** A table cell's spans as HTML (Markdown isn't read inside an HTML block): marks, links, and line breaks as `<br>`. */
+function cellHtml(cell: Node, tableDefs: unknown, absolute: (url: string) => string): string {
+	const defs = new Map<string, Node>();
+	for (const def of [...(Array.isArray(tableDefs) ? tableDefs : []), ...(Array.isArray(cell.markDefs) ? cell.markDefs : [])]) if (isRecord(def) && typeof def._key === "string") defs.set(def._key, def);
+	const children: unknown[] = Array.isArray(cell.content) ? cell.content : Array.isArray(cell.children) ? cell.children : [];
+	let out = "";
+	for (const child of children) {
+		if (!isRecord(child)) continue;
+		if (child._type !== "span") {
+			if (child._type === "break") out += "<br>";
+			continue;
+		}
+		const raw = typeof child.text === "string" ? child.text : "";
+		if (!raw) continue;
+		const marks: string[] = Array.isArray(child.marks) ? child.marks.filter((m: unknown): m is string => typeof m === "string") : [];
+		let html = raw.split(/\r\n|\r|\n/).map(escapeHtml).join("<br>");
+		if (raw.trim()) {
+			if (marks.includes("code")) html = `<code>${html}</code>`;
+			if (marks.includes("strike-through")) html = `<s>${html}</s>`;
+			if (marks.includes("em")) html = `<em>${html}</em>`;
+			if (marks.includes("strong")) html = `<strong>${html}</strong>`;
+		}
+		for (const mark of marks) {
+			const def = defs.get(mark);
+			if (!def || (def._type !== "link" && typeof def.href !== "string")) continue;
+			// The shared converter's rule: absolute, and no javascript:, vbscript: or data: link.
+			const href = safeHref(def.href, { absolute });
+			if (href) html = `<a href="${escapeHtml(href)}">${html}</a>`;
+		}
+		out += html;
+	}
+	return out.trim();
+}
+
+/**
+ * A table block as an HTML table in Buttondown's own table style. A Markdown pipe table comes out of Buttondown
+ * with no borders and no cell padding (seen in a test email, 2026-11-15): its email CSS styles only
+ * `table.buttondown-block-styled`.
+ *
+ * - The header row is the first row, as in the shared converter's pipe table: `<thead>` and `<th>`. The other rows
+ *   are `<tbody>` and `<td>`.
+ * - One HTML block, which Markdown leaves alone: no blank line and no indent inside it, each cell on its own line
+ *   (template code is escaped cell by cell there: src/buttondown/template.ts escapeTemplateTable).
+ * - A cell that spans columns keeps its `colspan`. A short row is filled with empty cells.
+ */
+export function renderTableBlock(block: Node, ctx: Pick<BlockContext, "absolute">): string | null {
+	const rows: Node[] = Array.isArray(block.rows) ? block.rows.filter(isRecord) : [];
+	const grid = rows.map((row) =>
+		(Array.isArray(row.cells) ? row.cells.filter(isRecord) : []).map((cell: Node) => ({
+			html: cellHtml(cell, block.markDefs, ctx.absolute),
+			span: typeof cell.colspan === "number" && cell.colspan > 1 ? Math.min(Math.floor(cell.colspan), 100) : 1,
+		})),
+	);
+	const width = Math.max(0, ...grid.map((cells) => cells.reduce((sum, cell) => sum + cell.span, 0)));
+	if (!width) return null;
+	const row = (cells: { html: string; span: number }[], tag: "th" | "td") => {
+		const used = cells.reduce((sum, cell) => sum + cell.span, 0);
+		const filled = [...cells, ...Array.from({ length: width - used }, () => ({ html: "", span: 1 }))];
+		return ["<tr>", ...filled.map((cell) => `<${tag}${cell.span > 1 ? ` colspan="${cell.span}"` : ""}>${cell.html}</${tag}>`), "</tr>"];
+	};
+	const [head = [], ...body] = grid;
+	return [`<table class="${TABLE_CLASS}">`, "<thead>", ...row(head, "th"), "</thead>", ...(body.length ? ["<tbody>", ...body.flatMap((cells) => row(cells, "td")), "</tbody>"] : []), "</table>"].join("\n");
 }
