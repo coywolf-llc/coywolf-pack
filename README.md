@@ -21,7 +21,8 @@ Every module starts off on a new site. Turn on only the ones you want on the **F
 | [Insights](docs/insights.md) | 404s (files and the media host too), server errors and crawlers from Cloudflare's analytics, real visitors' Core Web Vitals, Fathom traffic, Google Search Console, and what visitors search for |
 | [Clean Image URLs](docs/images.md) | Images from a `media.` subdomain on R2, resized to the sizes the theme uses, cached for a year |
 | [Backups](docs/backups.md) | Backups of the D1 database and R2 media, rewind with undo, restore to a new database |
-| [Alerts & Digest](docs/alerts.md) | Emails when a backup fails, links break, the Cloudflare bill estimate passes a threshold, an update is out or the content audit gets worse, plus a weekly digest |
+| [Alerts & Digest](docs/alerts.md) | Emails when a backup fails, links break, the Cloudflare bill estimate passes a threshold, an update is out, the content audit gets worse or a Buttondown draft fails, plus a weekly digest |
+| [Buttondown Drafts](docs/buttondown.md) | A Buttondown email draft when a post with a chosen category is published, updated while it's an untouched draft. You review and send it in Buttondown: the Pack never sends |
 | [Redirect Manager](docs/redirects.md) | External, file-path and regex redirects, bulk import and export, and automatic redirects for slug changes and removed content (alongside EmDash's own Redirects page) |
 | [Schema & Social](docs/schema.md) | One Schema.org graph per page (publisher, articles, authors), breadcrumbs, robots directives, Open Graph, custom JSON-LD |
 | [Social Images](docs/social-images.md) | A generated Open Graph image (title, site name, logo, your colors) for entries without one, made with Cloudflare Browser Run |
@@ -162,14 +163,14 @@ A good first set for most sites:
 - **Features** (**Coywolf Pack → Features**) turns modules and their parts on or off: flip the switches, then **Save** (or Ctrl/⌘+S). A module's page also has switches for its parts, which apply right away.
 - **Each module's page** holds its settings, grouped into sections, with step-by-step guides. A feature that needs an API key or a binding shows a setup card until it's there.
 - **API keys and tokens** go on the plugin's **Settings** page ([Keys](#keys)). EmDash stores them encrypted.
-- **In the entry editor and content lists** (admins only): sections in a saved entry's sidebar for **Schema & Social**, **AI suggestions** and **Link status**, and a **Links** column in content lists, each while its module is on.
+- **In the entry editor and content lists** (admins only): sections in a saved entry's sidebar for **Schema & Social**, **AI suggestions**, **Link status** and **Buttondown**, and a **Links** column in content lists, each while its module is on.
 - **Saving:** a bar appears at the bottom of a settings page when there are unsaved changes, with **Discard** and **Save** (also Ctrl/⌘+S). The result shows as a notice at the bottom of the screen. Leaving the page with unsaved changes asks first.
 - **Hiding EmDash's own pages:** a site that uses Redirect Manager or WordPress Migration instead of EmDash's Redirects or Import can hide those with EmDash's `admin.hiddenNavItems` option in `astro.config.mjs` (for example `emdash({ admin: { hiddenNavItems: ["redirects"] } })`).
 - **Language:** the pack's admin pages and docs are in English only; they don't follow EmDash's admin language setting.
 
 ### Keys
 
-The plugin's **Settings** page (`https://coywolf.com/_emdash/admin/plugins-manager/coywolf-pack/settings`) has four fields, each with its step-by-step guide:
+The plugin's **Settings** page (`https://coywolf.com/_emdash/admin/plugins-manager/coywolf-pack/settings`) has five fields, each with its step-by-step guide:
 
 | Field | For |
 | --- | --- |
@@ -177,6 +178,7 @@ The plugin's **Settings** page (`https://coywolf.com/_emdash/admin/plugins-manag
 | **AI API key** | AI Enrichment (Anthropic, OpenAI or Gemini) |
 | **Fathom API key** | Insights' Fathom card |
 | **Google service account key** | Insights' Search Console card |
+| **Buttondown API key** | Buttondown Drafts (a key with only Emails → Read & write) |
 
 Create the Cloudflare API token with the pre-filled form in its guide, and add the few permissions Cloudflare's form can't pre-select ([the list](docs/README.md#the-cloudflare-api-token)). For the domains policy, **Specified Domains → this site's domain** is recommended; choose **All Domains** to use one token on every site in the account. Or set it as a Worker secret: `npx wrangler secret put CLOUDFLARE_API_TOKEN`. The token never needs D1: restores keep their own token (`BACKUPS_API_TOKEN`).
 

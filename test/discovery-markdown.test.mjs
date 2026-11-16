@@ -129,3 +129,46 @@ test("images in Markdown point at the media host when there is one (not the site
 		lib.setStoragePublicUrl(null);
 	}
 });
+
+test("the optional hooks (Buttondown Drafts): image swaps an image's URL, unknownBlock renders blocks it would skip; without them nothing changes", () => {
+	const value = [
+		{ _type: "image", _key: "i", asset: { url: "/_emdash/api/media/file/a.webp" }, alt: "A" },
+		{ _type: "coywolf-note", _key: "n", body: "Hi" },
+		{ _type: "mystery", _key: "m" },
+	];
+	assert.equal(portableTextToMarkdown(value), "![A](/_emdash/api/media/file/a.webp)", "the default: unknown blocks are skipped");
+	const seen = [];
+	const md = portableTextToMarkdown(value, {
+		image: (url, node) => (seen.push(node._key), `${url}?email`),
+		unknownBlock: (node) => (node._type === "coywolf-note" ? "> Hi" : null),
+	});
+	assert.equal(md, "![A](/_emdash/api/media/file/a.webp?email)\n\n> Hi");
+	assert.deepEqual(seen, ["i"]);
+});
+
+test("links: a dangerous scheme hidden with a tab, a line break or a control character is dropped too (as a browser reads it)", async () => {
+	const { dangerousHref, normalizeHref, safeHref } = await import("../src/discovery/markdown.ts");
+	// What build.ts passes: new URL(href, base) removes tabs, line breaks and leading control characters.
+	const absolute = (href) => (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("#") ? href : new URL(href, "https://coywolf.com/").href);
+	const hidden = ["java\tscript:alert(1)", "\u0001javascript:alert(1)", "java\nscript:alert(1)", "java\r\nscript:alert(1)", " \u0000 JaVa\tScRiPt:alert(1)", "javascript\t:alert(1)", "\u001f javascript:alert(1)", "vb\tscript:msgbox(1)", "\u0002vbscript:x", "d\nata:text/html,x", "\tdata:text/html,x"];
+	for (const href of hidden) {
+		const name = JSON.stringify(href);
+		assert.equal(dangerousHref(href), true, name);
+		for (const options of [{ absolute }, {}, { absolute: (u) => u }]) {
+			assert.equal(safeHref(href, options), null, name);
+			const md = portableTextToMarkdown([block([span("x", ["l"])], { markDefs: [{ _type: "link", _key: "l", href }] }), { _type: "image", _key: "i", asset: { url: "/a.png" }, alt: "A", link: href }, { _type: "image", _key: "j", asset: { url: href }, alt: "B" }], options);
+			assert.equal(md, `x\n\n![A](${options.absolute === absolute ? "https://coywolf.com" : ""}/a.png)`, name);
+			assert.doesNotMatch(md, /script:|data:/i, name);
+		}
+	}
+	// A link that `absolute` itself would turn into one is dropped as it goes out.
+	assert.equal(safeHref("/x", { absolute: () => "javascript:alert(1)" }), null);
+	// Real links come out as they did.
+	assert.equal(normalizeHref(" \u0001\thttps://a.com/x\ty \n"), "https://a.com/xy");
+	for (const href of ["https://a.com/x", "/about/", "#top", "mailto:hi@coywolf.com", "about/javascript:x", "/data:x", "https://a.com/?u=javascript:alert(1)", "java%09script:alert(1)", "javascripts:x", "database:x"]) assert.equal(dangerousHref(href), false, href);
+	assert.equal(safeHref(" /a b(c) ", { absolute }), "https://coywolf.com/a%20b(c)");
+	assert.equal(safeHref("https://a.com/a\tb", {}), "https://a.com/a%09b", "as before");
+	assert.equal(safeHref("javascript:alert(1)", {}), null);
+	assert.equal(safeHref("", {}), null);
+	assert.equal(safeHref(null, {}), null);
+});

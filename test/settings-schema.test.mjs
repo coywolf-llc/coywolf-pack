@@ -28,8 +28,9 @@ test("the known secrets keep their stored keys", () => {
 	// Every key a site may have stored stays declared (EmDash throws reading an encrypted value whose key isn't), the
 	// Cloudflare API token first: the object's order is the Settings page's.
 	const before036 = ["aiApiKey", "backupsCloudflareToken", "cloudflareSetupToken", "filesR2SecretAccessKey", "imagesApiToken", "insightsFathomApiKey", "insightsGoogleServiceAccount", "robotsRadarToken", "socialImagesApiToken", "usageApiToken", "videosApiToken", "videosWebhookSecret"];
-	assert.deepEqual(Object.keys(SECRET_SETTINGS).sort(), [...before036, "cloudflareApiToken"].sort());
-	assert.deepEqual(Object.keys(SECRET_SETTINGS).slice(0, 4), ["cloudflareApiToken", "aiApiKey", "insightsFathomApiKey", "insightsGoogleServiceAccount"]);
+	assert.deepEqual(Object.keys(SECRET_SETTINGS).sort(), [...before036, "cloudflareApiToken", "buttondownApiKey"].sort());
+	assert.deepEqual(Object.keys(SECRET_SETTINGS).slice(0, 5), ["cloudflareApiToken", "aiApiKey", "insightsFathomApiKey", "insightsGoogleServiceAccount", "buttondownApiKey"]);
+	assert.match(read("buttondown/keys.ts"), /BUTTONDOWN_KEY_SETTING = "buttondownApiKey"/);
 	// Labels are how the Settings page script finds fields: no two alike.
 	const labels = Object.values(SECRET_SETTINGS).map((f) => f.label);
 	assert.equal(new Set(labels).size, labels.length);

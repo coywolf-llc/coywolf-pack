@@ -7,7 +7,12 @@
  * (paragraphs, headings h1–h6, blockquotes, bullet and numbered lists at any
  * depth, with strong/em/code/strike-through and link marks), images, code,
  * horizontal breaks, and tables. Anything else (embeds, buttons, custom
- * plugin blocks) is skipped rather than guessed at.
+ * plugin blocks) is skipped rather than guessed at, unless the caller passes
+ * `unknownBlock` (Buttondown Drafts does, for its email bodies). `table`
+ * lets a caller write a table its own way (Buttondown Drafts writes an HTML
+ * table). `rendered` lets a caller change a block's finished Markdown
+ * (Buttondown Drafts escapes template code there). Without them the output
+ * is as before.
  */
 import { cdnOriginalUrl } from "../images/lib.js";
 
@@ -17,6 +22,23 @@ type Node = Record<string, any>;
 export interface MarkdownOptions {
 	/** Turn a site-relative href or media URL into an absolute one. Default: unchanged. */
 	absolute?: (url: string) => string;
+	/**
+	 * The URL an image block uses, given the one this converter found (the original on the media host when there's
+	 * one). Default: that URL. Buttondown Drafts swaps in an email-safe size and format.
+	 */
+	image?: (url: string, block: Node) => string;
+	/** Markdown for a block type this converter doesn't know (null: left out). Default: every such block is left out. */
+	unknownBlock?: (block: Node) => string | null;
+	/**
+	 * What a table block becomes (null: left out). Default: a Markdown pipe table. Buttondown Drafts writes an HTML
+	 * table with it, which Buttondown styles.
+	 */
+	table?: (block: Node) => string | null;
+	/**
+	 * Called with each block's finished Markdown (each list item on its own) and the block. What it returns is used.
+	 * Default: the Markdown as it is. Buttondown Drafts escapes template code with it.
+	 */
+	rendered?: (markdown: string, block: Node) => string;
 }
 
 export interface Frontmatter {
@@ -25,6 +47,22 @@ export interface Frontmatter {
 
 const HEADING = /^h([1-6])$/;
 const DANGEROUS_SCHEME = /^\s*(javascript|vbscript|data):/i;
+
+/**
+ * A URL as a browser reads its scheme (the WHATWG URL parser): ASCII tabs and line breaks are removed wherever they
+ * are, and so are the control characters and spaces at either end. So "java\tscript:alert(1)" is "javascript:alert(1)".
+ */
+export function normalizeHref(href: string): string {
+	return href
+		.trim()
+		.replace(/[\t\n\r]/g, "")
+		.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+}
+
+/** Whether a URL is a javascript:, vbscript: or data: one, read as a browser reads it (normalizeHref). */
+export function dangerousHref(href: string): boolean {
+	return DANGEROUS_SCHEME.test(normalizeHref(href));
+}
 
 const isRecord = (value: unknown): value is Node => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -46,9 +84,12 @@ export function escapeLineStart(line: string): string {
 	return line.replace(/^(\s*)([#>+-]|\d+[.)])(?=\s|$)/, (_m, space: string, marker: string) => `${space}${marker.replace(/([#>+\-.)])/, "\\$1")}`);
 }
 
-function safeHref(href: unknown, options: MarkdownOptions): string | null {
-	if (typeof href !== "string" || !href.trim() || DANGEROUS_SCHEME.test(href)) return null;
+/** A link's URL, made absolute and safe inside Markdown's `(…)`, or null for none or a dangerous scheme. */
+export function safeHref(href: unknown, options: MarkdownOptions): string | null {
+	if (typeof href !== "string" || !href.trim() || dangerousHref(href)) return null;
 	const url = options.absolute ? options.absolute(href.trim()) : href.trim();
+	// Checked again as it goes out: making it absolute can't turn it into one either.
+	if (dangerousHref(url)) return null;
 	return url.replace(/[()\s]/g, (c) => encodeURIComponent(c));
 }
 
@@ -124,7 +165,8 @@ function imageUrl(block: Node): string | null {
 }
 
 function renderImage(block: Node, options: MarkdownOptions): string | null {
-	const src = safeHref(imageUrl(block), options);
+	const found = imageUrl(block);
+	const src = safeHref(found && options.image ? options.image(found, block) : found, options);
 	if (!src) return null;
 	const asset = isRecord(block.asset) ? block.asset : {};
 	const altRaw = typeof block.alt === "string" ? block.alt : typeof asset.alt === "string" ? asset.alt : "";
@@ -219,7 +261,8 @@ export function portableTextToMarkdown(value: unknown, options: MarkdownOptions 
 		if (!isRecord(block)) continue;
 		if (block._type === "block" && typeof block.listItem === "string") {
 			list ??= [];
-			list.push(renderListItem(block, listState, options));
+			const item = renderListItem(block, listState, options);
+			list.push(options.rendered ? options.rendered(item, block) : item);
 			continue;
 		}
 		closeList();
@@ -238,11 +281,13 @@ export function portableTextToMarkdown(value: unknown, options: MarkdownOptions 
 				rendered = "---";
 				break;
 			case "table":
-				rendered = renderTable(block, options);
+				rendered = options.table ? options.table(block) : renderTable(block, options);
 				break;
 			default:
-				rendered = null; // Unknown block types are skipped.
+				// Unknown block types are skipped, unless the caller renders them.
+				rendered = options.unknownBlock ? options.unknownBlock(block) : null;
 		}
+		if (rendered && options.rendered) rendered = options.rendered(rendered, block);
 		if (rendered) parts.push(rendered);
 	}
 	closeList();

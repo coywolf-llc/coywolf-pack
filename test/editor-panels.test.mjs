@@ -39,7 +39,8 @@ test("a panel shows while its module's page is in the admin's sidebar (the manif
 });
 
 test("the panels and the column: valid for EmDash (ids, titles, finite order and role), admins only, one per module page", () => {
-	assert.deepEqual(EDITOR_PANELS.map((p) => [p.id, p.page]), [["childPages", "/child-pages"], ["schema", "/schema"], ["ai", "/ai"], ["links", "/links"]]);
+	assert.deepEqual(EDITOR_PANELS.map((p) => [p.id, p.page]), [["childPages", "/child-pages"], ["schema", "/schema"], ["ai", "/ai"], ["links", "/links"], ["buttondown", "/buttondown"]]);
+	assert.equal(new Set(EDITOR_PANELS.map((p) => p.order)).size, EDITOR_PANELS.length, "no two panels share an order");
 	for (const panel of [...EDITOR_PANELS, ...LIST_COLUMNS]) {
 		assert.ok(panel.id.trim() && (panel.title ?? panel.label).trim(), panel.id);
 		assert.ok(Number.isFinite(panel.order) && Number.isFinite(panel.minRole), panel.id);
@@ -51,7 +52,9 @@ test("the panels and the column: valid for EmDash (ids, titles, finite order and
 	const index = readFileSync(new URL("../src/admin/index.tsx", import.meta.url), "utf8");
 	assert.match(index, /export \{ contentEditorPanels, contentListColumns \} from "\.\/editor-panels\.js";/);
 	const panels = readFileSync(new URL("../src/admin/editor-panels.tsx", import.meta.url), "utf8");
-	assert.match(panels, /export const contentEditorPanels = EDITOR_PANELS\.map\(\(\{ page, \.\.\.panel \}\) => \(\{ \.\.\.panel, component: PANEL_COMPONENTS\[panel\.id\], collections: \(collection: string\) => extensionShows\(panel\.id, page, collection\) \}\)\);/);
+	assert.match(panels, /export const contentEditorPanels = EDITOR_PANELS\.map\(\(\{ page, \.\.\.panel \}\) => \(\{ \.\.\.panel, component: PANEL_COMPONENTS\[panel\.id\], collections: \(collection: string\) => extensionShows\(panel\.id, page, collection\), \.\.\.\(PANEL_VISIBLE\[panel\.id\] \? \{ isVisible: PANEL_VISIBLE\[panel\.id\] \} : \{\}\) \}\)\);/);
+	// Buttondown's panel also asks whether a rule covers the collection (EmDash's isVisible), sharing the panel's own read.
+	assert.match(panels, /const PANEL_VISIBLE: .+? = \{ buttondown: buttondownPanelVisible \};/);
 	assert.match(panels, /export const contentListColumns = LIST_COLUMNS\.map\(\(\{ page, \.\.\.column \}\) => \(\{ \.\.\.column, cell: COLUMN_CELLS\[column\.id\], collections: \(collection: string\) => extensionShows\(column\.id, page, collection\) \}\)\);/);
 	// The columns' cells share one request per page (pageLinks, pageParents: keyed by collection and the page's ids).
 	assert.match(panels, /pageLinks\(props\.collection, ids\)/);
@@ -150,4 +153,31 @@ test("byline avatars in JSON-LD use the public media address, never EmDash's sig
 	assert.deepEqual(graph["@graph"][1].image, ["/_emdash/api/media/file/IMG2.jpg", "https://example.com/other.png"]);
 	assert.equal(reads, 2);
 	await resolveAssetUrls({ "@graph": [{ name: "No media here" }] }, async () => assert.fail("no read without an asset URL"));
+});
+
+test("the Buttondown panel: shown only where a rule covers the collection, with one read shared by EmDash's isVisible and the panel", async () => {
+	const { buttondownEntry, buttondownPanelVisible, badgeLabel, STATE_BADGE, timeAgo } = await import("../src/admin/buttondown-core.ts");
+	const asked = [];
+	const fetcher = async (body) => (asked.push(body), { covered: body.collection === "posts" });
+	assert.equal((await buttondownEntry("posts", "1", "v1", { fetcher, now: 0 })).covered, true);
+	assert.equal((await buttondownEntry("posts", "1", "v1", { fetcher, now: 1000 })).covered, true);
+	assert.equal(asked.length, 1, "the second ask (the panel after isVisible) reuses the first");
+	await buttondownEntry("posts", "1", "v2", { fetcher, now: 1000 });
+	assert.equal(asked.length, 2, "a saved entry (a new updatedAt) reads again");
+	await buttondownEntry("posts", "1", "v2", { fetcher, now: 1000, fresh: true });
+	assert.equal(asked.length, 3, "after a button: fresh");
+	assert.equal((await buttondownEntry("pages", "1", "", { fetcher, now: 0 })).covered, false);
+	// The visibility check never throws: a failed read hides the panel.
+	assert.equal(await buttondownPanelVisible({ collection: "broken", entry: { id: "x", updatedAt: "never-read-before" } }).catch(() => "threw"), false);
+	// Badges: the state in a word or two, Buttondown's own status for an email the Pack leaves alone.
+	assert.equal(badgeLabel({ state: "left", remoteStatus: "about_to_send" }), "About to send");
+	assert.equal(badgeLabel({ state: "draft", remoteStatus: "draft" }), "Draft");
+	assert.equal(STATE_BADGE.error.variant, "error");
+	for (const [state, b] of Object.entries(STATE_BADGE)) assert.ok(b.label && b.variant, state);
+	assert.equal(timeAgo(new Date(Date.now() - 120_000).toISOString()), "2 minutes ago");
+	assert.equal(timeAgo("nope"), "");
+	// The panel's actions: Refresh asks first (it overwrites changes made in Buttondown).
+	const panels = readFileSync(new URL("../src/admin/editor-panels.tsx", import.meta.url), "utf8");
+	assert.match(panels, /title: "Refresh the draft from the post\?"/);
+	assert.match(panels, /Create draft now/);
 });

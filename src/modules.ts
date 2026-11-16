@@ -6,6 +6,7 @@
 import { aiPack } from "./ai/pack.js";
 import { alertsPack } from "./alerts/pack.js";
 import { auditPack } from "./audit/pack.js";
+import { buttondownPack } from "./buttondown/pack.js";
 import { socialImagesPack } from "./social/pack.js";
 import { backupsDownloadMiddleware, backupsPack } from "./backups/pack.js";
 import { cloudflarePack } from "./cloudflare/pack.js";
@@ -71,6 +72,8 @@ export const MODULES: Factory[] = [
 	// Phase 5C. No middleware; their hooks (Social Images' publish hook) don't depend on the modules above.
 	(o) => (o.audit === false ? null : auditPack()),
 	(o) => (o.alerts === false ? null : alertsPack()),
+	// Its hooks run after the response and depend on no other module's (the post's URL comes from the shared resolver).
+	(o) => (o.buttondown === false ? null : buttondownPack(o.buttondown ?? {})),
 	(o) => (o.socialImages === false ? null : socialImagesPack(o.socialImages ?? {})),
 ];
 

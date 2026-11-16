@@ -20,7 +20,7 @@
  * (ctx.settings.get/set work for keys that aren't in the schema).
  *
  * The order below is the Settings page's order: the Cloudflare API token and
- * the three other keys first, then the older secrets it replaces (kept
+ * the four other keys first, then the older secrets it replaces (kept
  * declared so their stored values still decrypt; src/core/settings-enhance.ts
  * hides them while empty), then the Videos webhook secret, which the pack
  * fills in itself.
@@ -57,6 +57,11 @@ export const SECRET_SETTINGS = {
 		type: "secret",
 		label: "Google service account key",
 		description: "For the Search Console card on the Insights page. Paste the whole JSON key file.",
+	},
+	buttondownApiKey: {
+		type: "secret",
+		label: "Buttondown API key",
+		description: "For Buttondown Drafts. Use a key with only Emails → Read & write (Sending Disabled, every other area None). The rules are on the Buttondown Drafts page.",
 	},
 	// The older tokens, one per feature: still read (after the Cloudflare API token), hidden on the Settings page when empty.
 	usageApiToken: { type: "secret", label: "Older: Cloudflare usage token", description: OLDER_DESCRIPTION },

@@ -107,6 +107,14 @@ function deferredTasks(): { track<T>(promise: Promise<T>): Promise<T> } | undefi
 	const store = requestStore() as { deferredTasks?: { track?: <T>(promise: Promise<T>) => Promise<T> } } | undefined;
 	return typeof store?.deferredTasks?.track === "function" ? (store.deferredTasks as { track<T>(promise: Promise<T>): Promise<T> }) : undefined;
 }
+/**
+ * Run `job` after the response, held open by waitUntil and tracked as one of EmDash's deferred tasks (as its own
+ * after() does), so a request-scoped database stays open until it's done. For work a hook starts that must outlive
+ * the hook's 5 seconds (Buttondown Drafts). Synchronous: call it before awaiting anything else.
+ */
+export function trackAfterResponse(job: Promise<unknown>): void {
+	afterResponse(deferredTasks()?.track(job) ?? job);
+}
 /** Scheduled jobs can take far longer than EmDash's 5-second hook default (Workers cron allows 15 minutes). */
 const CRON_TIMEOUT_MS = 14 * 60_000;
 /** plugin:activate schedules every task (one D1 write each); a boot-time failure would disable the plugin. */

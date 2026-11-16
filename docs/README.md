@@ -23,6 +23,7 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 - [Clean Image URLs](images.md)
 - [Backups](backups.md)
 - [Alerts & Digest](alerts.md): email alerts and a weekly digest
+- [Buttondown Drafts](buttondown.md): a Buttondown email draft for each new newsletter post (never sent by the Pack)
 - [Redirect Manager](redirects.md)
 - [Schema & Social](schema.md)
 - [Social Images](social-images.md): generated Open Graph images

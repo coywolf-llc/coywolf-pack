@@ -17,6 +17,7 @@ Checked every hour. Each alert reads what its module already keeps, so it works 
 | Cloudflare bill estimate | The usage card's 30-day estimate is over your threshold (in US dollars; empty turns it off) | The Performance page's last usage reading (read again once a day if nobody opened the page) |
 | Coywolf Pack update | A newer version is on npm | The update check's last answer |
 | Content audit worsened | The latest [content audit](content-audit.md) found more of any problem than the run before | The audit's report |
+| Buttondown draft failed | A [Buttondown draft](buttondown.md) couldn't be created, updated or deleted for over an hour (0.43.0) | Buttondown Drafts' records in error |
 
 Everything new at a check goes out in one email per recipient. An issue is sent to each recipient at most once a day, and one that lasts (the bill over the threshold, an update waiting, backups overdue) only once until it clears. Sends are tracked per recipient and recorded before they go out, so a check that's cut off mid-send doesn't send again the same day. If the provider refuses an email, that recipient's issues are tried again at the next check; if it doesn't answer within 20 seconds, the email is counted as sent but unconfirmed (it may still arrive) and isn't repeated. When nothing is wrong, nothing is sent.
 

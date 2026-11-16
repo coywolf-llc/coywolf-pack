@@ -9,10 +9,20 @@ const { settingsEnhanceScript, settingsGuideHtml, settingsPageData, injectAdminE
 const { SECRET_SETTINGS, OLDER_SECRET_KEYS } = await import("../src/core/secrets.ts");
 const { tokenFormUrl, CLOUDFLARE_TOKEN_FORM } = await import("../src/core/guide-content.ts");
 
-test("four fields get guides: the Cloudflare API token, the AI key, Fathom and Google", () => {
+test("five fields get guides: the Cloudflare API token, the AI key, Fathom, Google and Buttondown", () => {
 	const html = settingsGuideHtml();
-	const { cloudflareApiToken, aiApiKey, insightsFathomApiKey, insightsGoogleServiceAccount } = SECRET_SETTINGS;
-	assert.deepEqual(Object.keys(html).sort(), [cloudflareApiToken.label, aiApiKey.label, insightsFathomApiKey.label, insightsGoogleServiceAccount.label].sort());
+	const { cloudflareApiToken, aiApiKey, insightsFathomApiKey, insightsGoogleServiceAccount, buttondownApiKey } = SECRET_SETTINGS;
+	assert.deepEqual(Object.keys(html).sort(), [cloudflareApiToken.label, aiApiKey.label, insightsFathomApiKey.label, insightsGoogleServiceAccount.label, buttondownApiKey.label].sort());
+	// Buttondown's guide asks for the least-privilege key, in Buttondown's own labels: Emails → Read & write, Sending
+	// Disabled, every other area None. There's no "Emails and drafts" area, and no menu path to the keys page.
+	const buttondown = html[buttondownApiKey.label];
+	assert.match(buttondown, /Emails<\/strong>: Read &amp; write/);
+	assert.match(buttondown, /Sending<\/strong>: Disabled/);
+	assert.match(buttondown, /Every other area \(Subscribers, Automations, Forms, Surveys, Settings and Styling\): None/);
+	assert.match(buttondown, /<a href="https:\/\/buttondown\.com\/keys"[^>]*>Buttondown's API keys page<\/a> \(buttondown\.com\/keys\)/);
+	assert.match(buttondown, /A key belongs to the newsletter that was selected when it was made/);
+	assert.doesNotMatch(buttondown, /Emails and drafts|Settings → API keys|: Write\b/);
+	assert.match(SECRET_SETTINGS.buttondownApiKey.description, /only Emails → Read & write \(Sending Disabled, every other area None\)/);
 	assert.equal((html[aiApiKey.label].match(/<details/g) ?? []).length, 3);
 	// The token's guide is the one pre-filled form, with the zone policy advice.
 	const token = html[cloudflareApiToken.label];
@@ -25,7 +35,7 @@ test("the script carries the older and hidden fields by their labels, and the ol
 	const data = settingsPageData();
 	assert.deepEqual(data.older, OLDER_SECRET_KEYS.map((key) => SECRET_SETTINGS[key].label));
 	assert.deepEqual(data.hidden, [SECRET_SETTINGS.videosWebhookSecret.label]);
-	// None of the four fields people fill in is hidden or tucked away.
+	// None of the five fields people fill in is hidden or tucked away.
 	for (const label of Object.keys(data.guides)) assert.ok(!data.older.includes(label) && !data.hidden.includes(label), label);
 	const script = settingsEnhanceScript();
 	for (const label of [...data.older, ...data.hidden]) assert.ok(script.includes(JSON.stringify(label)), `the script names ${label}`);

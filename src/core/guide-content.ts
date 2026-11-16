@@ -32,6 +32,7 @@ export type GuideId =
 	| "web-analytics"
 	| "fathom"
 	| "search-console"
+	| "buttondown"
 	| "browser-run-token";
 
 export interface Guide {
@@ -351,6 +352,17 @@ export const GUIDES: Record<GuideId, Guide> = {
 		],
 		note: "The pack asks only for read access (the webmasters.readonly scope). Search Console's numbers lag by a day or two, and the newest day may still change. Each reading is three small queries, kept for six hours.",
 	},
+	buttondown: {
+		summary: "How to make a Buttondown API key that can only write drafts",
+		steps: [
+			`Sign in to ${link("https://buttondown.com/", "Buttondown")} and switch to the newsletter this site's drafts go to. A key belongs to the newsletter that was selected when it was made, so check which one is selected first. Each site uses its own newsletter's key.`,
+			`Open ${link("https://buttondown.com/keys", "Buttondown's API keys page")} (buttondown.com/keys) and create a new key. Name it after this site, for example ${code("Coywolf Pack drafts (example.com)")}.`,
+			`Set the permissions:${bullets([`${b("Emails")}: Read &amp; write (drafts are part of Emails).`, `${b("Sending")}: Disabled.`, `Every other area (Subscribers, Automations, Forms, Surveys, Settings and Styling): None.`, "Save the key."])}`,
+			`Copy the key and paste it into ${b("Buttondown API key")} on this page, then save. It's stored encrypted, and the page never shows it again.`,
+			`On the ${b("Buttondown Drafts")} page, select ${b("Check key")}. It should say the key works, can read drafts, and can't read your newsletters or subscribers.`,
+		],
+		note: "With Sending set to Disabled the key can't send or schedule an email, even if it leaks. The Pack only ever makes, updates and (for an unpublished post) deletes untouched drafts. A newsletter's main key has full access: don't use it here.",
+	},
 	"media-host": {
 		summary: "How to set up a media host by hand in the Cloudflare dashboard",
 		steps: [
@@ -439,6 +451,10 @@ export const SETTINGS_PAGE_GUIDES: Record<string, { intro: string; guides: Guide
 	insightsGoogleServiceAccount: {
 		intro: "For the Search Console card on the Insights page. Paste the whole JSON key file.",
 		guides: ["search-console"],
+	},
+	buttondownApiKey: {
+		intro: "For Buttondown Drafts. Use a key with only Emails → Read &amp; write (Sending Disabled, every other area None). The rules are on the Buttondown Drafts page.",
+		guides: ["buttondown"],
 	},
 };
 

@@ -130,3 +130,25 @@ test("File Downloads settings come from the shared read with their defaults", as
 	assert.equal(await readSiteSettings(db), settings);
 	assert.equal(db.queries, 1);
 });
+
+test("File Downloads settings, strict (Buttondown Drafts): an unreadable database rejects; without strict it's the defaults, as before", async () => {
+	invalidateFeatures();
+	const db = fakeDb({ [option("filesBase")]: '"get"', [option("filesScheme")]: '"dark"' });
+	db.fail = true;
+	const error = console.error;
+	console.error = () => {};
+	try {
+		await assert.rejects(readSiteSettings(db, true), /couldn't be read/);
+		const defaults = await readSiteSettings(db);
+		assert.equal(defaults.scheme, "auto");
+		assert.equal(defaults.publicBaseUrl, "");
+	} finally {
+		console.error = error;
+	}
+	// Readable: strict changes nothing.
+	db.fail = false;
+	invalidateFeatures();
+	const strict = await readSiteSettings(db, true);
+	assert.equal(strict.scheme, "dark");
+	assert.equal(await readSiteSettings(db), strict);
+});

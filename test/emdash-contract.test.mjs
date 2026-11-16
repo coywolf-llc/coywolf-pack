@@ -1132,7 +1132,7 @@ test("Settings page: the route, the form id and Kumo's Input for each secret fie
 	assert.match(page, /className: "space-y-4",\s*children: \[fields\.length === 0 && [\s\S]{0,400}?fields\.map\(\(\[key, field\]\) => [\s\S]{0,40}?jsx\(SettingFieldInput, \{/);
 });
 
-test("Settings page: the script keeps four fields in view, hides empty older tokens and the webhook secret, and tucks saved ones behind a toggle (rendered as EmDash does, with the installed Kumo)", async () => {
+test("Settings page: the script keeps five fields in view, hides empty older tokens and the webhook secret, and tucks saved ones behind a toggle (rendered as EmDash does, with the installed Kumo)", async () => {
 	const { Window } = await import("happy-dom");
 	const window = new Window({ url: "https://example.com/_emdash/admin/plugins-manager/coywolf-pack/settings" });
 	for (const key of ["window", "document", "navigator", "HTMLElement", "Node", "Element", "MutationObserver", "requestAnimationFrame", "cancelAnimationFrame", "getComputedStyle"]) {
@@ -1174,7 +1174,7 @@ test("Settings page: the script keeps four fields in view, hides empty older tok
 		window.eval(settingsEnhanceScript());
 		await window.happyDOM.waitUntilComplete();
 
-		for (const key of ["cloudflareApiToken", "aiApiKey", "insightsFathomApiKey", "insightsGoogleServiceAccount"]) assert.equal(wrapper(key).hidden, false, `${key} stays in view`);
+		for (const key of ["cloudflareApiToken", "aiApiKey", "insightsFathomApiKey", "insightsGoogleServiceAccount", "buttondownApiKey"]) assert.equal(wrapper(key).hidden, false, `${key} stays in view`);
 		for (const key of OLDER_SECRET_KEYS) assert.equal(wrapper(key).hidden, true, `${key} is out of view`);
 		assert.equal(wrapper("videosWebhookSecret").hidden, true, "the webhook secret is hidden even when saved");
 		// Browsers ignore autocomplete="off" on password inputs but respect "new-password", so no field may lose EmDash's hint.
@@ -1492,4 +1492,55 @@ test("Child Pages: a parent chosen on a page with drafts waits in the draft revi
 	assert.match(policy, /hydrateDraftData\(current/);
 	assert.match(policy, /content: contentItemToRecord\(current\.data\.item\)/);
 	assert.match(functionSource(runtime, "contentItemToRecord"), /return \{ \.\.\.item \};/);
+});
+
+test("Buttondown Drafts: afterPublish's content carries the entry's id, status and publishedAt; republishing keeps the first publishedAt, and so does unpublish then publish (the since rule, src/buttondown/sync.ts)", async () => {
+	const { handleContentCreate, handleContentPublish, handleContentUnpublish } = await import("emdash");
+	const created = (await handleContentCreate(db, "posts", { data: { title: "Newsletter issue" }, slug: "bd-issue", status: "draft" })).data.item;
+	const first = await handleContentPublish(db, "posts", created.id, { currentTime: new Date("2026-11-15T10:00:00Z") });
+	assert.ok(first.success);
+	const item = first.data.item;
+	// What the runtime hands content:afterPublish is this item as a record (contentItemToRecord: { ...item }).
+	assert.equal(typeof item.id, "string");
+	assert.equal(item.status, "published");
+	assert.ok(item.publishedAt, "publishedAt is set on the first publish");
+	const runtime = [...emdashDist.values()].find((src) => src.includes("runAfterPublishHooks(contentItemToRecord(result.data.item)") || /this\.runAfterPublishHooks\(\s*contentItemToRecord\(result\.data\.item\)/.test(src));
+	assert.ok(runtime, "afterPublish gets the published item");
+	assert.match(functionSource(runtime, "contentItemToRecord"), /return \{ \.\.\.item \};/);
+	// Republish (a later publish of the published entry): the first date stays.
+	const again = await handleContentPublish(db, "posts", created.id, { currentTime: new Date("2026-11-20T10:00:00Z") });
+	assert.equal(again.data.item.publishedAt, item.publishedAt);
+	// Unpublish keeps it too, so publishing again still passes the since check.
+	assert.ok((await handleContentUnpublish(db, "posts", created.id)).success);
+	const back = await handleContentPublish(db, "posts", created.id, { currentTime: new Date("2026-11-25T10:00:00Z") });
+	assert.equal(back.data.item.publishedAt, item.publishedAt);
+});
+
+test("Buttondown Drafts: EmDash's admin honors a content editor panel's isVisible (the panel shows only in collections a rule covers, src/admin/editor-panels.tsx)", () => {
+	assert.match(admin, /value\.isVisible !== void 0 && typeof value\.isVisible !== "function"/);
+	assert.match(admin, /const isVisible = panel\.extension\.isVisible;/);
+	assert.match(admin, /await isVisible\(context\) === true/);
+	assert.match(admin, /!extension\.isVisible \|\| result\?\.scope === scope && result\.visible\.get\(/);
+});
+
+test("Buttondown Drafts: entryTerms reads every term an entry has in one taxonomy, locale-resolved, through EmDash's own tables (src/core/content-url.ts)", async () => {
+	const { ContentRepository } = await import("emdash");
+	const TaxonomyRepository = await distClass("TaxonomyRepository", "async setTermsForEntry(");
+	const { entryTerms, termParentMaps, ancestorTrail } = await import("../src/core/content-url.ts");
+	const content = new ContentRepository(db);
+	const terms = new TaxonomyRepository(db);
+	const newsletter = await terms.create({ name: "category", slug: "bd-newsletter", label: "Coywolf Newsletter" });
+	const special = await terms.create({ name: "category", slug: "bd-special", label: "Special issue", parentId: newsletter.id });
+	const other = await terms.create({ name: "category", slug: "bd-other", label: "Other" });
+	const tag = await terms.create({ name: "tag", slug: "bd-tag", label: "A tag" });
+	const entry = await content.create({ type: "posts", slug: "bd-terms", status: "published", publishedAt: new Date().toISOString(), data: { title: "Terms" } });
+	await terms.setTermsForEntry("posts", entry.id, "category", [special.id, other.id]);
+	await terms.setTermsForEntry("posts", entry.id, "tag", [tag.id]);
+	assert.deepEqual((await entryTerms(d1, "posts", entry.id, "category")).sort(), ["bd-other", "bd-special"]);
+	assert.deepEqual(await entryTerms(d1, "posts", entry.id, "tag"), ["bd-tag"]);
+	assert.deepEqual(await entryTerms(d1, "posts", "no-such-entry", "category"), []);
+	assert.deepEqual(await entryTerms(d1, "Bad Collection", entry.id, "category"), [], "a collection slug that isn't EmDash's never reaches the SQL");
+	// A child term of a chosen term counts: its parent comes from the same taxonomy rows (termParentMaps).
+	const parents = (await termParentMaps(d1, ["category"])).get("category");
+	assert.deepEqual(ancestorTrail("bd-special", parents), ["bd-newsletter", "bd-special"]);
 });

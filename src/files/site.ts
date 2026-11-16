@@ -83,9 +83,13 @@ export function settingsFrom(raw: Record<string, unknown>): SiteSettings {
 	};
 }
 
-/** The settings from D1, in the feature switches' query and per-isolate cache (defaults if it can't be read). */
-export async function readSiteSettings(db: D1Database): Promise<SiteSettings> {
+/**
+ * The settings from D1, in the feature switches' query and per-isolate cache (defaults if it can't be read).
+ * `strict`: reject when they can't be read, for a caller that must not build on the defaults (Buttondown Drafts).
+ */
+export async function readSiteSettings(db: D1Database, strict = false): Promise<SiteSettings> {
 	const reads = await Promise.all(SETTING_KEYS.map((key) => readSiteSetting(key, db)));
+	if (strict && reads.some((r) => !r)) throw new Error("File Downloads' settings couldn't be read.");
 	if (reads.some((r) => !r)) console.error("coywolf-pack files: could not read settings");
 	const raw = reads.map((r) => r?.value ?? null);
 	const memo = settingsMemo;
