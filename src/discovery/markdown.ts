@@ -48,6 +48,22 @@ export interface Frontmatter {
 const HEADING = /^h([1-6])$/;
 const DANGEROUS_SCHEME = /^\s*(javascript|vbscript|data):/i;
 
+/**
+ * A URL as a browser reads its scheme (the WHATWG URL parser): ASCII tabs and line breaks are removed wherever they
+ * are, and so are the control characters and spaces at either end. So "java\tscript:alert(1)" is "javascript:alert(1)".
+ */
+export function normalizeHref(href: string): string {
+	return href
+		.trim()
+		.replace(/[\t\n\r]/g, "")
+		.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+}
+
+/** Whether a URL is a javascript:, vbscript: or data: one, read as a browser reads it (normalizeHref). */
+export function dangerousHref(href: string): boolean {
+	return DANGEROUS_SCHEME.test(normalizeHref(href));
+}
+
 const isRecord = (value: unknown): value is Node => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** Escape characters that would otherwise turn plain text into Markdown syntax. */
@@ -70,8 +86,10 @@ export function escapeLineStart(line: string): string {
 
 /** A link's URL, made absolute and safe inside Markdown's `(…)`, or null for none or a dangerous scheme. */
 export function safeHref(href: unknown, options: MarkdownOptions): string | null {
-	if (typeof href !== "string" || !href.trim() || DANGEROUS_SCHEME.test(href)) return null;
+	if (typeof href !== "string" || !href.trim() || dangerousHref(href)) return null;
 	const url = options.absolute ? options.absolute(href.trim()) : href.trim();
+	// Checked again as it goes out: making it absolute can't turn it into one either.
+	if (dangerousHref(url)) return null;
 	return url.replace(/[()\s]/g, (c) => encodeURIComponent(c));
 }
 

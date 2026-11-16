@@ -7,7 +7,7 @@
  * The body:
  * - starts with Buttondown's plaintext editor-mode comment (its own guess at
  *   the mode isn't reliable: a fenced html block made it switch to HTML);
- * - has no frontmatter (Buttondown refuses a body that starts with it): it's
+ * - has no frontmatter (Buttondown refuses a body that starts with its fence, a first line that is "---"): it's
  *   made with portableTextToMarkdown directly, never Discovery's .md builder;
  * - holds each Portable Text field of the collection in field order, with
  *   relative links made absolute, images resized and in a format email apps
@@ -28,7 +28,7 @@ import type { DisclosureSettings, PodcastSettings } from "../customBlocks/render
 import { type EmailFile, markdownUrl, renderTableBlock, renderUnknownBlock } from "./blocks.js";
 import type { DraftFields } from "./client.js";
 import { BUTTONDOWN_LIMITS } from "./keys.js";
-import { TEMPLATE_CODE, VERBATIM_OPEN, escapeTemplateBlock, escapeTemplateLines } from "./template.js";
+import { TEMPLATE_CODE, VERBATIM_CLOSE, VERBATIM_OPEN, escapeTemplateBlock, escapeTemplateLines } from "./template.js";
 
 export { TEMPLATE_CODE };
 
@@ -149,6 +149,16 @@ export function packMetadata(source: Pick<EmailSource, "key" | "collection" | "e
 	return { ...current, coywolf_pack: { v: METADATA_VERSION, key: source.key, collection: source.collection, entry: source.entryId, hash } };
 }
 
+/**
+ * Whether the content would start with a frontmatter fence, which Buttondown refuses: a first line that is "---"
+ * alone (spaces or tabs after it or not). A line such as "---x" or "--- text" isn't one. Checked as Buttondown reads
+ * it: the verbatim tags on a first line are gone by then.
+ */
+export function startsWithFrontmatter(content: string): boolean {
+	const firstLine = (content.split("\n", 1)[0] ?? "").split(VERBATIM_OPEN).join("").split(VERBATIM_CLOSE).join("");
+	return /^---[ \t]*$/.test(firstLine);
+}
+
 export async function buildEmail(source: EmailSource): Promise<BuiltEmail> {
 	const origin = source.siteUrl.replace(/\/+$/, "");
 	const absolute = (href: string) => {
@@ -193,8 +203,7 @@ export async function buildEmail(source: EmailSource): Promise<BuiltEmail> {
 		const footer = href ? escapeTemplateLines(`[Read it on ${host}](${href})`) : "";
 		if (footer) content = content ? `${content}\n\n---\n\n${footer}` : footer;
 	}
-	// Checked as Buttondown reads it: the verbatim tag in front of a first line is gone by then.
-	if (/^\s*---/.test(content.startsWith(VERBATIM_OPEN) ? content.slice(VERBATIM_OPEN.length) : content)) throw new Error("The email body would start with frontmatter.");
+	if (startsWithFrontmatter(content)) throw new Error("The email body would start with frontmatter.");
 	const body = `${MODE_COMMENT}\n${content}\n`;
 
 	const subject = plainLine(source.title, 2000) || plainLine(source.slug, 2000) || "Untitled post";

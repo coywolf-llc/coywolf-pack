@@ -9,7 +9,7 @@ import { test } from "node:test";
 
 import "./ts-resolve.mjs";
 
-const { buildEmail, emailImage, imageValueUrl, MODE_COMMENT, siteHost, entryKey, packMetadata } = await import("../src/buttondown/body.ts");
+const { buildEmail, emailImage, imageValueUrl, MODE_COMMENT, siteHost, entryKey, packMetadata, startsWithFrontmatter } = await import("../src/buttondown/body.ts");
 const { renderTableBlock, renderUnknownBlock, richToMarkdown, watchUrl } = await import("../src/buttondown/blocks.ts");
 const lib = await import("../src/images/lib.ts");
 
@@ -19,10 +19,12 @@ const image = (url, extra = {}) => ({ _type: "image", _key: Math.random().toStri
 /** A table block: each row is a list of cells, a cell is its text or its spans. */
 const tableCell = (content, extra = {}) => ({ _type: "tableCell", _key: Math.random().toString(36).slice(2), content: typeof content === "string" ? [span(content)] : content, ...extra });
 const tableBlock = (rows, extra = {}) => ({ _type: "table", _key: "t", rows: rows.map((cells) => ({ _type: "tableRow", cells: cells.map((c) => (c?._type === "tableCell" ? c : tableCell(c))) })), ...extra });
+/** The email's table tag: Buttondown's class, and the space above and below that its CSS leaves out. */
+const TABLE_OPEN = '<table class="buttondown-block-styled" style="margin:16px 0;">';
 /** The email's HTML table, from each cell's inner HTML: the first row is the header. */
 const tableHtml = ([head, ...rows]) => {
 	const row = (cells, tag) => ["<tr>", ...cells.map((c) => `<${tag}>${c}</${tag}>`), "</tr>"];
-	return ['<table class="buttondown-block-styled">', "<thead>", ...row(head, "th"), "</thead>", ...(rows.length ? ["<tbody>", ...rows.flatMap((r) => row(r, "td")), "</tbody>"] : []), "</table>"].join("\n");
+	return [TABLE_OPEN, "<thead>", ...row(head, "th"), "</thead>", ...(rows.length ? ["<tbody>", ...rows.flatMap((r) => row(r, "td")), "</tbody>"] : []), "</table>"].join("\n");
 };
 
 const source = (extra = {}) => ({
@@ -303,7 +305,7 @@ test("template code: a table cell is wrapped inside its <th> or <td>; the other 
 	// A header cell, a cell that spans columns, and template code inside a link and next to escaped HTML.
 	const more = tableBlock([["{{ head }}"], [tableCell([span("if a < b {% x %}", ["k"])], { colspan: 2, markDefs: [{ _key: "k", _type: "link", href: "https://x.example/p/{{ id }}/" }] })]]);
 	const moreOut = await escaped([more]);
-	assert.equal(moreOut.body, ['<table class="buttondown-block-styled">', "<thead>", "<tr>", `<th>${V("{{ head }}")}</th>`, "<th></th>", "</tr>", "</thead>", "<tbody>", "<tr>", `<td colspan="2">${V('<a href="https://x.example/p/{{%20id%20}}/">if a &lt; b {% x %}</a>')}</td>`, "</tr>", "</tbody>", "</table>"].join("\n"));
+	assert.equal(moreOut.body, [TABLE_OPEN, "<thead>", "<tr>", `<th>${V("{{ head }}")}</th>`, "<th></th>", "</tr>", "</thead>", "<tbody>", "<tr>", `<td colspan="2">${V('<a href="https://x.example/p/{{%20id%20}}/">if a &lt; b {% x %}</a>')}</td>`, "</tr>", "</tbody>", "</table>"].join("\n"));
 	assert.equal(moreOut.printed, renderTableBlock(more, { absolute: (u) => u }));
 	// A line that isn't a cell's (the table never writes one) is wrapped whole: nothing in a table can reach Django.
 	const { escapeTemplateBlock } = await import("../src/buttondown/template.ts");
@@ -312,12 +314,12 @@ test("template code: a table cell is wrapped inside its <th> or <td>; the other 
 	assert.equal(django(escapeTemplateBlock("<td>a {{</td><td>b }}</td>", "table")), "<td>a {{</td><td>b }}</td>");
 });
 
-test("a table goes out as an HTML table in Buttondown's own table style: the first row in <thead> with <th>, the rest in <tbody> with <td>", async () => {
+test("a table goes out as an HTML table in Buttondown's own table style, with 16px above and below: with no header information, the first row in <thead> with <th>, the rest in <tbody> with <td>", async () => {
 	// The live case (2026-11-15): the pipe table came out as "Classic Outlook No", with no borders or padding.
 	const table = tableBlock([["Email app", "Shows WebP"], ["Apple Mail", "Yes"], ["Classic Outlook", "No"]]);
 	const built = await buildEmail(source({ bodyFields: [[block([span("Before.")]), table, block([span("After.")])]], footerLink: false }));
 	const html = [
-		'<table class="buttondown-block-styled">',
+		TABLE_OPEN,
 		"<thead>",
 		"<tr>",
 		"<th>Email app</th>",
@@ -340,13 +342,16 @@ test("a table goes out as an HTML table in Buttondown's own table style: the fir
 	assert.equal(built.fields.body, `${MODE_COMMENT}\nBefore.\n\n${html}\n\nAfter.\n`);
 	assert.deepEqual(built.warnings, []);
 	assert.doesNotMatch(built.fields.body, /\|/, "no pipe table");
-	// The header row is the first row, whatever the cells say (the shared converter's rule for its pipe table).
-	const flagged = tableBlock([[tableCell("a", { isHeader: false }), "b"], [tableCell("c", { isHeader: true }), "d"]]);
-	assert.equal(renderTableBlock(flagged, { absolute: (u) => u }), tableHtml([["a", "b"], ["c", "d"]]));
+	// Buttondown's CSS gives its table class no margin, and a code block none: the inline style keeps the table off what follows.
+	const beforeCode = await buildEmail(noFooter([table, { _type: "code", _key: "c", code: "x = 1" }]));
+	assert.equal(beforeCode.fields.body, `${MODE_COMMENT}\n${html}\n\n\`\`\`\nx = 1\n\`\`\`\n`);
+	assert.match(html, /^<table class="buttondown-block-styled" style="margin:16px 0;">\n/, "the class stays, the margin is inline");
+	assert.equal(html.match(/style=/g).length, 1, "and nothing else is styled");
+	// A table that says nothing about headers (no hasHeaderRow, no isHeader) has its first row as the header: the rule above.
 	// A header row alone has no <tbody>; a short row is filled; a cell that spans columns keeps its colspan; no rows, no table.
 	const abs = { absolute: (u) => u };
 	assert.equal(renderTableBlock(tableBlock([["a", "b"]]), abs), tableHtml([["a", "b"]]));
-	assert.equal(renderTableBlock(tableBlock([["a", "b", "c"], ["d"], [tableCell("wide", { colspan: 2 }), "e"]]), abs), ['<table class="buttondown-block-styled">', "<thead>", "<tr>", "<th>a</th>", "<th>b</th>", "<th>c</th>", "</tr>", "</thead>", "<tbody>", "<tr>", "<td>d</td>", "<td></td>", "<td></td>", "</tr>", "<tr>", '<td colspan="2">wide</td>', "<td>e</td>", "</tr>", "</tbody>", "</table>"].join("\n"));
+	assert.equal(renderTableBlock(tableBlock([["a", "b", "c"], ["d"], [tableCell("wide", { colspan: 2 }), "e"]]), abs), [TABLE_OPEN, "<thead>", "<tr>", "<th>a</th>", "<th>b</th>", "<th>c</th>", "</tr>", "</thead>", "<tbody>", "<tr>", "<td>d</td>", "<td></td>", "<td></td>", "</tr>", "<tr>", '<td colspan="2">wide</td>', "<td>e</td>", "</tr>", "</tbody>", "</table>"].join("\n"));
 	assert.equal(renderTableBlock(tableBlock([]), abs), null);
 	assert.equal(renderTableBlock(tableBlock([[]]), abs), null);
 	assert.equal((await buildEmail(noFooter([tableBlock([]), block([span("Only this.")])]))).fields.body, `${MODE_COMMENT}\nOnly this.\n`);
@@ -544,7 +549,24 @@ test("template code: the hash is what it was for a post without it, and changes 
 test("template code: the escape is the email's alone (the public .md converter adds nothing), and a first line in verbatim is still checked for frontmatter", async () => {
 	const { portableTextToMarkdown } = await import("../src/discovery/markdown.ts");
 	assert.equal(portableTextToMarkdown([{ _type: "code", _key: "c", code: "{{ x }}" }, block([span("{% y %}")])]), "```\n{{ x }}\n```\n\n{% y %}");
-	await assert.rejects(buildEmail(noFooter([block([span("--- {{ x }}")])])), /frontmatter/);
+	// "--- {{ x }}" isn't a frontmatter fence (see the frontmatter test below): it goes out, escaped.
+	assert.equal((await buildEmail(noFooter([block([span("--- {{ x }}")])]))).fields.body, `${MODE_COMMENT}\n${V("--- {{ x }}")}\n`);
+});
+
+test("frontmatter: only a first line that is exactly --- (spaces after it or not) is refused; ---x and --- text go out", async () => {
+	const body = async (blocks) => (await buildEmail(noFooter(blocks))).fields.body;
+	// Text that starts with the three dashes isn't a fence.
+	assert.equal(await body([block([span("---x")])]), `${MODE_COMMENT}\n---x\n`);
+	assert.equal(await body([block([span("--- text")])]), `${MODE_COMMENT}\n--- text\n`);
+	assert.equal(await body([block([span("---- four")])]), `${MODE_COMMENT}\n---- four\n`);
+	assert.equal(await body([block([span("---x\nsecond")])]), `${MODE_COMMENT}\n---x  \nsecond\n`);
+	// The converter never leaves a fence first: a rule at the top is dropped, and a paragraph that is "---" is escaped.
+	assert.equal(await body([{ _type: "break", _key: "r" }, { _type: "break", _key: "r2" }, block([span("---x")])]), `${MODE_COMMENT}\n---x\n`);
+	assert.equal(await body([block([span("---")])]), `${MODE_COMMENT}\n\\---\n`);
+	assert.equal(await body([block([span("---  ")])]), `${MODE_COMMENT}\n\\---\n`);
+	// The check itself (the last guard before the body is written): a fence, with or without the verbatim tags around it.
+	for (const content of ["---", "--- ", "---\t ", "---\ntitle: x\n---\nText", `${V("---")}\nmore`, "{% verbatim pack %}---"]) assert.equal(startsWithFrontmatter(content), true, JSON.stringify(content));
+	for (const content of ["---x", "--- text", "----", " ---", "-- -", "\\---", "--", "", "Text\n---", "Text\n\n---\n\nMore", V("--- {{ x }}"), "<table>\n---"]) assert.equal(startsWithFrontmatter(content), false, JSON.stringify(content));
 });
 
 test("fields: the subject, the excerpt or SEO description, the canonical URL, the image, a slug only when Buttondown takes it, and the metadata", async () => {
@@ -576,4 +598,234 @@ test("the hash is the same for the same post and changes with any field", async 
 	for (const change of [{ title: "Other" }, { excerpt: "Other" }, { slug: "other" }, { postUrl: "https://coywolf.com/x/" }, { featuredImage: "https://x.example/a.jpg" }, { bodyFields: [[block([span("Changed.")])]] }, { footerLink: false }]) {
 		assert.notEqual((await buildEmail(source(change))).hash, a.hash, JSON.stringify(change));
 	}
+});
+
+// --- Review 3 fixes: merged cells, header cells, alignment, adjacent marks, hidden schemes ---
+
+const header = (content, extra = {}) => tableCell(content, { isHeader: true, ...extra });
+const data = (content, extra = {}) => tableCell(content, { isHeader: false, ...extra });
+/** The table's lines after the opening tag and before the closing one. */
+const tableLines = (table) => {
+	const lines = renderTableBlock(table, { absolute: (u) => u }).split("\n");
+	assert.equal(lines[0], TABLE_OPEN);
+	assert.equal(lines.at(-1), "</table>");
+	return lines.slice(1, -1);
+};
+
+test("a table's merged cell keeps its rowspan, and the cells under it stay in their column (no cell is added for a column it takes)", () => {
+	// Review 3, M1: B was moved under Plan, and Pro was one row tall.
+	assert.deepEqual(tableLines(tableBlock([["Plan", "Feature"], [tableCell("Pro", { rowspan: 2 }), "A"], ["B"]])), ["<thead>", "<tr>", "<th>Plan</th>", "<th>Feature</th>", "</tr>", "</thead>", "<tbody>", "<tr>", '<td rowspan="2">Pro</td>', "<td>A</td>", "</tr>", "<tr>", "<td>B</td>", "</tr>", "</tbody>"]);
+	// Both spans on one cell: colspan first, then rowspan. The rows under it are filled only where nothing is.
+	assert.deepEqual(tableLines(tableBlock([["a", "b", "c", "d"], [tableCell("wide and tall", { colspan: 2, rowspan: 2 }), "e"], ["f", "g"], ["h"]])), [
+		"<thead>",
+		"<tr>",
+		"<th>a</th>",
+		"<th>b</th>",
+		"<th>c</th>",
+		"<th>d</th>",
+		"</tr>",
+		"</thead>",
+		"<tbody>",
+		"<tr>",
+		'<td colspan="2" rowspan="2">wide and tall</td>',
+		"<td>e</td>",
+		"<td></td>",
+		"</tr>",
+		"<tr>",
+		"<td>f</td>",
+		"<td>g</td>",
+		"</tr>",
+		"<tr>",
+		"<td>h</td>",
+		"<td></td>",
+		"<td></td>",
+		"<td></td>",
+		"</tr>",
+		"</tbody>",
+	]);
+	// A tall cell in the last column: the short row under it gets one empty cell, for the middle column only.
+	assert.deepEqual(tableLines(tableBlock([[data("a"), data("b"), data("c", { rowspan: 2 })], [data("d")]])), ["<tbody>", "<tr>", "<td>a</td>", "<td>b</td>", '<td rowspan="2">c</td>', "</tr>", "<tr>", "<td>d</td>", "<td></td>", "</tr>", "</tbody>"]);
+	// A rowspan ends at the table's last row; 1, 0, a fraction or text is no span.
+	assert.deepEqual(tableLines(tableBlock([[data("a", { rowspan: 99 }), data("b", { rowspan: 1 })], [data("c", { rowspan: 0, colspan: 1.5 })], [data("d", { rowspan: "2" })]])), ["<tbody>", "<tr>", '<td rowspan="3">a</td>', "<td>b</td>", "</tr>", "<tr>", "<td>c</td>", "</tr>", "<tr>", "<td>d</td>", "</tr>", "</tbody>"]);
+	assert.deepEqual(tableLines(tableBlock([[data("a", { rowspan: 2.9 }), data("b")], [data("c")]])), ["<tbody>", "<tr>", '<td rowspan="2">a</td>', "<td>b</td>", "</tr>", "<tr>", "<td>c</td>", "</tr>", "</tbody>"]);
+	// A row that tall cells cover whole has no cell of its own.
+	assert.deepEqual(tableLines(tableBlock([[data("a", { rowspan: 2 }), data("b", { rowspan: 2 })], []])), ["<tbody>", "<tr>", '<td rowspan="2">a</td>', '<td rowspan="2">b</td>', "</tr>", "<tr>", "</tr>", "</tbody>"]);
+});
+
+test("a table's header cells are the ones it marks: no header row when it's off, a header column as <th>, the first row only when the table says nothing", () => {
+	// Review 3, L1. The header row off (the editor writes isHeader: false and no hasHeaderRow): no <thead>, no <th>.
+	assert.deepEqual(tableLines(tableBlock([[data("Mon"), data("9-5")], [data("Tue"), data("9-5")]])), ["<tbody>", "<tr>", "<td>Mon</td>", "<td>9-5</td>", "</tr>", "<tr>", "<td>Tue</td>", "<td>9-5</td>", "</tr>", "</tbody>"]);
+	assert.deepEqual(tableLines(tableBlock([["Mon", "9-5"], ["Tue", "9-5"]], { hasHeaderRow: false })), ["<tbody>", "<tr>", "<td>Mon</td>", "<td>9-5</td>", "</tr>", "<tr>", "<td>Tue</td>", "<td>9-5</td>", "</tr>", "</tbody>"]);
+	// A header column alone: <th> for exactly those cells, in the <tbody>.
+	assert.deepEqual(tableLines(tableBlock([[header("Sales"), data("1")], [header("Costs"), data("2")]])), ["<tbody>", "<tr>", "<th>Sales</th>", "<td>1</td>", "</tr>", "<tr>", "<th>Costs</th>", "<td>2</td>", "</tr>", "</tbody>"]);
+	// A header row and a header column.
+	assert.deepEqual(tableLines(tableBlock([[header(""), header("Q1")], [header("Sales"), data("1")]], { hasHeaderRow: true })), ["<thead>", "<tr>", "<th></th>", "<th>Q1</th>", "</tr>", "</thead>", "<tbody>", "<tr>", "<th>Sales</th>", "<td>1</td>", "</tr>", "</tbody>"]);
+	// A first row with one cell that isn't a header is no header row: its header cells are still <th>.
+	assert.deepEqual(tableLines(tableBlock([[header("a"), data("b")], [data("c"), header("d")]])), ["<tbody>", "<tr>", "<th>a</th>", "<td>b</td>", "</tr>", "<tr>", "<td>c</td>", "<th>d</th>", "</tr>", "</tbody>"]);
+	// A mark that isn't `true` is no header. A cell without the mark, in a table that has marks, isn't one either.
+	assert.deepEqual(tableLines(tableBlock([[tableCell("a", { isHeader: "yes" }), tableCell("b")], [data("c"), data("d")]])), ["<tbody>", "<tr>", "<td>a</td>", "<td>b</td>", "</tr>", "<tr>", "<td>c</td>", "<td>d</td>", "</tr>", "</tbody>"]);
+	// The flag alone (hasHeaderRow, no isHeader on the first row): the first row is the header, as on the site.
+	assert.equal(renderTableBlock(tableBlock([["a", "b"], ["c", "d"]], { hasHeaderRow: true }), { absolute: (u) => u }), tableHtml([["a", "b"], ["c", "d"]]));
+	// No header information at all: the first row is the header, as before.
+	assert.equal(renderTableBlock(tableBlock([["a", "b"], ["c", "d"]]), { absolute: (u) => u }), tableHtml([["a", "b"], ["c", "d"]]));
+	// A header row is one row: a first row with a tall cell stays in the <tbody> (a rowspan can't leave a <thead>), its cells still <th>.
+	assert.deepEqual(tableLines(tableBlock([[header("a", { rowspan: 2 }), header("b")], [data("c")]], { hasHeaderRow: true })), ["<tbody>", "<tr>", '<th rowspan="2">a</th>', "<th>b</th>", "</tr>", "<tr>", "<td>c</td>", "</tr>", "</tbody>"]);
+	// A short row is filled with its own kind of cell: <th> in a row of header cells, <td> in any other.
+	assert.deepEqual(tableLines(tableBlock([[header("a")], [data("b"), data("c")], [header("d"), data("e"), data("f")]], { hasHeaderRow: true })), ["<thead>", "<tr>", "<th>a</th>", "<th></th>", "<th></th>", "</tr>", "</thead>", "<tbody>", "<tr>", "<td>b</td>", "<td>c</td>", "<td></td>", "</tr>", "<tr>", "<th>d</th>", "<td>e</td>", "<td>f</td>", "</tr>", "</tbody>"]);
+});
+
+test("a table is the email's alone (headers, spans, alignment): the public .md pipe table still has its first row as the header, whatever the cells say", async () => {
+	const { portableTextToMarkdown } = await import("../src/discovery/markdown.ts");
+	const off = tableBlock([[data("Mon"), data("9-5")], [data("Tue", { rowspan: 2, textAlign: "center" }), data("9-5")]]);
+	assert.equal(portableTextToMarkdown([off]), "| Mon | 9-5 |\n| --- | --- |\n| Tue | 9-5 |");
+});
+
+test("a table cell keeps its textAlign (left, center or right) as an inline style; anything else, and column widths, are left out", () => {
+	// Review 3, L4.
+	const table = tableBlock(
+		[
+			[header("Item", { textAlign: "left" }), header("Price", { textAlign: "right", colwidth: [120] })],
+			[data("Tea", { textAlign: "center", colspan: 1 }), data("4.50", { textAlign: "right" })],
+			[data("Both", { textAlign: "center", colspan: 2, rowspan: 2 })],
+			[],
+			[data("j", { textAlign: "justify" }), data("x", { textAlign: 'right;" onclick="x' })],
+			[data("u", { textAlign: "RIGHT" }), data("n", { textAlign: 1, colwidth: [50], style: "color:red", width: 50 })],
+		],
+		{ hasHeaderRow: true },
+	);
+	const lines = tableLines(table);
+	assert.deepEqual(lines, [
+		"<thead>",
+		"<tr>",
+		'<th style="text-align:left;">Item</th>',
+		'<th style="text-align:right;">Price</th>',
+		"</tr>",
+		"</thead>",
+		"<tbody>",
+		"<tr>",
+		'<td style="text-align:center;">Tea</td>',
+		'<td style="text-align:right;">4.50</td>',
+		"</tr>",
+		"<tr>",
+		'<td colspan="2" rowspan="2" style="text-align:center;">Both</td>',
+		"</tr>",
+		"<tr>",
+		"</tr>",
+		"<tr>",
+		"<td>j</td>",
+		"<td>x</td>",
+		"</tr>",
+		"<tr>",
+		"<td>u</td>",
+		"<td>n</td>",
+		"</tr>",
+		"</tbody>",
+	]);
+	assert.doesNotMatch(lines.join("\n"), /width|colgroup|<col\b|onclick|color/, "no widths, and nothing but the three alignments in a style");
+});
+
+test("template code: a cell with a rowspan, a colspan or an alignment is still wrapped inside its own tag", async () => {
+	const { escapeTemplateBlock } = await import("../src/buttondown/template.ts");
+	const table = tableBlock(
+		[
+			[header("{{ head }}", { textAlign: "center" }), header("Plain"), header("{% h %}", { colspan: 2 })],
+			[data("{{ tall }}", { rowspan: 2 }), data("{# c #} {", { rowspan: 2, textAlign: "right" }), data("{{ all }}", { colspan: 2, rowspan: 2, textAlign: "left" })],
+			[],
+			[header("endverbatim {{ x }}", { colspan: 3, textAlign: "right" }), data("a {{")],
+		],
+		{ hasHeaderRow: true },
+	);
+	const out = await escaped([table]);
+	const names = { "{{": "openvariable", "}}": "closevariable", "{%": "openblock", "%}": "closeblock", "{#": "opencomment", "#}": "closecomment", "{": "openbrace" };
+	const T = (text) => text.replace(/\{\{|\{%|\{#|\}\}|%\}|#\}|\{/g, (m) => `{% templatetag ${names[m]} %}`);
+	assert.equal(
+		out.body,
+		[
+			TABLE_OPEN,
+			"<thead>",
+			"<tr>",
+			`<th style="text-align:center;">${V("{{ head }}")}</th>`,
+			"<th>Plain</th>",
+			`<th colspan="2">${V("{% h %}")}</th>`,
+			"</tr>",
+			"</thead>",
+			"<tbody>",
+			"<tr>",
+			`<td rowspan="2">${V("{{ tall }}")}</td>`,
+			`<td rowspan="2" style="text-align:right;">${T("{# c #} {")}</td>`,
+			`<td colspan="2" rowspan="2" style="text-align:left;">${V("{{ all }}")}</td>`,
+			"</tr>",
+			"<tr>",
+			"</tr>",
+			"<tr>",
+			`<th colspan="3" style="text-align:right;">${T("endverbatim {{ x }}")}</th>`,
+			`<td>${T("a {{")}</td>`,
+			"</tr>",
+			"</tbody>",
+			"</table>",
+		].join("\n"),
+	);
+	assert.equal(out.printed, renderTableBlock(table, { absolute: (u) => u }), "Buttondown prints the table as it was before the escape");
+	// Every line with an escape is one cell's line, wrapped inside its tag: no tag is ever inside a wrap.
+	for (const line of out.body.split("\n")) if (/verbatim|templatetag/.test(line)) assert.match(line, /^<(t[hd])(?: colspan="\d+")?(?: rowspan="\d+")?(?: style="text-align:(?:left|center|right);")?>[^<]*\{% [^<]* %\}<\/\1>$/, line);
+	// The table's own tag (class and margin) has no template code, so it's never wrapped.
+	const written = (cell) => `${TABLE_OPEN}\n<tbody>\n<tr>\n<td rowspan="2" style="text-align:center;">${cell}</td>\n</tr>\n</tbody>\n</table>`;
+	assert.equal(escapeTemplateBlock(written("{{ a }}"), "table"), written(V("{{ a }}")));
+	// A line separator in a cell (U+2028, U+2029) is text: the wrap is still inside the tag.
+	assert.equal(escapeTemplateBlock(written("a\u2028{{ b }}\u2029c"), "table"), written(V("a\u2028{{ b }}\u2029c")));
+	const sep = await escaped([tableBlock([[header("x\u2028{{ y }}", { rowspan: 1, colspan: 2, textAlign: "right" })]], { hasHeaderRow: true })]);
+	assert.equal(sep.body, [TABLE_OPEN, "<thead>", "<tr>", `<th colspan="2" style="text-align:right;">${V("x\u2028{{ y }}")}</th>`, "</tr>", "</thead>", "</table>"].join("\n"));
+});
+
+test("rich text: bold or italic runs side by side are one run, so the email shows the formatting and not the stars", () => {
+	// Review 3, L5: "<i>a</i><i>b</i>" was "*a**b*", which Markdown reads as italic "a**b".
+	const abs = { absolute: (u) => new URL(u, "https://coywolf.com/").href };
+	assert.equal(richToMarkdown("<i>a</i><i>b</i>", abs), "*ab*");
+	assert.equal(richToMarkdown("<b>a</b><b>b</b>", abs), "**ab**");
+	assert.equal(richToMarkdown("<em>one</em><i>two</i><em>three</em>, <strong>four</strong><b>five</b>", abs), "*onetwothree*, **fourfive**");
+	assert.equal(richToMarkdown("**a**<strong>b</strong><b> c</b> d", abs), "**ab c** d", "the site's **bold** next to a tag's bold too");
+	// A space between two runs keeps them apart, which Markdown reads fine.
+	assert.equal(richToMarkdown("<i>a</i> <i>b</i> and <b>c</b> <b>d</b>", abs), "*a* *b* and **c** **d**");
+	// An empty run between two runs doesn't keep them apart, and a run inside a run of the same mark is part of it.
+	assert.equal(richToMarkdown("<i>a</i><b></b><i>b</i>", abs), "*ab*");
+	assert.equal(richToMarkdown("<em>a<i>b</i></em><em>c</em>", abs), "*abc*");
+	// A closing tag with nothing open joins nothing; runs in two paragraphs stay two runs.
+	assert.equal(richToMarkdown("</i><i>x</i>", abs), "*x*");
+	assert.equal(richToMarkdown("<p><b>One</b></p><p><b>Two</b></p>", abs), "**One**\n\n**Two**");
+	for (const out of ["<i>a</i><i>b</i>", "<b>a</b><b>b</b>", "<b>a</b><b>b</b><b>c</b>", "<i>a</i><i>b</i><i>c</i><i>d</i>"].map((rich) => richToMarkdown(rich, abs))) assert.doesNotMatch(out, /[^*]\*{2,}[^*]/, out);
+});
+
+test("links: a javascript:, vbscript: or data: scheme hidden with a tab, a line break or a control character is refused, as a browser would read it", async () => {
+	// Review 3, L2: the URL parser removes tabs and line breaks, and control characters at the start, so "java\tscript:" is "javascript:".
+	const c = { postUrl: "https://coywolf.com/p/", siteHost: "coywolf.com", absolute: (u) => (/^[a-z][a-z0-9+.-]*:/i.test(u) || u.startsWith("#") ? u : new URL(u, "https://coywolf.com/").href), image: (u) => u, warn() {} };
+	const { markdownUrl } = await import("../src/buttondown/blocks.ts");
+	const hidden = ["java\tscript:alert(1)", "\u0001javascript:alert(1)", "java\nscript:alert(1)", "java\r\nscript:alert(1)", " \u0000 JaVa\tScRiPt:alert(1)", "javascript\t:alert(1)", "\u001f javascript:alert(1)", "vb\tscript:msgbox(1)", "\u0002vbscript:x", "d\nata:text/html,<script>alert(1)</script>", "\tdata:text/html,x"];
+	for (const href of hidden) {
+		const name = JSON.stringify(href);
+		// A table cell's link (raw HTML): the text stays, the link goes.
+		const html = renderTableBlock(tableBlock([[tableCell([span("x", ["k"])], { markDefs: [{ _key: "k", _type: "link", href }] })]]), c);
+		assert.deepEqual(html.split("\n").slice(3, 4), ["<th>x</th>"], name);
+		assert.doesNotMatch(html, /href|script:|data:/i, name);
+		// A paragraph's link and an image's link (Markdown).
+		const built = await buildEmail(noFooter([block([span("x", ["k"])], { markDefs: [{ _key: "k", _type: "link", href }] }), image("https://x.example/a.jpg", { link: href })]));
+		assert.equal(built.fields.body, `${MODE_COMMENT}\nx\n\n![Alt](https://x.example/a.jpg)\n`, name);
+		// The Pack's blocks: a button, an embed, a testimonial's name link.
+		assert.equal(markdownUrl(href, c.absolute), null, name);
+		assert.equal(renderUnknownBlock({ _type: "button", url: href, text: "Go" }, c).startsWith("_[Part of"), true, name);
+		assert.equal(renderUnknownBlock({ _type: "embed", url: href }, c).startsWith("_[Part of"), true, name);
+		assert.doesNotMatch(renderUnknownBlock({ _type: "coywolf-testimonial", quote: "q", name: "N", nameUrl: href }, c), /\]\(/, name);
+	}
+	// In rich text an entity can hide the tab: decoded, then refused.
+	assert.equal(richToMarkdown('<a href="java&#9;script:alert(1)">x</a> <a href="&#1;javascript:alert(1)">y</a> <a href="jav&#x0A;ascript:alert(1)">z</a>', c), "x y z");
+	// Real links are as they were: the space around them goes, a tab inside one goes too (as in a browser).
+	assert.equal(markdownUrl("  https://x.example/a b(c)  ", c.absolute), "https://x.example/a%20b%28c%29");
+	assert.equal(markdownUrl("\thttps://x.example/a\tb\n", c.absolute), "https://x.example/ab");
+	assert.equal(markdownUrl("/pricing/", c.absolute), "https://coywolf.com/pricing/");
+	assert.equal(markdownUrl("mailto:hi@coywolf.com", c.absolute), "mailto:hi@coywolf.com");
+	assert.equal(markdownUrl("ht\ttps://x.example/", c.absolute), "https://x.example/");
+	// A scheme the Pack's blocks never link to, hidden the same way.
+	assert.equal(markdownUrl("\u0001ftp://x.example/", c.absolute), null);
+	assert.equal(markdownUrl("f\ttp://x.example/", c.absolute), null);
+	// Text that only looks like one isn't a scheme: it's a path on the site.
+	assert.equal(markdownUrl("java%09script:alert(1)", c.absolute), "https://coywolf.com/java%09script:alert%281%29");
 });

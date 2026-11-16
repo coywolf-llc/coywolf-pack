@@ -135,7 +135,7 @@ The Pack never sets `publish_date`, `filters`, `email_type`, `archival_mode`, `t
 The body:
 
 - Starts with `<!-- buttondown-editor-mode: plaintext -->`, so Buttondown reads it as Markdown. Its own guess isn't reliable.
-- Has no frontmatter. Buttondown refuses a body that starts with it.
+- Has no frontmatter. Buttondown refuses a body that starts with it (a first line that is `---`). A rule at the top of a post is left out. Text that only starts with the dashes, such as `---x`, is fine.
 - Holds each Portable Text field of the collection, in field order, as the Markdown versions in [Discovery](discovery.md) do, with links made absolute.
 - Ends with a rule and "Read it on coywolf.com", linking to the post (unless you turn that off). A post with no content gets the link alone.
 
@@ -156,12 +156,20 @@ The body:
 | Quote, Testimonial | A block quote, then who said it |
 | Podcast links | The heading, then a list of the services |
 | Review | The item, the rating ("4.5 / 5"), the pros and the cons |
-| Table | An HTML table in Buttondown's own table style, with borders, cell padding and a shaded header row. The first row is the header |
+| Table | An HTML table in Buttondown's own table style, with borders and cell padding. See **Tables** below |
 | Embed, button | Its label (or URL) as a link. A YouTube player embed (`youtube.com/embed/<id>` or `youtube-nocookie.com/embed/<id>`) links to `https://www.youtube.com/watch?v=<id>`. A Vimeo one (`player.vimeo.com/video/<id>`) links to `https://vimeo.com/<id>`. Other embeds keep their URL |
 | Table of contents, breadcrumbs | Left out: they're navigation |
 | Anything else | "Part of this post isn't shown in email. Read it on coywolf.com.", linking to the post, and a warning naming the block |
 
 The text of a Note, Details, Affiliate disclosure, Quote or Testimonial block keeps its links, its bold (`**bold**`, `<strong>`, `<b>`) and its italic (`<em>`, `<i>`). Other markup is dropped. A single `*star*` stays plain text, as it does on the site.
+
+**Tables.** A table goes out as an HTML table with Buttondown's table class, so Buttondown draws its borders and cell padding.
+
+- Header cells are the ones the table marks in the editor: the header row, the header column, or both. With the header row off, no row is a header.
+- A table with no header information has its first row as the header.
+- Merged cells stay merged, across columns and across rows.
+- A cell keeps its alignment (left, center or right). Column widths are left out.
+- The table has 16px of space above and below it, as paragraphs do. Buttondown's own CSS gives its tables none.
 
 **Template code.** Buttondown runs Django templating over the body when it sends, inside code blocks too. So a post that shows `{{ example }}` would lose it. The Pack wraps each piece of the body that has `{{`, `{%` or `{#` in Django's verbatim tags:
 
@@ -171,7 +179,10 @@ The text of a Note, Details, Affiliate disclosure, Quote or Testimonial block ke
 
 - Buttondown removes the two tags and prints what's between them as you wrote it.
 - A piece is the code inside a code block, a table cell, or one line of text. Text without template code is never wrapped.
-- A piece that verbatim can't hold safely (it has `endverbatim` in it, or a `{{`, `{%` or `{#` that nothing closes) is written with `{% templatetag … %}` tags instead. It prints the same.
+- A piece that verbatim can't hold safely is written with `{% templatetag … %}` tags instead. It prints the same. That's a piece where one of these is true:
+  - It has `endverbatim` in it.
+  - Its last line has a `{{`, `{%` or `{#` that nothing closes on that line.
+  - Its last line ends with `{`.
 - The Markdown versions in [Discovery](discovery.md) don't get the tags. They're for Buttondown only.
 
 To use one of Buttondown's own variables, such as `{{ subscriber.metadata.first_name }}`, add it to the draft in Buttondown. Written in the post, it would be printed as text.

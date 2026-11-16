@@ -87,8 +87,12 @@ export function escapeTemplateLines(markdown: string): string {
 		.join("\n");
 }
 
-/** One cell's line in the email's HTML table (src/buttondown/blocks.ts renderTableBlock): the opening tag, what's inside, the closing tag. */
-const TABLE_CELL = /^(<(t[hd])(?: colspan="\d+")?>)(.*)(<\/\2>)$/;
+/**
+ * One cell's line in the email's HTML table (src/buttondown/blocks.ts renderTableBlock): the opening tag (with the
+ * attributes it writes there, in its order: colspan, rowspan, the alignment), what's inside, the closing tag. What's
+ * inside is anything at all (the `s` flag): a line separator such as U+2028 is text, not the end of the line.
+ */
+const TABLE_CELL = /^(<(t[hd])(?: colspan="\d+")?(?: rowspan="\d+")?(?: style="text-align:(?:left|center|right);")?>)(.*)(<\/\2>)$/s;
 
 /**
  * The email's HTML table, which has one cell on each line: each cell with template code is wrapped inside its

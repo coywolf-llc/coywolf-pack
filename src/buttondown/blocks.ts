@@ -13,7 +13,7 @@
  */
 import { BLOCK_TYPES, DEFAULT_DISCLOSURE, DEFAULT_PODCAST, DEFAULT_SUMMARY, type DisclosureSettings, NOTE_VARIANTS, PODCAST_SERVICES, type PodcastSettings, normalizeDetails, normalizeDisclosure, normalizeNote, normalizePodcast, normalizeQuote, normalizeTestimonial } from "../customBlocks/render.js";
 import { escapeHtml } from "../customBlocks/rich.js";
-import { escapeLineStart, escapeText, safeHref } from "../discovery/markdown.js";
+import { dangerousHref, escapeLineStart, escapeText, normalizeHref, safeHref } from "../discovery/markdown.js";
 import { formatSize } from "../files/format.js";
 import { BLOCK_TYPE as FILE_BLOCK } from "../files/walker.js";
 import { BREADCRUMBS_BLOCK } from "../breadcrumbs/stamp.js";
@@ -54,12 +54,18 @@ export const NAVIGATION_BLOCKS: ReadonlySet<string> = new Set([TOC_BLOCK, BREADC
 const isRecord = (value: unknown): value is Node => typeof value === "object" && value !== null && !Array.isArray(value);
 const str = (v: unknown) => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
 
-/** A link's URL as Markdown takes it: absolute, with spaces and parentheses encoded. Null for anything that isn't http(s), mailto or site-relative. */
+/**
+ * A link's URL as Markdown takes it: absolute, with spaces and parentheses encoded. Null for anything that isn't
+ * http(s), mailto or site-relative. The scheme is read as a browser reads it (normalizeHref): a tab, a line break or a
+ * leading control character can't hide one.
+ */
 export function markdownUrl(url: string, absolute: (url: string) => string): string | null {
-	const raw = url.trim();
-	if (!raw || /^\s*(javascript|vbscript|data):/i.test(raw)) return null;
+	const raw = normalizeHref(url);
+	if (!raw || dangerousHref(raw)) return null;
 	if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^(https?|mailto):/i.test(raw)) return null;
-	return absolute(raw).replace(/[()\s]/g, (c) => (c === "(" ? "%28" : c === ")" ? "%29" : encodeURIComponent(c)));
+	const out = absolute(raw);
+	if (dangerousHref(out)) return null;
+	return out.replace(/[()\s]/g, (c) => (c === "(" ? "%28" : c === ")" ? "%29" : encodeURIComponent(c)));
 }
 
 const link = (text: string, url: string, ctx: BlockContext) => {
@@ -73,7 +79,40 @@ const B_CLOSE = "\u0002";
 const I_OPEN = "\u0003";
 const I_CLOSE = "\u0004";
 
-/** One paragraph's bold and italic marks as Markdown. The spaces just inside a pair move outside (Markdown needs that); a mark without its pair is dropped (and the double space that can leave). */
+/**
+ * One mark's runs made flat, so each prints as one pair of stars:
+ * - two runs side by side become one (`<i>a</i><i>b</i>` is `*ab*`, where `*a**b*` would print its stars);
+ * - a run inside a run of the same mark is part of it (`<em>a<i>b</i></em>`).
+ *
+ * A closing mark with no run open is left for emphasis() to drop.
+ */
+function joinRuns(text: string, open: string, close: string): string {
+	let out = "";
+	let depth = 0;
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (c === open) {
+			if (depth++ > 0) continue;
+		} else if (c === close && depth > 1) {
+			depth--;
+			continue;
+		} else if (c === close && depth === 1) {
+			if (text[i + 1] === open) {
+				i++;
+				continue;
+			}
+			depth = 0;
+		}
+		out += c;
+	}
+	return out;
+}
+
+/**
+ * One paragraph's bold and italic marks as Markdown. An empty pair goes, and runs of the same mark side by side are
+ * joined (joinRuns). The spaces just inside a pair move outside (Markdown needs that); a mark without its pair is
+ * dropped (and the double space that can leave).
+ */
 function emphasis(paragraph: string): string {
 	const pair = (text: string, open: string, close: string, mark: string) =>
 		text.replace(new RegExp(`${open}([^${open}${close}]*)${close}`, "g"), (_m, inner: string) => {
@@ -83,7 +122,8 @@ function emphasis(paragraph: string): string {
 			const tail = inner.slice(inner.trimEnd().length);
 			return `${lead}${mark}${core}${mark}${tail}`;
 		});
-	return pair(pair(paragraph, I_OPEN, I_CLOSE, "*"), B_OPEN, B_CLOSE, "**")
+	const joined = joinRuns(joinRuns(paragraph.replace(/\u0001\u0002|\u0003\u0004/g, ""), I_OPEN, I_CLOSE), B_OPEN, B_CLOSE);
+	return pair(pair(joined, I_OPEN, I_CLOSE, "*"), B_OPEN, B_CLOSE, "**")
 		.replace(/[\u0001-\u0004]/g, "")
 		.replace(/ {2,}/g, " ");
 }
@@ -351,31 +391,83 @@ function cellHtml(cell: Node, tableDefs: unknown, absolute: (url: string) => str
 }
 
 /**
+ * The space above and below the table. Buttondown's email CSS gives `table.buttondown-block-styled` no margin (and a
+ * code block none either), so a table sat flush against what came after it (seen in a test email, 2026-11-15).
+ * Paragraphs, lists, quotes and figures get 16px there: the table gets the same.
+ */
+export const TABLE_STYLE = "margin:16px 0;";
+
+const TEXT_ALIGN: ReadonlySet<string> = new Set(["left", "center", "right"]);
+
+interface TableCell {
+	html: string;
+	colspan: number;
+	rowspan: number;
+	header: boolean;
+	align: string;
+}
+
+/**
  * A table block as an HTML table in Buttondown's own table style. A Markdown pipe table comes out of Buttondown
  * with no borders and no cell padding (seen in a test email, 2026-11-15): its email CSS styles only
  * `table.buttondown-block-styled`.
  *
- * - The header row is the first row, as in the shared converter's pipe table: `<thead>` and `<th>`. The other rows
- *   are `<tbody>` and `<td>`.
+ * - Header cells are the ones the table marks, as on the site (EmDash's Table.astro): a cell with `isHeader: true` is
+ *   a `<th>`, any other a `<td>`. The first row is a `<thead>` when every cell in it is a header cell one row tall
+ *   (a table with `hasHeaderRow: true` and no `isHeader` on its first row counts). With the header row off there's no
+ *   `<thead>`, and a header column is `<th>` cells in the `<tbody>`.
+ * - A table that says nothing about headers (no `hasHeaderRow`, no `isHeader` on any cell) has its first row as the
+ *   header, as in the shared converter's pipe table.
  * - One HTML block, which Markdown leaves alone: no blank line and no indent inside it, each cell on its own line
  *   (template code is escaped cell by cell there: src/buttondown/template.ts escapeTemplateTable).
- * - A cell that spans columns keeps its `colspan`. A short row is filled with empty cells.
+ * - A merged cell keeps its `colspan` and `rowspan` (a rowspan ends at the table's last row). A cell keeps its
+ *   `textAlign` (left, center or right) as an inline style. Column widths are left out.
+ * - A short row is filled with empty cells. What's short is worked out on a grid of the columns each row has taken,
+ *   by its own cells and by taller cells above (as placeCells does in Table.astro), so a cell under a merged one
+ *   stays in its column.
  */
 export function renderTableBlock(block: Node, ctx: Pick<BlockContext, "absolute">): string | null {
-	const rows: Node[] = Array.isArray(block.rows) ? block.rows.filter(isRecord) : [];
-	const grid = rows.map((row) =>
-		(Array.isArray(row.cells) ? row.cells.filter(isRecord) : []).map((cell: Node) => ({
+	const rows: Node[][] = (Array.isArray(block.rows) ? block.rows.filter(isRecord) : []).map((row: Node) => (Array.isArray(row.cells) ? row.cells.filter(isRecord) : []));
+	const marked = (cell: Node) => typeof cell.isHeader === "boolean";
+	const hasHeaderInfo = typeof block.hasHeaderRow === "boolean" || rows.some((cells) => cells.some(marked));
+	// EmDash's rule for a table saved with the flag alone: the first row's cells are header cells.
+	const promoted = block.hasHeaderRow === true && !(rows[0] ?? []).some(marked);
+	const span = (value: unknown, max: number) => (typeof value === "number" && value > 1 ? Math.max(1, Math.min(Math.floor(value), max)) : 1);
+	const grid: TableCell[][] = rows.map((cells, r) =>
+		cells.map((cell) => ({
 			html: cellHtml(cell, block.markDefs, ctx.absolute),
-			span: typeof cell.colspan === "number" && cell.colspan > 1 ? Math.min(Math.floor(cell.colspan), 100) : 1,
+			colspan: span(cell.colspan, 100),
+			rowspan: span(cell.rowspan, rows.length - r),
+			header: hasHeaderInfo ? cell.isHeader === true || (promoted && r === 0) : r === 0,
+			align: typeof cell.textAlign === "string" && TEXT_ALIGN.has(cell.textAlign) ? cell.textAlign : "",
 		})),
 	);
-	const width = Math.max(0, ...grid.map((cells) => cells.reduce((sum, cell) => sum + cell.span, 0)));
+	// The columns each row has taken: its own cells go in the first free ones, and a tall cell takes them in the rows below too.
+	const taken = grid.map(() => new Set<number>());
+	grid.forEach((cells, r) => {
+		let column = 0;
+		for (const cell of cells) {
+			while (taken[r]?.has(column)) column++;
+			for (let down = 0; down < cell.rowspan; down++) for (let across = 0; across < cell.colspan; across++) taken[r + down]?.add(column + across);
+			column += cell.colspan;
+		}
+	});
+	const width = Math.max(0, ...taken.map((columns) => Math.max(-1, ...columns) + 1));
 	if (!width) return null;
-	const row = (cells: { html: string; span: number }[], tag: "th" | "td") => {
-		const used = cells.reduce((sum, cell) => sum + cell.span, 0);
-		const filled = [...cells, ...Array.from({ length: width - used }, () => ({ html: "", span: 1 }))];
-		return ["<tr>", ...filled.map((cell) => `<${tag}${cell.span > 1 ? ` colspan="${cell.span}"` : ""}>${cell.html}</${tag}>`), "</tr>"];
+	const tag = (cell: TableCell | null, fill: "th" | "td") => {
+		if (!cell) return `<${fill}></${fill}>`;
+		const name = cell.header ? "th" : "td";
+		const attrs = `${cell.colspan > 1 ? ` colspan="${cell.colspan}"` : ""}${cell.rowspan > 1 ? ` rowspan="${cell.rowspan}"` : ""}${cell.align ? ` style="text-align:${cell.align};"` : ""}`;
+		return `<${name}${attrs}>${cell.html}</${name}>`;
 	};
-	const [head = [], ...body] = grid;
-	return [`<table class="${TABLE_CLASS}">`, "<thead>", ...row(head, "th"), "</thead>", ...(body.length ? ["<tbody>", ...body.flatMap((cells) => row(cells, "td")), "</tbody>"] : []), "</table>"].join("\n");
+	const row = (cells: TableCell[], r: number) => {
+		// Empty cells for the columns nothing has taken, so every border is drawn. They follow the row's own kind.
+		const fill = cells.length > 0 && cells.every((cell) => cell.header) ? "th" : "td";
+		const missing = width - (taken[r]?.size ?? 0);
+		return ["<tr>", ...cells.map((cell) => tag(cell, fill)), ...Array.from({ length: missing }, () => tag(null, fill)), "</tr>"];
+	};
+	const first = grid[0] ?? [];
+	const headRow = first.length > 0 && first.every((cell) => cell.header && cell.rowspan === 1);
+	const body = grid.flatMap((cells, r) => (headRow && r === 0 ? [] : row(cells, r)));
+	return [`<table class="${TABLE_CLASS}" style="${TABLE_STYLE}">`, ...(headRow ? ["<thead>", ...row(first, 0), "</thead>"] : []), ...(body.length ? ["<tbody>", ...body, "</tbody>"] : []), "</table>"].join("\n");
 }
