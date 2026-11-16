@@ -19,6 +19,16 @@ A page that isn't in the edge cache yet is built by the Worker, and every D1 rou
 
 EmDash starts its runtime (and so the plugins) synchronously, before its setup probe, so the pack has started by the time its middleware runs. The pack middleware still checks first, defensively, in case a later EmDash changes that order: `ensurePackStarted()` (`src/core/ready.ts`) calls EmDash's `plugins()` itself when the pack hasn't started, which is cached per configuration, so EmDash gets the same instance. A page rendered while the pack still isn't started is kept out of the edge cache like any page rendered after a failed read, and the log names it `pack not started`. A site that adds the pack's middleware without `coywolfPlugin()` in its plugins list never starts the pack, so it sees that on every page: the setup in the README needs both.
 
+## Block renderers and emdash/ui
+
+EmDash gathers plugin block renderers in its generated `virtual:emdash/block-components` module, which imports the pack's `blockComponents` (`src/astro/index.ts`, the plugin's `componentsEntry`). That module is imported by `emdash/ui`'s `PortableText`. So nothing statically reachable from `src/astro/index.ts` may import `emdash/ui` or EmDash's components:
+
+- A static import closes an import cycle.
+- A theme that imports `@coywolf/emdash/astro` before `emdash/ui` then gets a bundle that merges `blockComponents` before it's defined.
+- Every pack block renders as "PortableText [components.type] is missing" (coywolf.com, 2026-11-15, through `CaptionedTable`).
+
+Components that need `emdash/ui` import it at render time instead (`const { Block } = await import("emdash/ui")` in `HeadingBlock`, `emdashComponents` in `CaptionedTable`), or copy what they need (`EmDashCode`). `test/import-cycle.test.mjs` walks the static imports from the entry and fails on any such import.
+
 ## Co-editing
 
 EmDash 1.5 can let several people edit one entry at once (`emdash({ coEditing: true })` and a Durable Object; off by default, and off on the Coywolf sites). An open editor then saves the entry 2 seconds after the last change and at least every 10 seconds while people type, through a path that doesn't pass through the site's middleware.

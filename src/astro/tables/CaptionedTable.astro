@@ -19,14 +19,18 @@
  *   import { CaptionedTable } from "@coywolf/emdash/astro";
  *   <PortableText value={value} components={{ type: { table: CaptionedTable } }} />
  */
-import { emdashComponents } from "emdash/ui";
-
 interface Props {
 	node: { _key?: unknown; caption?: unknown };
 	/** The region's accessible name when the table has no caption. */
 	label?: string;
 }
 
+// Imported at render time, never at the top: emdash/ui imports PortableText, whose
+// virtual:emdash/block-components imports this package's blockComponents. A static import here
+// closes that cycle, and a theme that imports @coywolf/emdash/astro before emdash/ui then gets
+// a bundle that merges blockComponents before they're defined: every pack block renders as
+// "PortableText [components.type] is missing". test/import-cycle.test.mjs keeps it out.
+const { emdashComponents } = await import("emdash/ui");
 const { node, label = "Table" } = Astro.props;
 const Table = emdashComponents.type.table;
 const caption = typeof node?.caption === "string" ? node.caption.trim() : "";
