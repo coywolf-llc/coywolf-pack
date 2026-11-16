@@ -165,6 +165,38 @@ test("the entry route: not covered without a rule; Create draft now refused for 
 	assert.equal(ctx.fake.calls.length, 0);
 });
 
+test("the admin's actions use a rule as soon as it's saved, while this isolate's cached rules are still the old ones", async () => {
+	// The hooks' read (settings) is still the per-isolate copy from before the rule was saved: no rules.
+	let cached = 0;
+	const pack = buttondownPack({}, { now: () => Date.parse("2026-11-16T06:21:00Z"), settings: async () => (cached++, normalizeSettings({ rules: [] })), terms: async () => ["newsletter"], termParents: async () => new Map(), postUrl: async () => "https://coywolf.com/newsletter/one/", files: async () => new Map(), background: () => {} });
+	const { routes } = pack;
+	// Saved a moment ago, in another isolate: the site's settings have it.
+	const rule = { collection: "posts", taxonomy: "category", terms: ["newsletter"], since: "2026-11-16T06:19:42.594Z" };
+	const base = context({ settings: { buttondownSettings: { rules: [rule], footerLink: true } } });
+	// Published before the rule: only Create draft now makes its draft.
+	const item = { id: "1", slug: "one", status: "published", publishedAt: "2026-03-21T19:58:24.000Z", data: { title: "One", content: [{ _type: "block", _key: "b", style: "normal", markDefs: [], children: [{ _type: "span", _key: "s", text: "First.", marks: [] }] }] } };
+	base.content = { get: async () => structuredClone(item) };
+	base.schema = { ...base.schema, getCollection: async (slug) => ({ slug, label: "Posts", titleField: "title", fields: [{ slug: "title", type: "string", sortOrder: 0 }, { slug: "content", type: "portableText", sortOrder: 1 }] }) };
+	const call = (route, input) => routes[`buttondown/${route}`].handler({ ...base, input: { collection: "posts", id: "1", ...input } });
+
+	const panel = await call("entry", {});
+	assert.equal(panel.canCreate, true, "the panel offers it");
+	// Create draft now runs (instead of "No rule covers this collection"). Buttondown refuses this first create.
+	base.fake.fail({ method: "POST" }, { status: 400, body: { code: "invalid", detail: "Refused once." } });
+	const refused = await call("sync", { action: "create" });
+	assert.equal(refused.record.state, "error");
+	assert.equal(base.fake.drafts().length, 0);
+	// Retry reads the rules the same way, and makes the draft.
+	const made = await call("retry", {});
+	assert.equal(made.record.state, "draft");
+	assert.equal(base.fake.drafts().length, 1);
+	assert.equal(cached, 0, "the actions and their jobs never read the cached rules");
+	// With no rule saved at all, the action is refused with the plain message.
+	const none = context({ settings: { buttondownSettings: { rules: [], footerLink: true } } });
+	none.content = base.content;
+	await assert.rejects(routes["buttondown/sync"].handler({ ...none, input: { collection: "posts", id: "1", action: "create" } }), /No rule covers this collection/);
+});
+
 test("Refresh draft from post through the routes: the date the admin saw goes back with it, it writes only while that's current, and a failure is never tried again as an overwrite", async () => {
 	let clock = Date.parse("2026-11-15T12:00:00Z");
 	const pack = buttondownPack({}, { now: () => clock, terms: async () => ["n"], termParents: async () => new Map(), postUrl: async () => "https://coywolf.com/newsletter/one/", files: async () => new Map(), background: () => {} });
