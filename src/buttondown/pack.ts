@@ -122,13 +122,16 @@ export function buttondownPack(options: ButtondownOptions = {}, overrides: Parti
 		};
 	};
 
+	// The admin's own actions read the rules from storage, as the panel that offered them did: a rule saved a moment
+	// ago in another isolate counts at once. The hooks and the hourly task keep the per-isolate cache.
+	const adminDeps: SyncDeps = { ...deps, settings: deps.freshSettings };
 	const manual = async (ctx: PluginContext, action: ManualAction, collection: string, id: string, seen?: string) => {
 		const record = readRecord(await records(ctx).get(recordId(collection, id)));
-		const refusal = await manualRefusal(ctx, deps, action, collection, id, record, seen);
+		const refusal = await manualRefusal(ctx, adminDeps, action, collection, id, record, seen);
 		if (refusal) throw PluginRouteError.badRequest(refusal);
 		if (action === "refresh") {
 			// One attempt, and only while Buttondown still shows what the admin saw, on an email that still has the Pack's key. Nothing is left to try it again.
-			const out = await refreshDraft(ctx, deps, collection, id, seen as string);
+			const out = await refreshDraft(ctx, adminDeps, collection, id, seen as string);
 			const notice = out.busy
 				? "Another job is working on this draft, so nothing was written. Try again in a moment."
 				: out.unkeyed
@@ -140,7 +143,7 @@ export function buttondownPack(options: ButtondownOptions = {}, overrides: Parti
 							: undefined;
 			return { record: out.record ? recordView(out.record) : null, ...(notice ? { notice } : {}) };
 		}
-		const after = await runManual(ctx, deps, action, collection, id);
+		const after = await runManual(ctx, adminDeps, action, collection, id);
 		return { record: after ? recordView(after) : null };
 	};
 

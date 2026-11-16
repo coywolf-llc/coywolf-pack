@@ -68,7 +68,7 @@ import { type BuiltEmail, type EmailSource, buildEmail, entryKey, imageValueUrl,
 import { type ButtondownClient, type ButtondownEmail, ButtondownError, ButtondownRefused, createButtondownClient, packKeyOf, safeDetail } from "./client.js";
 import { BUTTONDOWN_FEATURES, BUTTONDOWN_KEY_SETTING, BUTTONDOWN_LIMITS } from "./keys.js";
 import { records } from "./store.js";
-import { BUTTONDOWN_DEFAULTS, type ButtondownRule, type ButtondownSettings, cachedSettings, ruleFor } from "./settings.js";
+import { BUTTONDOWN_DEFAULTS, type ButtondownRule, type ButtondownSettings, cachedSettings, loadSettings, ruleFor } from "./settings.js";
 import {
 	type ButtondownRecord,
 	CLEARED,
@@ -98,6 +98,12 @@ export interface SyncDeps {
 	db: () => Promise<D1Database | null>;
 	/** The rules. Rejects when they can't be read (never "no rules"). */
 	settings: (ctx: PluginContext) => Promise<ButtondownSettings>;
+	/**
+	 * The rules read from storage, past the per-isolate cache `settings` keeps (up to five minutes after a save in
+	 * another isolate). The admin's own actions use it, so Create draft now, Refresh draft from post and Retry use a
+	 * rule as soon as it's saved, as the panel that offers them does. Rejects when they can't be read.
+	 */
+	freshSettings: (ctx: PluginContext) => Promise<ButtondownSettings>;
 	/** The entry's term slugs in one taxonomy. Rejects when they can't be read (never "no terms"). */
 	terms: (ctx: PluginContext, collection: string, id: string, taxonomy: string) => Promise<string[]>;
 	/** Child term → parent term, for one taxonomy. Rejects when it can't be read. */
@@ -133,6 +139,7 @@ export function defaultDeps(database = "DB"): SyncDeps {
 		now: Date.now,
 		db,
 		settings: (ctx) => cachedSettings(ctx, database, true),
+		freshSettings: (ctx) => loadSettings(ctx, true),
 		terms: async (ctx, collection, id, taxonomy) => entryTerms(await source(ctx), collection, id, taxonomy, { strict: true }),
 		termParents: async (ctx, taxonomy) => {
 			const hit = parentsCache.get(taxonomy);
