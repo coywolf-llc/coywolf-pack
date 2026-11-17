@@ -760,6 +760,27 @@ test("ctx.redirects (redirects:write): Slug changes delete EmDash's own slug-cha
 	}
 });
 
+test("ctx.redirects: EmDash's slug-change redirect for a slug longer than D1's LIKE limit is still found by the shortened search and deleted (src/redirects/slug-changes.ts likeSearchTerm)", async () => {
+	const { dropEmDashAuto, likeSearchTerm } = await import("../src/redirects/slug-changes.ts");
+	const RedirectRepository = await distClass("RedirectRepository", "async createAutoRedirect(");
+	const repo = new RedirectRepository(db);
+	const oldSlug = "google-is-feeding-rank-trackers-poisoned-serps-with-swapped-results";
+	const newSlug = "rank-trackers-getting-poisoned-serps-from-google-in-search-results";
+	const auto = await repo.createAutoRedirect("posts", oldSlug, newSlug, "c-long", "/{slug}/", null, null);
+	// Another change whose new slug starts the same way: the search finds it too, the whole-slug match leaves it.
+	const sibling = await repo.createAutoRedirect("posts", "other-old", `${newSlug}-2`, "c-long-2", "/{slug}/", null, null);
+	const term = likeSearchTerm(newSlug);
+	assert.ok(term.length < newSlug.length && newSlug.startsWith(term), "the term is the slug's start");
+	const listed = await ctx.redirects.list({ auto: true, search: term, limit: 100 });
+	assert.deepEqual(listed.items.map((r) => r.id).sort(), [auto.id, sibling.id].sort(), "EmDash's search with the term finds both");
+
+	assert.equal(await dropEmDashAuto(ctx, "posts", `/news/seo/${oldSlug}/`, newSlug), 1);
+	assert.equal(await ctx.redirects.get(auto.id), null, "EmDash's row for the change is gone");
+	assert.ok(await ctx.redirects.get(sibling.id), "the other change's row stays");
+	const left = await ctx.redirects.get(sibling.id);
+	await ctx.redirects.delete(sibling.id, { _rev: left._rev });
+});
+
 test("secret settings: encrypted at rest, decrypted for a declared secret, refused for an undeclared one (src/core/secrets.ts)", async () => {
 	const emdash = await import("emdash");
 	// EmDash's Settings page API handlers (emdash/internal/plugin-test-runtime exports them, but it loads Astro's virtual modules).
