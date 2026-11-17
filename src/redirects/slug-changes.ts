@@ -67,6 +67,33 @@ export type AutoRedirectsApi = Pick<RedirectAccessWithWrite, "list" | "get" | "d
 const trimSlash = (path: string) => path.replace(/\/+$/, "");
 
 /**
+ * The longest LIKE pattern D1 runs, in bytes: a longer one fails the query ("LIKE or GLOB pattern too
+ * complex"). EmDash's redirects search is `source LIKE '%<term>%' OR destination LIKE …`, with `\`, `%`
+ * and `_` escaped by a backslash.
+ */
+export const D1_LIKE_PATTERN_BYTES = 50;
+const LIKE_ESCAPED = /[\\%_]/;
+const utf8 = new TextEncoder();
+
+/**
+ * The longest start of `text` whose EmDash search pattern (`%`, the escaped text, `%`) fits in
+ * `maxPattern` bytes. Searching with the whole slug failed for any slug over 48 bytes (most
+ * headline slugs), so EmDash's auto row was never found and stayed. A shorter term only finds
+ * more rows: dropEmDashAuto still compares the whole slug before it deletes one.
+ */
+export function likeSearchTerm(text: string, maxPattern = D1_LIKE_PATTERN_BYTES): string {
+	let bytes = 2;
+	let term = "";
+	for (const char of text) {
+		const size = LIKE_ESCAPED.test(char) ? 2 : utf8.encode(char).length;
+		if (bytes + size > maxPattern) break;
+		bytes += size;
+		term += char;
+	}
+	return term;
+}
+
+/**
  * Delete the redirect EmDash made for the same change (its "Auto: slug change" rows),
  * through EmDash's redirects API, so EmDash's write lock, its loop cache and the
  * redirects it publishes to its middleware all see the delete.
@@ -101,13 +128,14 @@ export async function dropEmDashAuto(
 		row.auto && row.groupName === EMDASH_AUTO_GROUP && sources.has(trimSlash(row.source)) && trimSlash(row.destination).toLowerCase().endsWith(ending);
 	let removed = 0;
 	let cursor: string | undefined;
+	// `search` (source or destination containing the new slug, or as much of its start as D1 allows) keeps the pages short.
+	const search = likeSearchTerm(newSlug);
 	for (let page = 0; ; page++) {
 		if (page >= maxPages) {
 			ctx.log?.warn("Slug change: stopped looking through EmDash's slug-change redirects after the page limit; the rest are left", { pages: maxPages, newSlug, removed });
 			break;
 		}
-		// `search` (source or destination containing the new slug) keeps the pages short.
-		const result = await api.list({ auto: true, group: EMDASH_AUTO_GROUP, search: newSlug, limit: 100, ...(cursor ? { cursor } : {}) });
+		const result = await api.list({ auto: true, group: EMDASH_AUTO_GROUP, limit: 100, ...(search ? { search } : {}), ...(cursor ? { cursor } : {}) });
 		for (const row of result.items) {
 			if (!matches(row)) continue;
 			const current = await api.get(row.id);
