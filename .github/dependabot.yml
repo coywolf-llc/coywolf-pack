@@ -44,6 +44,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # Wait a week after an action's release before proposing it, so a bad or hijacked release has time to
+    # be found and pulled first. (github-actions takes default-days only; the semver-*-days keys don't apply.)
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
         patterns: ["*"]
