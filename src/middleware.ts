@@ -1,6 +1,7 @@
 /**
  * Coywolf Pack site middleware: everything the pack serves outside EmDash's
- * plugin API (redirects, and module files such as sitemaps or downloads).
+ * plugin API (redirects, and module files such as sitemaps or downloads), and
+ * the limits on EmDash's sign-in emails (src/core/signin-limit.ts).
  * Add it first in the site's src/middleware.ts:
  *
  * ```ts
@@ -22,6 +23,7 @@ import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOpti
 import { SETTLE_RETRY_MS, claimSettle, currentGenerationTag, mergeScopes, recordSettingsChange, settleLater } from "./core/generation.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
 import { ensurePackStarted } from "./core/ready.js";
+import { signInLimitResponse } from "./core/signin-limit.js";
 import { DEADLINES } from "./core/single-flight.js";
 import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
@@ -105,6 +107,10 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		} catch {
 			return next(); // Not running on Cloudflare.
 		}
+		// Sign-in emails (EmDash's magic-link send): a cap per address and on all of them, before EmDash sends one.
+		// Null for every other request (src/core/signin-limit.ts).
+		const signInHeld = await signInLimitResponse(context.request, context.url.pathname, workers.env[options.database ?? "DB"] as D1Database | undefined);
+		if (signInHeld) return signInHeld;
 		// Pages rendered in this isolate may now load the live search client as a file (it's served below).
 		notePackMiddleware();
 		// Reads that fail from here until the response is rendered keep it out of the edge cache.
