@@ -1120,7 +1120,7 @@ test("sign-in email limits: the pack counts in EmDash's _emdash_rate_limits the 
 	const send = (address) => new Request(`https://example.com${path}`, { method: "POST", body: JSON.stringify({ email: address }) });
 	const checkRateLimit = await distFunction("checkRateLimit");
 	const realNow = Date.now;
-	const fixed = Date.UTC(2026, 0, 5, 9, 1, 0); // well inside both windows, for the pack and EmDash alike
+	const fixed = Date.UTC(2026, 0, 5, 9, 1, 0); // well inside the window, for the pack and EmDash alike
 	Date.now = () => fixed;
 	try {
 		const options = { pause: async () => {} };
@@ -1131,8 +1131,9 @@ test("sign-in email limits: the pack counts in EmDash's _emdash_rate_limits the 
 		const counted = limit.EMAIL_LIMIT.max + 1;
 		const perAddress = await checkRateLimit(db, (await limit.emailKey(email.toLowerCase())).replace(/:magic-link\/send$/, ""), "magic-link/send", limit.EMAIL_LIMIT.max, limit.EMAIL_LIMIT.windowSeconds);
 		assert.equal(perAddress.count, counted + 1);
-		const all = await checkRateLimit(db, limit.ALL_KEY.replace(/:magic-link\/send$/, ""), "magic-link/send", limit.ALL_LIMIT.max, limit.ALL_LIMIT.windowSeconds);
-		assert.equal(all.count, limit.EMAIL_LIMIT.max + 1, "the hourly count took the requests within the address's limit only: not the held one, not the made-up address");
+		// The address's row is the only one the pack wrote: nothing for the made-up address, and no count for all addresses together.
+		const written = await d1.prepare(`SELECT key FROM _emdash_rate_limits WHERE key LIKE 'coywolf-%'`).all();
+		assert.deepEqual(written.results.map((row) => row.key), [await limit.emailKey(email.toLowerCase())]);
 	} finally {
 		Date.now = realNow;
 	}

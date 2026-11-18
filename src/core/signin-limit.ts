@@ -1,42 +1,44 @@
 /**
- * Sign-in email limits: a cap on the sign-in links EmDash emails to one
- * address, and on all of them together.
+ * Sign-in email limit: a cap on the sign-in links EmDash emails to one
+ * address.
  *
  * EmDash (1.5) limits `POST /_emdash/api/auth/magic-link/send` by IP address
  * only (3 per 5 minutes), so requests spread over many addresses can fill an
  * admin's inbox with sign-in emails. The pack middleware counts each request
- * for a user's address before EmDash sees it:
+ * for a user's address before EmDash sees it: 3 per 15 minutes for one
+ * address (key `coywolf-email:<SHA-256 of the address>:magic-link/send`, so
+ * the table never holds the address itself).
  *
- * - 3 per 15 minutes for one address (key `coywolf-email:<SHA-256 of the
- *   address>:magic-link/send`, so the table never holds the address itself)
- * - 20 an hour for every address together (key `coywolf-all:magic-link/send`)
- *
- * Both are rows of EmDash's own `_emdash_rate_limits` table, written with the
- * upsert EmDash's checkRateLimit uses: fixed windows, a request counted even
- * when it's over (so a flood never resets its window), and EmDash's own
- * cleanup removing old windows. The hourly count only takes requests that are
- * within their address's limit, so one address adds at most 3 to it per 15
- * minutes: requests for a single address can't use up the hourly cap and lock
- * every other user out. Over either limit, the request gets the answer
+ * The count is a row of EmDash's own `_emdash_rate_limits` table, written with
+ * the upsert EmDash's checkRateLimit uses: fixed windows, a request counted
+ * even when it's over (so a flood never resets its window), and EmDash's own
+ * cleanup removing old windows. Over the limit, the request gets the answer
  * EmDash gives when it has sent a link (the same one it gives at its IP limit)
  * without reaching EmDash, after a pause like the one EmDash adds for an
  * unknown address, so neither the answer nor its timing says a limit was hit
  * or that the address has an account.
  *
- * Only addresses in EmDash's users table are counted (EmDash sends nothing to
- * any other), so made-up addresses can't use up the hourly cap. The address is
- * lowercased, as EmDash looks users up, and nothing else: EmDash's schema
- * refuses an address with spaces or a line break around it (400), so a padded
- * one must match no user and go on to EmDash. If the pack trimmed it, a user's
- * padded address would be held with a 200 on the 4th request while anyone
- * else's got 400 every time, which would tell the sender who has an account.
+ * There is no cap on all addresses together. Only addresses in EmDash's users
+ * table are counted (EmDash sends nothing to any other), so the per-address
+ * limit already bounds the mail: 12 an hour per user, on sites with one or two
+ * users. A shared cap would add almost nothing to that, and would let anyone
+ * who knows a few users' addresses hold every user's sign-in emails for its
+ * whole window.
+ *
+ * The address is lowercased, as EmDash looks users up, and nothing else:
+ * EmDash's schema refuses an address with spaces or a line break around it
+ * (400), so a padded one must match no user and go on to EmDash. If the pack
+ * trimmed it, a user's padded address would be held with a 200 on the 4th
+ * request while anyone else's got 400 every time, which would tell the sender
+ * who has an account.
  *
  * A body too big to be a sign-in request (over SIGNIN_BODY_MAX, declared or
  * actual) gets the same answer without reaching EmDash: EmDash's schema
  * ignores extra fields, so padding a request past the size the pack reads
- * would otherwise skip both limits. Anything else the pack can't read (bad
- * JSON, no email, a body already read) goes on to EmDash, which answers it as before. Any database
- * error fails open: the request goes on to EmDash (logged once per isolate).
+ * would otherwise skip the limit. Anything else the pack can't read (bad
+ * JSON, no email, a body already read) goes on to EmDash, which answers it as
+ * before. Any database error fails open: the request goes on to EmDash (logged
+ * once per isolate).
  *
  * Kept free of EmDash imports so tests can load it directly.
  */
@@ -45,14 +47,10 @@
 export const SIGNIN_SEND_PATH = "/_emdash/api/auth/magic-link/send";
 /** Largest body read: a sign-in request is `{"email":"…"}`, an address at most 254 characters. */
 export const SIGNIN_BODY_MAX = 4096;
-/** The endpoint part of the keys, as EmDash names its own limit on this route. */
+/** The endpoint part of the key, as EmDash names its own limit on this route. */
 const ENDPOINT = "magic-link/send";
 /** One address: 3 links per 15 minutes. */
 export const EMAIL_LIMIT = { max: 3, windowSeconds: 900 } as const;
-/** Every address together: 20 links an hour. */
-export const ALL_LIMIT = { max: 20, windowSeconds: 3600 } as const;
-/** The key of the hourly cap on every address. */
-export const ALL_KEY = `coywolf-all:${ENDPOINT}`;
 /** What EmDash's handler answers when it has sent a link (and at its own limit). */
 export const SIGNIN_SENT_MESSAGE = "If an account exists for this email, a magic link has been sent.";
 
@@ -172,23 +170,6 @@ function countRequest(db: D1Database, key: string, window: string): D1PreparedSt
 		.bind(key, window);
 }
 
-/**
- * The same upsert for the hourly count of every address, run only while the
- * per-address row (which the statement before it in the batch has just
- * counted) is within its limit. Over it, nothing is written and no row comes
- * back.
- */
-function countWithinLimit(db: D1Database, key: string, window: string, perAddressKey: string, perAddressWindow: string, perAddressMax: number): D1PreparedStatement {
-	return db
-		.prepare(
-			`INSERT INTO _emdash_rate_limits (key, "window", count)
-			SELECT ?, ?, 1 WHERE (SELECT count FROM _emdash_rate_limits WHERE key = ? AND "window" = ?) <= ?
-			ON CONFLICT (key, "window") DO UPDATE SET count = _emdash_rate_limits.count + 1
-			RETURNING count`,
-		)
-		.bind(key, window, perAddressKey, perAddressWindow, perAddressMax);
-}
-
 /** Whether the address belongs to one of EmDash's users (stored lowercase, as EmDash's getUserByEmail looks them up). */
 async function isUser(db: D1Database, email: string): Promise<boolean> {
 	return (await db.prepare("SELECT 1 AS found FROM users WHERE email = ? LIMIT 1").bind(email).first()) !== null;
@@ -200,7 +181,7 @@ let failureLogged = false;
 const pauseLikeEmDash = () => new Promise<void>((resolve) => setTimeout(resolve, 100 + Math.random() * 150));
 
 /**
- * For a sign-in email request over either limit (or too big to be one): the
+ * For a sign-in email request over its address's limit (or too big to be one): the
  * answer to give instead of EmDash's, after a pause. Null for every other
  * request, which goes on unchanged.
  */
@@ -217,19 +198,9 @@ export async function signInLimitResponse(request: Request, pathname: string, db
 	try {
 		if (!(await isUser(db, email))) return null;
 		const now = (options.now ?? Date.now)();
-		const key = await emailKey(email);
-		const window = windowStart(now, EMAIL_LIMIT.windowSeconds);
-		// One batch, which D1 runs in order as one transaction: the address's count first, then the hourly count,
-		// which reads the address's new count and only adds to its own while that's within the limit. No other
-		// isolate's request can come between the two, so each request sees its own place in the address's window,
-		// and at most EMAIL_LIMIT.max requests per address and window ever reach the hourly count.
-		const [one, all] = await db.batch<{ count: number }>([
-			countRequest(db, key, window),
-			countWithinLimit(db, ALL_KEY, windowStart(now, ALL_LIMIT.windowSeconds), key, window, EMAIL_LIMIT.max),
-		]);
-		const count = (result: D1Result<{ count: number }> | undefined) => Number(result?.results?.[0]?.count ?? 1);
-		// Over the address's limit the hourly statement returns no row; that request is held whatever the hourly count is.
-		if (count(one) <= EMAIL_LIMIT.max && count(all) <= ALL_LIMIT.max) return null;
+		// One statement, so each request gets its own place in the address's window, whichever isolate it arrives in.
+		const row = await countRequest(db, await emailKey(email), windowStart(now, EMAIL_LIMIT.windowSeconds)).first<{ count: number }>();
+		if (Number(row?.count ?? 1) <= EMAIL_LIMIT.max) return null;
 	} catch (error) {
 		if (!failureLogged) {
 			failureLogged = true;

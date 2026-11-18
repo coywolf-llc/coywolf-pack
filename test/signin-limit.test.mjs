@@ -1,8 +1,8 @@
 // Run: node --test test/signin-limit.test.mjs
-// Sign-in email limits (src/core/signin-limit.ts): the pack middleware caps the sign-in links EmDash's
-// magic-link route emails, per address (3 per 15 minutes) and for every address (20 an hour), counted in
-// EmDash's _emdash_rate_limits table. Over a limit, the request gets EmDash's own "sent" answer without
-// reaching EmDash. EmDash's real schema and rate limiter are checked in test/emdash-contract.test.mjs.
+// Sign-in email limit (src/core/signin-limit.ts): the pack middleware caps the sign-in links EmDash's
+// magic-link route emails per address (3 per 15 minutes), counted in EmDash's _emdash_rate_limits table.
+// Over the limit, the request gets EmDash's own "sent" answer without reaching EmDash. There is no cap on
+// all addresses together (no `coywolf-all:` row is ever written). EmDash's real schema and rate limiter are checked in test/emdash-contract.test.mjs.
 import "./ts-resolve.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
@@ -26,11 +26,11 @@ registerHooks({
 
 const limit = await import("../src/core/signin-limit.ts");
 const { coywolfPack } = await import("../src/middleware.ts");
-const { ALL_KEY, ALL_LIMIT, EMAIL_LIMIT, SIGNIN_BODY_MAX, SIGNIN_SENT_MESSAGE, emailKey, signInLimitResponse, windowStart } = limit;
+const { EMAIL_LIMIT, SIGNIN_BODY_MAX, SIGNIN_SENT_MESSAGE, emailKey, signInLimitResponse, windowStart } = limit;
 
 const ADMIN = "admin@example.com";
 const SEND = "/_emdash/api/auth/magic-link/send";
-const T0 = Date.UTC(2026, 10, 17, 12, 0, 0); // on a window boundary of both limits
+const T0 = Date.UTC(2026, 10, 17, 12, 0, 0); // on a window boundary of the limit
 
 /** A D1Database over node:sqlite with the tables the limits use (as EmDash's migrations create them). */
 function d1(users = [ADMIN]) {
@@ -49,7 +49,12 @@ function d1(users = [ADMIN]) {
 	});
 	return { sqlite, prepare: (sql) => statement(sql), batch: async (statements) => Promise.all(statements.map((s) => s.all())) };
 }
-const rows = (db) => db.sqlite.prepare(`SELECT key, "window", count FROM _emdash_rate_limits ORDER BY key`).all().map((row) => ({ ...row }));
+/** Every row of the table. No row for all addresses together may ever be there: the per-address rows are the only ones. */
+const rows = (db) => {
+	const all = db.sqlite.prepare(`SELECT key, "window", count FROM _emdash_rate_limits ORDER BY key, "window"`).all().map((row) => ({ ...row }));
+	for (const row of all) assert.match(row.key, /^coywolf-email:[0-9a-f]{64}:magic-link\/send$/, `only per-address rows are written, not ${row.key}`);
+	return all;
+};
 
 /** A sign-in email request, as EmDash's sign-in page sends it. */
 function sendRequest(body, { path = SEND, method = "POST", headers } = {}) {
@@ -80,12 +85,11 @@ test("under the per-address limit, requests go on to EmDash; the next one gets E
 	assert.equal(pauses, 0, "requests that go on aren't paused");
 	await assertSent(await check(db, sendRequest({ email: ADMIN })));
 	assert.equal(pauses, 1, "a held request is paused, as EmDash pauses for an unknown address");
-	// Counted as EmDash counts: the key, the window start, and every request for the address (held ones too).
-	// The hourly count only takes the requests within the address's limit.
-	assert.deepEqual(rows(db), [
-		{ key: ALL_KEY, window: windowStart(T0, 3600), count: EMAIL_LIMIT.max },
-		{ key: await emailKey(ADMIN), window: windowStart(T0, 900), count: 4 },
-	]);
+	// Counted as EmDash counts: the key, the window start, and every request for the address (held ones too). One row, and no other.
+	assert.deepEqual(rows(db), [{ key: await emailKey(ADMIN), window: windowStart(T0, 900), count: 4 }]);
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM _emdash_rate_limits WHERE key LIKE 'coywolf-all:%'").get().n, 0, "no row for all addresses together");
+	assert.equal(limit.ALL_KEY, undefined);
+	assert.equal(limit.ALL_LIMIT, undefined);
 	assert.match(await emailKey(ADMIN), /^coywolf-email:[0-9a-f]{64}:magic-link\/send$/);
 	assert.ok(!JSON.stringify(rows(db)).includes("example.com"), "the address itself is never stored");
 	// A new 15-minute window lets the address through again.
@@ -115,36 +119,33 @@ test("a padded address isn't trimmed: it matches no user, isn't counted, and goe
 	await assertSent(await check(db, sendRequest({ email: ADMIN })));
 });
 
-test("over the hourly cap on every address, a request for any user is held", async () => {
-	const users = Array.from({ length: ALL_LIMIT.max + 1 }, (_, i) => `user${i}@example.com`);
-	const db = d1(users);
-	for (let i = 0; i < ALL_LIMIT.max; i++) assert.equal(await check(db, sendRequest({ email: users[i] }), T0 + i * 1000), null, `user ${i}`);
-	// A user with no requests yet, still in the hour.
-	await assertSent(await check(db, sendRequest({ email: users[ALL_LIMIT.max] }), T0 + 30 * 60_000));
-	// The next hour.
-	assert.equal(await check(db, sendRequest({ email: users[ALL_LIMIT.max] }), T0 + ALL_LIMIT.windowSeconds * 1000), null);
+test("each address has its own limit and nothing else: no number of users' requests holds another user's, and no row for all addresses is written", async () => {
+	// 30 users, each at their limit in one window (90 requests that go on): with a cap on all addresses together, the later ones would be held.
+	const users = Array.from({ length: 30 }, (_, i) => `user${i}@example.com`);
+	const db = d1([...users, "editor@example.com"]);
+	pauses = 0;
+	for (const [n, email] of users.entries()) for (let i = 0; i < EMAIL_LIMIT.max; i++) assert.equal(await check(db, sendRequest({ email }), T0 + n * 1000 + i), null, `${email}, request ${i + 1}`);
+	// One address far over its own limit: held, and still only its own row grows.
+	for (let i = 0; i < 25; i++) await assertSent(await check(db, sendRequest({ email: users[0] }), T0 + 60_000 + i));
+	assert.equal(pauses, 25);
+	// Another user's first request, in the same window, goes on to EmDash.
+	assert.equal(await check(db, sendRequest({ email: "editor@example.com" }), T0 + 120_000), null);
+	const counted = rows(db); // asserts every key is a per-address one
+	assert.equal(counted.length, users.length + 1, "one row per address");
+	assert.equal(counted.find((row) => row.key.startsWith("coywolf-all")), undefined);
+	assert.equal(counted.reduce((sum, row) => sum + row.count, 0), users.length * EMAIL_LIMIT.max + 25 + 1);
+	// Later windows in the hour: the address gets its limit again each time (nothing adds up across windows).
+	for (let w = 1; w < 4; w++) {
+		const at = T0 + w * EMAIL_LIMIT.windowSeconds * 1000;
+		for (let i = 0; i < EMAIL_LIMIT.max; i++) assert.equal(await check(db, sendRequest({ email: users[0] }), at + i), null, `window ${w}, request ${i + 1}`);
+		await assertSent(await check(db, sendRequest({ email: users[0] }), at + 10));
+	}
+	rows(db);
 });
 
-test("requests for one address can't use up the hourly cap: only those within the address's limit count toward it", async () => {
-	const db = d1([ADMIN, "editor@example.com"]);
-	let held = 0;
-	for (let i = 0; i < ALL_LIMIT.max + 5; i++) if (await check(db, sendRequest({ email: ADMIN }), T0 + i * 1000)) held++;
-	assert.equal(held, ALL_LIMIT.max + 5 - EMAIL_LIMIT.max, "everything past the address's limit is held");
-	assert.deepEqual(rows(db), [
-		{ key: ALL_KEY, window: windowStart(T0, 3600), count: EMAIL_LIMIT.max },
-		{ key: await emailKey(ADMIN), window: windowStart(T0, 900), count: ALL_LIMIT.max + 5 },
-	]);
-	// Another user's first request, in the same windows, goes on to EmDash.
-	assert.equal(await check(db, sendRequest({ email: "editor@example.com" }), T0 + 60_000), null);
-	assert.equal(rows(db).find((row) => row.key === ALL_KEY).count, EMAIL_LIMIT.max + 1);
-	// The address's later windows in the hour add at most its limit each.
-	for (let w = 1; w < 4; w++) for (let i = 0; i < 10; i++) await check(db, sendRequest({ email: ADMIN }), T0 + w * EMAIL_LIMIT.windowSeconds * 1000 + i);
-	assert.equal(rows(db).find((row) => row.key === ALL_KEY).count, EMAIL_LIMIT.max * 4 + 1);
-});
-
-test("an address that isn't a user's isn't counted: made-up addresses can't use up the hourly cap", async () => {
+test("an address that isn't a user's isn't counted", async () => {
 	const db = d1();
-	for (let i = 0; i < ALL_LIMIT.max * 2; i++) assert.equal(await check(db, sendRequest({ email: `nobody${i}@example.com` })), null);
+	for (let i = 0; i < 40; i++) assert.equal(await check(db, sendRequest({ email: `nobody${i}@example.com` })), null);
 	for (let i = 0; i < 5; i++) assert.equal(await check(db, sendRequest({ email: "nobody@example.com" })), null);
 	assert.deepEqual(rows(db), []);
 	assert.equal(await check(db, sendRequest({ email: ADMIN })), null, "the admin's first request still goes on");
@@ -173,7 +174,7 @@ test("a body too big to be a sign-in request is held, uncounted: padding can't s
 	assert.deepEqual(rows(db), [], "nothing counted");
 	// A small chunked request is counted like any other.
 	assert.equal(await check(db, chunked(JSON.stringify({ email: ADMIN }))), null);
-	assert.equal(rows(db).length, 2);
+	assert.deepEqual(rows(db), [{ key: await emailKey(ADMIN), window: windowStart(T0, 900), count: 1 }]);
 });
 
 test("EmDash's route still reads the body after the check", async () => {
@@ -208,7 +209,8 @@ test("a database error fails open (the request goes on to EmDash), logged once p
 	const original = console.error;
 	console.error = (...args) => logged.push(args);
 	try {
-		const broken = { prepare: () => ({ bind: () => ({ first: async () => ({ found: 1 }), all: async () => ({ results: [] }) }) }), batch: async () => Promise.reject(new Error("D1_ERROR: no such table")) };
+		// The user is found, then the count can't be written.
+		const broken = { prepare: (sql) => ({ bind: () => ({ first: async () => (sql.startsWith("SELECT") ? { found: 1 } : Promise.reject(new Error("D1_ERROR: no such table"))) }) }) };
 		assert.equal(await check(broken, sendRequest({ email: ADMIN })), null);
 		assert.equal(await check(broken, sendRequest({ email: ADMIN })), null);
 		const lookupFails = { prepare: () => ({ bind: () => ({ first: async () => Promise.reject(new Error("D1 down")) }) }) };

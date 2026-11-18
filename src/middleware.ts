@@ -1,7 +1,7 @@
 /**
  * Coywolf Pack site middleware: everything the pack serves outside EmDash's
  * plugin API (redirects, and module files such as sitemaps or downloads), and
- * the limits on EmDash's sign-in emails (src/core/signin-limit.ts).
+ * the limit on EmDash's sign-in emails (src/core/signin-limit.ts).
  * Add it first in the site's src/middleware.ts:
  *
  * ```ts
@@ -107,7 +107,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		} catch {
 			return next(); // Not running on Cloudflare.
 		}
-		// Sign-in emails (EmDash's magic-link send): a cap per address and on all of them, before EmDash sends one.
+		// Sign-in emails (EmDash's magic-link send): a cap per address, before EmDash sends one.
 		// Null for every other request (src/core/signin-limit.ts).
 		const signInHeld = await signInLimitResponse(context.request, context.url.pathname, workers.env[options.database ?? "DB"] as D1Database | undefined);
 		if (signInHeld) return signInHeld;
