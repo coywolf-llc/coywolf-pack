@@ -14,20 +14,28 @@
  * Both are rows of EmDash's own `_emdash_rate_limits` table, written with the
  * upsert EmDash's checkRateLimit uses: fixed windows, a request counted even
  * when it's over (so a flood never resets its window), and EmDash's own
- * cleanup removing old windows. Over either limit, the request gets the answer
+ * cleanup removing old windows. The hourly count only takes requests that are
+ * within their address's limit, so one address adds at most 3 to it per 15
+ * minutes: requests for a single address can't use up the hourly cap and lock
+ * every other user out. Over either limit, the request gets the answer
  * EmDash gives when it has sent a link (the same one it gives at its IP limit)
  * without reaching EmDash, after a pause like the one EmDash adds for an
  * unknown address, so neither the answer nor its timing says a limit was hit
  * or that the address has an account.
  *
  * Only addresses in EmDash's users table are counted (EmDash sends nothing to
- * any other), so made-up addresses can't use up the hourly cap.
+ * any other), so made-up addresses can't use up the hourly cap. The address is
+ * lowercased, as EmDash looks users up, and nothing else: EmDash's schema
+ * refuses an address with spaces or a line break around it (400), so a padded
+ * one must match no user and go on to EmDash. If the pack trimmed it, a user's
+ * padded address would be held with a 200 on the 4th request while anyone
+ * else's got 400 every time, which would tell the sender who has an account.
  *
  * A body too big to be a sign-in request (over SIGNIN_BODY_MAX, declared or
  * actual) gets the same answer without reaching EmDash: EmDash's schema
  * ignores extra fields, so padding a request past the size the pack reads
  * would otherwise skip both limits. Anything else the pack can't read (bad
- * JSON, no email) goes on to EmDash, which answers it as before. Any database
+ * JSON, no email, a body already read) goes on to EmDash, which answers it as before. Any database
  * error fails open: the request goes on to EmDash (logged once per isolate).
  *
  * Kept free of EmDash imports so tests can load it directly.
@@ -92,12 +100,13 @@ async function smallBody(request: Request, max: number): Promise<string | typeof
 	const declared = Number(request.headers.get("content-length") ?? Number.NaN);
 	if (Number.isFinite(declared) && declared > max) return TOO_LARGE;
 	// A copy (the route reads the original), read in parts: with no Content-Length (a chunked upload), the size is only known by reading.
-	const stream = request.clone().body;
-	if (!stream) return "";
-	const reader = stream.getReader();
 	const parts: Uint8Array[] = [];
 	let size = 0;
 	try {
+		// Inside the try: clone() throws for a body that's already read or locked, and that request goes on to EmDash too.
+		const stream = request.clone().body;
+		if (!stream) return "";
+		const reader = stream.getReader();
 		for (;;) {
 			const { done, value } = await reader.read();
 			if (done) break;
@@ -120,7 +129,12 @@ async function smallBody(request: Request, max: number): Promise<string | typeof
 	return new TextDecoder().decode(bytes);
 }
 
-/** The address a sign-in request names, as the limits count it (trimmed, lowercase); null when there isn't one. */
+/**
+ * The address a sign-in request names, as the limits count it: A–Z lowercased
+ * (the addresses EmDash accepts are ASCII, and it looks users up lowercase),
+ * and never trimmed (see the note on padded addresses
+ * above). Null when there isn't one.
+ */
 export function requestedEmail(text: string): string | null {
 	let body: unknown;
 	try {
@@ -130,7 +144,8 @@ export function requestedEmail(text: string): string | null {
 	}
 	const email = body && typeof body === "object" ? (body as { email?: unknown }).email : undefined;
 	if (typeof email !== "string") return null;
-	const normalized = email.trim().toLowerCase();
+	// A–Z only: toLowerCase() also turns the Kelvin sign (U+212A) into "k", which would make an address EmDash refuses match a user.
+	const normalized = email.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
 	return normalized.includes("@") ? normalized : null;
 }
 
@@ -155,6 +170,23 @@ function countRequest(db: D1Database, key: string, window: string): D1PreparedSt
 			RETURNING count`,
 		)
 		.bind(key, window);
+}
+
+/**
+ * The same upsert for the hourly count of every address, run only while the
+ * per-address row (which the statement before it in the batch has just
+ * counted) is within its limit. Over it, nothing is written and no row comes
+ * back.
+ */
+function countWithinLimit(db: D1Database, key: string, window: string, perAddressKey: string, perAddressWindow: string, perAddressMax: number): D1PreparedStatement {
+	return db
+		.prepare(
+			`INSERT INTO _emdash_rate_limits (key, "window", count)
+			SELECT ?, ?, 1 WHERE (SELECT count FROM _emdash_rate_limits WHERE key = ? AND "window" = ?) <= ?
+			ON CONFLICT (key, "window") DO UPDATE SET count = _emdash_rate_limits.count + 1
+			RETURNING count`,
+		)
+		.bind(key, window, perAddressKey, perAddressWindow, perAddressMax);
 }
 
 /** Whether the address belongs to one of EmDash's users (stored lowercase, as EmDash's getUserByEmail looks them up). */
@@ -185,11 +217,18 @@ export async function signInLimitResponse(request: Request, pathname: string, db
 	try {
 		if (!(await isUser(db, email))) return null;
 		const now = (options.now ?? Date.now)();
+		const key = await emailKey(email);
+		const window = windowStart(now, EMAIL_LIMIT.windowSeconds);
+		// One batch, which D1 runs in order as one transaction: the address's count first, then the hourly count,
+		// which reads the address's new count and only adds to its own while that's within the limit. No other
+		// isolate's request can come between the two, so each request sees its own place in the address's window,
+		// and at most EMAIL_LIMIT.max requests per address and window ever reach the hourly count.
 		const [one, all] = await db.batch<{ count: number }>([
-			countRequest(db, await emailKey(email), windowStart(now, EMAIL_LIMIT.windowSeconds)),
-			countRequest(db, ALL_KEY, windowStart(now, ALL_LIMIT.windowSeconds)),
+			countRequest(db, key, window),
+			countWithinLimit(db, ALL_KEY, windowStart(now, ALL_LIMIT.windowSeconds), key, window, EMAIL_LIMIT.max),
 		]);
 		const count = (result: D1Result<{ count: number }> | undefined) => Number(result?.results?.[0]?.count ?? 1);
+		// Over the address's limit the hourly statement returns no row; that request is held whatever the hourly count is.
 		if (count(one) <= EMAIL_LIMIT.max && count(all) <= ALL_LIMIT.max) return null;
 	} catch (error) {
 		if (!failureLogged) {

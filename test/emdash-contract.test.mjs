@@ -1132,7 +1132,7 @@ test("sign-in email limits: the pack counts in EmDash's _emdash_rate_limits the 
 		const perAddress = await checkRateLimit(db, (await limit.emailKey(email.toLowerCase())).replace(/:magic-link\/send$/, ""), "magic-link/send", limit.EMAIL_LIMIT.max, limit.EMAIL_LIMIT.windowSeconds);
 		assert.equal(perAddress.count, counted + 1);
 		const all = await checkRateLimit(db, limit.ALL_KEY.replace(/:magic-link\/send$/, ""), "magic-link/send", limit.ALL_LIMIT.max, limit.ALL_LIMIT.windowSeconds);
-		assert.equal(all.count, counted + 1, "the made-up address wasn't counted");
+		assert.equal(all.count, limit.EMAIL_LIMIT.max + 1, "the hourly count took the requests within the address's limit only: not the held one, not the made-up address");
 	} finally {
 		Date.now = realNow;
 	}

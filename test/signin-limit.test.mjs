@@ -80,9 +80,10 @@ test("under the per-address limit, requests go on to EmDash; the next one gets E
 	assert.equal(pauses, 0, "requests that go on aren't paused");
 	await assertSent(await check(db, sendRequest({ email: ADMIN })));
 	assert.equal(pauses, 1, "a held request is paused, as EmDash pauses for an unknown address");
-	// Counted as EmDash counts: the key, the window start, and every request (held ones too).
+	// Counted as EmDash counts: the key, the window start, and every request for the address (held ones too).
+	// The hourly count only takes the requests within the address's limit.
 	assert.deepEqual(rows(db), [
-		{ key: ALL_KEY, window: windowStart(T0, 3600), count: 4 },
+		{ key: ALL_KEY, window: windowStart(T0, 3600), count: EMAIL_LIMIT.max },
 		{ key: await emailKey(ADMIN), window: windowStart(T0, 900), count: 4 },
 	]);
 	assert.match(await emailKey(ADMIN), /^coywolf-email:[0-9a-f]{64}:magic-link\/send$/);
@@ -91,10 +92,27 @@ test("under the per-address limit, requests go on to EmDash; the next one gets E
 	assert.equal(await check(db, sendRequest({ email: ADMIN }), T0 + EMAIL_LIMIT.windowSeconds * 1000), null);
 });
 
-test("the address is trimmed and lowercased, so spellings of one address share its limit", async () => {
+test("the address is lowercased, so spellings of one address share its limit", async () => {
 	const db = d1();
-	for (const email of [ADMIN, " Admin@Example.com", "ADMIN@EXAMPLE.COM "]) assert.equal(await check(db, sendRequest({ email })), null);
+	for (const email of [ADMIN, "Admin@Example.com", "ADMIN@EXAMPLE.COM"]) assert.equal(await check(db, sendRequest({ email })), null);
 	await assertSent(await check(db, sendRequest({ email: "admin@EXAMPLE.com" })));
+});
+
+test("a padded address isn't trimmed: it matches no user, isn't counted, and goes on to EmDash (which answers 400), for a user as for anyone", async () => {
+	// EmDash's schema refuses these. Trimming would hold a user's 4th with a 200 while a non-user's stayed 400: a way to tell who has an account.
+	const db = d1();
+	pauses = 0;
+	assert.equal(limit.requestedEmail(JSON.stringify({ email: " Admin@Example.com " })), " admin@example.com ");
+	// "admin@exam\u212Aple…" has no user here, so the last one uses a user with a k: the Kelvin sign must not fold into it.
+	db.sqlite.prepare("INSERT INTO users (id, email) VALUES ('k', 'mark@example.com')").run();
+	for (const email of [` ${ADMIN}`, `${ADMIN} `, `${ADMIN}\n`, `\t${ADMIN}`, " nobody@example.com", "mar\u212A@example.com"]) {
+		for (let i = 0; i < EMAIL_LIMIT.max + 2; i++) assert.equal(await check(db, sendRequest({ email })), null, `${JSON.stringify(email)}, request ${i + 1}`);
+	}
+	assert.deepEqual(rows(db), [], "nothing counted");
+	assert.equal(pauses, 0);
+	// The address itself still has its whole limit.
+	for (let i = 0; i < EMAIL_LIMIT.max; i++) assert.equal(await check(db, sendRequest({ email: ADMIN })), null);
+	await assertSent(await check(db, sendRequest({ email: ADMIN })));
 });
 
 test("over the hourly cap on every address, a request for any user is held", async () => {
@@ -105,6 +123,23 @@ test("over the hourly cap on every address, a request for any user is held", asy
 	await assertSent(await check(db, sendRequest({ email: users[ALL_LIMIT.max] }), T0 + 30 * 60_000));
 	// The next hour.
 	assert.equal(await check(db, sendRequest({ email: users[ALL_LIMIT.max] }), T0 + ALL_LIMIT.windowSeconds * 1000), null);
+});
+
+test("requests for one address can't use up the hourly cap: only those within the address's limit count toward it", async () => {
+	const db = d1([ADMIN, "editor@example.com"]);
+	let held = 0;
+	for (let i = 0; i < ALL_LIMIT.max + 5; i++) if (await check(db, sendRequest({ email: ADMIN }), T0 + i * 1000)) held++;
+	assert.equal(held, ALL_LIMIT.max + 5 - EMAIL_LIMIT.max, "everything past the address's limit is held");
+	assert.deepEqual(rows(db), [
+		{ key: ALL_KEY, window: windowStart(T0, 3600), count: EMAIL_LIMIT.max },
+		{ key: await emailKey(ADMIN), window: windowStart(T0, 900), count: ALL_LIMIT.max + 5 },
+	]);
+	// Another user's first request, in the same windows, goes on to EmDash.
+	assert.equal(await check(db, sendRequest({ email: "editor@example.com" }), T0 + 60_000), null);
+	assert.equal(rows(db).find((row) => row.key === ALL_KEY).count, EMAIL_LIMIT.max + 1);
+	// The address's later windows in the hour add at most its limit each.
+	for (let w = 1; w < 4; w++) for (let i = 0; i < 10; i++) await check(db, sendRequest({ email: ADMIN }), T0 + w * EMAIL_LIMIT.windowSeconds * 1000 + i);
+	assert.equal(rows(db).find((row) => row.key === ALL_KEY).count, EMAIL_LIMIT.max * 4 + 1);
 });
 
 test("an address that isn't a user's isn't counted: made-up addresses can't use up the hourly cap", async () => {
@@ -146,6 +181,25 @@ test("EmDash's route still reads the body after the check", async () => {
 	const request = sendRequest({ email: ADMIN });
 	assert.equal(await check(db, request), null);
 	assert.deepEqual(await request.json(), { email: ADMIN });
+});
+
+test("a body that's already been read fails open: the request goes on to EmDash, uncounted", async () => {
+	const db = d1();
+	const used = sendRequest({ email: ADMIN });
+	await used.text();
+	assert.equal(used.bodyUsed, true);
+	assert.equal(await check(db, used), null);
+	// A locked body (a reader held on it) too.
+	const locked = sendRequest({ email: ADMIN });
+	locked.body.getReader();
+	assert.equal(await check(db, locked), null);
+	// And a request whose clone() throws anything at all.
+	const broken = sendRequest({ email: ADMIN });
+	broken.clone = () => {
+		throw new Error("no clone");
+	};
+	assert.equal(await check(db, broken), null);
+	assert.deepEqual(rows(db), []);
 });
 
 test("a database error fails open (the request goes on to EmDash), logged once per isolate", async () => {
