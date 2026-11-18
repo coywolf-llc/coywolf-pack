@@ -23,7 +23,7 @@ import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOpti
 import { SETTLE_RETRY_MS, claimSettle, currentGenerationTag, mergeScopes, recordSettingsChange, settleLater } from "./core/generation.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
 import { ensurePackStarted } from "./core/ready.js";
-import { signInLimitResponse } from "./core/signin-limit.js";
+import { signInHeldRequest } from "./core/signin-limit.js";
 import { DEADLINES } from "./core/single-flight.js";
 import { injectAdminEnhancements } from "./core/settings-enhance.js";
 import type { PackMiddleware } from "./core/module.js";
@@ -107,10 +107,22 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 		} catch {
 			return next(); // Not running on Cloudflare.
 		}
-		// Sign-in emails (EmDash's magic-link send): a cap per address, before EmDash sends one.
-		// Null for every other request (src/core/signin-limit.ts).
-		const signInHeld = await signInLimitResponse(context.request, context.url.pathname, workers.env[options.database ?? "DB"] as D1Database | undefined);
-		if (signInHeld) return signInHeld;
+		// Sign-in emails (EmDash's magic-link send): a cap per address, before EmDash sends one. Over it, EmDash's route
+		// still runs, on a request for an address that has no account (src/core/signin-limit.ts). Null for every other request.
+		const signInHeld = await signInHeldRequest(context.request, context.url.pathname, workers.env[options.database ?? "DB"] as D1Database | undefined);
+		// The route reads the context's request, so that is where the held one goes: the request then takes the same way
+		// through the rest of this middleware, the site's and EmDash's route as any other. Not next(request) or
+		// context.rewrite(request): Astro (7.4) routes those again, the first leaves the route its old request when no
+		// middleware comes after this one (so the email would be sent), and the second runs the whole middleware chain
+		// again. test/signin-delegation.test.mjs runs this on Astro's own middleware runtime with EmDash's route.
+		if (signInHeld) {
+			try {
+				context.request = signInHeld;
+			} catch (error) {
+				// An Astro whose context can't be given a request: the request goes on unchanged (the limit isn't applied), as after a database error.
+				console.error("coywolf-pack: the sign-in email limit couldn't hold a request, so EmDash handles it as sent", error);
+			}
+		}
 		// Pages rendered in this isolate may now load the live search client as a file (it's served below).
 		notePackMiddleware();
 		// Reads that fail from here until the response is rendered keep it out of the edge cache.
