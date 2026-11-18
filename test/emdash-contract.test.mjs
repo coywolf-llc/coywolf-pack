@@ -1082,6 +1082,7 @@ test("EmDash's routes the pack calls, links to or watches exist, with those meth
 		"/_emdash/api/plugins/[pluginId]/[...path]": ["GET", "POST"], // the pack's routes
 		"/_emdash/api/search": ["GET"],
 		"/_emdash/api/search/suggest": ["GET"],
+		"/_emdash/api/auth/magic-link/send": ["POST"], // middleware: sign-in email limits (src/core/signin-limit.ts)
 		"/_emdash/admin/[...path]": [],
 	};
 	for (const [pattern, methods] of Object.entries(needed)) {
@@ -1089,6 +1090,46 @@ test("EmDash's routes the pack calls, links to or watches exist, with those meth
 		if (!methods.length) continue;
 		const exported = routeMethods(routes.get(pattern));
 		for (const m of methods) assert.ok(exported.has(m) || exported.has("ALL"), `${pattern} doesn't export ${m} (exports ${[...exported].join(", ")})`);
+	}
+});
+
+test("sign-in email limits: the pack counts in EmDash's _emdash_rate_limits the way checkRateLimit does, finds EmDash's users, and holds with an address EmDash accepts (src/core/signin-limit.ts)", async () => {
+	const limit = await import("../src/core/signin-limit.ts");
+	const path = "/_emdash/api/auth/magic-link/send";
+	// The table the upsert writes, and its primary key: the upsert's ON CONFLICT target.
+	const table = await columns("_emdash_rate_limits");
+	for (const name of ["key", "window", "count"]) assert.ok(table.some((c) => c.name === name), `_emdash_rate_limits has no ${name} column in EmDash ${emdashVersion}`);
+	assert.deepEqual(table.filter((c) => c.pk).sort((a, b) => a.pk - b.pk).map((c) => c.name), ["key", "window"]);
+	// EmDash's sign-in route reads { email }, and its schema accepts the address a held request is given.
+	const { magicLinkSendBody } = await import("emdash/api/schemas");
+	assert.ok("email" in magicLinkSendBody.shape, `the magic-link body is ${Object.keys(magicLinkSendBody.shape).join(", ")}`);
+	assert.equal(magicLinkSendBody.safeParse({ email: limit.heldEmail() }).success, true, `EmDash ${emdashVersion}'s schema refuses an @${limit.HELD_EMAIL_DOMAIN} address`);
+	// (EmDash's route itself, behind the pack middleware on Astro's middleware runtime: test/signin-delegation.test.mjs.)
+
+	// A user made by EmDash's own auth adapter, with a mixed-case address: the pack's lookup finds it as the route's does.
+	const { createKyselyAdapter } = await import(pathToFileURL(join(packageDir("@emdash-cms/auth", emdashDir), "dist/adapters/kysely.mjs")).href);
+	const email = "Signin-Limit@Example.com";
+	await createKyselyAdapter(db).createUser({ email, name: "Sign-in limit" });
+	const send = (address) => new Request(`https://example.com${path}`, { method: "POST", body: JSON.stringify({ email: address }) });
+	const checkRateLimit = await distFunction("checkRateLimit");
+	const realNow = Date.now;
+	const fixed = Date.UTC(2026, 0, 5, 9, 1, 0); // well inside the window, for the pack and EmDash alike
+	Date.now = () => fixed;
+	try {
+		for (let i = 0; i < limit.EMAIL_LIMIT.max; i++) assert.equal(await limit.signInHeldRequest(send(email), path, d1), null, `request ${i + 1}`);
+		const held = await limit.signInHeldRequest(send(email), path, d1);
+		assert.ok(held instanceof Request, "held over the per-address limit");
+		assert.equal(magicLinkSendBody.safeParse(await held.json()).success, true, "EmDash's schema accepts the held request's body");
+		assert.equal(await limit.signInHeldRequest(send("not-a-user@example.com"), path, d1), null);
+		// EmDash's limiter, given the pack's subjects, counts on from the pack's rows: same key format, window start and table.
+		const counted = limit.EMAIL_LIMIT.max + 1;
+		const perAddress = await checkRateLimit(db, (await limit.emailKey(email.toLowerCase())).replace(/:magic-link\/send$/, ""), "magic-link/send", limit.EMAIL_LIMIT.max, limit.EMAIL_LIMIT.windowSeconds);
+		assert.equal(perAddress.count, counted + 1);
+		// The address's row is the only one the pack wrote: nothing for the made-up address, and no count for all addresses together.
+		const written = await d1.prepare(`SELECT key FROM _emdash_rate_limits WHERE key LIKE 'coywolf-%'`).all();
+		assert.deepEqual(written.results.map((row) => row.key), [await limit.emailKey(email.toLowerCase())]);
+	} finally {
+		Date.now = realNow;
 	}
 });
 

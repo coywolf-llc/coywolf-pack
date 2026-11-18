@@ -15,7 +15,7 @@ Start with [Getting started](../README.md#getting-started) to install the pack a
 - [Performance](performance.md): Workers Cache, clearing after deploys and edits, cache warming, Cloudflare usage, Speculation Rules
 - [Cloudflare Checkup](cloudflare-checkup.md): the zone settings that matter for a Workers-served site, one-click fixes, and serving links with tracking parameters from the cache
 - [Content URLs](content-urls.md): telling the pack how your theme routes entries (category paths, nested pages)
-- [Internals](internals.md): how the pack keeps D1 reads to about one round trip per uncached page, and the deadlines on reads requests share
+- [Internals](internals.md): how the pack keeps D1 reads to about one round trip per uncached page, the deadlines on reads requests share, and the limit on sign-in emails
 
 ## Modules
 

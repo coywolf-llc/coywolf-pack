@@ -115,6 +115,7 @@ Search (when **Search rate limit** is on), video plays and video likes count eac
 - A binding with another name: `coywolfPlugin({ search: { rateLimiter: "NAME" }, videos: { rateLimiter: "NAME" } })`.
 - Without a binding nothing changes: each isolate counts on its own, best effort.
 - Requests answered from the edge cache (repeat searches) never reach the Worker, so they aren't counted; only misses are.
+- Sign-in emails have a limit per address, always on and counted in the site's database, with no binding needed: see [Sign-in email limits](internals.md#sign-in-email-limits).
 
 ### Cloudflare usage
 
