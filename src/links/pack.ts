@@ -54,7 +54,8 @@ export async function joinSplitLinksBeforeSave(
 		if (typeof content !== "object" || content === null || Array.isArray(content)) return undefined;
 		const result = joinEntrySplitLinks(content as Record<string, unknown>);
 		if (!result) return undefined;
-		ctx.log.info("links: joined split links", { collection: event.collection, id: event.id ?? null, joined: result.joined });
+		// Debug: an open editor keeps its split copy and sends it again with every autosave until it's reloaded.
+		ctx.log.debug("links: joined split links", { collection: event.collection, id: event.id ?? null, joined: result.joined });
 		return result.content;
 	} catch (error) {
 		try {

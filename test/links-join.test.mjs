@@ -2,6 +2,7 @@
 // Join split links (links.join): one link the editor saved in pieces is stored as one link.
 import "./ts-resolve.mjs";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const { joinSplitLinks, joinEntrySplitLinks } = await import("../src/links/join.ts");
@@ -229,7 +230,7 @@ test("joinEntrySplitLinks: only the fields that changed; null when nothing did",
 
 test("the hook: undefined when nothing changes, the joined content when it does, and it never throws", async () => {
 	const logs = [];
-	const ctx = { log: { info: (msg, data) => logs.push([msg, data]), warn: (msg, data) => logs.push([msg, data]) } };
+	const ctx = { log: { debug: (msg, data) => logs.push([msg, data]), info: (msg, data) => logs.push([msg, data]), warn: (msg, data) => logs.push([msg, data]) } };
 	assert.equal(await joinSplitLinksBeforeSave({ content: { title: "x" }, collection: "posts" }, ctx), undefined);
 	assert.equal(await joinSplitLinksBeforeSave({ collection: "posts" }, ctx), undefined);
 	assert.equal(await joinSplitLinksBeforeSave(undefined, ctx), undefined);
@@ -242,7 +243,7 @@ test("the hook: undefined when nothing changes, the joined content when it does,
 	assert.equal(await joinSplitLinksBeforeSave({ content: hostile, collection: "posts" }, ctx), undefined);
 	assert.match(logs.pop()[0], /couldn't check for split links/);
 	// Even when logging fails.
-	const broken = { log: { info() { throw new Error("log"); }, warn() { throw new Error("log"); } } };
+	const broken = { log: { debug() { throw new Error("log"); }, info() { throw new Error("log"); }, warn() { throw new Error("log"); } } };
 	assert.equal(await joinSplitLinksBeforeSave({ content: hostile }, broken), undefined);
 	assert.equal(await joinSplitLinksBeforeSave({ content: { body: [geminiBlock()] } }, broken), undefined);
 });
@@ -262,7 +263,7 @@ test("wired into Link Manager: a part on by default, gating content:beforeSave",
 	const event = { content: { body: [geminiBlock()] }, collection: "posts", isNew: false, id: "p1" };
 	const ctxWith = (features) => {
 		const store = new Map(features === undefined ? [] : [["features", features]]);
-		return { settings: { get: async (key) => store.get(key) ?? null, set: async () => {} }, log: { info() {}, warn() {}, error() {} } };
+		return { settings: { get: async (key) => store.get(key) ?? null, set: async () => {} }, log: { debug() {}, info() {}, warn() {}, error() {} } };
 	};
 	invalidateFeatures();
 	const on = await hooks["content:beforeSave"](event, ctxWith({ links: true }));
@@ -274,4 +275,53 @@ test("wired into Link Manager: a part on by default, gating content:beforeSave",
 	invalidateFeatures();
 	assert.equal(await hooks["content:beforeSave"]({ ...event, content: { title: "x" } }, ctxWith({ links: true })), undefined, "nothing to join: no change");
 	invalidateFeatures();
+});
+
+test("cost: a 20,000-piece link in one block joins in one pass, not one walk per piece", () => {
+	const n = 20_000;
+	const b = block(
+		Array.from({ length: n }, (_, i) => span(`s${i}`, "x", [`k${i}`])),
+		Array.from({ length: n }, (_, i) => link(`k${i}`, GEMINI)),
+	);
+	const started = performance.now();
+	const { value, joined } = joinSplitLinks([b]);
+	const ms = performance.now() - started;
+	assert.equal(joined, n - 1);
+	assert.deepEqual(value[0].markDefs, [link("k0", GEMINI)]);
+	assert.ok(ms < 2_000, `took ${Math.round(ms)} ms (quadratic took about 4 s here)`);
+});
+
+/** The link elements EmDash's renderer makes from a block: astro-portabletext's own @portabletext/toolkit. */
+async function renderedLinks(b) {
+	const require = createRequire(import.meta.url);
+	let toolkit;
+	try {
+		// From astro-portabletext's own entry: it can have its own copy of the toolkit (3.x under EmDash 1.5).
+		toolkit = createRequire(require.resolve("astro-portabletext"))("@portabletext/toolkit");
+	} catch {
+		toolkit = await import("@portabletext/toolkit");
+	}
+	const links = [];
+	const walk = (node) => {
+		if (node && node._type === "@span" && node.markType === "link") links.push(toolkit.spanToPlainText(node));
+		for (const child of node?.children ?? []) walk(child);
+	};
+	for (const node of toolkit.buildMarksTree(b)) walk(node);
+	return links;
+}
+
+test("rendered: the joined pieces are one link element (EmDash's renderer), with the one documented exception", async () => {
+	// Before: two links side by side. After: one.
+	assert.deepEqual(await renderedLinks(geminiBlock()), ["Google's ", "Gemini"]);
+	assert.deepEqual(await renderedLinks(joinSplitLinks([geminiBlock()]).value[0]), ["Google's Gemini"]);
+	// Other formatting inside the link, or running on past it: still one link.
+	const inner = block([span("a", "Google's ", ["k1"]), span("b", "Gem", ["k2", "strong"]), span("c", "ini", ["k2"])], [link("k1", GEMINI), link("k2", GEMINI)]);
+	assert.deepEqual(await renderedLinks(joinSplitLinks([inner]).value[0]), ["Google's Gemini"]);
+	const past = block([span("a", "Google's ", ["em", "k1"]), span("b", "Gemini", ["em", "k2"]), span("c", " here", ["em"])], [link("k1", GEMINI), link("k2", GEMINI)]);
+	assert.deepEqual(await renderedLinks(joinSplitLinks([past]).value[0]), ["Google's Gemini"]);
+	// Formatting that starts before the link and ends inside it closes the link with it (docs/links.md): one markDef, two elements.
+	const across = block([span("p", "pre ", ["strong"]), span("a", "G ", ["strong", "k1"]), span("b", "Gem", ["k2"])], [link("k1", GEMINI), link("k2", GEMINI)]);
+	const joined = joinSplitLinks([across]).value[0];
+	assert.deepEqual(joined.markDefs, [link("k1", GEMINI)]);
+	assert.deepEqual(await renderedLinks(joined), ["G ", "Gem"]);
 });

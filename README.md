@@ -5,7 +5,7 @@ Coywolf Pack is an [EmDash](https://emdashcms.com) plugin that enhances existing
 - **Absurdly fast for humans and bots:** cached pages answer in 60–90 ms, cache warming keeps pages cached for visitors and crawlers alike, and images come straight from Cloudflare's edge.
 - **Enhances what EmDash already does:** redirects, search, robots.txt, schema, images and RSS feeds go well beyond EmDash's built-in versions and starter templates.
 - **Adds what EmDash doesn't have:** backups and restore, link checking, videos, reviews, AI enrichment and more.
-- **Manage your site like a pro:** turn each feature on or off, see your Cloudflare usage and estimated bill, and finish a move from WordPress. On a new site everything starts off, so installing changes nothing until you're ready, and updating never turns a feature on.
+- **Manage your site like a pro:** turn each feature on or off, see your Cloudflare usage and estimated bill, and finish a move from WordPress. On a new site everything starts off, so installing changes nothing until you're ready, and updating never turns a module on.
 - **Free and open source** (MIT).
 
 **New here?** Follow [Getting started](#getting-started) to install it and turn features on.
@@ -192,7 +192,7 @@ Install the latest version, then deploy:
 npm install @coywolf/emdash@latest
 ```
 
-If your `package.json` points at a GitHub tarball URL from before the pack was on npm (0.35.13 and earlier), this command replaces it with the npm version. Updates never turn features on by themselves: new features start off.
+If your `package.json` points at a GitHub tarball URL from before the pack was on npm (0.35.13 and earlier), this command replaces it with the npm version. Updates never turn a module on by themselves: new modules start off. A new part of a module you already use can start on when it only fixes or adds to what the module does (glossary.io definitions in AI Enrichment, Join split links in Link Manager); its release notes say so, and its switch is on the module's page and the Features page.
 
 **Update notices:** turn on **Update check**, the first switch on the **Features** page. Once a day it asks npm for the newest version of Coywolf Pack. When there's an update, a **Coywolf Pack update** card on the EmDash dashboard and a notice at the top of the pack's pages show the command above, with a **Copy command** button. **Dismiss** hides both for everyone on the site until the next version. The check sends nothing about your site and never updates anything by itself.
 

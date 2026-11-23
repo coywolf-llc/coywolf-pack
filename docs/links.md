@@ -35,12 +35,13 @@ No bindings or secrets, but EmDash needs to know the site URL (**Settings → Ge
 
 EmDash's editor sometimes saves one link as two pieces next to each other, each with its own copy of the link: in "Google's Gemini", "Google's " and "Gemini" both linked to `https://glossary.io/gemini/`, but through two link marks. That renders as two `<a>` elements side by side, so hover styles apply to one word at a time, screen readers announce two links, and link tooltips (such as glossary.io's) treat them as separate links.
 
-With **Join split links** on, each save fixes it before the entry is stored (a `content:beforeSave` hook, on every collection and every field that holds blocks):
+With **Join split links** on, each save fixes it before the entry is stored (a `content:beforeSave` hook on every collection; it looks through every field the save sends and changes only Portable Text text blocks and table cells):
 
-- In each text block and table cell, at any depth (blocks inside other blocks' fields too), a piece of text whose link has the same address and the same other settings (**Open in new tab**, a title, any other attribute) as the link of the piece right before it is moved onto that link. Three or more pieces in a row become one link. A link mark that nothing uses any more is removed.
+- In each text block and table cell, at any depth (blocks inside other blocks' fields too), a piece of text whose link has the same address and the same other settings (**Open in new tab**, a title, any other attribute) as the link of the piece right before it is moved onto that link, whatever other formatting either piece has. Three or more pieces in a row become one link, keeping the first piece's link mark. A link mark the join leaves unused is removed; marks that were unused before stay.
 - Only the link mark changes. Text, other formatting (bold, italic, code…), keys and the order of blocks stay as they are. Links with different addresses, or the same address with different settings, stay separate, and so do two links with other text between them.
+- The joined link renders as one `<a>`, except where other formatting starts before the link and ends inside it (bold "Google's " running into a link that goes on past it): EmDash's renderer closes the link where the bold ends, as it does for any link of that shape.
 - It reads only the content being saved: no database reads or writes, and nothing runs in the background. A save with nothing to join is stored as it came. If anything goes wrong, the content is saved unchanged and a warning is logged, so it never blocks a save.
-- Entries saved before this was turned on are fixed the next time they're saved. A log line (`links: joined split links`) records each save that joined links.
+- Entries saved before this was turned on are fixed the next time their content is saved (an edit to the body; there's no bulk fix). An editor that's still open keeps its own split copy and sends it again with each save, which is joined again each time, until the entry is reopened. Each save that joins links logs `links: joined split links` at debug level.
 
 Code: `src/links/join.ts` (pure; tests in `test/links-join.test.mjs`).
 

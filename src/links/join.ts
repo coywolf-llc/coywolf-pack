@@ -15,6 +15,12 @@
  * uses any more are dropped. Text, other marks, keys, blocks and their order are
  * never changed, and definitions that were unused before stay as they were.
  *
+ * The joined pieces then render as one `<a>`, except where other formatting
+ * starts before the link and ends inside it ("pre " and "G " bold, then "Gem"):
+ * EmDash's renderer (astro-portabletext, @portabletext/toolkit buildMarksTree)
+ * closes the link with the bold, as it does for any link of that shape.
+ * Spans that use a table's own markDefs (not their cell's) aren't joined.
+ *
  * Pure: never mutates its input; changed objects are copied and unchanged
  * subtrees are shared. Running it twice gives the same result (nothing joined
  * the second time).
@@ -54,16 +60,21 @@ function linkIdentity(def: Obj): string | null {
 	return canonical(rest);
 }
 
-/** Whether any span under `node` (outside markDefs) still has `key` among its marks. */
-function referenced(node: unknown, key: string): boolean {
-	if (Array.isArray(node)) return node.some((item) => referenced(item, key));
-	if (!isObj(node)) return false;
-	if (node._type === "span") return Array.isArray(node.marks) && node.marks.includes(key);
-	for (const [k, child] of Object.entries(node)) {
-		if (k === "markDefs" || typeof child !== "object" || child === null) continue;
-		if (referenced(child, key)) return true;
+/** Every mark key the spans under `node` (outside markDefs) use, in one pass. */
+function marksInUse(node: unknown, out = new Set<unknown>()): Set<unknown> {
+	if (Array.isArray(node)) {
+		for (const item of node) marksInUse(item, out);
+		return out;
 	}
-	return false;
+	if (!isObj(node)) return out;
+	if (node._type === "span") {
+		if (Array.isArray(node.marks)) for (const mark of node.marks) out.add(mark);
+		return out;
+	}
+	for (const [k, child] of Object.entries(node)) {
+		if (k !== "markDefs" && typeof child === "object" && child !== null) marksInUse(child, out);
+	}
+	return out;
 }
 
 /**
@@ -116,9 +127,10 @@ function joinNode(node: Obj): { node: Obj; joined: number } | null {
 	}
 	if (!next) return null;
 
-	// Drop the definitions this left unused (still used elsewhere in the node: kept).
-	const current: Obj = next;
-	const unused = new Set([...dropped].filter((key) => !referenced({ ...current, markDefs: [] }, key)));
+	// Drop the definitions this left unused (still used elsewhere in the node: kept). One walk, whatever the
+	// number of joins: a check per dropped key was quadratic (16 s for a 40,000-span block).
+	const used = marksInUse({ ...next, markDefs: [] });
+	const unused = new Set([...dropped].filter((key) => !used.has(key)));
 	if (unused.size) next.markDefs = markDefs.filter((def) => !(isObj(def) && typeof def._key === "string" && unused.has(def._key)));
 	return { node: next, joined };
 }
