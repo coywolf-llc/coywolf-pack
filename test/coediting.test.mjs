@@ -12,6 +12,7 @@ const { stampContent } = await import("../src/headings/stamp.ts");
 const { beforeSave: breadcrumbsBeforeSave } = await import("../src/breadcrumbs/pack.ts");
 const { beforeSave: reviewsBeforeSave } = await import("../src/reviews/pack.ts");
 const { beforeSave: wpImportBeforeSave } = await import("../src/wpImport/pack.ts");
+const { joinSplitLinksBeforeSave } = await import("../src/links/pack.ts");
 
 test("beforeSave with only the changed fields: hooks leave fields they weren't sent alone", async () => {
 	const titleOnly = { title: "A new title" };
@@ -20,6 +21,7 @@ test("beforeSave with only the changed fields: hooks leave fields they weren't s
 	assert.equal(await reviewsBeforeSave({ content: titleOnly }), undefined);
 	const ctx = { settings: { get: async () => null }, log: { info() {}, warn() {} } };
 	assert.equal(await wpImportBeforeSave({ content: titleOnly, collection: "posts", editedBy: { id: "u2" } }, ctx), undefined);
+	assert.equal(await joinSplitLinksBeforeSave({ content: titleOnly, collection: "posts" }, ctx), undefined);
 	// A body-only save gets its anchors, and nothing else is added.
 	const body = [{ _type: "block", _key: "h1", style: "h2", children: [{ _type: "span", text: "Hello world" }] }];
 	const stamped = stampContent({ body }, { anchors: true, toc: true, prefix: "", previous: null });
