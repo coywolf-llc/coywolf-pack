@@ -22,6 +22,8 @@ export const ADMIN_CSS = `.cw-fill-tint{fill:var(--color-kumo-tint)}
 .cw-field-icon{bottom:.625rem}
 .cw-w-60{width:15rem}
 .cw-overflow-auto{overflow:auto}
+.cw-me-auto{margin-inline-end:auto}
+.cw-max-h-28rem{max-height:28rem}
 .cw-pre-wrap{white-space:pre-wrap;overflow-wrap:anywhere}
 .cw-wrap-anywhere{overflow-wrap:anywhere}
 .cw-rows-head{display:none}

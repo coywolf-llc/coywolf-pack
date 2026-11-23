@@ -1160,7 +1160,7 @@ function PreviewTab(props: { config: Config }) {
 								<h3 className="mb-1 text-sm font-medium">
 									JSON-LD ({j.id === "primary" ? "replaces EmDash's" : result.custom && j.id === result.custom.id ? `custom markup: ${result.custom.label}` : j.id})
 								</h3>
-								<pre className="max-h-[28rem] cw-overflow-auto rounded bg-kumo-tint p-3 text-xs">{JSON.stringify(j.graph, null, 2)}</pre>
+								<pre className="cw-max-h-28rem cw-overflow-auto rounded bg-kumo-tint p-3 text-xs">{JSON.stringify(j.graph, null, 2)}</pre>
 							</div>
 						))}
 						{result.custom && <WarningList warnings={result.custom.warnings} />}

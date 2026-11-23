@@ -185,7 +185,7 @@ function ImportDialog(props: { open: boolean; onClose: () => void; onImported: (
 				</div>
 				{error && <Banner variant="error" role="alert" className="mt-3 whitespace-pre-wrap" description={error} />}
 				<div className="mt-6 flex flex-wrap justify-end gap-2">
-					<Button className="me-auto" variant="secondary" icon={<FileArrowUp />} disabled={pending} onClick={() => fileRef.current?.click()}>
+					<Button className="cw-me-auto" variant="secondary" icon={<FileArrowUp />} disabled={pending} onClick={() => fileRef.current?.click()}>
 						Choose file…
 					</Button>
 					<input
