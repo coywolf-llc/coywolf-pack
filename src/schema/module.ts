@@ -683,11 +683,11 @@ async function pageVideosStep(ctx: PluginContext, page: PublicPageContext, origi
  * page's Article node (or its WebPage when there's no Article). Loaded lazily
  * so sites without the AI module don't pay for it.
  */
-async function entitiesStep(ctx: PluginContext, content: { collection: string; id: string }, record?: Promise<unknown>): Promise<GraphStep> {
+async function entitiesStep(ctx: PluginContext, content: { collection: string; id: string }, origin: string, record?: Promise<unknown>): Promise<GraphStep> {
 	const warn = (error: unknown) => ctx.log.warn("schema: could not attach AI entities", { error: String(error) });
 	try {
 		const [{ getEntryEntities }, preloaded] = await Promise.all([import("../ai/entities.js"), record]);
-		const { about, mentions } = await getEntryEntities(ctx, content.collection, content.id, record ? { record: preloaded as never } : undefined);
+		const { about, mentions } = await getEntryEntities(ctx, content.collection, content.id, record ? { record: preloaded as never } : undefined, { origin });
 		if (!about.length && !mentions.length) return noStep;
 		return (graph) => {
 			try {
@@ -882,7 +882,7 @@ export async function schemaContributions(
 					)
 				: noStep,
 			// AI Enrichment's Wikidata-grounded entities, when that feature is on.
-			page.content && isOn(on, "ai.entities") ? entitiesStep(ctx, page.content, doc("aiEntries")) : noStep,
+			page.content && isOn(on, "ai.entities") ? entitiesStep(ctx, page.content, site.origin, doc("aiEntries")) : noStep,
 		]);
 		entryOverride = override;
 		enrichImageObjects(publisher, (url) => (url === logoUrl ? logoInfo : null));

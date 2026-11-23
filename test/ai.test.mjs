@@ -4,3 +4,4 @@ import "./ts-resolve.mjs";
 await import("../src/ai/logic.test.ts");
 await import("../src/ai/queue.test.ts");
 await import("../src/ai/wikidata.test.ts");
+await import("../src/ai/glossary.test.ts");

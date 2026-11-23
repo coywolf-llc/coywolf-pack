@@ -7,6 +7,7 @@
  *   aiEntries — per-entry analysis: hash, entities, description suggestion
  *   aiMedia   — per-image suggestion and what was written
  *   aiUsage   — one row per model call (kept 30 days)
+ *   aiGlossary — glossary.io's entity index ("index"), refreshed about daily
  */
 import type { PluginContext, StorageCollection } from "emdash";
 
@@ -26,6 +27,8 @@ export const STORAGE = {
 	aiEntries: { indexes: ["collection", "status", "descriptionStatus", "updated"] },
 	aiMedia: { indexes: ["status", "updated"] },
 	aiUsage: { indexes: ["time"] },
+	/** glossary.io's entity index, one document ("index"; src/ai/glossary.ts). */
+	aiGlossary: { indexes: [] as string[] },
 };
 
 export const SETTINGS_SCHEMA = {
