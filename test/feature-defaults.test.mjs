@@ -273,8 +273,10 @@ test("the real switches: Redirect Manager, Slug changes and Backups default off,
 	assert.match(routes, /"features\/list"[\s\S]*?recordDefaults\(ctx\)/);
 	assert.match(routes, /"features\/save"[\s\S]*?recordDefaults\(ctx\)[\s\S]*?const saved = await ctx\.settings\.get<FeatureMap>\(FEATURES_SETTING\);[\s\S]*?withRecordedDefaults\(saved, true\)/);
 	// No other feature was on by default before 0.36.0 except Search's live results (a part of Search, which is off).
+	// Join split links (0.47.0) is on by default too: a part of Link Manager, which is off.
 	const all = ["redirects", "backups", "search", "schema", "discovery", "images", "videos", "files", "links", "robots"]
 		.map((m) => readFileSync(new URL(`../src/${m}/pack.ts`, import.meta.url), "utf8"))
 		.join("\n");
-	assert.doesNotMatch(all.replace(/id: "search\.live"[\s\S]*?default: true/, ""), /default: true/);
+	assert.match(all, /id: JOIN_FEATURE,[^}]*default: true,/);
+	assert.doesNotMatch(all.replace(/id: "search\.live"[\s\S]*?default: true/, "").replace(/id: JOIN_FEATURE,[^}]*default: true,/, ""), /default: true/);
 });

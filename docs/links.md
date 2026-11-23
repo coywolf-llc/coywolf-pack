@@ -11,8 +11,9 @@ An inventory of every link in your content, ported from Coywolf SEO's Link Manag
 - **Dashboard widget** with the number of broken links.
 - **In the entry editor and content lists** (admins only, while Link Manager is on): a saved entry's sidebar has a **Link status** section with its links, worst first, each with its status and HTTP code, and a link to Link Manager. Content lists get a **Links** column: "2 broken", "1 blocked", or "5 OK" per entry. The column reads a whole page of entries in one request (one D1 read per 90 entries, over the references' `entryKey` index), not one per row. Both only read; the inventory is updated when entries are saved.
 - **Entries view** (sub-feature, off by default): inbound internal link counts per published entry and orphans. See [Inbound links and orphans](#inbound-links-and-orphans).
+- **Join split links** (sub-feature, on by default): one link the editor saved in pieces is saved as one link. See [Join split links](#join-split-links).
 
-Feature switches: **Link Manager** (`links`), **Scheduled link checking** (`links.check`) and **Inbound links and orphans** (`links.inbound`), all off by default.
+Feature switches: **Link Manager** (`links`), **Scheduled link checking** (`links.check`) and **Inbound links and orphans** (`links.inbound`), all off by default, and **Join split links** (`links.join`), on by default (it runs only while Link Manager is on). The parts' switches are also on the Link Manager page.
 
 ## Setup
 
@@ -30,6 +31,19 @@ No bindings or secrets, but EmDash needs to know the site URL (**Settings → Ge
 - Workers limit subrequests per invocation (50 on Free, 1,000 on Paid), and database calls count. A checked link takes 1–2 requests plus 1 per redirect, and 1 database write; keep **subrequests per check run** under your plan's limit, leaving room for other scheduled jobs. Scheduled runs work in hourly steps (scan steps of about 200 database statements or 60 seconds, then one check run of **subrequests per check run** each hour), so on a big site a run can take several hours or more; raise subrequests per check run on the Paid plan to finish sooner. While Scheduled link checking is off, the hourly tasks read only the feature switches; between runs, they also read one small state row and the frequency. A scan started from the page runs faster while the page is open; admin actions stop at about 150 statements or 25 seconds and continue on the next call.
 - Links are stored in plugin storage (`links_urls`, `links_refs`) in the site's D1 database, so backups include them. The list pages through indexed queries; search matches the start of a URL (when it starts with `http` or `/`) or of a domain. Indexing an entry looks up its references with one D1 query on the `entryKey` expression index, with no sort (storage queries always sort by creation time, and for that SQLite picked the generic list index and read every reference row of the site, once per entry scanned). A scan writes only references that are new or changed (an unchanged entry costs that one read and no writes), drops links removed from an entry as it indexes it, and then removes the references of entries it can't visit (deleted, trashed, or in a collection without link fields now): one query lists the entries that have references, and one per 90 of them checks they still exist. Status counts are cached for up to a minute (10 minutes in the dashboard widget).
 - Regular-expression ignore rules are limited to 200 characters, and patterns that can take exponential time (repeated groups containing a quantifier or alternation, backreferences) are refused.
+## Join split links
+
+EmDash's editor sometimes saves one link as two pieces next to each other, each with its own copy of the link: in "Google's Gemini", "Google's " and "Gemini" both linked to `https://glossary.io/gemini/`, but through two link marks. That renders as two `<a>` elements side by side, so hover styles apply to one word at a time, screen readers announce two links, and link tooltips (such as glossary.io's) treat them as separate links.
+
+With **Join split links** on, each save fixes it before the entry is stored (a `content:beforeSave` hook, on every collection and every field that holds blocks):
+
+- In each text block and table cell, at any depth (blocks inside other blocks' fields too), a piece of text whose link has the same address and the same other settings (**Open in new tab**, a title, any other attribute) as the link of the piece right before it is moved onto that link. Three or more pieces in a row become one link. A link mark that nothing uses any more is removed.
+- Only the link mark changes. Text, other formatting (bold, italic, code…), keys and the order of blocks stay as they are. Links with different addresses, or the same address with different settings, stay separate, and so do two links with other text between them.
+- It reads only the content being saved: no database reads or writes, and nothing runs in the background. A save with nothing to join is stored as it came. If anything goes wrong, the content is saved unchanged and a warning is logged, so it never blocks a save.
+- Entries saved before this was turned on are fixed the next time they're saved. A log line (`links: joined split links`) records each save that joined links.
+
+Code: `src/links/join.ts` (pure; tests in `test/links-join.test.mjs`).
+
 ## How links are checked
 
 - **From Cloudflare's network.** External links are fetched by the site's Worker, so the requests come from Cloudflare's shared Worker IP addresses, not from your site's address or a browser. Many other Workers share those addresses, and some sites rate-limit or block them as a group: the same reason Bing throttled the pack's IndexNow pings. A link that answers that way shows as **Blocked**, not **Broken**.
