@@ -267,3 +267,11 @@ test("a stored copy from before names were kept is refreshed after the response"
 	assert.equal(calls.fetch, 1);
 	assert.equal((docs.get("index") as { format?: number }).format, 2);
 });
+
+test("alternateName skips case, accent and punctuation variants of the entity's name", () => {
+	const lookup = glossary.glossaryLookup(
+		glossary.parseGlossaryIndex({ v: 1, terms: { Q1: ["x-corp", "X Corp. is a company.", ["X Corp.", "Pokémon", "Pokemon", "C++", "c++", "1", "2", "3", "4", "5"]] } }),
+	);
+	const nodes = logic.entityNodes([{ name: "X Corp", type: "Organization", description: "", qid: "Q1", wikipedia: "", website: "", primary: true }], lookup);
+	assert.deepEqual(nodes.about[0].alternateName, ["Pokémon", "C++", "1", "2", "3", "4"], "X Corp. is the entity's own name; repeats dropped; at most 7 names kept");
+});

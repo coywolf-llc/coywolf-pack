@@ -33,7 +33,7 @@ import { PLUGIN_ID, cachedCtxFeatures, isOn, siteFeatures } from "../core/featur
 import { sharedRead, sharedSlot } from "../core/single-flight.js";
 import { afterResponse } from "../shared.js";
 import { VERSION } from "../version.js";
-import type { GlossaryLookup } from "./logic.js";
+import { type GlossaryLookup, nameKey } from "./logic.js";
 
 export const GLOSSARY_ORIGIN = "https://glossary.io";
 export const GLOSSARY_HOST = "glossary.io";
@@ -58,7 +58,8 @@ const REFRESH_TIMEOUT_MS = 10_000;
 const MAX_BYTES = 4_000_000;
 const MAX_TERMS = 50_000;
 const MAX_DESCRIPTION = 500;
-const MAX_NAMES = 6;
+/** glossary.io sends the term's name and up to 6 "Also known as" names. */
+const MAX_NAMES = 7;
 const MAX_NAME = 60;
 /** Stored copies made before the names were kept: refreshed after the response, not a day later. */
 const STORED_FORMAT = 2;
@@ -74,7 +75,7 @@ interface StoredIndex {
 	format?: number;
 }
 
-/** A term's names, checked: strings of 1–60 characters on one line, no repeats (ignoring case), at most 6. */
+/** A term's names, checked: strings of 1–60 characters on one line, no repeats (by nameKey: case, accents, punctuation), at most 7. */
 function cleanNames(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	const seen = new Set<string>();
@@ -82,8 +83,8 @@ function cleanNames(value: unknown): string[] {
 	for (const raw of value) {
 		if (typeof raw !== "string") continue;
 		const name = raw.replace(/\s+/g, " ").trim();
-		if (!name || name.length > MAX_NAME || seen.has(name.toLowerCase())) continue;
-		seen.add(name.toLowerCase());
+		if (!name || name.length > MAX_NAME || seen.has(nameKey(name))) continue;
+		seen.add(nameKey(name));
 		out.push(name);
 		if (out.length === MAX_NAMES) break;
 	}

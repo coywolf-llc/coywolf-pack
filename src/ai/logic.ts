@@ -77,6 +77,9 @@ const GEOGRAPHIC = new Set([
 	"Q5107", // continent
 ]);
 
+/** How two names compare: normalizeName, or plain lowercase when that leaves nothing ("C++", non-Latin scripts). */
+export const nameKey = (value: string) => normalizeName(value) || value.trim().toLowerCase();
+
 /** Lowercase, strip diacritics and punctuation, collapse whitespace: "Café-Müller, Inc." → "cafe muller inc". */
 export function normalizeName(value: string): string {
 	return value
@@ -441,8 +444,9 @@ export function entityNodes(entities: Entity[] | undefined | null, glossary?: Gl
 		};
 		const description = defined?.description || e.description;
 		if (description) node.description = description;
-		const own = e.name.trim().toLowerCase();
-		const others = (defined?.names ?? []).filter((n) => n.trim().toLowerCase() !== own);
+		// Names that are only a case, accent or punctuation variant of the entity's own aren't other names.
+		const own = nameKey(e.name);
+		const others = (defined?.names ?? []).filter((n) => nameKey(n) !== own);
 		if (others.length) node.alternateName = others.length === 1 ? others[0] : others;
 		(e.primary ? about : mentions).push(node);
 	}
