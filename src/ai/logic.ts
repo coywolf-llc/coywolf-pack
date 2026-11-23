@@ -415,8 +415,15 @@ export function verifyEntities(mentions: GroundedMention[], details: Record<stri
 	return out;
 }
 
-/** Schema.org nodes for stored entities: { about, mentions }. */
-export function entityNodes(entities: Entity[] | undefined | null): { about: Record<string, unknown>[]; mentions: Record<string, unknown>[] } {
+/** An entity's glossary.io definition, by Wikidata ID (src/ai/glossary.ts). */
+export type GlossaryLookup = (qid: string) => { url: string; description: string } | undefined;
+
+/**
+ * Schema.org nodes for stored entities: { about, mentions }. With `glossary`,
+ * an entity that has a glossary.io definition gets that page last in its
+ * sameAs, and the definition as its description.
+ */
+export function entityNodes(entities: Entity[] | undefined | null, glossary?: GlossaryLookup): { about: Record<string, unknown>[]; mentions: Record<string, unknown>[] } {
 	const about: Record<string, unknown>[] = [];
 	const mentions: Record<string, unknown>[] = [];
 	for (const e of entities ?? []) {
@@ -424,12 +431,15 @@ export function entityNodes(entities: Entity[] | undefined | null): { about: Rec
 		const sameAs = [`https://www.wikidata.org/wiki/${e.qid}`];
 		if (e.wikipedia) sameAs.push(e.wikipedia);
 		if (e.website) sameAs.push(e.website);
+		const defined = glossary?.(e.qid);
+		if (defined && !sameAs.includes(defined.url)) sameAs.push(defined.url);
 		const node: Record<string, unknown> = {
 			"@type": (ENTITY_TYPES as readonly string[]).includes(e.type) ? e.type : "Thing",
 			name: e.name,
 			sameAs: sameAs.length > 1 ? sameAs : sameAs[0],
 		};
-		if (e.description) node.description = e.description;
+		const description = defined?.description || e.description;
+		if (description) node.description = description;
 		(e.primary ? about : mentions).push(node);
 	}
 	return { about, mentions };

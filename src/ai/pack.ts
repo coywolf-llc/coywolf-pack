@@ -9,6 +9,7 @@ import type { PluginContext } from "emdash";
 import { cachedCtxFeatures, ctxFeatures, isOn, registerFeatures } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
 import { getEntryEntities } from "./entities.js";
+import { GLOSSARY_HOST } from "./glossary.js";
 import { PROVIDER_HOSTS } from "./providers.js";
 import { aiRoutes } from "./routes.js";
 import { type AiOptions, STORAGE, col, enqueue, entryKey, readSettings, type EntryRecord } from "./store.js";
@@ -37,6 +38,12 @@ const FEATURES = [
 		label: "Output entities on their own",
 		description: "Add the entities to each page's JSON-LD by themselves. Only needed when Coywolf Schema isn't on.",
 		default: false,
+	},
+	{
+		id: "ai.glossary",
+		label: "glossary.io definitions",
+		description: "When an entity has a definition on glossary.io, add that page to its sameAs and use the definition as its description. Checks glossary.io about once a day.",
+		default: true,
 	},
 	{
 		id: "ai.descriptions",
@@ -100,7 +107,7 @@ export function aiPack(options: AiOptions = {}): PackModule {
 				if (!ref) return null;
 				// The Schema & Social graph already carries these on its Article/WebPage node.
 				if (isOn(await cachedCtxFeatures(ctx), "schema.graph")) return null;
-				const { about, mentions } = await getEntryEntities(ctx, ref.collection, ref.id);
+				const { about, mentions } = await getEntryEntities(ctx, ref.collection, ref.id, undefined, { origin: ctx.site?.url ?? event.page.canonical ?? event.page.url });
 				if (!about.length && !mentions.length) return null;
 				const graph: Record<string, unknown> = { "@context": "https://schema.org", "@type": "WebPage", "@id": event.page.canonical ?? event.page.url };
 				if (about.length) graph.about = about;
@@ -116,6 +123,6 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		adminPages: [{ path: "/ai", label: "AI Enrichment", icon: "sparkle" }],
 		storage: STORAGE,
 		capabilities: ["network:request", "content:read", "content:write", "schema:read", "media:read", "media:bytes:read", "media:metadata:write"],
-		allowedHosts: [...PROVIDER_HOSTS, WIKIDATA_HOST, WIKIDATA_QUERY_HOST],
+		allowedHosts: [...PROVIDER_HOSTS, WIKIDATA_HOST, WIKIDATA_QUERY_HOST, GLOSSARY_HOST],
 	};
 }
