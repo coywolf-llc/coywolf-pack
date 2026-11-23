@@ -42,7 +42,7 @@ const FEATURES = [
 	{
 		id: "ai.glossary",
 		label: "glossary.io definitions",
-		description: "When an entity has a definition on glossary.io, add that page to its sameAs and use the definition as its description. Checks glossary.io about once a day.",
+		description: "When an entity has a definition on glossary.io, add that page to its sameAs, use the definition as its description, and add glossary.io's other names for it (alternateName). Checks glossary.io about once a day.",
 		default: true,
 	},
 	{

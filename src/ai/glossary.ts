@@ -5,8 +5,11 @@
  * glossary.io publishes one index of its terms keyed by Wikidata ID
  * (https://glossary.io/api/entities.json: {v: 1, terms: {QID: [slug, definition]}}).
  * An entity in a page's Schema.org whose QID is listed gets
- * https://glossary.io/{slug}/ added to its sameAs (last) and the glossary's
- * short definition as its description (see entityNodes in logic.ts).
+ * https://glossary.io/{slug}/ added to its sameAs (last), the glossary's
+ * short definition as its description, and the glossary's names for it (the
+ * term's own name and its "Also known as" names, minus the entity's name) as
+ * its alternateName (see entityNodes in logic.ts). The names are the index's
+ * third item (glossary.io since 2026-11-23): [slug, definition, [names]].
  *
  * Lookups: the whole index (about 1,000 terms, 80 KB compressed) comes in one
  * request and is stored on the site (plugin storage aiGlossary/index); each
@@ -55,15 +58,36 @@ const REFRESH_TIMEOUT_MS = 10_000;
 const MAX_BYTES = 4_000_000;
 const MAX_TERMS = 50_000;
 const MAX_DESCRIPTION = 500;
+const MAX_NAMES = 6;
+const MAX_NAME = 60;
+/** Stored copies made before the names were kept: refreshed after the response, not a day later. */
+const STORED_FORMAT = 2;
 
 const QID = /^Q[1-9][0-9]{0,11}$/;
 const SLUG = /^[a-z0-9][a-z0-9-]{0,99}$/;
 
-export type GlossaryTerms = Record<string, [slug: string, description: string]>;
+export type GlossaryTerms = Record<string, [slug: string, description: string] | [slug: string, description: string, names: string[]]>;
 
 interface StoredIndex {
 	fetchedAt: number;
 	terms: GlossaryTerms;
+	format?: number;
+}
+
+/** A term's names, checked: strings of 1–60 characters on one line, no repeats (ignoring case), at most 6. */
+function cleanNames(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const raw of value) {
+		if (typeof raw !== "string") continue;
+		const name = raw.replace(/\s+/g, " ").trim();
+		if (!name || name.length > MAX_NAME || seen.has(name.toLowerCase())) continue;
+		seen.add(name.toLowerCase());
+		out.push(name);
+		if (out.length === MAX_NAMES) break;
+	}
+	return out;
 }
 
 /**
@@ -80,22 +104,23 @@ export function parseGlossaryIndex(value: unknown): GlossaryTerms | null {
 	for (const [qid, term] of Object.entries(terms as Record<string, unknown>)) {
 		if (count >= MAX_TERMS) break;
 		if (!QID.test(qid) || !Array.isArray(term)) continue;
-		const [slug, description] = term as unknown[];
+		const [slug, description, names] = term as unknown[];
 		if (typeof slug !== "string" || !SLUG.test(slug) || typeof description !== "string") continue;
 		const text = description.replace(/\s+/g, " ").trim();
 		if (!text || text.length > MAX_DESCRIPTION) continue;
-		out[qid] = [slug, text];
+		const clean = cleanNames(names);
+		out[qid] = clean.length ? [slug, text, clean] : [slug, text];
 		count++;
 	}
 	return out;
 }
 
-/** The lookup entityNodes uses: a QID → its glossary.io page and definition. */
+/** The lookup entityNodes uses: a QID → its glossary.io page, definition and names. */
 export function glossaryLookup(terms: GlossaryTerms | null | undefined): GlossaryLookup | undefined {
 	if (!terms) return undefined;
 	return (qid) => {
 		const term = Object.hasOwn(terms, qid) ? terms[qid] : undefined;
-		return term ? { url: `${GLOSSARY_ORIGIN}/${term[0]}/`, description: term[1] } : undefined;
+		return term ? { url: `${GLOSSARY_ORIGIN}/${term[0]}/`, description: term[1], names: term[2] ?? [] } : undefined;
 	};
 }
 
@@ -156,7 +181,7 @@ async function fetchIndex(ctx: Ctx, timeoutMs: number): Promise<StoredIndex> {
 	if (!terms) throw new Error("glossary.io index: unknown format");
 	// An empty answer (glossary.io misconfigured, or its route cached before the terms had IDs) never replaces a copy.
 	if (!Object.keys(terms).length) throw new Error("glossary.io index: no terms");
-	return { fetchedAt: Date.now(), terms };
+	return { fetchedAt: Date.now(), terms, format: STORED_FORMAT };
 }
 
 function validStored(doc: unknown): StoredIndex | null {
@@ -164,7 +189,9 @@ function validStored(doc: unknown): StoredIndex | null {
 	if (!value || typeof value.fetchedAt !== "number") return null;
 	// Checked again (about a millisecond, once an hour per isolate), so a damaged row can't put bad URLs in pages.
 	const terms = parseGlossaryIndex({ v: 1, terms: value.terms });
-	return terms ? { fetchedAt: value.fetchedAt, terms } : null;
+	if (!terms) return null;
+	// A copy from before the names were kept (Pack 0.45.0) counts as old: refreshed after this response.
+	return { fetchedAt: value.format === STORED_FORMAT ? value.fetchedAt : 0, terms, format: value.format };
 }
 
 async function readStored(source: Source): Promise<StoredIndex | null> {
