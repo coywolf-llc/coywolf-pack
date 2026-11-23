@@ -77,6 +77,9 @@ const GEOGRAPHIC = new Set([
 	"Q5107", // continent
 ]);
 
+/** How two names compare: normalizeName, or plain lowercase when that leaves nothing ("C++", non-Latin scripts). */
+export const nameKey = (value: string) => normalizeName(value) || value.trim().toLowerCase();
+
 /** Lowercase, strip diacritics and punctuation, collapse whitespace: "Café-Müller, Inc." → "cafe muller inc". */
 export function normalizeName(value: string): string {
 	return value
@@ -415,13 +418,14 @@ export function verifyEntities(mentions: GroundedMention[], details: Record<stri
 	return out;
 }
 
-/** An entity's glossary.io definition, by Wikidata ID (src/ai/glossary.ts). */
-export type GlossaryLookup = (qid: string) => { url: string; description: string } | undefined;
+/** An entity's glossary.io definition and names, by Wikidata ID (src/ai/glossary.ts). */
+export type GlossaryLookup = (qid: string) => { url: string; description: string; names?: string[] } | undefined;
 
 /**
  * Schema.org nodes for stored entities: { about, mentions }. With `glossary`,
  * an entity that has a glossary.io definition gets that page last in its
- * sameAs, and the definition as its description.
+ * sameAs, the definition as its description, and glossary.io's names for it
+ * other than its own as its alternateName.
  */
 export function entityNodes(entities: Entity[] | undefined | null, glossary?: GlossaryLookup): { about: Record<string, unknown>[]; mentions: Record<string, unknown>[] } {
 	const about: Record<string, unknown>[] = [];
@@ -440,6 +444,10 @@ export function entityNodes(entities: Entity[] | undefined | null, glossary?: Gl
 		};
 		const description = defined?.description || e.description;
 		if (description) node.description = description;
+		// Names that are only a case, accent or punctuation variant of the entity's own aren't other names.
+		const own = nameKey(e.name);
+		const others = (defined?.names ?? []).filter((n) => nameKey(n) !== own);
+		if (others.length) node.alternateName = others.length === 1 ? others[0] : others;
 		(e.primary ? about : mentions).push(node);
 	}
 	return { about, mentions };

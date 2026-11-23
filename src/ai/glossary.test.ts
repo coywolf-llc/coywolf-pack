@@ -49,7 +49,7 @@ test("parseGlossaryIndex keeps only well-formed terms", () => {
 
 test("glossaryLookup builds glossary.io URLs and ignores inherited keys", () => {
 	const lookup = glossary.glossaryLookup({ Q116698014: ["gemini", GEMINI] })!;
-	assert.deepEqual(lookup("Q116698014"), { url: "https://glossary.io/gemini/", description: GEMINI });
+	assert.deepEqual(lookup("Q116698014"), { url: "https://glossary.io/gemini/", description: GEMINI, names: [] });
 	assert.equal(lookup("Q1"), undefined);
 	assert.equal(lookup("constructor"), undefined);
 	assert.equal(lookup("__proto__"), undefined);
@@ -140,7 +140,7 @@ test("glossaryFor fetches and stores when the site has no copy, then uses memory
 
 test("glossaryFor uses a fresh stored copy without fetching", async () => {
 	glossary.resetGlossaryForTests();
-	const { ctx, calls } = fakeCtx({ stored: { fetchedAt: Date.now(), terms: { Q90: ["paris", "Paris is a city."] } } });
+	const { ctx, calls } = fakeCtx({ stored: { fetchedAt: Date.now(), format: 2, terms: { Q90: ["paris", "Paris is a city."] } } });
 	const lookup = await glossary.glossaryFor(ctx, "https://coywolf.com");
 	assert.equal(lookup?.("Q90")?.url, "https://glossary.io/paris/");
 	await settle();
@@ -214,4 +214,64 @@ test("the fetch identifies the pack", async () => {
 	};
 	await glossary.glossaryFor(ctx, "https://coywolf.com");
 	assert.match(agent, /^CoywolfPack\/\d+\.\d+\.\d+ /);
+});
+
+test("parseGlossaryIndex keeps each term's names, checked", () => {
+	const terms = glossary.parseGlossaryIndex({
+		v: 1,
+		terms: {
+			Q918: ["x", "X is a social network.", ["X", "Twitter", " twitter ", 5, "", "y".repeat(61), "Line\nbreak"]],
+			Q95: ["google", "Google is a company.", ["Google"]],
+			Q1: ["one", "Old format, no names."],
+			Q2: ["two", "Names not a list.", "Twitter"],
+		},
+	});
+	assert.deepEqual(terms, {
+		Q918: ["x", "X is a social network.", ["X", "Twitter", "Line break"]],
+		Q95: ["google", "Google is a company.", ["Google"]],
+		Q1: ["one", "Old format, no names."],
+		Q2: ["two", "Names not a list."],
+	});
+	assert.deepEqual(glossary.glossaryLookup(terms)!("Q918")!.names, ["X", "Twitter", "Line break"]);
+	assert.deepEqual(glossary.glossaryLookup(terms)!("Q1")!.names, []);
+});
+
+test("entityNodes adds glossary.io's other names as alternateName", () => {
+	const lookup = glossary.glossaryLookup({
+		Q918: ["x", "X is a social network.", ["X", "Twitter"]],
+		Q180711: ["seo", "SEO is the practice of …", ["SEO", "Search engine optimization"]],
+		Q95: ["google", "Google is a company.", ["Google"]],
+		Q2: ["two", "Two names.", ["Alpha", "Beta"]],
+	});
+	const nodes = logic.entityNodes(
+		[
+			{ name: "X", type: "Thing", description: "", qid: "Q918", wikipedia: "", website: "", primary: true },
+			{ name: "search engine optimization", type: "Thing", description: "", qid: "Q180711", wikipedia: "", website: "", primary: false },
+			{ name: "Google", type: "Organization", description: "", qid: "Q95", wikipedia: "", website: "", primary: false },
+			{ name: "Gamma", type: "Thing", description: "", qid: "Q2", wikipedia: "", website: "", primary: false },
+		],
+		lookup,
+	);
+	assert.equal(nodes.about[0].alternateName, "Twitter");
+	assert.equal(nodes.mentions[0].alternateName, "SEO", "Search engine optimization is the entity's own name (any case)");
+	assert.equal("alternateName" in nodes.mentions[1], false, "no names but its own");
+	assert.deepEqual(nodes.mentions[2].alternateName, ["Alpha", "Beta"]);
+});
+
+test("a stored copy from before names were kept is refreshed after the response", async () => {
+	glossary.resetGlossaryForTests();
+	const { ctx, calls, docs } = fakeCtx({ stored: { fetchedAt: Date.now(), terms: { Q90: ["paris", "Paris is a city."] } } });
+	const lookup = await glossary.glossaryFor(ctx, "https://coywolf.com");
+	assert.equal(lookup?.("Q90")?.url, "https://glossary.io/paris/", "the old copy still answers this render");
+	await settle();
+	assert.equal(calls.fetch, 1);
+	assert.equal((docs.get("index") as { format?: number }).format, 2);
+});
+
+test("alternateName skips case, accent and punctuation variants of the entity's name", () => {
+	const lookup = glossary.glossaryLookup(
+		glossary.parseGlossaryIndex({ v: 1, terms: { Q1: ["x-corp", "X Corp. is a company.", ["X Corp.", "Pokémon", "Pokemon", "C++", "c++", "1", "2", "3", "4", "5"]] } }),
+	);
+	const nodes = logic.entityNodes([{ name: "X Corp", type: "Organization", description: "", qid: "Q1", wikipedia: "", website: "", primary: true }], lookup);
+	assert.deepEqual(nodes.about[0].alternateName, ["Pokémon", "C++", "1", "2", "3", "4"], "X Corp. is the entity's own name; repeats dropped; at most 7 names kept");
 });
