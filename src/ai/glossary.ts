@@ -18,8 +18,10 @@
  *
  * glossary.io failing never fails a page or keeps it out of the edge cache:
  * the page renders with the copy it has (or without glossary data), and that
- * isolate tries again 10 minutes later. Pages already in the edge cache keep
- * what they had until they render again. Not used on glossary.io itself,
+ * isolate tries again 10 minutes later, then 20, 40… up to a day while it
+ * keeps failing (each failure is logged). An answer with no terms counts as a
+ * failure, so it never replaces a good copy. Pages already in the edge cache
+ * keep what they had until they render again. Not used on glossary.io itself,
  * whose term pages are the definitions.
  */
 import type { PluginContext, StorageCollection } from "emdash";
@@ -27,6 +29,7 @@ import type { PluginContext, StorageCollection } from "emdash";
 import { PLUGIN_ID, cachedCtxFeatures, isOn, siteFeatures } from "../core/features.js";
 import { sharedRead, sharedSlot } from "../core/single-flight.js";
 import { afterResponse } from "../shared.js";
+import { VERSION } from "../version.js";
 import type { GlossaryLookup } from "./logic.js";
 
 export const GLOSSARY_ORIGIN = "https://glossary.io";
@@ -39,8 +42,11 @@ const DOC_ID = "index";
 const REFRESH_MS = 24 * 60 * 60_000;
 /** How long an isolate uses its in-memory copy before reading the stored one again (another isolate may have refreshed it). */
 const MEMO_MS = 60 * 60_000;
-/** After a failed fetch (or a read that found nothing), how long an isolate waits before trying again. */
+/** After a failed fetch (or a read that found nothing), how long an isolate waits before trying again; doubled after each further failure, up to RETRY_MAX_MS. */
 const RETRY_MS = 10 * 60_000;
+const RETRY_MAX_MS = 24 * 60 * 60_000;
+/** Longest a render waits for another request's read or fill of the index (sharedRead). */
+const SHARED_WAIT_MS = 2_000;
 /** A render that has no copy at all waits this long for glossary.io (it's edge-cached there). */
 const FILL_TIMEOUT_MS = 1_500;
 /** A refresh after the response can take longer. */
@@ -125,19 +131,31 @@ interface Memo {
 }
 
 let memo: Memo | null = null;
-/** When this isolate last failed to fetch the index, and last started a refresh. */
+/** When this isolate last failed to fetch the index, how many times in a row, and when it last started a refresh. */
 let failedAt = 0;
+let failures = 0;
 let refreshStartedAt = 0;
 const slot = sharedSlot<Memo>();
 
+/** True when this isolate may ask glossary.io again: no failure, or the back-off since the last one has passed. */
+function mayFetch(now: number): boolean {
+	if (!failures) return true;
+	return now - failedAt > Math.min(RETRY_MS * 2 ** (failures - 1), RETRY_MAX_MS);
+}
+
 async function fetchIndex(ctx: Ctx, timeoutMs: number): Promise<StoredIndex> {
 	const get = ctx.http ? ctx.http.fetch.bind(ctx.http) : fetch;
-	const response = await get(INDEX_URL, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
+	const response = await get(INDEX_URL, {
+		headers: { Accept: "application/json", "User-Agent": `CoywolfPack/${VERSION} (+https://github.com/coywolf-llc/coywolf-pack)` },
+		signal: AbortSignal.timeout(timeoutMs),
+	});
 	if (!response.ok) throw new Error(`glossary.io index: HTTP ${response.status}`);
 	const text = await response.text();
 	if (text.length > MAX_BYTES) throw new Error("glossary.io index: too large");
 	const terms = parseGlossaryIndex(JSON.parse(text));
 	if (!terms) throw new Error("glossary.io index: unknown format");
+	// An empty answer (glossary.io misconfigured, or its route cached before the terms had IDs) never replaces a copy.
+	if (!Object.keys(terms).length) throw new Error("glossary.io index: no terms");
 	return { fetchedAt: Date.now(), terms };
 }
 
@@ -164,10 +182,15 @@ async function readStored(source: Source): Promise<StoredIndex | null> {
 async function fetchAndStore(ctx: Ctx, timeoutMs: number): Promise<StoredIndex> {
 	try {
 		const fresh = await fetchIndex(ctx, timeoutMs);
-		afterResponse(Promise.resolve(store(ctx)?.put(DOC_ID, fresh)).catch(() => undefined));
+		failures = 0;
+		afterResponse(
+			Promise.resolve(store(ctx)?.put(DOC_ID, fresh)).catch((error: unknown) => console.warn(`[coywolf-pack] glossary.io index: couldn't store it: ${String(error)}`)),
+		);
 		return fresh;
 	} catch (error) {
 		failedAt = Date.now();
+		failures++;
+		console.warn(`[coywolf-pack] glossary.io index: ${String(error)} (failure ${failures} in a row in this isolate; pages render without new glossary data)`);
 		throw error;
 	}
 }
@@ -176,7 +199,7 @@ async function fetchAndStore(ctx: Ctx, timeoutMs: number): Promise<StoredIndex> 
 async function readOrFill(source: Source): Promise<Memo> {
 	const now = Date.now();
 	let stored = await readStored(source);
-	if (!stored && !isD1(source) && now - failedAt > RETRY_MS) stored = await fetchAndStore(source as Ctx, FILL_TIMEOUT_MS).catch(() => null);
+	if (!stored && !isD1(source) && mayFetch(now)) stored = await fetchAndStore(source as Ctx, FILL_TIMEOUT_MS).catch(() => null);
 	return { terms: stored?.terms ?? null, fetchedAt: stored?.fetchedAt ?? 0, readAt: Date.now() };
 }
 
@@ -194,13 +217,15 @@ export async function glossaryFor(source: Source, origin?: string | null): Promi
 		const expired = !memo || now - memo.readAt > (memo.terms ? MEMO_MS : RETRY_MS);
 		if (expired) {
 			try {
-				memo = await sharedRead(slot, () => readOrFill(source), { anchor: afterResponse, label: "glossary.io index" });
+				const next = await sharedRead(slot, () => readOrFill(source), { anchor: afterResponse, label: "glossary.io index", waitMs: SHARED_WAIT_MS });
+				// A D1-only read can't fetch: finding nothing there mustn't hold off the plugin context's fill.
+				if (next.terms || !isD1(source)) memo = next;
 			} catch {
 				// A failed read keeps the copy this isolate has.
 			}
 		}
 		const current = memo;
-		if (current?.terms && now - current.fetchedAt > REFRESH_MS && !isD1(source) && now - refreshStartedAt > RETRY_MS && now - failedAt > RETRY_MS) {
+		if (current?.terms && now - current.fetchedAt > REFRESH_MS && !isD1(source) && now - refreshStartedAt > RETRY_MS && mayFetch(now)) {
 			refreshStartedAt = now;
 			afterResponse(
 				fetchAndStore(source as Ctx, REFRESH_TIMEOUT_MS).then(
@@ -219,6 +244,7 @@ export async function glossaryFor(source: Source, origin?: string | null): Promi
 export function resetGlossaryForTests(): void {
 	memo = null;
 	failedAt = 0;
+	failures = 0;
 	refreshStartedAt = 0;
 	slot.flight = null;
 }

@@ -189,3 +189,29 @@ test("glossaryFor stays off on glossary.io and when the switch is off", async ()
 	await settle();
 	assert.equal(calls.fetch + off.calls.fetch + aiOff.calls.fetch, 0);
 });
+
+test("an empty answer never replaces the stored copy", async () => {
+	glossary.resetGlossaryForTests();
+	const stale = { fetchedAt: Date.now() - 25 * 60 * 60_000, terms: { Q90: ["paris", "Paris is a city."] } };
+	const { ctx, calls, docs } = fakeCtx({ stored: stale, respond: async () => new Response(JSON.stringify({ v: 1, terms: {} }), { status: 200 }) });
+	const lookup = await glossary.glossaryFor(ctx, "https://coywolf.com");
+	assert.equal(lookup?.("Q90")?.url, "https://glossary.io/paris/");
+	await settle();
+	assert.equal(calls.fetch, 1);
+	assert.equal(calls.put, 0);
+	assert.deepEqual(docs.get("index"), stale);
+	assert.equal((await glossary.glossaryFor(ctx, "https://coywolf.com"))?.("Q90")?.url, "https://glossary.io/paris/");
+	assert.equal(calls.fetch, 1, "no new try until the back-off passes");
+});
+
+test("the fetch identifies the pack", async () => {
+	glossary.resetGlossaryForTests();
+	let agent = "";
+	const { ctx } = fakeCtx({});
+	(ctx as unknown as { http: { fetch: (url: string, init: RequestInit) => Promise<Response> } }).http.fetch = async (_url, init) => {
+		agent = new Headers(init.headers).get("user-agent") ?? "";
+		return new Response(JSON.stringify({ v: 1, terms: { Q90: ["paris", "Paris is a city."] } }));
+	};
+	await glossary.glossaryFor(ctx, "https://coywolf.com");
+	assert.match(agent, /^CoywolfPack\/\d+\.\d+\.\d+ /);
+});
