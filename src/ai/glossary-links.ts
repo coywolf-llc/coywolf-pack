@@ -660,3 +660,107 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 	plan.content = copy;
 	return plan;
 }
+
+// ── Removing links (glossary.io terms that are gone) ─────────────
+
+/** How deep nested blocks are looked for (columns, callouts…), as portableTextToPlain (src/ai/logic.ts) does. */
+const MAX_DEPTH = 8;
+
+/** Every Portable Text block in a value, nested ones too. */
+function eachBlock(value: unknown, visit: (block: Block) => void, depth = 0): void {
+	if (depth > MAX_DEPTH || value == null || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const v of value) eachBlock(v, visit, depth + 1);
+		return;
+	}
+	const node = value as Record<string, unknown>;
+	if (node._type === "block" && Array.isArray(node.children)) {
+		visit(node as unknown as Block);
+		return;
+	}
+	for (const [key, child] of Object.entries(node)) {
+		if (key.startsWith("_") || key === "markDefs") continue;
+		if (child && typeof child === "object") eachBlock(child, visit, depth + 1);
+	}
+}
+
+/** The glossary.io slugs a Portable Text value links to anywhere, nested blocks included. */
+export function glossarySlugsIn(content: unknown, origin = GLOSSARY): Set<string> {
+	const out = new Set<string>();
+	eachBlock(content, (block) => {
+		for (const d of Array.isArray(block.markDefs) ? block.markDefs : []) {
+			if (!d || d._type !== "link" || typeof d.href !== "string") continue;
+			const slug = glossarySlug(d.href, origin);
+			if (slug) out.add(slug);
+		}
+	});
+	return out;
+}
+
+/** A span's marks and other properties (not its key or text), to tell whether two spans can be one. */
+function spanShape(span: Span): string {
+	const { _key: _k, text: _t, marks, ...rest } = span as Span & Record<string, unknown>;
+	const props = Object.keys(rest)
+		.sort()
+		.map((k) => [k, (rest as Record<string, unknown>)[k]]);
+	return JSON.stringify([[...(marks ?? [])].sort(), props]);
+}
+
+const isSpan = (c: unknown): c is Span => Boolean(c) && (c as Span)._type === "span" && typeof (c as Span).text === "string";
+
+/** Adjacent spans that now have the same marks (and nothing else different) become one, where one of them just lost a link. */
+function mergeSpans(children: unknown[], touched: ReadonlySet<number>): unknown[] {
+	const out: unknown[] = [];
+	let lastTouched = false;
+	children.forEach((child, i) => {
+		const prev = out[out.length - 1];
+		const changed = touched.has(i);
+		if ((lastTouched || changed) && isSpan(prev) && isSpan(child) && spanShape(prev) === spanShape(child)) {
+			prev.text += child.text;
+			lastTouched = true;
+			return;
+		}
+		out.push(child);
+		lastTouched = changed;
+	});
+	return out;
+}
+
+/**
+ * Take the links to these glossary.io slugs out of a Portable Text value and
+ * keep their text: in every block (nested ones too), each link markDef whose
+ * glossary slug is one of `slugs` is dropped and its key taken out of every
+ * span's marks. The text, other marks and other links are untouched, and
+ * neighboring spans left with the same marks are merged. Returns a copy (the
+ * input itself when there's nothing to remove), how many links went, and how
+ * many per slug.
+ */
+export function removeGlossaryLinks(content: unknown, slugs: Iterable<string>, origin = GLOSSARY): { content: unknown; removed: number; bySlug: Record<string, number> } {
+	const wanted = new Set(slugs);
+	const bySlug: Record<string, number> = {};
+	if (!wanted.size || ![...glossarySlugsIn(content, origin)].some((s) => wanted.has(s))) return { content, removed: 0, bySlug };
+	const copy = structuredClone(content);
+	let removed = 0;
+	eachBlock(copy, (block) => {
+		const defs = Array.isArray(block.markDefs) ? block.markDefs : [];
+		const drop = new Set<string>();
+		for (const d of defs) {
+			if (!d || d._type !== "link" || typeof d.href !== "string" || typeof d._key !== "string") continue;
+			const slug = glossarySlug(d.href, origin);
+			if (!slug || !wanted.has(slug)) continue;
+			drop.add(d._key);
+			bySlug[slug] = (bySlug[slug] ?? 0) + 1;
+			removed++;
+		}
+		if (!drop.size) return;
+		block.markDefs = defs.filter((d) => !(d && drop.has(d._key)));
+		const touched = new Set<number>();
+		block.children.forEach((child, i) => {
+			if (!isSpan(child) || !child.marks?.some((m) => drop.has(m))) return;
+			child.marks = child.marks.filter((m) => !drop.has(m));
+			touched.add(i);
+		});
+		block.children = mergeSpans(block.children, touched);
+	});
+	return { content: copy, removed, bySlug };
+}

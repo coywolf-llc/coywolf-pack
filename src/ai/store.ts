@@ -7,8 +7,10 @@
  *   aiEntries — per-entry analysis: hash, entities, description suggestion
  *   aiMedia   — per-image suggestion and what was written
  *   aiUsage   — one row per model call (kept 30 days)
- *   aiGlossary — glossary.io's entity index ("index"), refreshed about daily
- *   aiLinks   — glossary.io links per entry: QIDs linked, text hash, retries
+ *   aiGlossary — glossary.io's entity index ("index"), refreshed about daily, and
+ *               what Remove links to deleted terms tracks ("gone"; src/ai/glossary-gone.ts)
+ *   aiLinks   — glossary.io links per entry: QIDs linked, text hash, links to
+ *               remove, retries
  */
 import type { PluginContext, StorageCollection } from "emdash";
 
@@ -33,6 +35,11 @@ export interface AiOptions {
 		shortHosts?: string[];
 		/** Entry slugs never linked (legal pages, link directories), in any collection; "posts:slug" for one collection. */
 		skip?: string[];
+		/**
+		 * After this part publishes its own link-only edit, put the entry's updated
+		 * date back (needs the site's D1 binding, DB). Default false.
+		 */
+		keepDates?: boolean;
 	};
 }
 
@@ -41,7 +48,7 @@ export const STORAGE = {
 	aiEntries: { indexes: ["collection", "status", "descriptionStatus", "updated"] },
 	aiMedia: { indexes: ["status", "updated"] },
 	aiUsage: { indexes: ["time"] },
-	/** glossary.io's entity index, one document ("index"; src/ai/glossary.ts). */
+	/** glossary.io's entity index ("index"; src/ai/glossary.ts) and the deleted-term checks ("gone"; src/ai/glossary-gone.ts). */
 	aiGlossary: { indexes: [] as string[] },
 	/** glossary.io links: what each entry's links remember (LinkMemo in src/ai/glossary-linker.ts). Kept when an entry is trashed. */
 	aiLinks: { indexes: ["retryAt"] },

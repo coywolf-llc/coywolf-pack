@@ -17,10 +17,10 @@
  * before they look again, so a read from before a publish isn't reused after it.
  */
 import { COLLECTION_SLUG, type ChildPagesState, type CollectionInfo, type StoredParents, type StoredParentsProvider, type UrlSource, comparablePath, createEntryUrlResolver, hostDefaultLocale, patternUsesPagePath, urlOverride } from "../core/content-url.js";
+import { databaseFor } from "../core/database.js";
 import { isOn, knownFeatures, knownSiteSetting, registerSiteSetting, siteFeatureState } from "../core/features.js";
 import { noteReadFailure } from "../core/read-failures.js";
 import { peekRequestMemo, requestMemo, seedRequestMemo } from "../core/request-memo.js";
-import { workerEnv } from "../shared.js";
 import { PARENT_FIELD, type PageRow, type PageTreeData, type ParentLink, buildPageTree, storedParentsOf } from "./tree.js";
 
 export const CHILD_PAGES_FEATURE = "childPages";
@@ -237,8 +237,6 @@ export async function readCollection(db: D1Database, collection: string, links: 
 
 // ── The URL resolver's provider ──────────────────────────────────
 
-const isD1 = (source: UrlSource): source is D1Database => typeof (source as D1Database).prepare === "function";
-
 export interface ProviderDeps {
 	/** Whether the feature is on (default: the switch, from the per-isolate settings cache). */
 	enabled?: () => Promise<boolean>;
@@ -260,15 +258,8 @@ const featureOn = async () => {
 	throw new Error("coywolf-pack: Child Pages: the feature switches couldn't be read");
 };
 
-/** The site's D1 database: the source when it is one, else the DB binding. */
-export async function databaseFor(source?: UrlSource | null): Promise<D1Database | null> {
-	if (source && isD1(source)) return source;
-	try {
-		return ((await workerEnv()).DB as D1Database | undefined) ?? null;
-	} catch {
-		return null;
-	}
-}
+/** The site's D1 database (src/core/database.ts, where other modules read it from too). */
+export { databaseFor };
 
 /** Child pages state for a resolver, read now: the collections with a parent field and their stored parents. */
 export async function readChildPagesState(db: D1Database): Promise<ChildPagesState> {

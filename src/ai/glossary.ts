@@ -206,6 +206,21 @@ async function readStored(source: Source): Promise<StoredIndex | null> {
 	return validStored(await store(source)?.get(DOC_ID));
 }
 
+/**
+ * The site's stored copy of the index, read from storage (not this isolate's
+ * memory), or null when there's none in the current format. The copy is only
+ * ever written after a 200 answer that parsed as version 1 and had terms, so a
+ * failed, empty or unknown answer is never seen here. Used by Remove links to
+ * deleted terms (src/ai/glossary-gone.ts), which compares one copy with the next.
+ */
+export async function storedGlossary(ctx: Pick<PluginContext, "storage">): Promise<{ fetchedAt: number; terms: GlossaryTerms } | null> {
+	const value = (await store(ctx as Ctx)?.get(DOC_ID)) as Partial<StoredIndex> | null | undefined;
+	if (!value || typeof value.fetchedAt !== "number" || value.format !== STORED_FORMAT) return null;
+	const terms = parseGlossaryIndex({ v: 1, terms: value.terms });
+	if (!terms || !Object.keys(terms).length) return null;
+	return { fetchedAt: value.fetchedAt, terms };
+}
+
 /** Fetch and store the index; the stored write runs after the response. */
 async function fetchAndStore(ctx: Ctx, timeoutMs: number): Promise<StoredIndex> {
 	try {

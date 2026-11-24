@@ -10,11 +10,10 @@ import { PluginRouteError, definePluginRoute } from "emdash";
 import { z } from "zod";
 
 import { CLOUDFLARE_API_HOST } from "../core/cloudflare-api.js";
-import { createEntryUrlResolver } from "../core/content-url.js";
 import { ctxFeatures, isOn, registerFeatures, requireFeature } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
 import { readOnlyRoute } from "../core/routes.js";
-import { purgePageCache } from "../pageCache/lib.js";
+import { purgeEntryPages } from "../pageCache/entries.js";
 import { siteName } from "../core/site.js";
 import { afterResponse, parseInput, workerEnv } from "../shared.js";
 import { NOT_SET_UP, type RenderContext, RenderError, SETTINGS_KEY, type SocialSettings, TOKEN_SETTING, browserRunToken, hashFor, normalizeSocialSettings, readSocialSettings, removeEntryImage, renderContext, renderEntry, renderer, screenshot, siteLogo, templateInputs } from "./render.js";
@@ -169,20 +168,8 @@ export async function renderPending(ctx: PluginContext, options: { limit: number
 	}
 }
 
-/** Purge the pages of entries whose image changed (at most 100 paths, Cloudflare's limit per purge). */
-async function purgeEntries(ctx: PluginContext, entries: Array<{ collection: string; id: string; slug: string | null }>): Promise<void> {
-	if (!entries.length) return;
-	try {
-		const resolver = createEntryUrlResolver(ctx);
-		const paths: string[] = [];
-		const byCollection = new Map<string, Array<{ id: string; slug: string | null }>>();
-		for (const e of entries) byCollection.set(e.collection, [...(byCollection.get(e.collection) ?? []), e]);
-		for (const [collection, list] of byCollection) for (const path of (await resolver.urls(collection, list.map((e) => ({ ...e, status: "published" })))).values()) if (path) paths.push(path);
-		if (paths.length) await purgePageCache({ pathPrefixes: paths.slice(0, 100) });
-	} catch (error) {
-		ctx.log.warn("social images: couldn't clear the pages' cached copies", { error: String(error) });
-	}
-}
+/** Purge the pages of entries whose image changed (src/pageCache/entries.ts). */
+const purgeEntries = (ctx: PluginContext, entries: Array<{ collection: string; id: string; slug: string | null }>) => purgeEntryPages(ctx, entries, { label: "social images" });
 
 interface BackfillState {
 	status: "idle" | "running";

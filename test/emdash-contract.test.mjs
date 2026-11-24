@@ -349,6 +349,8 @@ const EXPRESSIONS = {
 	'ref.by === "id" ? "id" : "storage_key"': ["id", "storage_key"],
 	// src/childPages/read.ts: rowsSql (the collection's title column, else none)
 	"src/childPages/read.ts::title": ['"title"', "NULL"],
+	// src/ai/glossary-gone.ts: findEntries (a Portable Text field of the collection)
+	"src/ai/glossary-gone.ts::field": "content",
 };
 
 /** The file's `const NAME = <literal>` declarations: fragments of SQL kept in constants. */
