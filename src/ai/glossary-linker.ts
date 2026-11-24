@@ -214,6 +214,8 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 		if (memo.pending !== undefined || memo.draft) memo = settled(memo);
 		return out("draft", item.slug);
 	}
+	// No pending draft: any marker left from an earlier edit is stale (its draft was published or discarded).
+	if (memo.pending !== undefined || memo.draft) memo = settled(memo);
 	const savedAt = Date.parse(item.updatedAt);
 	if (Number.isFinite(savedAt) && now - savedAt < BUSY_MS) return out("busy", item.slug);
 
