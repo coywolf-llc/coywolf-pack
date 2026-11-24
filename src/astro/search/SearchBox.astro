@@ -35,7 +35,7 @@ export interface Props {
 	locale?: string | null;
 	/** Characters before suggesting. Default 2. */
 	minChars?: number;
-	/** Milliseconds to wait after typing. Default 200. */
+	/** Milliseconds after the last keystroke before asking the server (title matches show at once). Default 120. */
 	debounce?: number;
 	/** Suggestions to show. Default 8. */
 	limit?: number;

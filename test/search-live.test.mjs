@@ -115,7 +115,10 @@ test("live script file: runs the same client with the config from its own script
 	const browser = () => ({ fetch() {}, AbortController: class {} });
 	const window = browser();
 	vm.runInNewContext(LIVE_ASSET, { document, window });
-	assert.equal(window.__cwLive, 1, "the client started");
+	// Started: it marks itself with the tools it lends the SearchBox.
+	assert.equal(typeof window.__cwLive, "object", "the client started");
+	assert.deepEqual(Object.keys(window.__cwLive).sort(), ["localItems", "merge", "titles", "warm"]);
+	assert.equal(window.__cwLive.titles("terms", null), null, "no index endpoint, no index");
 	assert.ok(reads.includes("DOMContentLoaded"), reads.join());
 	const idle = { currentScript: { getAttribute: () => null } };
 	const idleWindow = browser();

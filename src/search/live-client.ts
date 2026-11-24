@@ -14,8 +14,10 @@
  * build step and isn't resent with every page. Written as plain ES2020 inside String.raw
  * (no backticks or "${" inside). It attaches to GET forms with a search
  * field (type="search", or a field named "s" or "q"), skipping the pack's
- * own SearchBox, which has its suggestions built in. Progressive
- * enhancement: without it, or before it runs, the form submits as before.
+ * own SearchBox, which has its own dropdown and borrows this script's title
+ * index, matcher and warm-up through window.__cwLive (searchbox-client.ts).
+ * Progressive enhancement: without it, or before it runs, the form submits
+ * as before.
  */
 
 import { MATCH_SOURCE } from "./title-match.js";
@@ -185,7 +187,6 @@ input[data-cw-live]::-webkit-search-decoration {
 const SCRIPT = String.raw`function (config, css, tools) {
 	"use strict";
 	if (window.__cwLive || !window.fetch || !window.AbortController) return;
-	window.__cwLive = 1;
 
 	// Narrow fields (a header search, a sidebar widget) still need a readable dropdown.
 	var MIN_WIDTH = 300;
@@ -195,39 +196,66 @@ const SCRIPT = String.raw`function (config, css, tools) {
 	var MARK = /<(?!\/?mark>)/g;
 	var counter = 0;
 	var styled = false;
-	// Shared by every field on the page: one title index, one warm-up.
+	// Shared by every field on the page (and the pack's SearchBox): one title index per collections
+	// and locale, one warm-up.
 	var titles = { promise: null, prepared: null, listeners: [] };
+	var indexes = {};
 	var warmed = false;
 
-	function loadTitles() {
-		if (!config.indexEndpoint || titles.promise) return;
+	/** The prepared title index for these collections and locale (a promise, never rejected), or null without an index. */
+	function indexFor(collections, locale) {
+		if (!config.indexEndpoint) return null;
+		var key = (collections || "") + "|" + (locale || "");
+		if (indexes[key]) return indexes[key];
 		var params = new URLSearchParams({ v: config.version });
-		if (config.locale) params.set("locale", config.locale);
-		titles.promise = fetch(config.indexEndpoint + "?" + params, { credentials: "same-origin", headers: { Accept: "application/json" } })
+		if (collections) params.set("collections", collections);
+		if (locale) params.set("locale", locale);
+		indexes[key] = fetch(config.indexEndpoint + "?" + params, { credentials: "same-origin", headers: { Accept: "application/json" } })
 			.then(function (r) {
 				return r.ok ? r.json() : null;
 			})
 			.then(function (body) {
-				var data = body && (body.entries ? body : body.data);
-				titles.prepared = tools.prepare(data);
+				return tools.prepare(body && (body.entries ? body : body.data));
 			})
 			.catch(function () {
-				titles.prepared = [];
-			})
-			.then(function () {
-				titles.listeners.forEach(function (fn) {
-					fn();
-				});
+				return [];
 			});
+		return indexes[key];
 	}
 
-	/** First focus: fetch the title index and wake a server isolate, so the first real search is quick. */
-	function prime() {
-		loadTitles();
+	function loadTitles() {
+		if (titles.promise) return;
+		titles.promise = indexFor("", config.locale);
+		if (!titles.promise) return;
+		titles.promise.then(function (prepared) {
+			titles.prepared = prepared;
+			titles.listeners.forEach(function (fn) {
+				fn();
+			});
+		});
+	}
+
+	/** Wake a server isolate (once per page), so the first real search is quick. */
+	function warm() {
 		if (warmed) return;
 		warmed = true;
-		fetch(config.endpoint + "?warm=1", { credentials: "same-origin" }).catch(function () {});
+		try {
+			fetch(config.endpoint + "?warm=1", { credentials: "same-origin", priority: "low" }).catch(function () {});
+		} catch (e) {
+			// Best effort only.
+		}
 	}
+
+	/** First focus: fetch the title index and wake a server isolate. */
+	function prime() {
+		loadTitles();
+		warm();
+	}
+
+	// Marks the client as running (a second copy stops above) and lends the pack's SearchBox, which
+	// has its own script and dropdown, the title index, the matcher and the warm-up, so its
+	// suggestions are instant too (src/search/searchbox-client.ts).
+	window.__cwLive = { titles: indexFor, warm: warm, localItems: tools.localItems, merge: tools.merge };
 
 	function addStyles() {
 		if (styled) return;
