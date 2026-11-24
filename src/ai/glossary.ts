@@ -236,11 +236,14 @@ async function readOrFill(source: Source): Promise<Memo> {
  * this is glossary.io, or there's no index. Never throws, and never marks the
  * page as a failed read: glossary data is a nice-to-have.
  */
-export async function glossaryFor(source: Source, origin?: string | null): Promise<GlossaryLookup | undefined> {
+export async function glossaryFor(source: Source, origin?: string | null, opts: { anySwitch?: boolean } = {}): Promise<GlossaryLookup | undefined> {
 	try {
 		if (isGlossarySite(origin)) return undefined;
-		const features = isD1(source) ? await siteFeatures() : await cachedCtxFeatures(source);
-		if (!isOn(features, "ai.glossary")) return undefined;
+		// Glossary links (ai.glossaryLinks) use the index whether or not the sameAs part is on.
+		if (!opts.anySwitch) {
+			const features = isD1(source) ? await siteFeatures() : await cachedCtxFeatures(source);
+			if (!isOn(features, "ai.glossary")) return undefined;
+		}
 		const now = Date.now();
 		const expired = !memo || now - memo.readAt > (memo.terms ? MEMO_MS : RETRY_MS);
 		if (expired) {

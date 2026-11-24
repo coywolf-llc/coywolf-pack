@@ -30,7 +30,8 @@ import {
 	readSettings,
 	takeCall,
 } from "./store.js";
-import { applyDescription, applyImageText, targetCollections, tick } from "./worker.js";
+import { applyDescription, applyImageText, entryText, targetCollections, tick } from "./worker.js";
+import { linkEntry } from "./glossary-linker.js";
 import { readOnlyRoute } from "../core/routes.js";
 
 const asCtx = (ctx: unknown) => ctx as PluginContext;
@@ -53,6 +54,14 @@ const settingsInput = z.object({
 	aiImageCaption: z.boolean().optional(),
 	aiImageOverwrite: z.boolean().optional(),
 	aiImageInstructions: z.string().max(4000).optional(),
+});
+
+const glossaryLinksInput = z.object({
+	dryRun: z.boolean().optional(),
+	keys: z.array(z.string().min(3).max(300)).min(1).max(25).optional(),
+	cursor: z.string().max(2000).optional(),
+	limit: z.number().int().min(1).max(25).optional(),
+	exclude: z.record(z.string().max(300), z.array(z.string().regex(/^Q[1-9][0-9]{0,11}$/)).max(100)).optional(),
 });
 
 const entryRef = z.object({ collection: z.string().min(1).max(200), id: z.string().min(1).max(200) });
@@ -82,6 +91,7 @@ export function aiRoutes(options: AiOptions) {
 						descriptions: isOn(features, "ai.descriptions"),
 						imageText: isOn(features, "ai.imageText"),
 						entitiesStandalone: isOn(features, "ai.entitiesStandalone"),
+						glossaryLinks: isOn(features, "ai.glossaryLinks"),
 					},
 					queue: await queueCounts(ctx),
 					bulk: { entries: entriesBulk, media: mediaBulk },
@@ -254,6 +264,56 @@ export function aiRoutes(options: AiOptions) {
 				const { collection, id } = parseInput(entryRef, (raw as { input: unknown }).input);
 				await enqueue(ctx, { kind: "entry", collection, entryId: id, due: Date.now(), force: true });
 				return { queued: true };
+			},
+		}),
+
+		/**
+		 * glossary.io links for entries analyzed before the part was on (or to redo
+		 * a batch): the same code the analysis runs. `keys` ("posts:<id>") or pages
+		 * of analyzed entries (`cursor`); `dryRun` plans without writing (allowed
+		 * with the part off); `exclude` lists QIDs never to link, per entry key.
+		 */
+		"ai/glossary-links": definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (raw) => {
+				const ctx = asCtx(raw);
+				const input = parseInput(glossaryLinksInput, (raw as { input: unknown }).input);
+				const features = await ctxFeatures(ctx);
+				if (!input.dryRun && !isOn(features, "ai.glossaryLinks")) throw PluginRouteError.notFound("Turn on glossary.io links first (AI Enrichment).");
+				const records = col<EntryRecord>(ctx, "aiEntries");
+				let keys = input.keys;
+				let cursor: string | undefined;
+				let hasMore = false;
+				if (!keys) {
+					const page = await records.query({ where: { status: "ok" }, orderBy: { updated: "desc" }, limit: input.limit ?? 10, cursor: input.cursor });
+					keys = page.items.map((i) => i.id);
+					cursor = page.cursor;
+					hasMore = page.hasMore;
+				}
+				const s = await readSettings(ctx, options);
+				const results = [];
+				for (const key of keys) {
+					const colon = key.indexOf(":");
+					const collection = key.slice(0, colon);
+					const id = key.slice(colon + 1);
+					if (colon < 1 || !id) {
+						results.push({ key, slug: null, status: "skipped", changes: [], reason: "bad key" });
+						continue;
+					}
+					try {
+						const outcome = await linkEntry(ctx, options, collection, id, {
+							dryRun: input.dryRun,
+							exclude: input.exclude?.[key],
+							hashText: async (data) => (await entryText(ctx, collection, data, s, features))?.textHash,
+						});
+						results.push(outcome);
+					} catch (error) {
+						results.push({ key, slug: null, status: "error", changes: [], reason: String(error).slice(0, 300) });
+					}
+				}
+				return { results, cursor, hasMore };
 			},
 		}),
 

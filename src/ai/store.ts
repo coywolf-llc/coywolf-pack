@@ -20,6 +20,19 @@ export interface AiOptions {
 	binding?: string;
 	/** Cloudflare Images binding used to downscale large images before analysis. Default "IMAGES". */
 	images?: string;
+	/** glossary.io links (part "ai.glossaryLinks"; src/ai/glossary-linker.ts). */
+	glossaryLinks?: {
+		/**
+		 * The site's other domains: links to them are never switched. The site's own
+		 * host always counts. "name.*" matches every domain with that name
+		 * ("coywolf.*": coywolf.com, coywolf.pro, forum.coywolf.com).
+		 */
+		ownHosts?: string[];
+		/** The site's short-link domains for affiliate links (e.g. "coywolf.io"): never switched, and the entity they name gets no glossary link. */
+		shortHosts?: string[];
+		/** Entry slugs never linked (legal pages, link directories), in any collection; "posts:slug" for one collection. */
+		skip?: string[];
+	};
 }
 
 export const STORAGE = {
@@ -167,6 +180,12 @@ export interface EntryRecord {
 	description: string;
 	descriptionStatus: "none" | "suggested" | "applied" | "dismissed";
 	updated: string;
+	/** Hash of the title and text alone (no settings): glossary links run only when it changes. Since 0.49.0. */
+	textHash?: string;
+	/** QIDs glossary links handled in this entry (linked, found linked, or excluded): never linked again. */
+	glossaryLinked?: string[];
+	/** The draft revision a glossary-links edit saved, until it's published (a failed publish is finished on the next run). */
+	glossaryDraft?: string;
 }
 
 export interface MediaRecord {

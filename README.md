@@ -41,7 +41,7 @@ Every module starts off on a new site. Turn on only the ones you want on the **F
 | [Videos](docs/videos.md) | Cloudflare Stream library, a video block with a light embed, video schema and sitemap, plays and likes |
 | [Reviews](docs/reviews.md) | A review block (rating, pros and cons) with Review schema |
 | [Custom Blocks](docs/custom-blocks.md) | Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks |
-| [AI Enrichment](docs/ai.md) | Wikidata-grounded entities for schema (linked to their glossary.io definitions), meta descriptions and image alt text |
+| [AI Enrichment](docs/ai.md) | Wikidata-grounded entities for schema (linked to their glossary.io definitions, also in the text if you like), meta descriptions and image alt text |
 | [WordPress Migration](docs/wordpress-import.md) | Finishes a move from WordPress after EmDash's own Import: blocks, authors, category parents, media URLs and redirects |
 
 ## Getting started
