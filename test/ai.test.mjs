@@ -13,6 +13,8 @@ await import("../src/ai/glossary-links.test.ts");
 await import("../src/ai/keep-date.test.ts");
 await import("../src/ai/glossary-unlink.test.ts");
 await import("../src/ai/glossary-gone.test.ts");
+await import("../src/ai/glossary-possessive.test.ts");
+await import("../src/ai/text-hash.test.ts");
 
 // src/ai/pack.ts and src/ai/worker.ts load the model providers, which Node can't run here: their wiring is checked in the source.
 const source = (file) => readFileSync(new URL(`../src/ai/${file}`, import.meta.url), "utf8");

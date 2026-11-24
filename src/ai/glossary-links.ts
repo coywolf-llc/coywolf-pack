@@ -19,8 +19,12 @@
  *    part of a longer name (Google in "Google Search Console", SMTP in
  *    "Gravity SMTP") or an abbreviation after an expansion ("(NLP)"). A
  *    mention at the start of a sentence or inside quotation marks is used only
- *    when there's no other.
+ *    when there's no other. A possessive right after the mention is linked
+ *    with it ("Google's", "Threads’"); a switched link keeps its text.
  * An entity named by an affiliate link gets no glossary link in that entry.
+ *
+ * linkPossessives (since 0.51.0) moves the possessive after any glossary.io
+ * link inside it ("[Google]'s" becomes "[Google's]"): only marks change.
  */
 
 export interface LinkEntity {
@@ -39,7 +43,8 @@ export interface GlossaryTarget {
 
 export type TargetLookup = (qid: string) => GlossaryTarget | null | undefined;
 
-export interface LinkChange {
+/** A glossary link the rules make (add) or an existing link they switch to glossary.io. */
+export interface TermLinkChange {
 	action: "switch" | "add";
 	qid: string;
 	entity: string;
@@ -51,6 +56,27 @@ export interface LinkChange {
 	why: string;
 	context: string;
 }
+
+/**
+ * A glossary.io link that now includes the possessive right after it
+ * ("[Google]'s" became "[Google's]"; the text is unchanged). The term's QID
+ * and entity are null when the site's index doesn't know the link's slug.
+ */
+export interface PossessiveChange {
+	action: "possessive";
+	qid: string | null;
+	entity: string | null;
+	slug: string | null;
+	href: string;
+	/** The link's whole text now ("Google's"). */
+	anchor: string;
+	block: string;
+	/** What moved into the link ("'s", "’s" or "’"). */
+	why: string;
+	context: string;
+}
+
+export type LinkChange = TermLinkChange | PossessiveChange;
 
 export interface LinkSkip {
 	qid: string;
@@ -65,7 +91,7 @@ export type KeptWhy = LinkKind | "domain" | "part-of-name" | "list" | "not-a-nam
 export interface LinkPlan {
 	/** The new body (a copy), or the input itself when nothing changed. */
 	content: unknown[];
-	changes: LinkChange[];
+	changes: TermLinkChange[];
 	skipped: LinkSkip[];
 	/** Existing links that name an entity but stay as they are. */
 	kept: Array<{ qid: string; entity: string; anchor: string; href: string; why: KeptWhy }>;
@@ -392,26 +418,198 @@ export function textBlocks(content: unknown[]): TextBlock[] {
 	content.forEach((raw, index) => {
 		const block = raw as Block;
 		if (!block || block._type !== "block" || !Array.isArray(block.children)) return;
-		const links = new Map<string, MarkDef>();
-		for (const d of block.markDefs ?? []) if (d && d._type === "link" && typeof d._key === "string" && typeof d.href === "string") links.set(d._key, d);
-		let text = "";
-		const offsets: number[] = [];
-		const linkOf: Array<string | null> = [];
-		for (const c of block.children) {
-			const span = c as Span;
-			if (span && span._type === "span" && typeof span.text === "string") {
-				offsets.push(text.length);
-				text += span.text;
-				linkOf.push((span.marks ?? []).find((m) => links.has(m)) ?? null);
-			} else {
-				offsets.push(-1);
-				linkOf.push(null);
-			}
-		}
-		const style = block.style ?? "normal";
-		out.push({ index, key: block._key ?? String(index), block, text, offsets, links, linkOf, eligible: style === "normal", listItem: Boolean(block.listItem) });
+		out.push(textBlockOf(block, index));
 	});
 	return out;
+}
+
+function textBlockOf(block: Block, index: number): TextBlock {
+	const links = new Map<string, MarkDef>();
+	for (const d of block.markDefs ?? []) if (d && d._type === "link" && typeof d._key === "string" && typeof d.href === "string") links.set(d._key, d);
+	let text = "";
+	const offsets: number[] = [];
+	const linkOf: Array<string | null> = [];
+	for (const c of block.children) {
+		const span = c as Span;
+		if (span && span._type === "span" && typeof span.text === "string") {
+			offsets.push(text.length);
+			text += span.text;
+			linkOf.push((span.marks ?? []).find((m) => links.has(m)) ?? null);
+		} else {
+			offsets.push(-1);
+			linkOf.push(null);
+		}
+	}
+	const style = block.style ?? "normal";
+	return { index, key: block._key ?? String(index), block, text, offsets, links, linkOf, eligible: style === "normal", listItem: Boolean(block.listItem) };
+}
+
+// ── Possessives ──────────────────────────────────────────────────
+
+/** A span's marks (none when they aren't a list). */
+const marksOf = (span: { marks?: unknown } | null | undefined): string[] => (Array.isArray(span?.marks) ? (span!.marks as string[]) : []);
+
+/** What a possessive never comes before: a letter, a digit or a hyphen ("Google’sfoo", "'s5", "'s-Hertogenbosch"). */
+const NOT_AFTER = "(?![\\p{L}\\p{N}\\-\u2010\u2011])";
+const POSSESSIVE_S = new RegExp(`^['\u2019\u02bc][sS]${NOT_AFTER}`, "u");
+const POSSESSIVE_BARE = new RegExp(`^['\u2019\u02bc]${NOT_AFTER}`, "u");
+
+/**
+ * The possessive right after a name or link text (text[start, end)), or "":
+ * "'s" or "’s" (or with the letter apostrophe "ʼ") before anything but a
+ * letter, a digit or a hyphen, or the end ("Google's", "Anthropic’s."); "'S"
+ * only after a name in capitals ("GOOGLE'S"). Or, after a name ending in "s",
+ * a bare apostrophe before the same ("Threads’ growth"), unless it can be a
+ * closing quotation mark or part of code: a quotation of any kind (' ‘ “ ")
+ * opened before the name in the block and not closed ("‘Threads’"), or a "=",
+ * "/" or quotation mark right before the name ("href='/users'"). Nothing after
+ * a space ("[Google ]'s"), or when the text already ends with one, so a fix is
+ * never made twice.
+ */
+function possessiveAfter(text: string, start: number, end: number): string {
+	const anchor = text.slice(start, end);
+	if (!/\S$/u.test(anchor) || /['\u2019\u02bc][sS]?$/.test(anchor)) return "";
+	const after = text.slice(end);
+	const full = POSSESSIVE_S.exec(after);
+	if (full) return full[0].endsWith("S") && !(/\p{Lu}/u.test(anchor) && !/\p{Ll}/u.test(anchor)) ? "" : full[0];
+	if (!/[sS]$/.test(anchor) || !POSSESSIVE_BARE.test(after)) return "";
+	const before = text.slice(0, start);
+	if (/[=/'"`\u2018\u2019\u201c\u201d\u02bc]$/.test(before) || insideQuotes(before) || insideSingleQuotes(before)) return "";
+	return after[0];
+}
+
+/**
+ * Whether the text ends inside single quotation marks: after an opening ‘ (or
+ * a ' at the start or after a space or an opening mark), with no closing ’ or
+ * ' after it (one after a non-space and before a non-letter: not the
+ * apostrophe in "don’t").
+ */
+function insideSingleQuotes(before: string): boolean {
+	let open = -1;
+	for (const m of before.matchAll(/\u2018|(?<=^|[\s(\["\u201c\u00ab\u2014\u2013])'/gu)) open = m.index!;
+	return open >= 0 && !/(?<=\S)['\u2019](?!\p{L})/u.test(before.slice(open + 1));
+}
+
+/** The possessive after a mention the rules link ("" when none), and whether it's in the mention's own span (else it starts the next one). */
+function possessiveFor(tb: TextBlock, child: number, start: number, end: number): { text: string; inSpan: boolean } {
+	const none = { text: "", inSpan: true };
+	const text = possessiveAfter(tb.text, start, end);
+	if (!text) return none;
+	const spanEnd = tb.offsets[child] + (tb.block.children[child] as Span).text.length;
+	if (end + text.length <= spanEnd) return { text, inSpan: true };
+	const next = tb.block.children[child + 1];
+	if (end === spanEnd && isSpan(next) && !tb.linkOf[child + 1] && !marksOf(next).includes("code") && next.text.length >= text.length) return { text, inSpan: false };
+	return none;
+}
+
+/** A span's marks without links, and its other properties (not its key or text): two spans with the same shape can be one. */
+const plainShape = (span: Span, linkKeys: ReadonlySet<string>) => spanShape({ ...span, marks: (span.marks ?? []).filter((m) => !linkKeys.has(m)) });
+
+/**
+ * Move the first `length` characters of the span after `last` (a link's last
+ * span) into that link: onto the end of that span when both have the same
+ * other marks and properties, or else as a new span with the next span's marks
+ * and the link's mark `key`. The next span goes when nothing is left of it.
+ * The block's text stays exactly as it was.
+ */
+function absorbPossessive(block: Block, last: number, length: number, key: string, linkKeys: ReadonlySet<string>, fresh: () => string): void {
+	const span = block.children[last] as Span;
+	const next = block.children[last + 1] as Span;
+	const moved = next.text.slice(0, length);
+	const rest = next.text.slice(length);
+	const tail: Span[] = rest ? [{ ...next, text: rest }] : [];
+	if (plainShape(span, linkKeys) === plainShape(next, linkKeys)) {
+		span.text += moved;
+		block.children.splice(last + 1, 1, ...tail);
+		return;
+	}
+	const piece: Span = { ...next, text: moved, marks: [...(next.marks ?? []), key] };
+	if (rest) piece._key = fresh();
+	block.children.splice(last + 1, 1, piece, ...tail);
+}
+
+/** New keys for spans and markDefs, unique within the block. */
+function keyMaker(block: Block, newKey: () => string): () => string {
+	const used = new Set<string>([...(Array.isArray(block.markDefs) ? block.markDefs : []).map((d) => d?._key), ...block.children.map((c) => (c as Span)?._key ?? "")]);
+	return () => {
+		let k = newKey();
+		while (used.has(k)) k = newKey();
+		used.add(k);
+		return k;
+	};
+}
+
+/** A glossary.io link that now has the possessive after it inside it ("[Google]'s" became "[Google's]"). */
+export interface PossessiveFix {
+	href: string;
+	/** The glossary.io term's slug, or null for another glossary.io page. */
+	slug: string | null;
+	/** The link's whole text now. */
+	anchor: string;
+	/** What moved into the link ("'s", "’s" or "’"). */
+	moved: string;
+	block: string;
+	context: string;
+}
+
+const isGlossaryHref = (href: string, origin: string) => {
+	const u = parse(href);
+	return Boolean(u) && u!.hostname !== "relative.invalid" && bareHost(u!.hostname) === bareHost(new URL(origin).hostname);
+};
+
+/**
+ * One block's glossary.io links with a possessive right after them, at the
+ * start of the next span (which is in no link and isn't code). None in a block
+ * with a span whose marks aren't a list: a malformed block is left as it is.
+ */
+function possessivesIn(block: Block, origin: string) {
+	if (!Array.isArray(block.markDefs) || !block.markDefs.length) return [];
+	if (block.children.some((c) => isSpan(c) && c.marks != null && !Array.isArray(c.marks))) return [];
+	const tb = textBlockOf(block, 0);
+	const out: Array<{ last: number; key: string; moved: string; href: string; start: number; end: number; anchor: string }> = [];
+	for (const run of linkRuns(tb)) {
+		if (!isGlossaryHref(run.href, origin)) continue;
+		const last = run.children[run.children.length - 1];
+		const next = block.children[last + 1];
+		if (!isSpan(next) || tb.linkOf[last + 1] || marksOf(next).includes("code")) continue;
+		const end = run.start + run.text.length;
+		const moved = possessiveAfter(tb.text, run.start, end);
+		if (!moved || next.text.length < moved.length) continue;
+		out.push({ last, key: tb.linkOf[last]!, moved, href: run.href, start: run.start, end, anchor: run.text + moved });
+	}
+	return out;
+}
+
+/**
+ * Move the possessive right after each glossary.io link (any of them: made by
+ * the rules, switched, or by hand) inside that link, in every block (nested
+ * ones too): "[Google]'s" becomes "[Google's]", "[Threads]’ growth" becomes
+ * "[Threads’] growth". Only when the possessive starts the span right after
+ * the link and that span is in no other link and isn't code. Same other marks: the
+ * characters join the link's last span; different ones (bold, say): they
+ * become a span of their own with those marks and the link. A span left empty
+ * goes. Only marks change, never the text, and other links are never touched.
+ * Returns a copy (the input itself when there's nothing to fix) and the fixes.
+ */
+export function linkPossessives(content: unknown, origin = GLOSSARY, newKey: () => string = defaultKey): { content: unknown; fixes: PossessiveFix[] } {
+	let found = false;
+	eachBlock(content, (block) => {
+		if (!found && possessivesIn(block, origin).length) found = true;
+	});
+	if (!found) return { content, fixes: [] };
+	const copy = structuredClone(content);
+	const fixes: PossessiveFix[] = [];
+	eachBlock(copy, (block) => {
+		const list = possessivesIn(block, origin);
+		if (!list.length) return;
+		const text = textBlockOf(block, 0).text;
+		const linkKeys = new Set(block.markDefs!.filter((d) => d && d._type === "link").map((d) => d._key));
+		const fresh = keyMaker(block, newKey);
+		// From the last link back, so the spans before each one stay where they are.
+		for (const p of [...list].reverse()) absorbPossessive(block, p.last, p.moved.length, p.key, linkKeys, fresh);
+		for (const p of list) fixes.push({ href: p.href, slug: glossarySlug(p.href, origin), anchor: p.anchor, moved: p.moved, block: block._key ?? "", context: context(text, p.start, p.end + p.moved.length) });
+	});
+	return { content: copy, fixes };
 }
 
 /** Link runs: adjacent spans with links to the same address (EmDash sometimes saves one link in pieces). */
@@ -519,7 +717,8 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 	const beats = (p: Occurrence, o: Occurrence) => p.end - p.start > o.end - o.start || (p.end - p.start === o.end - o.start && !p.plural && o.plural);
 	const live = occurrences.filter((o) => !occurrences.some((p) => p.entity !== o.entity && p.block === o.block && p.start < o.end && o.start < p.end && beats(p, o)));
 
-	type Edit = { kind: "add"; child: number; start: number; end: number; href: string } | { kind: "switch"; run: Run; href: string };
+	/** An add's `possessive`: the length of a possessive at the start of the next span, moved into the link after it's made. */
+	type Edit = { kind: "add"; child: number; start: number; end: number; href: string; possessive: number } | { kind: "switch"; run: Run; href: string };
 	const edits = new Map<number, Edit[]>();
 	const taken: Array<{ block: number; start: number; end: number }> = [];
 	const switched = new Set<Run>();
@@ -606,10 +805,13 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 		if (!pick) return skip("taken", mine.map((o) => o.text).join(", "));
 		const tb = byIndex.get(pick.block)!;
 		const childStart = tb.offsets[pick.child];
-		push(pick.block, { kind: "add", child: pick.child, start: pick.start - childStart, end: pick.end - childStart, href });
-		taken.push({ block: pick.block, start: pick.start, end: pick.end });
+		// A possessive right after the mention is linked with it ("Google's", "Threads’").
+		const possessive = possessiveFor(tb, pick.child, pick.start, pick.end);
+		const end = pick.end + possessive.text.length;
+		push(pick.block, { kind: "add", child: pick.child, start: pick.start - childStart, end: (possessive.inSpan ? end : pick.end) - childStart, href, possessive: possessive.inSpan ? 0 : possessive.text.length });
+		taken.push({ block: pick.block, start: pick.start, end });
 		const why = `${normalizeName(pick.text) === normalizeName(entity.name) ? "name" : "alias"}${pick.fallback ? " (fallback)" : ""}`;
-		plan.changes.push({ action: "add", qid: entity.qid, entity: entity.name, slug: target.slug, href, anchor: pick.text, block: tb.key, why, context: context(tb.text, pick.start, pick.end) });
+		plan.changes.push({ action: "add", qid: entity.qid, entity: entity.name, slug: target.slug, href, anchor: pick.text + possessive.text, block: tb.key, why, context: context(tb.text, pick.start, end) });
 	});
 
 	if (!plan.changes.length) return plan;
@@ -619,13 +821,7 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 	for (const [index, list] of edits) {
 		const block = copy[index] as Block;
 		block.markDefs = Array.isArray(block.markDefs) ? block.markDefs : [];
-		const used = new Set<string>([...block.markDefs.map((d) => d._key), ...block.children.map((c) => (c as Span)._key ?? "")]);
-		const fresh = () => {
-			let k = newKey();
-			while (used.has(k)) k = newKey();
-			used.add(k);
-			return k;
-		};
+		const fresh = keyMaker(block, newKey);
 		for (const e of list) {
 			if (e.kind !== "switch") continue;
 			const shared = block.children.some((c, i) => !e.run.children.includes(i) && ((c as Span).marks ?? []).some((m) => e.run.defKeys.includes(m)));
@@ -645,6 +841,7 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 			}
 		}
 		const adds = list.filter((e): e is Extract<Edit, { kind: "add" }> => e.kind === "add").sort((x, y) => y.child - x.child || y.start - x.start);
+		const possessives: Array<{ key: string; length: number }> = [];
 		for (const e of adds) {
 			const span = block.children[e.child] as Span;
 			const key = fresh();
@@ -655,6 +852,13 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 			pieces.push({ ...span, _key: e.start > 0 ? fresh() : span._key, text: span.text.slice(e.start, e.end), marks: [...marks, key] });
 			if (e.end < span.text.length) pieces.push({ ...span, _key: fresh(), text: span.text.slice(e.end), marks: [...marks] });
 			block.children.splice(e.child, 1, ...pieces);
+			if (e.possessive) possessives.push({ key, length: e.possessive });
+		}
+		if (possessives.length) {
+			// A possessive that starts the next span joins the new link (from the last link back, so the spans before stay put).
+			const linkKeys = new Set(block.markDefs.filter((d) => d._type === "link").map((d) => d._key));
+			const at = (key: string) => block.children.findIndex((c) => ((c as Span).marks ?? []).includes(key));
+			for (const p of possessives.map((p) => ({ ...p, index: at(p.key) })).sort((x, y) => y.index - x.index)) absorbPossessive(block, p.index, p.length, p.key, linkKeys, fresh);
 		}
 	}
 	plan.content = copy;
@@ -695,6 +899,41 @@ export function glossarySlugsIn(content: unknown, origin = GLOSSARY): Set<string
 		}
 	});
 	return out;
+}
+
+/** Every link address in a Portable Text value, nested blocks included (one per link markDef). */
+export function linkHrefsIn(content: unknown): string[] {
+	const out: string[] = [];
+	eachBlock(content, (block) => {
+		for (const d of Array.isArray(block.markDefs) ? block.markDefs : []) if (d && d._type === "link" && typeof d.href === "string") out.push(d.href);
+	});
+	return out;
+}
+
+/**
+ * A copy of a Portable Text value as it is apart from its links: in every
+ * block (nested ones too) the link markDefs and their marks are gone, spans
+ * have no keys, and neighboring spans with the same marks are one. Two values
+ * that differ only in their links (which text is linked, and where to) give
+ * equal copies; any other difference (text, formatting, a block added, an
+ * image changed) shows.
+ */
+export function withoutLinks(content: unknown): unknown {
+	const copy = structuredClone(content);
+	eachBlock(copy, (block) => {
+		const defs = Array.isArray(block.markDefs) ? block.markDefs : [];
+		const linkKeys = new Set(defs.filter((d) => d && d._type === "link").map((d) => d._key));
+		block.markDefs = defs.filter((d) => !(d && d._type === "link"));
+		const all = new Set<number>();
+		block.children.forEach((child, i) => {
+			all.add(i);
+			if (!isSpan(child)) return;
+			delete child._key;
+			if (Array.isArray(child.marks)) child.marks = child.marks.filter((m) => !linkKeys.has(m));
+		});
+		block.children = mergeSpans(block.children, all);
+	});
+	return copy;
 }
 
 /** A span's marks and other properties (not its key or text), to tell whether two spans can be one. */

@@ -4,7 +4,7 @@
  *
  * Storage collections (plugin storage, D1):
  *   aiQueue   — pending jobs, id "entry:<collection>:<id>" or "media:<id>"
- *   aiEntries — per-entry analysis: hash, entities, description suggestion
+ *   aiEntries — per-entry analysis: hashes, entities, description suggestion
  *   aiMedia   — per-image suggestion and what was written
  *   aiUsage   — one row per model call (kept 30 days)
  *   aiGlossary — glossary.io's entity index ("index"), refreshed about daily, and
@@ -182,7 +182,13 @@ export interface EntryRecord {
 	collection: string;
 	entryId: string;
 	title: string;
+	/** Title, text and the settings the analysis used (EntryText.hash). A bulk run re-analyzes the entry when it differs. */
 	hash: string;
+	/**
+	 * Title and text alone (EntryText.textHash): a save re-analyzes the entry only when it differs (since 0.51.0).
+	 * Missing on analyses made before then until it's filled from the entry's current text (fillTextHashes in src/ai/worker.ts).
+	 */
+	textHash?: string;
 	status: "ok" | "error";
 	error: string;
 	entities: Entity[];
@@ -323,5 +329,18 @@ export interface BulkState {
 }
 
 export const bulkKey = (kind: BulkState["kind"]) => `state:ai:bulk:${kind}`;
+
+/** The scheduled run's pass that gives analyses made before 0.51.0 their text hash (fillTextHashes in src/ai/worker.ts). */
+export interface TextHashFillState {
+	/** Where the pass continues (the aiEntries page after the last one finished). */
+	cursor?: string;
+	filled: number;
+	skipped: number;
+	started: string;
+	/** Set when the pass went through every analysis: it never runs again (later analyses record their text hash). */
+	done?: string;
+}
+
+export const TEXT_HASHES_KEY = "state:ai:textHashes";
 /** Epoch ms until which Wikidata asked to slow down (shared by every entry job, so one Retry-After throttles them all). */
 export const WIKIDATA_BUSY_KEY = "state:ai:wikidataBusyUntil";

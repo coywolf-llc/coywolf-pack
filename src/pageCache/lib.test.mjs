@@ -295,6 +295,7 @@ const READ_ONLY_ROUTES = [
 	"ai/entry",
 	"ai/media",
 	"ai/test",
+	"ai/text-hashes",
 	"alerts/check",
 	"alerts/digest/preview",
 	"alerts/settings/save",

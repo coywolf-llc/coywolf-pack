@@ -498,7 +498,9 @@ async function queueRemovals(
 			break;
 		}
 		const colon = key.indexOf(":");
-		const memo: LinkMemo = (await memos.get(key)) ?? { collection: key.slice(0, colon), entryId: key.slice(colon + 1), linked: [], updated: "" };
+		// An entry with nothing remembered (a link a person made, say) gets a memo that counts as nothing remembered (pendingNew): once the
+		// removal is done, a plain memo without a text hash would read as a text change, and the entry's next analysis would link it.
+		const memo: LinkMemo = (await memos.get(key)) ?? { collection: key.slice(0, colon), entryId: key.slice(colon + 1), linked: [], pendingNew: true, updated: "" };
 		const unlink = new Map((memo.unlink ?? []).map((u) => [u.slug, u]));
 		const had = unlink.size;
 		for (const u of list) unlink.set(u.slug, u);

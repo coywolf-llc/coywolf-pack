@@ -516,6 +516,11 @@ export interface QueueJob {
 	/** Times in a row Wikidata's Retry-After pushed the job back; reset when an attempt fails. */
 	deferrals?: number;
 	force?: boolean;
+	/**
+	 * "save": queued by a save, publish or restore (the content hooks). Unless forced, it runs only when the entry's
+	 * title or text changed since its analysis, never for new settings alone. Bulk runs and Analyze again leave it out.
+	 */
+	source?: "save";
 	enqueuedAt: number;
 	lastError?: string;
 	/** Model outputs already paid for, so a retry resumes after them. Valid only for the same text hash. */
@@ -612,10 +617,16 @@ export function retryAt(job: QueueJob, now: number): number | null {
 	return now + 5 * 60_000 * 4 ** (attempts - 1);
 }
 
-/** Merge a re-enqueue into an existing job: push the debounce later, keep attempts reset, keep force if either asked. */
+/**
+ * Merge a re-enqueue into an existing job: push the debounce later, keep attempts reset, keep force if either asked.
+ * It stays a save's job (source "save") only when both are: a save merged into a bulk run's job (or the reverse)
+ * keeps the bulk run's check, so new settings still re-analyze it.
+ */
 export function mergeJob(existing: QueueJob | null, next: QueueJob): QueueJob {
 	if (!existing) return next;
-	return { ...next, force: Boolean(existing.force || next.force), enqueuedAt: Math.min(existing.enqueuedAt, next.enqueuedAt), attempts: 0 };
+	const { source: _s, ...rest } = next;
+	const saves = existing.source === "save" && next.source === "save";
+	return { ...rest, ...(saves ? { source: "save" as const } : {}), force: Boolean(existing.force || next.force), enqueuedAt: Math.min(existing.enqueuedAt, next.enqueuedAt), attempts: 0 };
 }
 
 /** UTC day key for the daily call counter. */

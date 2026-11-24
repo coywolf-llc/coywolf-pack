@@ -37,6 +37,8 @@ import {
 	DailyLimitError,
 	type EntryRecord,
 	type MediaRecord,
+	TEXT_HASHES_KEY,
+	type TextHashFillState,
 	type UsageRow,
 	WIKIDATA_BUSY_KEY,
 	bindings,
@@ -53,7 +55,7 @@ import {
 	withLock,
 } from "./store.js";
 import { WikidataBusyError, entityDetails, searchCandidates } from "./wikidata.js";
-import { linkEntry, linkMemos, retryDue, shouldLink, withRetry } from "./glossary-linker.js";
+import { BUSY_MS, changeCounts, linkEntry, linkMemos, retryDue, shouldLink, withRetry, withoutPendingNew } from "./glossary-linker.js";
 import { checkGoneTerms, removeGoneOn } from "./glossary-gone.js";
 import { VERSION } from "../version.js";
 
@@ -97,9 +99,9 @@ function signature(s: Settings, features: FeatureMap): string {
 export interface EntryText {
 	title: string;
 	text: string;
-	/** Title, text and the settings that shape the analysis: a change re-analyzes the entry. */
+	/** Title, text and the settings that shape the analysis: a bulk run re-analyzes the entry when it changes. */
 	hash: string;
-	/** Title and text alone: glossary links run only when it changes (not after a settings change). */
+	/** Title and text alone: a save re-analyzes the entry only when it changes, and glossary links run only then (not after a settings change). */
 	textHash: string;
 	info: CollectionSchemaInfo;
 }
@@ -209,7 +211,12 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 	const records = col<EntryRecord>(ctx, "aiEntries");
 	const key = entryKey(collection, id);
 	const previous = await records.get(key);
-	if (!job.force && previous?.status === "ok" && previous.hash === t.hash) return "skipped";
+	// A save's job runs only for a new title or text (it may have been changed back since); other jobs also for new settings.
+	if (!job.force && previous?.status === "ok" && (previous.hash === t.hash || (job.source === "save" && previous.textHash === t.textHash))) {
+		// An analysis made before 0.51.0 whose hash still matches is of this very title and text: its text hash is recorded (nothing else changes, not its date).
+		if (!previous.textHash && previous.hash === t.hash) await records.put(key, { ...previous, textHash: t.textHash }).catch(() => undefined);
+		return "skipped";
+	}
 
 	const ref = key;
 	// Outputs from an earlier failed attempt on the same text are reused (the job is saved with them on failure).
@@ -239,6 +246,7 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 		entryId: id,
 		title: t.title,
 		hash: t.hash,
+		textHash: t.textHash,
 		status: "ok",
 		error: "",
 		entities,
@@ -255,24 +263,34 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
  * glossary.io links after an analysis: after a first analysis, or one whose
  * text changed since the links last looked (never a re-analysis for new
  * settings). Otherwise the text hash is remembered, so the next text change
- * links. Never fails the analysis: a failure is tried again later.
+ * links. Never fails the analysis: a failure to link is tried again later.
+ * Only that: a retry links without asking whether the text changed, so a
+ * failure before linking was decided (the memo couldn't be read, or the text
+ * couldn't be recorded) schedules none, and the next analysis decides again.
  */
-async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: EntryRecord, previous: EntryRecord | null, textHash: string, budget: Budget): Promise<void> {
+export async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: EntryRecord, previous: EntryRecord | null, textHash: string, budget: Budget): Promise<void> {
 	const key = entryKey(record.collection, record.entryId);
 	const memos = linkMemos(ctx);
+	let linking = false;
 	try {
 		const memo = await memos.get(key);
 		if (!record.entities.length || !shouldLink(memo, previous, textHash)) {
-			if (memo?.textHash !== textHash) await memos.put(key, { ...(memo ?? { collection: record.collection, entryId: record.entryId, linked: [] }), textHash, updated: new Date().toISOString() });
+			// A memo made for an entry with nothing remembered (pendingNew: a possessives-only run's marker, a removal's) becomes an ordinary memo once the text is recorded with it: an edit still pending stays recognizable.
+			if (memo?.textHash !== textHash || memo?.pendingNew) await memos.put(key, { ...withoutPendingNew(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash, updated: new Date().toISOString() });
 			return;
 		}
+		linking = true;
 		budget.used += LINK_SUBREQUESTS;
 		const linked = await linkEntry(ctx, options, record.collection, record.entryId, { record, textHash });
-		if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("glossary.io links", { entry: key, status: linked.status, links: linked.changes.length, ...(linked.dateKept === undefined ? {} : { dateKept: linked.dateKept }) });
+		if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("glossary.io links", { entry: key, status: linked.status, ...changeCounts(linked.changes), ...(linked.dateKept === undefined ? {} : { dateKept: linked.dateKept }) });
 	} catch (error) {
+		if (!linking) {
+			ctx.log.warn("glossary.io links: couldn't read or record what's remembered about the entry; nothing is linked", { entry: key, error: String(error) });
+			return;
+		}
 		ctx.log.warn("glossary.io links failed; trying again later", { entry: key, error: String(error) });
 		const memo = await memos.get(key).catch(() => null);
-		await memos.put(key, withRetry({ ...(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash }, "error")).catch(() => undefined);
+		await memos.put(key, withRetry({ ...withoutPendingNew(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash }, "error")).catch(() => undefined);
 	}
 }
 
@@ -462,6 +480,216 @@ export async function advanceBulk(ctx: PluginContext, s: Settings, features: Fea
 	await ctx.kv.set(bulkKey(kind), state);
 }
 
+// ── Text hashes for analyses made before 0.51.0 ──────────────────
+
+/** Why an analysis wasn't given a text hash. */
+export type TextHashSkip =
+	/** Not "<collection>:<id>". */
+	| "bad key"
+	/** No analysis for the key. */
+	| "not analyzed"
+	/** Its last analysis failed: the next save analyzes it anyway. */
+	| "analysis failed"
+	/** An analysis is queued: it records the text hash. */
+	| "queued"
+	/** The entry is gone. */
+	| "missing"
+	| "unpublished"
+	/** A pending draft: its text may be about to change. */
+	| "draft"
+	/** Saved in the last two minutes: that save may still be queuing an analysis. */
+	| "recently saved"
+	| "no text"
+	/** The title isn't the one analyzed, so the text changed since: its next save analyzes it. */
+	| "title changed"
+	/** The analysis changed while this ran. */
+	| "changed meanwhile"
+	| "error";
+
+export interface TextHashFill {
+	dryRun: boolean;
+	/** Analyses given a text hash (in a dry run, the ones that would be). */
+	filled: string[];
+	skipped: Array<{ key: string; reason: TextHashSkip; error?: string }>;
+	/** `checked`: analyses looked at; `alreadySet`: ones that had a text hash (not listed). */
+	counts: { checked: number; filled: number; alreadySet: number; skipped: number };
+	/** Pages of analyses (no `keys`): pass `cursor` back for the next page while `hasMore`. */
+	cursor?: string;
+	hasMore: boolean;
+}
+
+/** Analyses the scheduled run gives a text hash per run, at most (each reads its entry, which counts 1 against the run's budget). */
+export const TEXT_HASH_FILL_PER_TICK = 10;
+
+/** One analysis: its text hash from the entry as it is now, when nothing can have changed that text since without an analysis on the way. */
+async function fillTextHash(
+	ctx: PluginContext,
+	s: Settings,
+	features: FeatureMap,
+	key: string,
+	known: EntryRecord | undefined,
+	opts: { dryRun: boolean; budget?: Budget },
+): Promise<"filled" | "set" | { reason: TextHashSkip }> {
+	const colon = key.indexOf(":");
+	const collection = key.slice(0, colon);
+	const id = key.slice(colon + 1);
+	if (colon < 1 || !id) return { reason: "bad key" };
+	const records = col<EntryRecord>(ctx, "aiEntries");
+	const record = known ?? (await records.get(key));
+	if (!record) return { reason: "not analyzed" };
+	if (record.status !== "ok") return { reason: "analysis failed" };
+	if (record.textHash) return "set";
+	if (opts.budget) opts.budget.used++;
+	if (await col<QueueJob>(ctx, "aiQueue").get(queueId({ kind: "entry", collection, entryId: id }))) return { reason: "queued" };
+	if (!ctx.content) throw new Error("Content read access is unavailable.");
+	const item = await ctx.content.get(collection, id);
+	if (!item) return { reason: "missing" };
+	if (item.status !== "published") return { reason: "unpublished" };
+	if (item.draftRevisionId && item.draftRevisionId !== item.liveRevisionId) return { reason: "draft" };
+	const savedAt = Date.parse(item.updatedAt);
+	if (Number.isFinite(savedAt) && Date.now() - savedAt < BUSY_MS) return { reason: "recently saved" };
+	const t = await entryText(ctx, collection, item.data, s, features);
+	if (!t) return { reason: "no text" };
+	if (t.title !== record.title) return { reason: "title changed" };
+	if (opts.dryRun) return "filled";
+	// Only the text hash is added: the date and everything else stay (the AI page lists analyses by date).
+	const fresh = await records.getVersioned(key);
+	if (!fresh || fresh.value.status !== "ok" || fresh.value.textHash || fresh.value.hash !== record.hash) return { reason: "changed meanwhile" };
+	const written = await records.compareAndSet(key, fresh.revision, { ...fresh.value, textHash: t.textHash });
+	return written.applied ? "filled" : { reason: "changed meanwhile" };
+}
+
+/**
+ * Before a possessives-only edit of an entry (the ai/glossary-links route with
+ * `only`): its publish fires the save hooks (src/ai/pack.ts), which queue an
+ * analysis when the entry's title or text isn't what its analysis saw, and
+ * that analysis could link. So the edit goes ahead only when those hooks
+ * would queue nothing for the entry as it is now. Null: go ahead. A reason:
+ * the entry must be left alone.
+ *
+ * - An analysis made before 0.51.0 (no text hash) under other settings than
+ *   today's would be queued for a paid re-analysis though its text is the
+ *   same. It gets its text hash first, by fillTextHash's rules (in a dry
+ *   run, nothing is written: it only tells whether it would). When none can
+ *   be recorded and its hash isn't today's: "text hash not recorded (…)".
+ * - An analysis whose text hash isn't the entry's current one (the text
+ *   changed while no job could be queued: AI Enrichment off, the collection
+ *   not covered, the queue cleared, a bulk run stopped) and whose hash isn't
+ *   today's either: "text changed since its analysis", unless a job is
+ *   already queued for the entry (that analysis runs with or without this
+ *   edit).
+ */
+export async function textHashBeforeEdit(ctx: PluginContext, s: Settings, features: FeatureMap, key: string, record: EntryRecord | null | undefined, dryRun: boolean): Promise<string | null> {
+	// No successful analysis: linkEntry skips the entry ("not analyzed").
+	if (!record || record.status !== "ok") return null;
+	const colon = key.indexOf(":");
+	const collection = key.slice(0, colon);
+	const id = key.slice(colon + 1);
+	let now = record;
+	let unfilled: string | null = null;
+	if (!record.textHash) {
+		const outcome = await fillTextHash(ctx, s, features, key, record, { dryRun });
+		// Its text hash is (or, in a dry run, would be) the entry's current one.
+		if (outcome === "filled") return null;
+		if (outcome !== "set") unfilled = outcome.reason;
+		now = (await col<EntryRecord>(ctx, "aiEntries").get(key)) ?? record;
+		// It failed meanwhile: the save hooks queue a failed analysis whatever its hashes say.
+		if (now.status !== "ok") return "not analyzed";
+	}
+	// The save hooks' own condition (onContent in src/ai/pack.ts), on the entry as it is now.
+	const item = await ctx.content?.get(collection, id);
+	const t = item ? await entryText(ctx, collection, item.data, s, features) : null;
+	// No entry or no text: the save hooks queue nothing for it. The same hash or text hash: they skip it.
+	if (!t || now.hash === t.hash || now.textHash === t.textHash) return null;
+	if (!now.textHash) return `text hash not recorded (${unfilled ?? "changed meanwhile"})`;
+	// A job that's already queued analyzes the entry anyway: this edit's publish adds no analysis.
+	if (await col<QueueJob>(ctx, "aiQueue").get(queueId({ kind: "entry", collection, entryId: id }))) return null;
+	return "text changed since its analysis";
+}
+
+/**
+ * Give analyses made before 0.51.0 a text hash, so a save that leaves an
+ * entry's title and text as they are stops re-analyzing it: from the entry's
+ * current title and text, which is what was analyzed unless they changed
+ * since without an analysis on the way. So an analysis is left alone when its
+ * entry has a queued job (that analysis records the hash), a pending draft, a
+ * save in the last two minutes (its job may not be queued yet), or another
+ * title than the one analyzed; and when it isn't published or is gone. A left
+ * analysis keeps today's behavior: its next save that changes anything
+ * analyzes it, and records the hash. `keys` ("posts:<id>"), or a page of
+ * analyses (`limit`, `cursor`). No model calls; `dryRun` writes nothing.
+ * `budget`: each entry read counts 1, and none starts once it's used up;
+ * `deadline` (epoch ms): none starts after it. `complete`: every analysis
+ * on the page was looked at.
+ */
+export async function fillTextHashes(
+	ctx: PluginContext,
+	options: AiOptions,
+	opts: { dryRun?: boolean; keys?: string[]; cursor?: string; limit?: number; budget?: Budget; deadline?: number },
+): Promise<TextHashFill & { complete: boolean }> {
+	const out: TextHashFill & { complete: boolean } = { dryRun: Boolean(opts.dryRun), filled: [], skipped: [], counts: { checked: 0, filled: 0, alreadySet: 0, skipped: 0 }, hasMore: false, complete: true };
+	let list: Array<{ key: string; record?: EntryRecord }>;
+	if (opts.keys) list = opts.keys.map((key) => ({ key }));
+	else {
+		const page = await col<EntryRecord>(ctx, "aiEntries").query({ where: { status: "ok" }, limit: opts.limit ?? 50, cursor: opts.cursor });
+		list = page.items.map((i) => ({ key: i.id, record: i.data }));
+		out.cursor = page.cursor;
+		out.hasMore = page.hasMore;
+	}
+	const [s, features] = await Promise.all([readSettings(ctx, options), ctxFeatures(ctx)]);
+	for (const { key, record } of list) {
+		if ((opts.deadline !== undefined && Date.now() >= opts.deadline) || (opts.budget && opts.budget.used >= opts.budget.max && !record?.textHash)) {
+			out.complete = false;
+			break;
+		}
+		out.counts.checked++;
+		let outcome: Awaited<ReturnType<typeof fillTextHash>> | { reason: "error"; error: string };
+		try {
+			outcome = await fillTextHash(ctx, s, features, key, record, { dryRun: out.dryRun, budget: opts.budget });
+		} catch (error) {
+			outcome = { reason: "error", error: String((error as Error)?.message ?? error).slice(0, 300) };
+		}
+		if (outcome === "set") out.counts.alreadySet++;
+		else if (outcome === "filled") {
+			out.counts.filled++;
+			out.filled.push(key);
+		} else {
+			out.counts.skipped++;
+			out.skipped.push({ key, ...outcome });
+		}
+	}
+	return out;
+}
+
+/**
+ * The scheduled run's share of fillTextHashes, so every site gets the text
+ * hashes without anyone asking: one page per run (after the queue work and
+ * glossary.io links), of at most TEXT_HASH_FILL_PER_TICK analyses and never
+ * more than the run's budget has left. Where it got to is kept
+ * (TEXT_HASHES_KEY) once a page is done, so a run that stops early looks at
+ * the rest of that page next time. After the last page it never runs again:
+ * every later analysis records its text hash.
+ */
+export async function fillTextHashesTick(ctx: PluginContext, options: AiOptions, budget: Budget, deadline: number): Promise<void> {
+	const state = (await ctx.kv.get<TextHashFillState>(TEXT_HASHES_KEY)) ?? { filled: 0, skipped: 0, started: new Date().toISOString() };
+	if (state.done) return;
+	const room = Math.min(TEXT_HASH_FILL_PER_TICK, budget.max - budget.used);
+	if (room <= 0 || Date.now() >= deadline) return;
+	const run = await fillTextHashes(ctx, options, { cursor: state.cursor, limit: room, budget, deadline });
+	// A page looked at again counts its skips once (filled ones are set by then).
+	state.filled += run.counts.filled;
+	if (run.complete) {
+		state.skipped += run.counts.skipped;
+		if (run.hasMore && run.cursor) state.cursor = run.cursor;
+		else {
+			delete state.cursor;
+			state.done = new Date().toISOString();
+			ctx.log.info("AI: text hashes recorded for analyses made before 0.51.0", { filled: state.filled, skipped: state.skipped });
+		}
+	}
+	await ctx.kv.set(TEXT_HASHES_KEY, state);
+}
+
 // ── Tick ─────────────────────────────────────────────────────────
 
 export interface TickResult {
@@ -565,6 +793,8 @@ export async function tick(ctx: PluginContext, options: AiOptions, opts: { maxJo
 			const room = Math.min(3, Math.floor((budget.max - budget.used) / LINK_SUBREQUESTS));
 			if (room > 0) await retryDue(ctx, options, room, { unlink }).catch((error) => ctx.log.warn("glossary.io links retry failed", { error: String(error) }));
 		}
+		// Text hashes for analyses made before 0.51.0 (no model calls), with what the run has left.
+		if (entriesOn) await fillTextHashesTick(ctx, options, budget, started + opts.budgetMs).catch((error) => ctx.log.warn("AI: recording text hashes failed", { error: String(error) }));
 		await pruneUsage(ctx).catch(() => undefined);
 		return out;
 	});

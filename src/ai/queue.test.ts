@@ -65,6 +65,15 @@ test("mergeJob debounces: later due wins, force sticks, attempts reset", () => {
 	assert.deepEqual(logic.mergeJob(null, next), next);
 });
 
+test("mergeJob keeps a save's mark only when both jobs are saves'", () => {
+	const saved: Job = { kind: "entry", collection: "posts", entryId: "1", due: 500, attempts: 0, enqueuedAt: 400, source: "save" };
+	const bulk: Job = { kind: "entry", collection: "posts", entryId: "1", due: 100, attempts: 1, enqueuedAt: 50, force: false };
+	assert.deepEqual(logic.mergeJob(bulk, saved), { kind: "entry", collection: "posts", entryId: "1", due: 500, attempts: 0, enqueuedAt: 50, force: false });
+	assert.deepEqual(logic.mergeJob(saved, bulk), { ...bulk, attempts: 0, enqueuedAt: 50, force: false });
+	assert.deepEqual(logic.mergeJob(saved, { ...saved, due: 900, enqueuedAt: 800 }), { ...saved, due: 900, force: false });
+	assert.deepEqual(logic.mergeJob(null, saved), saved);
+});
+
 test("queueId and dayKey", () => {
 	assert.equal(logic.queueId({ kind: "entry", collection: "posts", entryId: "x" }), "entry:posts:x");
 	assert.equal(logic.queueId({ kind: "media", mediaId: "m" }), "media:m");

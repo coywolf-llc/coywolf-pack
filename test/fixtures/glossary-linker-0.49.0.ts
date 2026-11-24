@@ -1,5 +1,6 @@
-// Coywolf Pack 0.49.0's src/ai/glossary-linker.ts, unchanged except for its import paths: the reference
-// src/ai/glossary-unlink.test.ts compares linkEntry with (keepDates and Remove links to deleted terms off).
+// Coywolf Pack 0.49.0's src/ai/glossary-linker.ts, unchanged except for its imports (paths, and 0.49.0's LinkChange,
+// which is TermLinkChange since 0.51.0): the reference src/ai/glossary-unlink.test.ts compares linkEntry with
+// (keepDates and Remove links to deleted terms off).
 
 /**
  * glossary.io links (AI Enrichment part "ai.glossaryLinks", off by default).
@@ -38,7 +39,7 @@ import type { PluginContext, StorageCollection } from "emdash";
 
 import { isConflict } from "../../src/core/conflict.js";
 import { glossaryFor, isGlossarySite } from "../../src/ai/glossary.js";
-import { type GlossaryTarget, type LinkChange, bodyText, glossarySlug, linkedGlossarySlugs, planGlossaryLinks } from "../../src/ai/glossary-links.js";
+import { type GlossaryTarget, type TermLinkChange as LinkChange, bodyText, glossarySlug, linkedGlossarySlugs, planGlossaryLinks } from "../../src/ai/glossary-links.js";
 // Types only (store.ts loads the providers, which the tests can't run): the collection lookups are repeated here.
 import type { AiOptions, EntryRecord } from "../../src/ai/store.js";
 
