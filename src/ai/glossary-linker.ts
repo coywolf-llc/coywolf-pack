@@ -137,6 +137,12 @@ export const BUSY_MS = 2 * 60_000;
 /** Tries after a draft, conflict, staged edit, missing index or error: 30 min, 1 h, 2 h… then it waits for the next text change. */
 export const MAX_TRIES = 6;
 const RETRY_BASE_MS = 30 * 60_000;
+/**
+ * After links to deleted terms are taken out (or turn out to be gone already), the entry is checked for
+ * new links this long after: just past the busy window its own publish opened. The retry pass is also how
+ * a site asks for an entry to be linked again (by setting retryAt), and a removal mustn't use that ask up.
+ */
+export const LINK_CHECK_MS = BUSY_MS + 60_000;
 
 const entryKey = (collection: string, id: string) => `${collection}:${id}`;
 const store = <T>(ctx: Pick<PluginContext, "storage">, name: string) => (ctx.storage as Record<string, StorageCollection>)[name] as StorageCollection<T>;
@@ -469,7 +475,9 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
  * the edit is live, each removed term's QID leaves `linked`, so the term can
  * be linked again if it comes back. An entry where the link is already gone (a
  * person removed it) is settled without a write, and keeps the QID, as for any
- * link removed by hand. Throws only on unexpected errors.
+ * link removed by hand. Once no removal is left, the entry's links are
+ * checked on a later retry pass (LINK_CHECK_MS), so a request to link it again
+ * that arrived meanwhile isn't lost. Throws only on unexpected errors.
  */
 export async function unlinkEntry(ctx: PluginContext, options: AiOptions, collection: string, id: string): Promise<LinkOutcome> {
 	const key = entryKey(collection, id);
@@ -478,8 +486,10 @@ export async function unlinkEntry(ctx: PluginContext, options: AiOptions, collec
 	const st = memoState(memos, key, (await memos.get(key)) ?? { collection, entryId: id, linked: [], updated: "" }, false);
 	const out = async (status: LinkStatus, slug: string | null, changes: UnlinkChange[] = [], reason?: string, dateKept?: boolean): Promise<LinkOutcome> => {
 		let next = withRetry(st.memo, status, now);
-		// Its own earlier edit went live first: the removal is tried again on the next run.
-		if (reason === FINISHED && next.unlink?.length) next = { ...next, retryAt: now + RETRY_BASE_MS };
+		// Removals done: linking is checked too, on a pass after this one.
+		if (!next.unlink?.length && (status === "unlinked" || status === "unchanged")) next = { ...next, retryAt: now + LINK_CHECK_MS, tries: 0 };
+		// Its own earlier edit went live first: the removal is tried again on a later run.
+		else if (reason === FINISHED && next.unlink?.length) next = { ...next, retryAt: now + RETRY_BASE_MS, tries: 0 };
 		await st.save(next);
 		return outcomeOf(key, slug, status, changes, reason, dateKept);
 	};

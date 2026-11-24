@@ -321,6 +321,9 @@ const SCENARIOS: Array<{ name: string; site: SiteOptions; options?: Record<strin
 	{ name: "glossary.io itself", site: { siteUrl: "https://glossary.io" } },
 	{ name: "retry pass", site: { memo: { linked: [], retryAt: Date.now() - 1000, tries: 1 } }, retry: true },
 	{ name: "keepDates false", site: {}, options: { glossaryLinks: { keepDates: false } } },
+	{ name: "update fails", site: { updateThrows: true } },
+	{ name: "publish fails", site: { publishThrows: true } },
+	{ name: "retry pass, publish fails", site: { publishThrows: true, memo: { linked: [], retryAt: Date.now() - 1000, tries: 2 } }, retry: true },
 ];
 
 test("with keepDates and gone-term removal off, linkEntry and retryDue do byte-for-byte what 0.49.0 did: no D1 call, no extra read or fetch", async () => {
@@ -342,7 +345,7 @@ test("with keepDates and gone-term removal off, linkEntry and retryDue do byte-f
 				keyN = 1000;
 				seed = 0;
 				const site = fakeSite(s.site);
-				const result = s.retry ? await impl.retryDue(site.ctx, s.options ?? {}, 3) : await impl.linkEntry(site.ctx, s.options ?? {}, "posts", "E1", s.link ?? {});
+				const result = await (s.retry ? impl.retryDue(site.ctx, s.options ?? {}, 3) : impl.linkEntry(site.ctx, s.options ?? {}, "posts", "E1", s.link ?? {})).catch((error: Error) => `threw ${error.message}`);
 				const memos = Object.fromEntries([...site.memos].map(([k, v]) => [k, { ...v, updated: "" }]));
 				return { result, calls: site.calls, fetches: site.fetches, memos, item: site.item() };
 			};
@@ -491,8 +494,10 @@ test("unlinkEntry takes the link out, keeps the text, publishes only its own dra
 	const memo = site.memos.get("posts:E1")!;
 	assert.deepEqual(memo.linked, ["Q95"]);
 	assert.equal(memo.unlink, undefined);
-	assert.equal(memo.retryAt, undefined);
 	assert.equal(memo.pendingUnlink, undefined);
+	// Linking is checked again just after the busy window its own publish opened (epoch ms and a number, as site code writes them).
+	assert.ok(Number.isInteger(memo.retryAt) && (memo.retryAt as number) - Date.now() > linker.BUSY_MS && (memo.retryAt as number) - Date.now() <= linker.LINK_CHECK_MS);
+	assert.equal(memo.tries, 0);
 	assert.equal(out.dateKept, undefined, "keepDates off");
 
 	// The term comes back: a later linkEntry links it again.
@@ -505,6 +510,39 @@ test("unlinkEntry takes the link out, keeps the text, publishes only its own dra
 		["StumbleUpon", STUMBLE],
 		["Google", "https://glossary.io/google/"],
 	]);
+});
+
+test("a memo with links to remove and a new definition to link: the removal, then the link, over two retry passes", async () => {
+	glossary.resetGlossaryForTests();
+	// StumbleUpon is gone; Fastmail (newly defined on glossary.io) is mentioned but not linked yet. The site asked for a re-link (retryAt due).
+	const body = [block(["I miss ", { t: "StumbleUpon", href: STUMBLE }, ". Fastmail agrees."])];
+	const site = fakeSite({
+		body,
+		terms: { ...WITHOUT_STUMBLE, Q1: ["fastmail", "An email service.", ["Fastmail"]] },
+		gone: GONE,
+		entities: [ent("Q911595", "StumbleUpon"), ent("Q1", "Fastmail")],
+		memo: { linked: ["Q911595"], unlink: [{ slug: "stumbleupon", qid: "Q911595" }], retryAt: Date.now() - 1000, tries: 0 },
+	});
+	assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 1);
+	assert.deepEqual(linksOf(site.item().data.content), [], "first pass: the removal");
+	const due = site.memos.get("posts:E1")!.retryAt as number;
+	assert.ok(due > Date.now(), "the link check waits out its own publish");
+
+	// A few minutes later (the entry's own save is no longer recent).
+	site.age();
+	const clock = Date.now;
+	Date.now = () => due + 1;
+	try {
+		glossary.resetGlossaryForTests();
+		assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 1);
+	} finally {
+		Date.now = clock;
+	}
+	assert.deepEqual(linksOf(site.item().data.content), [["Fastmail", "https://glossary.io/fastmail/"]], "second pass: the new link");
+	assert.equal(links.bodyText(site.item().data.content), links.bodyText(body));
+	const memo = site.memos.get("posts:E1")!;
+	assert.deepEqual(memo.linked, ["Q1"]);
+	assert.equal(memo.retryAt, undefined, "done");
 });
 
 test("unlinkEntry waits like linking: someone's draft, a recent save, a save before the write, a publish conflict, a collision", async () => {
