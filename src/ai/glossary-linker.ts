@@ -173,6 +173,12 @@ export interface LinkOptions {
 	/** The entry's current text hash, to remember (omit when the analysis isn't of the current text). */
 	textHash?: string;
 	/**
+	 * A person's run whose `textHash` is withheld because a re-analysis is queued: a memo that counts as nothing
+	 * remembered (`pendingNew`) becomes an ordinary one anyway, so that analysis still links. Without this or a
+	 * `textHash` (a retry), such a memo keeps counting as nothing remembered.
+	 */
+	forgetNew?: true;
+	/**
 	 * "possessive": only move possessives inside the entry's glossary.io links.
 	 * Nothing is linked or switched, `exclude` and `textHash` are ignored, what's
 	 * remembered as linked stays as it is, and no retry is scheduled (one already
@@ -311,7 +317,7 @@ export function afterError(memo: LinkMemo, now = Date.now()): LinkMemo {
 
 /**
  * The memo without an edit in progress. `pendingNew` stays: a memo without a text hash that lost it would make the
- * entry's next analysis link (shouldLink). Only recording the text, or a normal run, takes it off (withoutPendingNew).
+ * entry's next analysis link (shouldLink). Only recording the text, a person's run (forgetNew) or a normal run's own edit while it runs takes it off (withoutPendingNew).
  */
 const settled = (memo: LinkMemo): LinkMemo => {
 	const { pending: _p, draft: _d, pendingQids: _q, pendingSlugs: _s, pendingPossessive: _o, pendingUnlink: _u, keepUpdatedAt: _k, ...rest } = memo;
@@ -549,12 +555,15 @@ async function publishOwnEdit(
 	ctx: PluginContext,
 	options: AiOptions,
 	st: MemoState,
-	edit: { collection: string; id: string; item: Item; info: CollectionSchemaInfo; patch: Record<string, unknown>; marker: Partial<LinkMemo>; collided: string },
+	edit: { collection: string; id: string; item: Item; info: CollectionSchemaInfo; patch: Record<string, unknown>; marker: Partial<LinkMemo>; collided: string; ordinary?: boolean },
 ): Promise<{ status: "done" | "conflict" | "collided" | "staged"; dateKept?: boolean }> {
 	const { collection, id, item } = edit;
 	const content = ctx.content!;
 	const keep = keepDatesOn(options);
 	const entry = { collection, id, slug: item.slug };
+	// A normal run's edit (`ordinary`) is never a memo that counts as nothing remembered: with `pendingNew`, its marker (left when the
+	// publish fails or the Worker dies) would read as nothing remembered, and the next analysis wouldn't finish its draft.
+	if (edit.ordinary) st.memo = withoutPendingNew(st.memo);
 	// Re-read right before writing: if anyone saved in between, leave the entry alone.
 	const fresh = await content.get(collection, id);
 	if (!fresh || versionOf(fresh) !== versionOf(item)) return { status: "conflict" };
@@ -634,6 +643,8 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	// A possessives-only run for an entry with nothing remembered starts from a memo that counts as nothing remembered (pendingNew), and its
 	// saves write only its edit in progress (memoState's markersOnly): a memo without a text hash would make the next analysis link.
 	const st = memoState(memos, key, existing ?? (only ? unseenMemo(collection, id) : { collection, entryId: id, linked: [], updated: "" }), Boolean(opts.dryRun), only);
+	/** The memo counted as nothing remembered when this run started (a possessives-only run's marker, a removal's). */
+	const unseen = st.memo.pendingNew === true;
 	/**
 	 * The end of a possessives-only run: only its edit in progress is written (or taken off), over what's stored now, and only when that
 	 * changes something; the text hash, the linked terms and the retry schedule are never touched (a retry would link). A memo with
@@ -651,7 +662,14 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	};
 	const out = async (status: LinkStatus, slug: string | null, changes: LinkChange[] = [], reason?: string, dateKept?: boolean): Promise<LinkOutcome> => {
 		if (opts.dryRun) return outcomeOf(key, slug, status, changes, reason, dateKept);
-		if (!only) await st.save(linkServed(withRetry({ ...withoutPendingNew(st.memo), ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now)));
+		if (!only) {
+			// A memo that counted as nothing remembered becomes an ordinary one only when the text is recorded with it, or a person's run says so
+			// (forgetNew). Otherwise (a retry, which has no text hash) it keeps counting as nothing remembered, also after an edit of this run's
+			// (publishOwnEdit took the flag off while it ran): a memo without a text hash and without the flag would make the next analysis link.
+			const ordinary = Boolean(opts.textHash) || opts.forgetNew === true || !unseen;
+			const base = ordinary ? withoutPendingNew(st.memo) : { ...st.memo, pendingNew: true as const };
+			await st.save(linkServed(withRetry({ ...base, ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now)));
+		}
 		else await endOnly();
 		return outcomeOf(key, slug, status, changes, reason, dateKept);
 	};
@@ -751,6 +769,7 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 		patch,
 		marker: { pendingQids: terms.map((c) => c.qid), pendingSlugs: [...new Set(terms.map((c) => c.slug))], ...(fixes.length ? { pendingPossessive: fixes.length } : {}) },
 		collided: "glossary.io links: a save landed while the links were written; nothing was published. Check the entry's revisions.",
+		ordinary: !only,
 	}).catch(async (error: unknown) => {
 		// A possessives-only run that failed with no edit left pending leaves nothing remembered, as before it ran. (With an edit still
 		// pending, the marker stays so the next possessives-only run finishes it.) Whatever is left when this fails too (a memo that

@@ -33,7 +33,7 @@ import {
 	takeCall,
 	withLock,
 } from "./store.js";
-import { applyDescription, applyImageText, entryText, fillTextHashes, targetCollections, tick } from "./worker.js";
+import { applyDescription, applyImageText, entryText, fillTextHashes, targetCollections, textHashBeforeEdit, tick } from "./worker.js";
 import { type LinkOutcome, linkEntry, linkMemos, withRetry } from "./glossary-linker.js";
 import { decideGone, goneSummary, readGoneState, removeGoneOn } from "./glossary-gone.js";
 import { readOnlyRoute } from "../core/routes.js";
@@ -347,6 +347,13 @@ export function aiRoutes(options: AiOptions) {
 							const record = await records.get(key);
 							if (input.only) {
 								// Possessives only: no links are planned, and nothing about the entry's text or links is remembered.
+								// An analysis made before 0.51.0 gets its text hash first (a dry run only checks that it would): without one, and
+								// with other settings than the analysis had, this edit's publish would queue a paid re-analysis of the same text.
+								const unsafe = await textHashBeforeEdit(ctx, s, features, key, record, Boolean(input.dryRun));
+								if (unsafe) {
+									out.push({ key, slug: null, status: "skipped", changes: [], reason: unsafe });
+									continue;
+								}
 								out.push(await linkEntry(ctx, options, collection, id, { dryRun: input.dryRun, record: record ?? undefined, only: input.only }));
 								continue;
 							}
@@ -354,7 +361,7 @@ export function aiRoutes(options: AiOptions) {
 							// The text hash is remembered unless a re-analysis is queued (it may find other entities and should still link).
 							const queued = await queue.get(queueId({ kind: "entry", collection, entryId: id }));
 							const t = item && !queued ? await entryText(ctx, collection, item.data, s, features) : null;
-							out.push(await linkEntry(ctx, options, collection, id, { dryRun: input.dryRun, exclude: input.exclude?.[key], record: record ?? undefined, textHash: t?.textHash }));
+							out.push(await linkEntry(ctx, options, collection, id, { dryRun: input.dryRun, exclude: input.exclude?.[key], record: record ?? undefined, textHash: t?.textHash, ...(queued ? { forgetNew: true as const } : {}) }));
 						} catch (error) {
 							out.push({ key, slug: null, status: "error", changes: [], reason: String(error).slice(0, 300) });
 							// Tried again by the scheduled run (an unpublished edit of its own is finished then). Never after a possessives-only run: a retry would link.

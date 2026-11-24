@@ -212,7 +212,11 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 	const key = entryKey(collection, id);
 	const previous = await records.get(key);
 	// A save's job runs only for a new title or text (it may have been changed back since); other jobs also for new settings.
-	if (!job.force && previous?.status === "ok" && (previous.hash === t.hash || (job.source === "save" && previous.textHash === t.textHash))) return "skipped";
+	if (!job.force && previous?.status === "ok" && (previous.hash === t.hash || (job.source === "save" && previous.textHash === t.textHash))) {
+		// An analysis made before 0.51.0 whose hash still matches is of this very title and text: its text hash is recorded (nothing else changes, not its date).
+		if (!previous.textHash && previous.hash === t.hash) await records.put(key, { ...previous, textHash: t.textHash }).catch(() => undefined);
+		return "skipped";
+	}
 
 	const ref = key;
 	// Outputs from an earlier failed attempt on the same text are reused (the job is saved with them on failure).
@@ -553,6 +557,32 @@ async function fillTextHash(
 	if (!fresh || fresh.value.status !== "ok" || fresh.value.textHash || fresh.value.hash !== record.hash) return { reason: "changed meanwhile" };
 	const written = await records.compareAndSet(key, fresh.revision, { ...fresh.value, textHash: t.textHash });
 	return written.applied ? "filled" : { reason: "changed meanwhile" };
+}
+
+/**
+ * Before a possessives-only edit of an entry (the ai/glossary-links route with
+ * `only`): its publish fires the save hooks, and for an analysis made before
+ * 0.51.0 (no text hash) under other settings than today's, they'd queue a
+ * paid re-analysis, though the text is the same. So such an analysis gets its
+ * text hash first, by fillTextHash's rules (in a dry run, nothing is written:
+ * it only tells whether it would). Null: go ahead (it has a text hash, would
+ * get one, or its hash still matches, so the save hooks queue nothing). A
+ * reason: no text hash could be recorded and the hash differs, so the entry
+ * must be left alone.
+ */
+export async function textHashBeforeEdit(ctx: PluginContext, s: Settings, features: FeatureMap, key: string, record: EntryRecord | null | undefined, dryRun: boolean): Promise<string | null> {
+	if (!record || record.status !== "ok" || record.textHash) return null;
+	const outcome = await fillTextHash(ctx, s, features, key, record, { dryRun });
+	if (outcome === "filled" || outcome === "set") return null;
+	const colon = key.indexOf(":");
+	const collection = key.slice(0, colon);
+	const now = (await col<EntryRecord>(ctx, "aiEntries").get(key)) ?? record;
+	if (now.status !== "ok" || now.textHash) return null;
+	const item = await ctx.content?.get(collection, key.slice(colon + 1));
+	const t = item ? await entryText(ctx, collection, item.data, s, features) : null;
+	// No entry or no text: the save hooks queue nothing for it. The same hash: they skip it, as before 0.51.0.
+	if (!t || t.hash === now.hash) return null;
+	return `text hash not recorded (${outcome.reason})`;
 }
 
 /**

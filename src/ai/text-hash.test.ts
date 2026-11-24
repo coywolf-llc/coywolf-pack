@@ -324,6 +324,26 @@ test("an analysis without a text hash (made before 0.51.0) queues as before: onl
 
 // ── Jobs ─────────────────────────────────────────────────────────
 
+test("a job skipped because the hash still matches records the text hash of an analysis made before 0.51.0, and nothing else", async () => {
+	const site = fakeSite();
+	const entry = site.add(item("A"));
+	assert.equal(await analyze(site, jobFor("A")), "done");
+	const old = legacy(site.record("A")!);
+	await site.storage.aiEntries.put("articles:A", old);
+	const before = site.writes("aiEntries").length;
+	assert.equal(await analyze(site, jobFor("A")), "skipped");
+	assert.deepEqual(site.record("A"), { ...old, textHash: (await site.textOf(entry)).textHash }, "the same hash means the same title and text: only the text hash is added, not the date");
+	assert.equal(site.writes("aiEntries").length, before + 1);
+	assert.equal(await site.calls(), 0);
+	// With a text hash there's nothing to write.
+	assert.equal(await analyze(site, jobFor("A", { source: "save" })), "skipped");
+	assert.equal(site.writes("aiEntries").length, before + 1);
+	// A save's job skipped for its text hash alone (other settings) has one already: nothing is written either.
+	site.settings.set("aiModel", "model-2");
+	assert.equal(await analyze(site, jobFor("A", { source: "save" })), "skipped");
+	assert.equal(site.writes("aiEntries").length, before + 1);
+});
+
 test("a save's job whose text is unchanged is skipped without a model call; any other job keeps 0.50.0's check", async () => {
 	const site = fakeSite({ features: WITH_CALLS });
 	const entry = site.add(item("A"));
