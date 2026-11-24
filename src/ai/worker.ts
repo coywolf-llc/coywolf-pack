@@ -53,6 +53,7 @@ import {
 	withLock,
 } from "./store.js";
 import { WikidataBusyError, entityDetails, searchCandidates } from "./wikidata.js";
+import { linkEntry, linkMemos, retryDue, shouldLink, withRetry } from "./glossary-linker.js";
 import { VERSION } from "../version.js";
 
 type Settings = AiSettings & { apiKey: string };
@@ -95,7 +96,10 @@ function signature(s: Settings, features: FeatureMap): string {
 export interface EntryText {
 	title: string;
 	text: string;
+	/** Title, text and the settings that shape the analysis: a change re-analyzes the entry. */
 	hash: string;
+	/** Title and text alone: glossary links run only when it changes (not after a settings change). */
+	textHash: string;
 	info: CollectionSchemaInfo;
 }
 
@@ -108,7 +112,7 @@ export async function entryText(ctx: PluginContext, collection: string, data: Re
 	const fields = [...info.fields].sort((a, b) => a.sortOrder - b.sortOrder).filter((f) => f.slug !== titleField);
 	const text = entryPlainText(data, fields);
 	if (!text.trim()) return null;
-	return { title, text, info, hash: await sha256(`${title}\n${text}\n${signature(s, features)}`) };
+	return { title, text, info, hash: await sha256(`${title}\n${text}\n${signature(s, features)}`), textHash: await sha256(`${title}\n${text}`) };
 }
 
 const language = (ctx: PluginContext) => (ctx.site?.locale || "en").slice(0, 2).toLowerCase() || "en";
@@ -117,8 +121,10 @@ const language = (ctx: PluginContext) => (ctx.site?.locale || "en").slice(0, 2).
  * Workers Free plan allows 50 subrequests; this leaves room for the host's own.
  */
 export const SUBREQUEST_BUDGET = 40;
-/** Worst case for one job: entry = extraction + disambiguation + description + 12 searches + 1 details; image = 1 call. */
-export const WORST_CASE_SUBREQUESTS = { entry: 16, media: 1 } as const;
+/** Publishing glossary links runs other plugins' publish hooks (cache purge, IndexNow…): counted as 3. */
+const LINK_SUBREQUESTS = 3;
+/** Worst case for one job: entry = extraction + disambiguation + description + 12 searches + 1 details (+ glossary links' publish); image = 1 call. */
+export const WORST_CASE_SUBREQUESTS = { entry: 16 + LINK_SUBREQUESTS, media: 1 } as const;
 
 export interface Budget {
 	used: number;
@@ -227,7 +233,7 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 		}
 	}
 
-	await records.put(key, {
+	const record: EntryRecord = {
 		collection,
 		entryId: id,
 		title: t.title,
@@ -238,8 +244,35 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 		description,
 		descriptionStatus,
 		updated: new Date().toISOString(),
-	});
+	};
+	await records.put(key, record);
+	if (wantEntities && isOn(features, "ai.glossaryLinks")) await afterAnalysis(ctx, options, record, previous, t.textHash, budget);
 	return "done";
+}
+
+/**
+ * glossary.io links after an analysis: after a first analysis, or one whose
+ * text changed since the links last looked (never a re-analysis for new
+ * settings). Otherwise the text hash is remembered, so the next text change
+ * links. Never fails the analysis: a failure is tried again later.
+ */
+async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: EntryRecord, previous: EntryRecord | null, textHash: string, budget: Budget): Promise<void> {
+	const key = entryKey(record.collection, record.entryId);
+	const memos = linkMemos(ctx);
+	try {
+		const memo = await memos.get(key);
+		if (!record.entities.length || !shouldLink(memo, previous, textHash)) {
+			if (memo?.textHash !== textHash) await memos.put(key, { ...(memo ?? { collection: record.collection, entryId: record.entryId, linked: [] }), textHash, updated: new Date().toISOString() });
+			return;
+		}
+		budget.used += LINK_SUBREQUESTS;
+		const linked = await linkEntry(ctx, options, record.collection, record.entryId, { record, textHash });
+		if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("glossary.io links", { entry: key, status: linked.status, links: linked.changes.length });
+	} catch (error) {
+		ctx.log.warn("glossary.io links failed; trying again later", { entry: key, error: String(error) });
+		const memo = await memos.get(key).catch(() => null);
+		await memos.put(key, withRetry({ ...(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash }, "error")).catch(() => undefined);
+	}
 }
 
 /**
@@ -514,6 +547,11 @@ export async function tick(ctx: PluginContext, options: AiOptions, opts: { maxJo
 					await queue.put(id, { ...job, attempts: job.attempts + 1, deferrals: 0, due: next, lastError: message });
 				}
 			}
+		}
+		// glossary.io links that waited (a draft, a busy or changed entry, no index yet): no model calls.
+		if (isOn(features, "ai.glossaryLinks") && isOn(features, "ai.entities") && Date.now() - started < opts.budgetMs) {
+			const room = Math.min(3, Math.floor((budget.max - budget.used) / LINK_SUBREQUESTS));
+			if (room > 0) await retryDue(ctx, options, room).catch((error) => ctx.log.warn("glossary.io links retry failed", { error: String(error) }));
 		}
 		await pruneUsage(ctx).catch(() => undefined);
 		return out;

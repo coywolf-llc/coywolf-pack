@@ -8,7 +8,7 @@ import { z } from "zod";
 
 import { ctxFeatures, isOn, requireFeature } from "../core/features.js";
 import { parseInput } from "../shared.js";
-import { type QueueJob, cleanText, DESCRIPTION_MAX, ALT_MAX, CAPTION_MAX } from "./logic.js";
+import { type QueueJob, cleanText, DESCRIPTION_MAX, ALT_MAX, CAPTION_MAX, queueId } from "./logic.js";
 import { type ModelOption, PROVIDERS, chat, listModels } from "./providers.js";
 import {
 	type AiOptions,
@@ -29,8 +29,10 @@ import {
 	queueCounts,
 	readSettings,
 	takeCall,
+	withLock,
 } from "./store.js";
-import { applyDescription, applyImageText, targetCollections, tick } from "./worker.js";
+import { applyDescription, applyImageText, entryText, targetCollections, tick } from "./worker.js";
+import { type LinkOutcome, linkEntry, linkMemos, withRetry } from "./glossary-linker.js";
 import { readOnlyRoute } from "../core/routes.js";
 
 const asCtx = (ctx: unknown) => ctx as PluginContext;
@@ -53,6 +55,14 @@ const settingsInput = z.object({
 	aiImageCaption: z.boolean().optional(),
 	aiImageOverwrite: z.boolean().optional(),
 	aiImageInstructions: z.string().max(4000).optional(),
+});
+
+const glossaryLinksInput = z.object({
+	dryRun: z.boolean().optional(),
+	keys: z.array(z.string().min(3).max(300)).min(1).max(25).optional(),
+	cursor: z.string().max(2000).optional(),
+	limit: z.number().int().min(1).max(25).optional(),
+	exclude: z.record(z.string().max(300), z.array(z.string().regex(/^Q[1-9][0-9]{0,11}$/)).max(100)).optional(),
 });
 
 const entryRef = z.object({ collection: z.string().min(1).max(200), id: z.string().min(1).max(200) });
@@ -82,6 +92,7 @@ export function aiRoutes(options: AiOptions) {
 						descriptions: isOn(features, "ai.descriptions"),
 						imageText: isOn(features, "ai.imageText"),
 						entitiesStandalone: isOn(features, "ai.entitiesStandalone"),
+						glossaryLinks: isOn(features, "ai.glossaryLinks"),
 					},
 					queue: await queueCounts(ctx),
 					bulk: { entries: entriesBulk, media: mediaBulk },
@@ -254,6 +265,70 @@ export function aiRoutes(options: AiOptions) {
 				const { collection, id } = parseInput(entryRef, (raw as { input: unknown }).input);
 				await enqueue(ctx, { kind: "entry", collection, entryId: id, due: Date.now(), force: true });
 				return { queued: true };
+			},
+		}),
+
+		/**
+		 * glossary.io links for entries analyzed before the part was on (or to redo
+		 * a batch): the same code the analysis runs. `keys` ("posts:<id>") or pages
+		 * of analyzed entries (`cursor`); `dryRun` plans without writing (allowed
+		 * with the part off); `exclude` lists QIDs never to link, per entry key.
+		 */
+		"ai/glossary-links": definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (raw) => {
+				const ctx = asCtx(raw);
+				const input = parseInput(glossaryLinksInput, (raw as { input: unknown }).input);
+				const features = await ctxFeatures(ctx);
+				if (!input.dryRun && !isOn(features, "ai.glossaryLinks")) throw PluginRouteError.notFound("Turn on glossary.io links first (AI Enrichment).");
+				const records = col<EntryRecord>(ctx, "aiEntries");
+				let keys = input.keys;
+				let cursor: string | undefined;
+				let hasMore = false;
+				if (!keys) {
+					const page = await records.query({ where: { status: "ok" }, orderBy: { updated: "desc" }, limit: input.limit ?? 10, cursor: input.cursor });
+					keys = page.items.map((i) => i.id);
+					cursor = page.cursor;
+					hasMore = page.hasMore;
+				}
+				const s = await readSettings(ctx, options);
+				const list = keys;
+				const queue = col<QueueJob>(ctx, "aiQueue");
+				const run = async () => {
+					const out: Array<LinkOutcome | { key: string; slug: null; status: "skipped" | "error"; changes: never[]; reason: string }> = [];
+					for (const key of list) {
+						const colon = key.indexOf(":");
+						const collection = key.slice(0, colon);
+						const id = key.slice(colon + 1);
+						if (colon < 1 || !id) {
+							out.push({ key, slug: null, status: "skipped", changes: [], reason: "bad key" });
+							continue;
+						}
+						try {
+							const record = await records.get(key);
+							const item = record?.status === "ok" ? await ctx.content?.get(collection, id) : null;
+							// The text hash is remembered unless a re-analysis is queued (it may find other entities and should still link).
+							const queued = await queue.get(queueId({ kind: "entry", collection, entryId: id }));
+							const t = item && !queued ? await entryText(ctx, collection, item.data, s, features) : null;
+							out.push(await linkEntry(ctx, options, collection, id, { dryRun: input.dryRun, exclude: input.exclude?.[key], record: record ?? undefined, textHash: t?.textHash }));
+						} catch (error) {
+							out.push({ key, slug: null, status: "error", changes: [], reason: String(error).slice(0, 300) });
+							// Tried again by the scheduled run (an unpublished edit of its own is finished then).
+							if (!input.dryRun) {
+								const memos = linkMemos(ctx);
+								const memo = await memos.get(key).catch(() => null);
+								await memos.put(key, withRetry(memo ?? { collection, entryId: id, linked: [], updated: new Date().toISOString() }, "error")).catch(() => undefined);
+							}
+						}
+					}
+					return out;
+				};
+				// Writes never run alongside the scheduled AI run (it analyzes and links too); a dry run writes nothing.
+				const results = input.dryRun ? await run() : await withLock(ctx, 5 * 60_000, run);
+				if (!results) throw new PluginRouteError("CONFLICT", "The scheduled AI run is working; try again in a minute.", 409);
+				return { results, cursor, hasMore };
 			},
 		}),
 

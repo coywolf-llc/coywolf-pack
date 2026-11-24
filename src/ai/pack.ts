@@ -46,6 +46,12 @@ const FEATURES = [
 		default: true,
 	},
 	{
+		id: "ai.glossaryLinks",
+		label: "glossary.io links",
+		description: "After an entry's entities are found, link each one that has a glossary.io definition to it, once per entry: an existing link to its home page, Wikipedia article or profile is switched, or its first mention is linked. Internal and affiliate links never change.",
+		default: false,
+	},
+	{
 		id: "ai.descriptions",
 		label: "Meta descriptions",
 		description: "Write meta descriptions for published entries that don't have one, as suggestions or filled in automatically.",
@@ -122,7 +128,7 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		tasks: [{ name: AI_TASK, schedule: "*/2 * * * *", handler: (ctx: PluginContext) => tick(ctx, options, { budgetMs: 8 * 60_000 }).then(() => undefined) }],
 		adminPages: [{ path: "/ai", label: "AI Enrichment", icon: "sparkle" }],
 		storage: STORAGE,
-		capabilities: ["network:request", "content:read", "content:write", "schema:read", "media:read", "media:bytes:read", "media:metadata:write"],
+		capabilities: ["network:request", "content:read", "content:write", "content:revisions:read", "content:publish", "schema:read", "media:read", "media:bytes:read", "media:metadata:write"],
 		allowedHosts: [...PROVIDER_HOSTS, WIKIDATA_HOST, WIKIDATA_QUERY_HOST, GLOSSARY_HOST],
 	};
 }
