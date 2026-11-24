@@ -53,7 +53,7 @@ import {
 	withLock,
 } from "./store.js";
 import { WikidataBusyError, entityDetails, searchCandidates } from "./wikidata.js";
-import { linkEntry, linkMemos, retryDue, shouldLink, withRetry } from "./glossary-linker.js";
+import { changeCounts, linkEntry, linkMemos, retryDue, shouldLink, withRetry } from "./glossary-linker.js";
 import { checkGoneTerms, removeGoneOn } from "./glossary-gone.js";
 import { VERSION } from "../version.js";
 
@@ -268,7 +268,7 @@ async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: Ent
 		}
 		budget.used += LINK_SUBREQUESTS;
 		const linked = await linkEntry(ctx, options, record.collection, record.entryId, { record, textHash });
-		if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("glossary.io links", { entry: key, status: linked.status, links: linked.changes.length, ...(linked.dateKept === undefined ? {} : { dateKept: linked.dateKept }) });
+		if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("glossary.io links", { entry: key, status: linked.status, ...changeCounts(linked.changes), ...(linked.dateKept === undefined ? {} : { dateKept: linked.dateKept }) });
 	} catch (error) {
 		ctx.log.warn("glossary.io links failed; trying again later", { entry: key, error: String(error) });
 		const memo = await memos.get(key).catch(() => null);

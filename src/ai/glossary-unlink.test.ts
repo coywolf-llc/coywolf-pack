@@ -3,7 +3,10 @@
  * deleted terms (removeGlossaryLinks, unlinkEntry), keepDates in the linker,
  * and proof that with both off linkEntry does exactly what 0.49.0 did (its
  * source is kept in test/fixtures/glossary-linker-0.49.0.ts), apart from
- * 0.51.0's possessives moved inside glossary.io links (one test shows that).
+ * 0.51.0's two intended differences, each shown by a test: a possessive after
+ * an existing glossary.io link moves inside it (the linker), and a new link's
+ * anchor includes the possessive after the name (the rules, which both the
+ * 0.49.0 linker here and the current one run).
  * Run: node --import ./test/ts-resolve.mjs --test src/ai/glossary-unlink.test.ts
  */
 import assert from "node:assert/strict";
@@ -369,7 +372,8 @@ const SCENARIOS: Array<{ name: string; site: SiteOptions; options?: Record<strin
 		site: { draft: "R7", version: 9, publishConflict: true, memo: { pending: 3, draft: "R7", pendingQids: ["Q911595"], pendingSlugs: ["stumbleupon"], linked: [], retryAt: Date.now() - 1000, tries: 1 } },
 		retry: true,
 	},
-	// Since 0.51.0 a possessive right after a glossary.io link moves inside it; none of these has one.
+	// Since 0.51.0 a possessive right after a glossary.io link moves inside it, and a new link includes the possessive
+	// after the name; none of these has either (those two are the tests after this one).
 	{ name: "a possessive after another site's link, and a contraction", site: { body: [block(["I miss ", { t: "StumbleUpon", href: "https://en.wikipedia.org/wiki/StumbleUpon" }, ". ", { t: "Fastmail", href: "https://www.fastmail.com/" }, "'s plans. Google agrees, it's true."])] } },
 	{ name: "a space before 's after a glossary.io link", site: { body: [block(["I miss ", { t: "StumbleUpon", href: STUMBLE }, " 's era. Google agrees."])] } },
 ];
@@ -385,7 +389,7 @@ async function runScenario(impl: typeof old049, s: (typeof SCENARIOS)[number], r
 	return { result, calls: site.calls, fetches: site.fetches, memos, item: site.item() };
 }
 
-test("with keepDates and gone-term removal off, linkEntry and retryDue do byte-for-byte what 0.49.0 did (for entries without a possessive after a glossary.io link): no D1 call, no extra read, fetch or log line", async () => {
+test("with keepDates and gone-term removal off, linkEntry and retryDue do byte-for-byte what 0.49.0 did (for entries without a possessive after a glossary.io link or after a name that gets linked): no D1 call, no extra read, fetch or log line", async () => {
 	const spy = keepDatesSpy();
 	// New span and markDef keys are random, and retry times read the clock: the same for both runs.
 	const clock = Date.now;
@@ -413,7 +417,7 @@ test("with keepDates and gone-term removal off, linkEntry and retryDue do byte-f
 	}
 });
 
-test("the one intended difference from 0.49.0 (since 0.51.0): a possessive after a glossary.io link moves inside it, in one publish, and links no term", async () => {
+test("intended difference from 0.49.0, 1 of 2 (since 0.51.0): a possessive after an existing glossary.io link moves inside it, in one publish, and links no term", async () => {
 	const body = [block(["I miss ", { t: "StumbleUpon", href: STUMBLE }, "'s randomness. ", { t: "Google", href: "https://glossary.io/google/" }, " agrees."])];
 	const scenario = { name: "a possessive after a glossary.io link", site: { body } };
 	const before = await runScenario(old049, scenario, () => undefined);
@@ -441,6 +445,33 @@ test("the one intended difference from 0.49.0 (since 0.51.0): a possessive after
 	const memo = (run: typeof now) => run.memos["posts:E1"] as Record<string, unknown>;
 	assert.deepEqual(memo(now).linked, memo(before).linked, "the same terms remembered as linked");
 	assert.equal(memo(now).pendingPossessive, undefined);
+});
+
+test("intended difference from 0.49.0, 2 of 2 (since 0.51.0): a new link's anchor includes the possessive after a plain mention; the linker itself does what 0.49.0's did", async () => {
+	// The rules (planGlossaryLinks) are shared by the 0.49.0 linker kept here and the current one, so this difference
+	// shows in both runs: Pack 0.49.0 linked "Google" and left "'s" outside.
+	const body = [block(["I miss StumbleUpon’s randomness. Google's search agrees."])];
+	const scenario = { name: "a possessive after a plain mention", site: { body } };
+	const before = await runScenario(old049, scenario, () => undefined);
+	const now = await runScenario(linker, scenario, () => undefined);
+	const result = now.result as { status: string; changes: Array<{ action: string; anchor: string; qid: string }> };
+	assert.equal(result.status, "linked");
+	assert.deepEqual(result.changes.map((c) => [c.action, c.anchor, c.qid]), [
+		["add", "StumbleUpon’s", "Q911595"],
+		["add", "Google's", "Q95"],
+	]);
+	assert.deepEqual(linksOf(now.item.data.content), [
+		["StumbleUpon’s", STUMBLE],
+		["Google's", "https://glossary.io/google/"],
+	]);
+	assert.equal(links.bodyText(now.item.data.content), links.bodyText(body), "the text is unchanged");
+	assert.deepEqual(now.calls.filter((c) => c.startsWith("publish")), ["publish rev-4"]);
+	// No possessive is left outside a link, so the linker has no fix to make: the same result, memo and writes as 0.49.0's linker.
+	assert.ok(!result.changes.some((c) => c.action === "possessive"));
+	assert.deepEqual((before.result as typeof result).changes.map((c) => [c.action, c.anchor, c.qid]), result.changes.map((c) => [c.action, c.anchor, c.qid]));
+	assert.deepEqual(linksOf(before.item.data.content), linksOf(now.item.data.content));
+	assert.deepEqual(now.memos, before.memos);
+	assert.deepEqual(now.calls.map((c) => c.split(" ")[0]), before.calls.map((c) => c.split(" ")[0]));
 });
 
 // ── keepDates ────────────────────────────────────────────────────

@@ -44,7 +44,9 @@
  * right after any glossary.io link in the entry inside it ("[Google]'s" becomes
  * "[Google's]"; src/ai/glossary-links.ts linkPossessives), with the same safety.
  * Such a fix isn't a link to a term (memo.linked is unchanged by it); an entry
- * whose only changes are fixes like that ends "linked" too.
+ * whose only changes are fixes like that ends "linked" too. A possessives-only
+ * run (LinkOptions.only) makes only those fixes: it never links or switches,
+ * remembers nothing as linked, and schedules no retry.
  *
  * "Link existing entries" (POST ai/glossary-links) runs the same code on
  * entries analyzed before the part was turned on, with a dry run.
@@ -68,10 +70,12 @@ import {
 	bodyText,
 	glossarySlug,
 	glossarySlugsIn,
+	linkHrefsIn,
 	linkPossessives,
 	linkedGlossarySlugs,
 	planGlossaryLinks,
 	removeGlossaryLinks,
+	withoutLinks,
 } from "./glossary-links.js";
 import { type PublishedRow, restoreUpdatedAt } from "./keep-date.js";
 // Types only (store.ts loads the providers, which the tests can't run): the collection lookups are repeated here.
@@ -135,6 +139,8 @@ export interface LinkMemo {
 	pendingSlugs?: string[];
 	/** That edit's possessives moved inside glossary.io links (how many), so its draft can be recognized too. */
 	pendingPossessive?: number;
+	/** That edit is a possessives-only run's, for an entry with nothing remembered before it: once it's done, nothing stays remembered. */
+	pendingNew?: true;
 	/** A removal in progress: the glossary slugs it takes out (instead of pendingQids and pendingSlugs). */
 	pendingUnlink?: string[];
 	/** keepDates: the entry's updated date before the edit in progress, put back once it's published. */
@@ -160,7 +166,24 @@ export interface LinkOptions {
 	record?: EntryRecord;
 	/** The entry's current text hash, to remember (omit when the analysis isn't of the current text). */
 	textHash?: string;
+	/**
+	 * "possessive": only move possessives inside the entry's glossary.io links.
+	 * Nothing is linked or switched, `exclude` and `textHash` are ignored, what's
+	 * remembered as linked stays as it is, and no retry is scheduled (one already
+	 * waiting stays): an entry that has to wait (draft, busy, conflict, staged)
+	 * is fixed by running it again. The entry needn't be analyzed.
+	 */
+	only?: "possessive";
 }
+
+/** For the logs: how many of an outcome's changes are links to terms (`links`: made, switched or removed) and, when there are any, how many are possessives moved inside a link (`possessives`). */
+export function changeCounts(changes: ReadonlyArray<LinkChange | UnlinkChange>): { links: number; possessives?: number } {
+	const possessives = changes.filter((c) => "action" in c && c.action === "possessive").length;
+	return { links: changes.length - possessives, ...(possessives ? { possessives } : {}) };
+}
+
+/** The possessive fix linkEntry runs (tests replace it). */
+export const possessivesIo = { fix: (content: unknown) => linkPossessives(content) };
 
 /** Saved this recently: someone may still be editing. */
 export const BUSY_MS = 2 * 60_000;
@@ -267,7 +290,7 @@ export function afterError(memo: LinkMemo, now = Date.now()): LinkMemo {
 
 /** The memo without an edit in progress. */
 const settled = (memo: LinkMemo): LinkMemo => {
-	const { pending: _p, draft: _d, pendingQids: _q, pendingSlugs: _s, pendingPossessive: _o, pendingUnlink: _u, keepUpdatedAt: _k, ...rest } = memo;
+	const { pending: _p, draft: _d, pendingQids: _q, pendingSlugs: _s, pendingPossessive: _o, pendingNew: _n, pendingUnlink: _u, keepUpdatedAt: _k, ...rest } = memo;
 	return rest as LinkMemo;
 };
 
@@ -543,13 +566,21 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	const key = entryKey(collection, id);
 	const memos = linkMemos(ctx);
 	const now = Date.now();
-	const st = memoState(memos, key, (await memos.get(key)) ?? { collection, entryId: id, linked: [], updated: "" }, Boolean(opts.dryRun));
+	const only = opts.only === "possessive";
+	const existing = await memos.get(key);
+	const st = memoState(memos, key, existing ?? { collection, entryId: id, linked: [], updated: "" }, Boolean(opts.dryRun));
+	// A possessives-only run for an entry with nothing remembered leaves nothing remembered (a memo without a text hash would make the next analysis link).
+	const fresh = only && (!existing || existing.pendingNew === true);
 	const out = async (status: LinkStatus, slug: string | null, changes: LinkChange[] = [], reason?: string, dateKept?: boolean): Promise<LinkOutcome> => {
-		if (!opts.dryRun) await st.save(linkServed(withRetry({ ...st.memo, ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now)));
+		if (opts.dryRun) return outcomeOf(key, slug, status, changes, reason, dateKept);
+		// A possessives-only run changes neither the text hash nor the retry schedule: a retry would link.
+		if (!only) await st.save(linkServed(withRetry({ ...st.memo, ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now)));
+		else if (fresh && st.memo.pending === undefined) await memos.delete(key);
+		else await st.save(st.memo);
 		return outcomeOf(key, slug, status, changes, reason, dateKept);
 	};
 	// Exclusions count from the start, so a run that has to wait (a draft, a recent save) can't link them later.
-	if (opts.exclude?.length && !opts.dryRun) st.memo = { ...st.memo, linked: [...new Set([...st.memo.linked, ...opts.exclude])].sort() };
+	if (opts.exclude?.length && !opts.dryRun && !only) st.memo = { ...st.memo, linked: [...new Set([...st.memo.linked, ...opts.exclude])].sort() };
 
 	const content = ctx.content;
 	if (!content?.get || !content.update || !content.getVersioned || !content.publish) throw new Error("Content write access is unavailable.");
@@ -558,7 +589,8 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	if (!config.siteHosts.length) return out("skipped", null, [], "the site's own URL isn't known");
 
 	const record = opts.record ?? (await store<EntryRecord>(ctx, "aiEntries").get(key));
-	if (!record || record.status !== "ok") return out("skipped", null, [], "not analyzed");
+	if (!only && (!record || record.status !== "ok")) return out("skipped", null, [], "not analyzed");
+	const entities = record?.status === "ok" ? record.entities : [];
 	const info = await ctx.schema?.getCollection(collection);
 	const fields = (info?.fields ?? []).filter((f) => f.type === "portableText").sort((a, b) => a.sortOrder - b.sortOrder);
 	if (!info || !fields.length) return out("skipped", null, [], "no Portable Text field");
@@ -570,48 +602,58 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	const waiting = await waitOrFinish(ctx, options, st, { collection, id, item, fields: fields.map((f) => f.slug), now, dryRun: opts.dryRun });
 	if (waiting) return out(waiting.status, item.slug, [], waiting.reason, waiting.dateKept);
 
-	const index = await glossaryFor(ctx, ctx.site?.url, { anySwitch: true });
-	if (!index) return out("no-index", item.slug);
+	// A possessives-only run uses the index only to name the terms of the links it fixes: it does without one.
+	const index = only ? await glossaryFor(ctx, ctx.site?.url, { anySwitch: true }).catch(() => null) : await glossaryFor(ctx, ctx.site?.url, { anySwitch: true });
+	if (!index && !only) return out("no-index", item.slug);
 	const lookup = (qid: string): GlossaryTarget | null => {
-		const term = index(qid);
+		const term = index ? index(qid) : null;
 		const slug = term ? glossarySlug(term.url) : null;
 		return term && slug ? { slug, names: term.names ?? [] } : null;
 	};
 
-	// One link per entity across all the entry's Portable Text fields.
-	const handled = new Set([...st.memo.linked, ...(opts.exclude ?? [])]);
-	const linkedSlugs = new Set(fields.flatMap((f) => [...linkedGlossarySlugs(item.data[f.slug])]));
-	for (const e of record.entities) {
-		const t = lookup(e.qid);
-		if (t && linkedSlugs.has(t.slug)) handled.add(e.qid);
-	}
-	const exclude = new Set(handled);
-	// An affiliate link in any field rules its entity out in all of them.
-	for (const field of fields) {
-		const pre = planGlossaryLinks(item.data[field.slug], record.entities, lookup, { siteHosts: config.siteHosts, shortHosts: config.shortHosts });
-		for (const s of pre.skipped) if (s.why === "affiliate") exclude.add(s.qid);
-	}
+	const handled = new Set<string>();
 	const patch: Record<string, unknown> = {};
 	const terms: TermLinkChange[] = [];
-	for (const field of fields) {
-		const plan = planGlossaryLinks(item.data[field.slug], record.entities, lookup, { siteHosts: config.siteHosts, shortHosts: config.shortHosts, exclude });
-		for (const c of plan.changes) exclude.add(c.qid);
-		if (plan.changes.length) {
-			patch[field.slug] = plan.content;
-			terms.push(...plan.changes);
+	// A possessives-only run plans no links at all.
+	if (!only) {
+		// One link per entity across all the entry's Portable Text fields.
+		for (const qid of [...st.memo.linked, ...(opts.exclude ?? [])]) handled.add(qid);
+		const linkedSlugs = new Set(fields.flatMap((f) => [...linkedGlossarySlugs(item.data[f.slug])]));
+		for (const e of entities) {
+			const t = lookup(e.qid);
+			if (t && linkedSlugs.has(t.slug)) handled.add(e.qid);
+		}
+		const exclude = new Set(handled);
+		// An affiliate link in any field rules its entity out in all of them.
+		for (const field of fields) {
+			const pre = planGlossaryLinks(item.data[field.slug], entities, lookup, { siteHosts: config.siteHosts, shortHosts: config.shortHosts });
+			for (const s of pre.skipped) if (s.why === "affiliate") exclude.add(s.qid);
+		}
+		for (const field of fields) {
+			const plan = planGlossaryLinks(item.data[field.slug], entities, lookup, { siteHosts: config.siteHosts, shortHosts: config.shortHosts, exclude });
+			for (const c of plan.changes) exclude.add(c.qid);
+			if (plan.changes.length) {
+				patch[field.slug] = plan.content;
+				terms.push(...plan.changes);
+			}
 		}
 	}
 	// Possessives right after glossary.io links (this part's, switched ones, a person's) go inside them: "[Google]'s" → "[Google's]".
+	// A field whose fix fails (content the fix can't read) keeps its possessives where they are; the term links still go ahead.
 	const fixes: PossessiveFix[] = [];
 	for (const field of fields) {
-		const fixed = linkPossessives(field.slug in patch ? patch[field.slug] : item.data[field.slug]);
-		if (!fixed.fixes.length) continue;
-		patch[field.slug] = fixed.content;
-		fixes.push(...fixed.fixes);
+		try {
+			const fixed = possessivesIo.fix(field.slug in patch ? patch[field.slug] : item.data[field.slug]);
+			if (!fixed.fixes.length) continue;
+			patch[field.slug] = fixed.content;
+			fixes.push(...fixed.fixes);
+		} catch (error) {
+			ctx.log.warn("glossary.io links: couldn't check a field's possessives; they stay as they are", { entry: key, slug: item.slug, field: field.slug, error: String(error) });
+		}
 	}
-	const changes: LinkChange[] = [...terms, ...(fixes.length ? await possessiveChanges(ctx, fixes, record.entities, lookup) : [])];
+	const changes: LinkChange[] = [...terms, ...(fixes.length ? await possessiveChanges(ctx, fixes, entities, lookup) : [])];
 	if (opts.dryRun) return out(changes.length ? "planned" : "unchanged", item.slug, changes);
-	st.memo = { ...st.memo, linked: [...handled].sort() };
+	if (!only) st.memo = { ...st.memo, linked: [...handled].sort() };
 	if (!changes.length) return out("unchanged", item.slug);
 
 	// A possessive fix links no term: only the rules' links are remembered.
@@ -622,13 +664,13 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 		item,
 		info,
 		patch,
-		marker: { pendingQids: terms.map((c) => c.qid), pendingSlugs: [...new Set(terms.map((c) => c.slug))], ...(fixes.length ? { pendingPossessive: fixes.length } : {}) },
+		marker: { pendingQids: terms.map((c) => c.qid), pendingSlugs: [...new Set(terms.map((c) => c.slug))], ...(fixes.length ? { pendingPossessive: fixes.length } : {}), ...(fresh ? { pendingNew: true as const } : {}) },
 		collided: "glossary.io links: a save landed while the links were written; nothing was published. Check the entry's revisions.",
 	});
 	if (edit.status === "conflict") return out("conflict", item.slug);
 	// Links that may not have stuck aren't remembered.
 	if (edit.status === "collided" || edit.status === "staged") return out(edit.status, item.slug, changes);
-	st.memo = { ...st.memo, linked };
+	if (!only) st.memo = { ...st.memo, linked };
 	return out("linked", item.slug, changes, undefined, edit.dateKept);
 }
 
@@ -750,9 +792,9 @@ export async function unlinkEntry(ctx: PluginContext, options: AiOptions, collec
  * enough: an editor's draft can have that version too. A removal's draft has
  * the live text, none of the removed links (which the live entry still has),
  * and its other fields (those both have) as they are live. An edit that moved
- * possessives inside glossary.io links leaves none to move in its draft; when
- * it made no link (only such fixes), the live entry still has some to move,
- * and its other fields are as they are live.
+ * possessives inside glossary.io links (ownPossessiveDraft) is recognized by
+ * what such an edit can do, not only by its text: an editor's draft that
+ * removed or re-pointed a link, or changed anything else, is never taken for it.
  */
 async function ownDraft(ctx: PluginContext, collection: string, item: { id: string; version?: number; data: Record<string, unknown>; draftRevisionId?: string | null }, memo: LinkMemo, fields: string[]): Promise<boolean> {
 	if (memo.draft && memo.draft === item.draftRevisionId) return true;
@@ -764,18 +806,69 @@ async function ownDraft(ctx: PluginContext, collection: string, item: { id: stri
 	if (!data) return false;
 	const sameText = fields.every((f) => !(f in data) || bodyText(data[f]) === bodyText(item.data[f]));
 	const others = Object.keys(data).filter((k) => !k.startsWith("_") && !fields.includes(k) && k in item.data);
+	const othersSame = () => others.every((k) => stable(data[k]) === stable(item.data[k]));
 	if (!removal) {
 		const slugs = new Set(fields.flatMap((f) => [...linkedGlossarySlugs(data[f])]));
 		const linksThere = sameText && (memo.pendingSlugs ?? []).every((s) => slugs.has(s));
 		if (!possessive) return linksThere;
-		const toMove = (value: unknown) => linkPossessives(value).fixes.length;
-		const moved = fields.every((f) => !(f in data) || !toMove(data[f]));
-		if (memo.pendingSlugs?.length) return linksThere && moved;
-		return linksThere && moved && fields.some((f) => toMove(item.data[f]) > 0) && others.every((k) => stable(data[k]) === stable(item.data[k]));
+		try {
+			return linksThere && othersSame() && ownPossessiveDraft(data, item.data, memo, fields);
+		} catch {
+			// Content the fix can't read: not this part's draft.
+			return false;
+		}
 	}
 	const inDraft = new Set(fields.flatMap((f) => [...glossarySlugsIn(data[f])]));
 	const live = new Set(fields.flatMap((f) => [...glossarySlugsIn(item.data[f])]));
-	return sameText && removal.every((s) => !inDraft.has(s)) && removal.some((s) => live.has(s)) && others.every((k) => stable(data[k]) === stable(item.data[k]));
+	return sameText && removal.every((s) => !inDraft.has(s)) && removal.some((s) => live.has(s)) && othersSame();
+}
+
+/**
+ * Whether a draft's Portable Text fields are what this part's edit with
+ * possessive fixes (memo.pendingPossessive) made of the live entry's.
+ * Only fixes (no pendingSlugs): each field is exactly the live field with its
+ * possessives moved (linkPossessives), span keys aside (a span the fix splits
+ * off gets a new one), so a field without any is as it is live; and the live
+ * entry has as many to move as the edit moved.
+ * With links too (pendingSlugs): the draft has none left to move; its
+ * glossary.io terms are the live ones plus the edit's; it has no link to
+ * anywhere else that the live entry doesn't have; and apart from links
+ * (withoutLinks) every field is as it is live: same blocks, text, formatting,
+ * images.
+ */
+function ownPossessiveDraft(data: Record<string, unknown>, live: Record<string, unknown>, memo: LinkMemo, fields: string[]): boolean {
+	const inDraft = (f: string) => (f in data ? data[f] : live[f]);
+	if (!memo.pendingSlugs?.length) {
+		let moved = 0;
+		for (const f of fields) {
+			const fixed = linkPossessives(live[f]);
+			moved += fixed.fixes.length;
+			if (stable(withoutSpanKeys(inDraft(f))) !== stable(withoutSpanKeys(fixed.content))) return false;
+		}
+		return moved === memo.pendingPossessive;
+	}
+	if (fields.some((f) => linkPossessives(inDraft(f)).fixes.length)) return false;
+	const slugsOf = (value: (f: string) => unknown) => new Set(fields.flatMap((f) => [...glossarySlugsIn(value(f))]));
+	const draftSlugs = slugsOf(inDraft);
+	const wanted = new Set([...slugsOf((f) => live[f]), ...memo.pendingSlugs]);
+	if (draftSlugs.size !== wanted.size || [...wanted].some((s) => !draftSlugs.has(s))) return false;
+	const elsewhere = (value: unknown) => linkHrefsIn(value).filter((href) => !glossarySlug(href));
+	return fields.every((f) => {
+		const liveHrefs = new Set(elsewhere(live[f]));
+		return elsewhere(inDraft(f)).every((href) => liveHrefs.has(href)) && stable(withoutLinks(inDraft(f))) === stable(withoutLinks(live[f]));
+	});
+}
+
+/** A copy of a value without its spans' keys. */
+function withoutSpanKeys(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(withoutSpanKeys);
+	if (!value || typeof value !== "object") return value;
+	const node = value as Record<string, unknown>;
+	return Object.fromEntries(
+		Object.entries(node)
+			.filter(([k]) => !(k === "_key" && node._type === "span"))
+			.map(([k, v]) => [k, withoutSpanKeys(v)]),
+	);
 }
 
 /** JSON with object keys sorted, to compare two copies of a field. */
@@ -805,7 +898,7 @@ export async function retryDue(ctx: PluginContext, options: AiOptions, limit: nu
 				continue;
 			}
 			const outcome = await linkEntry(ctx, options, data.collection, data.entryId);
-			if (outcome.status === "linked") ctx.log.info("glossary.io links (retry)", { entry: id, links: outcome.changes.length, ...(outcome.dateKept === undefined ? {} : { dateKept: outcome.dateKept }) });
+			if (outcome.status === "linked") ctx.log.info("glossary.io links (retry)", { entry: id, ...changeCounts(outcome.changes), ...(outcome.dateKept === undefined ? {} : { dateKept: outcome.dateKept }) });
 		} catch (error) {
 			ctx.log.warn("glossary.io links (retry) failed", { entry: id, error: String(error) });
 			const memo = await memos.get(id);

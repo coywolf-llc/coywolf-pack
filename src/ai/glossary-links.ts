@@ -446,22 +446,36 @@ function textBlockOf(block: Block, index: number): TextBlock {
 
 // ── Possessives ──────────────────────────────────────────────────
 
+/** A span's marks (none when they aren't a list). */
+const marksOf = (span: { marks?: unknown } | null | undefined): string[] => (Array.isArray(span?.marks) ? (span!.marks as string[]) : []);
+
+/** What a possessive never comes before: a letter, a digit or a hyphen ("Google’sfoo", "'s5", "'s-Hertogenbosch"). */
+const NOT_AFTER = "(?![\\p{L}\\p{N}\\-\u2010\u2011])";
+const POSSESSIVE_S = new RegExp(`^['\u2019\u02bc][sS]${NOT_AFTER}`, "u");
+const POSSESSIVE_BARE = new RegExp(`^['\u2019\u02bc]${NOT_AFTER}`, "u");
+
 /**
  * The possessive right after a name or link text (text[start, end)), or "":
- * "'s" or "’s" before a non-letter or the end ("Google's", "Anthropic’s."),
- * or, after a name ending in "s", a bare "'" or "’" before a non-letter or the
- * end ("Threads’ growth"), unless it closes a quotation opened before the name
- * ("‘Threads’"). Nothing after a space ("[Google ]'s"), or when the text
- * already ends with one, so a fix is never made twice.
+ * "'s" or "’s" (or with the letter apostrophe "ʼ") before anything but a
+ * letter, a digit or a hyphen, or the end ("Google's", "Anthropic’s."); "'S"
+ * only after a name in capitals ("GOOGLE'S"). Or, after a name ending in "s",
+ * a bare apostrophe before the same ("Threads’ growth"), unless it can be a
+ * closing quotation mark or part of code: a quotation of any kind (' ‘ “ ")
+ * opened before the name in the block and not closed ("‘Threads’"), or a "=",
+ * "/" or quotation mark right before the name ("href='/users'"). Nothing after
+ * a space ("[Google ]'s"), or when the text already ends with one, so a fix is
+ * never made twice.
  */
 function possessiveAfter(text: string, start: number, end: number): string {
 	const anchor = text.slice(start, end);
-	if (!/\S$/u.test(anchor) || /['\u2019][sS]?$/.test(anchor)) return "";
+	if (!/\S$/u.test(anchor) || /['\u2019\u02bc][sS]?$/.test(anchor)) return "";
 	const after = text.slice(end);
-	const full = /^['\u2019]s(?!\p{L})/u.exec(after);
-	if (full) return full[0];
-	if (/[sS]$/.test(anchor) && /^['\u2019](?!\p{L})/u.test(after) && !insideSingleQuotes(text.slice(0, start))) return after[0];
-	return "";
+	const full = POSSESSIVE_S.exec(after);
+	if (full) return full[0].endsWith("S") && !(/\p{Lu}/u.test(anchor) && !/\p{Ll}/u.test(anchor)) ? "" : full[0];
+	if (!/[sS]$/.test(anchor) || !POSSESSIVE_BARE.test(after)) return "";
+	const before = text.slice(0, start);
+	if (/[=/'"`\u2018\u2019\u201c\u201d\u02bc]$/.test(before) || insideQuotes(before) || insideSingleQuotes(before)) return "";
+	return after[0];
 }
 
 /**
@@ -484,7 +498,7 @@ function possessiveFor(tb: TextBlock, child: number, start: number, end: number)
 	const spanEnd = tb.offsets[child] + (tb.block.children[child] as Span).text.length;
 	if (end + text.length <= spanEnd) return { text, inSpan: true };
 	const next = tb.block.children[child + 1];
-	if (end === spanEnd && isSpan(next) && !tb.linkOf[child + 1] && next.text.length >= text.length) return { text, inSpan: false };
+	if (end === spanEnd && isSpan(next) && !tb.linkOf[child + 1] && !marksOf(next).includes("code") && next.text.length >= text.length) return { text, inSpan: false };
 	return none;
 }
 
@@ -543,16 +557,21 @@ const isGlossaryHref = (href: string, origin: string) => {
 	return Boolean(u) && u!.hostname !== "relative.invalid" && bareHost(u!.hostname) === bareHost(new URL(origin).hostname);
 };
 
-/** One block's glossary.io links with a possessive right after them, at the start of the next span (which is in no link). */
+/**
+ * One block's glossary.io links with a possessive right after them, at the
+ * start of the next span (which is in no link and isn't code). None in a block
+ * with a span whose marks aren't a list: a malformed block is left as it is.
+ */
 function possessivesIn(block: Block, origin: string) {
 	if (!Array.isArray(block.markDefs) || !block.markDefs.length) return [];
+	if (block.children.some((c) => isSpan(c) && c.marks != null && !Array.isArray(c.marks))) return [];
 	const tb = textBlockOf(block, 0);
 	const out: Array<{ last: number; key: string; moved: string; href: string; start: number; end: number; anchor: string }> = [];
 	for (const run of linkRuns(tb)) {
 		if (!isGlossaryHref(run.href, origin)) continue;
 		const last = run.children[run.children.length - 1];
 		const next = block.children[last + 1];
-		if (!isSpan(next) || tb.linkOf[last + 1]) continue;
+		if (!isSpan(next) || tb.linkOf[last + 1] || marksOf(next).includes("code")) continue;
 		const end = run.start + run.text.length;
 		const moved = possessiveAfter(tb.text, run.start, end);
 		if (!moved || next.text.length < moved.length) continue;
@@ -566,7 +585,7 @@ function possessivesIn(block: Block, origin: string) {
  * the rules, switched, or by hand) inside that link, in every block (nested
  * ones too): "[Google]'s" becomes "[Google's]", "[Threads]’ growth" becomes
  * "[Threads’] growth". Only when the possessive starts the span right after
- * the link and that span is in no other link. Same other marks: the
+ * the link and that span is in no other link and isn't code. Same other marks: the
  * characters join the link's last span; different ones (bold, say): they
  * become a span of their own with those marks and the link. A span left empty
  * goes. Only marks change, never the text, and other links are never touched.
@@ -880,6 +899,41 @@ export function glossarySlugsIn(content: unknown, origin = GLOSSARY): Set<string
 		}
 	});
 	return out;
+}
+
+/** Every link address in a Portable Text value, nested blocks included (one per link markDef). */
+export function linkHrefsIn(content: unknown): string[] {
+	const out: string[] = [];
+	eachBlock(content, (block) => {
+		for (const d of Array.isArray(block.markDefs) ? block.markDefs : []) if (d && d._type === "link" && typeof d.href === "string") out.push(d.href);
+	});
+	return out;
+}
+
+/**
+ * A copy of a Portable Text value as it is apart from its links: in every
+ * block (nested ones too) the link markDefs and their marks are gone, spans
+ * have no keys, and neighboring spans with the same marks are one. Two values
+ * that differ only in their links (which text is linked, and where to) give
+ * equal copies; any other difference (text, formatting, a block added, an
+ * image changed) shows.
+ */
+export function withoutLinks(content: unknown): unknown {
+	const copy = structuredClone(content);
+	eachBlock(copy, (block) => {
+		const defs = Array.isArray(block.markDefs) ? block.markDefs : [];
+		const linkKeys = new Set(defs.filter((d) => d && d._type === "link").map((d) => d._key));
+		block.markDefs = defs.filter((d) => !(d && d._type === "link"));
+		const all = new Set<number>();
+		block.children.forEach((child, i) => {
+			all.add(i);
+			if (!isSpan(child)) return;
+			delete child._key;
+			if (Array.isArray(child.marks)) child.marks = child.marks.filter((m) => !linkKeys.has(m));
+		});
+		block.children = mergeSpans(block.children, all);
+	});
+	return copy;
 }
 
 /** A span's marks and other properties (not its key or text), to tell whether two spans can be one. */

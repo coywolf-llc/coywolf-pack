@@ -64,6 +64,8 @@ const glossaryLinksInput = z.object({
 	cursor: z.string().max(2000).optional(),
 	limit: z.number().int().min(1).max(25).optional(),
 	exclude: z.record(z.string().max(300), z.array(z.string().regex(/^Q[1-9][0-9]{0,11}$/)).max(100)).optional(),
+	/** "possessive": only move possessives inside the entries' glossary.io links (no links made or switched, nothing remembered, no retry). */
+	only: z.enum(["possessive"]).optional(),
 	/** Remove links to deleted terms: its status, or a person's decision on the slugs the page showed (src/ai/glossary-gone.ts decideGone). */
 	gone: z.enum(["status", "approve", "dismiss"]).optional(),
 	slugs: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,99}$/)).min(1).max(5000).optional(),
@@ -280,6 +282,8 @@ export function aiRoutes(options: AiOptions) {
 		 * a batch): the same code the analysis runs. `keys` ("posts:<id>") or pages
 		 * of analyzed entries (`cursor`); `dryRun` plans without writing (allowed
 		 * with the part off); `exclude` lists QIDs never to link, per entry key.
+		 * `only: "possessive"` fixes the possessives after existing glossary.io
+		 * links and nothing else (no links made or switched; `exclude` is ignored).
 		 * `gone` is Remove links to deleted terms instead: "status", or "approve" /
 		 * "dismiss" with the `slugs` the AI Enrichment page showed.
 		 */
@@ -330,6 +334,11 @@ export function aiRoutes(options: AiOptions) {
 						}
 						try {
 							const record = await records.get(key);
+							if (input.only) {
+								// Possessives only: no links are planned, and nothing about the entry's text or links is remembered.
+								out.push(await linkEntry(ctx, options, collection, id, { dryRun: input.dryRun, record: record ?? undefined, only: input.only }));
+								continue;
+							}
 							const item = record?.status === "ok" ? await ctx.content?.get(collection, id) : null;
 							// The text hash is remembered unless a re-analysis is queued (it may find other entities and should still link).
 							const queued = await queue.get(queueId({ kind: "entry", collection, entryId: id }));
@@ -337,8 +346,8 @@ export function aiRoutes(options: AiOptions) {
 							out.push(await linkEntry(ctx, options, collection, id, { dryRun: input.dryRun, exclude: input.exclude?.[key], record: record ?? undefined, textHash: t?.textHash }));
 						} catch (error) {
 							out.push({ key, slug: null, status: "error", changes: [], reason: String(error).slice(0, 300) });
-							// Tried again by the scheduled run (an unpublished edit of its own is finished then).
-							if (!input.dryRun) {
+							// Tried again by the scheduled run (an unpublished edit of its own is finished then). Never after a possessives-only run: a retry would link.
+							if (!input.dryRun && !input.only) {
 								const memos = linkMemos(ctx);
 								const memo = await memos.get(key).catch(() => null);
 								await memos.put(key, withRetry(memo ?? { collection, entryId: id, linked: [], updated: new Date().toISOString() }, "error")).catch(() => undefined);
