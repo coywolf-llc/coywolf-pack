@@ -37,6 +37,8 @@
  * src/ai/glossary-gone.ts decides which terms are gone for good and queues the
  * entries that link to them; unlinkEntry takes those links out and keeps their
  * text, and forgets the term's QID so it can be linked again if it comes back.
+ * A removal never links anything by itself: the Pack links an entry after an
+ * analysis of new text, on a retry of that, or when a site asks (retryAt).
  *
  * "Link existing entries" (POST ai/glossary-links) runs the same code on
  * entries analyzed before the part was turned on, with a dry run.
@@ -45,11 +47,13 @@ import type { CollectionSchemaInfo, PluginContext, StorageCollection } from "emd
 
 import { isConflict } from "../core/conflict.js";
 import { databaseFor } from "../core/database.js";
+import { ctxFeatures } from "../core/features.js";
 import { purgeEntryPages } from "../pageCache/entries.js";
-import { glossaryFor, isGlossarySite } from "./glossary.js";
-import { readGoneState } from "./glossary-gone.js";
+import { afterResponse } from "../shared.js";
+import { glossaryFor, isGlossarySite, storedGlossary } from "./glossary.js";
+import { readGoneState, removeGoneOn } from "./glossary-gone.js";
 import { type GlossaryTarget, type LinkChange, bodyText, glossarySlug, glossarySlugsIn, linkedGlossarySlugs, planGlossaryLinks, removeGlossaryLinks } from "./glossary-links.js";
-import { restoreUpdatedAt } from "./keep-date.js";
+import { type PublishedRow, restoreUpdatedAt } from "./keep-date.js";
 // Types only (store.ts loads the providers, which the tests can't run): the collection lookups are repeated here.
 import type { AiOptions, EntryRecord } from "./store.js";
 
@@ -115,7 +119,11 @@ export interface LinkMemo {
 	keepUpdatedAt?: string;
 	/** Links to take out: terms deleted from glossary.io (src/ai/glossary-gone.ts). */
 	unlink?: Array<{ slug: string; qid: string }>;
-	/** When to try again (epoch ms), and the tries so far. */
+	/** The `retryAt` the removal's queue (or a removal that has to wait) wrote: a turn that's the removal's own, not a request to link. */
+	unlinkAt?: number;
+	/** A try to link was waiting when the removal was queued: once the links are out, the entry's links are checked (LINK_CHECK_MS). */
+	relink?: true;
+	/** When to try again (epoch ms), and the tries so far. A site asks for an entry to be linked again by setting retryAt (and tries: 0). */
 	retryAt?: number;
 	tries?: number;
 	updated: string;
@@ -138,20 +146,40 @@ export const BUSY_MS = 2 * 60_000;
 export const MAX_TRIES = 6;
 const RETRY_BASE_MS = 30 * 60_000;
 /**
- * After links to deleted terms are taken out (or turn out to be gone already), the entry is checked for
- * new links this long after: just past the busy window its own publish opened. The retry pass is also how
- * a site asks for an entry to be linked again (by setting retryAt), and a removal mustn't use that ask up.
+ * After links to deleted terms are taken out (or turn out to be gone already), an entry that also had a try to
+ * link waiting (linkAsked) is checked for new links this long after: just past the busy window its own publish
+ * opened. The retry pass is also how a site asks for an entry to be linked again (by setting retryAt), and a
+ * removal mustn't use that ask up. Without such a try, a removal is never followed by linking.
  */
 export const LINK_CHECK_MS = BUSY_MS + 60_000;
+
+/**
+ * Whether a try to link this entry is waiting, besides any removal: its `retryAt` isn't the one the removal's
+ * queue wrote (`unlinkAt`), so a site set it or a link had to wait, or such a try was waiting when the removal
+ * was queued (`relink`).
+ */
+export const linkAsked = (memo: Pick<LinkMemo, "retryAt" | "unlinkAt" | "relink">): boolean => memo.relink === true || (memo.retryAt !== undefined && memo.retryAt !== memo.unlinkAt);
+
+/** The memo after a link pass that isn't tried again: a waiting try to link (`relink`, `unlinkAt`) has been served. Unchanged when there's none. */
+function linkServed(memo: LinkMemo): LinkMemo {
+	if (memo.retryAt !== undefined || (memo.relink === undefined && memo.unlinkAt === undefined)) return memo;
+	const { relink: _l, unlinkAt: _a, ...rest } = memo;
+	return rest;
+}
 
 const entryKey = (collection: string, id: string) => `${collection}:${id}`;
 const store = <T>(ctx: Pick<PluginContext, "storage">, name: string) => (ctx.storage as Record<string, StorageCollection>)[name] as StorageCollection<T>;
 export const linkMemos = (ctx: Pick<PluginContext, "storage">) => store<LinkMemo>(ctx, "aiLinks");
 
-/** The database and page purge keepDates uses (tests replace them). */
+/** How long after keepDates put a date back the entry's cached pages are cleared a second time. */
+export const REPURGE_MS = 20_000;
+
+/** The database, page purge and "a little later" keepDates uses (tests replace them). */
 export const keepDatesIo = {
 	database: (): Promise<D1Database | null> => databaseFor(),
 	purge: purgeEntryPages,
+	/** Run once more after REPURGE_MS, kept alive past the response (or the scheduled run). Never throws. */
+	later: (run: () => Promise<void>): void => afterResponse(new Promise<void>((resolve) => setTimeout(resolve, REPURGE_MS)).then(run).catch(() => undefined)),
 };
 
 /** The hosts and entries the rules need, from coywolfPlugin({ ai: { glossaryLinks } }) and the site's own URL. */
@@ -254,39 +282,88 @@ const keepDatesOn = (options: AiOptions) => options.glossaryLinks?.keepDates ===
 let warnedNoDatabase = false;
 
 /**
- * keepDates: after this part's own publish, put the entry's updated date back
- * (only when the row is the one that publish left: src/ai/keep-date.ts), then
- * clear its cached pages, since a request in between may have cached the new
- * date. `published` is the revision the publish made live (null for a
- * collection without revisions). Never throws: the edit is published either way.
+ * keepDates: after this part's own write, put the entry's updated date back,
+ * then clear its cached pages (now, and once more a little later: a page
+ * rendered in between may have been cached with the new date). `row` is the
+ * row that write left, as EmDash returned it (never read again, so a save
+ * that lands after the write can't be mistaken for it): src/ai/keep-date.ts
+ * changes only that exact row. Never throws: the edit is published either way.
  */
-async function keepDate(ctx: PluginContext, collection: string, id: string, original: string | undefined, published: string | null): Promise<boolean> {
+async function keepDate(ctx: PluginContext, entry: { collection: string; id: string; slug: string | null }, original: string | undefined, row: PublishedRow | null): Promise<boolean> {
 	try {
-		if (!original) return false;
-		const after = await ctx.content!.get(collection, id);
-		if (!after || after.status !== "published" || pendingDraft(after)) return false;
-		if (published !== null && after.liveRevisionId !== published) return false;
-		if (after.updatedAt === original) return false;
+		if (!original || !row || row.updatedAt === original) return false;
 		const db = await keepDatesIo.database();
 		if (!db) {
 			if (!warnedNoDatabase) ctx.log.error("glossary.io links: keepDates needs the site's D1 binding (DB); updated dates move until it's there.");
 			warnedNoDatabase = true;
 			return false;
 		}
-		const kept = await restoreUpdatedAt(db, collection, id, original, { updatedAt: after.updatedAt, version: after.version ?? Number.NaN, liveRevisionId: published === null ? null : (after.liveRevisionId ?? null) });
-		if (kept) await keepDatesIo.purge(ctx, [{ collection, id, slug: after.slug }], { label: "glossary.io links", tags: true });
+		const kept = await restoreUpdatedAt(db, entry.collection, entry.id, original, row);
+		if (kept) {
+			const purge = () => keepDatesIo.purge(ctx, [{ collection: entry.collection, id: entry.id, slug: entry.slug }], { label: "glossary.io links", tags: true });
+			await purge();
+			keepDatesIo.later(purge);
+		}
 		return kept;
 	} catch (error) {
-		ctx.log.warn("glossary.io links: couldn't keep the updated date", { entry: entryKey(collection, id), error: String(error) });
+		ctx.log.warn("glossary.io links: couldn't keep the updated date", { entry: entryKey(entry.collection, entry.id), error: String(error) });
 		return false;
 	}
+}
+
+/**
+ * The row a publish of this part's own draft left, from what EmDash's publish
+ * returned ({ item, _rev }, the row as its transaction wrote it): published,
+ * that draft live, no draft pending, exactly one version after the draft.
+ * Null when it's anything else, so the date is left alone.
+ */
+function publishedRow(published: unknown, draftVersion: number | undefined, draft: string | null | undefined): PublishedRow | null {
+	const item = (published as { item?: Partial<Item> } | null | undefined)?.item;
+	if (!item || !draft || item.status !== "published" || pendingDraft(item)) return null;
+	if (item.liveRevisionId !== draft || typeof item.updatedAt !== "string" || !Number.isInteger(item.version) || item.version !== (draftVersion ?? Number.NaN) + 1) return null;
+	return { updatedAt: item.updatedAt, version: item.version!, liveRevisionId: draft };
+}
+
+/**
+ * Whether these removals still stand, from the site's stored index copy (not
+ * this isolate's memory of it) and the deleted-term record: confirmed gone
+ * under that QID, and neither the QID nor the slug in the index (a slug another
+ * term has now leads to a definition again). Null when the site has no index
+ * copy. `held`: removals are paused (a refused index copy waits for a person).
+ */
+async function goneCheck(ctx: PluginContext): Promise<{ held: boolean; stands(u: { slug: string; qid: string }): boolean } | null> {
+	const copy = await storedGlossary(ctx);
+	if (!copy) return null;
+	const state = await readGoneState(ctx);
+	const slugs = new Set(Object.values(copy.terms).map((term) => term[0]));
+	const confirmed = state?.gone ?? {};
+	return {
+		held: state?.held?.why === "index-shrank",
+		stands: (u) => confirmed[u.slug]?.qid === u.qid && !Object.hasOwn(copy.terms, u.qid) && !slugs.has(u.slug),
+	};
+}
+
+/**
+ * Whether an unpublished removal draft of this part's own may still go live:
+ * "yes" when the part is on and every term it took out is still confirmed
+ * gone (goneCheck); "no" when the part is off or a term isn't; "wait" when it
+ * can't be told now (no index copy, or removals are paused).
+ */
+async function removalStands(ctx: PluginContext, memo: LinkMemo): Promise<"yes" | "no" | "wait"> {
+	if (!removeGoneOn(await ctxFeatures(ctx))) return "no";
+	const check = await goneCheck(ctx);
+	if (!check || check.held) return "wait";
+	const queued = new Map((memo.unlink ?? []).map((u) => [u.slug, u]));
+	return (memo.pendingUnlink ?? []).every((slug) => queued.has(slug) && check.stands(queued.get(slug)!)) ? "yes" : "no";
 }
 
 /**
  * Before an edit: the entry's pending draft, or a save in the last two
  * minutes, means wait (null: go ahead). A pending draft that is this part's
  * own unpublished edit (a link edit or a removal) is published instead, and
- * what it did is recorded.
+ * what it did is recorded. A removal's draft is published only while the
+ * removal still stands (removalStands); when it doesn't, its marker is dropped
+ * and the draft is left for a person, never published and never changed.
  */
 async function waitOrFinish(
 	ctx: PluginContext,
@@ -299,18 +376,31 @@ async function waitOrFinish(
 	if (pendingDraft(item)) {
 		// This part's own edit whose publish didn't happen goes live now; anyone else's draft is left alone.
 		if (!at.dryRun && (await ownDraft(ctx, collection, item, st.memo, at.fields))) {
+			const removal = Boolean(st.memo.pendingUnlink?.length);
+			const stands = removal ? await removalStands(ctx, st.memo) : "yes";
+			// Can't be told now: the marker stays, and it's looked at again on a later try.
+			if (stands === "wait") return { status: "draft" };
+			if (stands === "no") {
+				ctx.log.warn("glossary.io links: an unpublished removal of links to a glossary.io term is no longer wanted (the part is off, or the term is back); its draft is left for a person to publish or discard", {
+					entry: entryKey(collection, id),
+					slug: item.slug,
+					slugs: st.memo.pendingUnlink,
+				});
+				st.memo = settled(st.memo);
+				return { status: "draft" };
+			}
 			const versioned = await content.getVersioned!(collection, id);
 			if (versioned && versioned.item.draftRevisionId === item.draftRevisionId) {
+				let published: unknown;
 				try {
-					await content.publish!(collection, id, { _rev: versioned._rev });
+					published = await content.publish!(collection, id, { _rev: versioned._rev });
 				} catch (error) {
 					if (!isConflict(error)) throw error;
 					return { status: "conflict" };
 				}
-				const removal = Boolean(st.memo.pendingUnlink?.length);
 				const original = st.memo.keepUpdatedAt;
 				st.memo = finished(st.memo);
-				const dateKept = keepDatesOn(options) ? await keepDate(ctx, collection, id, original, item.draftRevisionId ?? null) : undefined;
+				const dateKept = keepDatesOn(options) ? await keepDate(ctx, { collection, id, slug: item.slug }, original, publishedRow(published, versioned.item.version, item.draftRevisionId)) : undefined;
 				return { status: removal ? "unlinked" : "linked", reason: FINISHED, dateKept };
 			}
 		}
@@ -341,13 +431,15 @@ async function publishOwnEdit(
 	const { collection, id, item } = edit;
 	const content = ctx.content!;
 	const keep = keepDatesOn(options);
+	const entry = { collection, id, slug: item.slug };
 	// Re-read right before writing: if anyone saved in between, leave the entry alone.
 	const fresh = await content.get(collection, id);
 	if (!fresh || versionOf(fresh) !== versionOf(item)) return { status: "conflict" };
 	// The marker goes in first, so an edit whose publish never happens is recognized (and published) next time.
 	await st.save({ ...st.memo, pending: fresh.version ?? 0, ...edit.marker, ...(keep ? { keepUpdatedAt: fresh.updatedAt } : {}) });
+	let updated: unknown;
 	try {
-		await content.update!(collection, id, edit.patch);
+		updated = await content.update!(collection, id, edit.patch);
 	} catch (error) {
 		// Nothing was written: drop the marker so it can't be mistaken for a later draft.
 		const after = await content.get(collection, id).catch(() => null);
@@ -356,7 +448,11 @@ async function publishOwnEdit(
 	}
 	if (!edit.info.supports.includes("revisions")) {
 		st.memo = settled(st.memo);
-		return { status: "done", ...(keep ? { dateKept: await keepDate(ctx, collection, id, fresh.updatedAt, null) } : {}) };
+		if (!keep) return { status: "done" };
+		// Without revisions the update is the whole edit: the row it left has the date the update returned, one version on.
+		const savedAt = (updated as { updatedAt?: unknown } | null | undefined)?.updatedAt;
+		const row = typeof savedAt === "string" && Number.isInteger(fresh.version) ? { updatedAt: savedAt, version: fresh.version! + 1, liveRevisionId: null } : null;
+		return { status: "done", dateKept: await keepDate(ctx, entry, fresh.updatedAt, row) };
 	}
 	const versioned = await content.getVersioned!(collection, id);
 	// Publish only the draft this edit created: exactly one version after the one read.
@@ -367,8 +463,9 @@ async function publishOwnEdit(
 	}
 	const draft = versioned.item.draftRevisionId;
 	await st.save({ ...st.memo, draft });
+	let published: unknown;
 	try {
-		await content.publish!(collection, id, { _rev: versioned._rev });
+		published = await content.publish!(collection, id, { _rev: versioned._rev });
 	} catch (error) {
 		if (!isConflict(error)) throw error;
 		// Someone saved it in between (an open editor autosaves): their draft may not have the edit, so it's tried again.
@@ -376,7 +473,7 @@ async function publishOwnEdit(
 		return { status: "staged" };
 	}
 	st.memo = settled(st.memo);
-	return { status: "done", ...(keep ? { dateKept: await keepDate(ctx, collection, id, fresh.updatedAt, draft) } : {}) };
+	return { status: "done", ...(keep ? { dateKept: await keepDate(ctx, entry, fresh.updatedAt, publishedRow(published, versioned.item.version, draft)) } : {}) };
 }
 
 /** An outcome, with dateKept only when keepDates said something. */
@@ -390,7 +487,7 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	const now = Date.now();
 	const st = memoState(memos, key, (await memos.get(key)) ?? { collection, entryId: id, linked: [], updated: "" }, Boolean(opts.dryRun));
 	const out = async (status: LinkStatus, slug: string | null, changes: LinkChange[] = [], reason?: string, dateKept?: boolean): Promise<LinkOutcome> => {
-		if (!opts.dryRun) await st.save(withRetry({ ...st.memo, ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now));
+		if (!opts.dryRun) await st.save(linkServed(withRetry({ ...st.memo, ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now)));
 		return outcomeOf(key, slug, status, changes, reason, dateKept);
 	};
 	// Exclusions count from the start, so a run that has to wait (a draft, a recent save) can't link them later.
@@ -470,27 +567,38 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 /**
  * Take the links to deleted glossary.io terms (memo.unlink, queued by
  * src/ai/glossary-gone.ts) out of one entry and keep their text, with the same
- * safety as linking. Checked again right before the write: a term whose QID is
- * back in the index, or that's no longer confirmed gone, is left alone. Once
- * the edit is live, each removed term's QID leaves `linked`, so the term can
- * be linked again if it comes back. An entry where the link is already gone (a
- * person removed it) is settled without a write, and keeps the QID, as for any
- * link removed by hand. Once no removal is left, the entry's links are
- * checked on a later retry pass (LINK_CHECK_MS), so a request to link it again
- * that arrived meanwhile isn't lost. Throws only on unexpected errors.
+ * safety as linking. Checked again right before the write: a term whose QID or
+ * slug is back in the index, or that's no longer confirmed gone, is left
+ * alone. Once the edit is live, each removed term's QID leaves `linked`, so
+ * the term can be linked again if it comes back. An entry where the link is
+ * already gone (a person removed it) is settled without a write, and keeps
+ * the QID, as for any link removed by hand.
+ *
+ * It never links by itself. Only when a try to link the entry was waiting
+ * besides the removal (linkAsked: a site's request to link it again, or a link
+ * that had to wait) are the entry's links checked on a later retry pass
+ * (LINK_CHECK_MS), so the removal doesn't use that try up. Throws only on
+ * unexpected errors.
  */
 export async function unlinkEntry(ctx: PluginContext, options: AiOptions, collection: string, id: string): Promise<LinkOutcome> {
 	const key = entryKey(collection, id);
 	const memos = linkMemos(ctx);
 	const now = Date.now();
 	const st = memoState(memos, key, (await memos.get(key)) ?? { collection, entryId: id, linked: [], updated: "" }, false);
+	const asked = linkAsked(st.memo);
 	const out = async (status: LinkStatus, slug: string | null, changes: UnlinkChange[] = [], reason?: string, dateKept?: boolean): Promise<LinkOutcome> => {
-		let next = withRetry(st.memo, status, now);
-		// Removals done: linking is checked too, on a pass after this one.
-		if (!next.unlink?.length && (status === "unlinked" || status === "unchanged")) next = { ...next, retryAt: now + LINK_CHECK_MS, tries: 0 };
-		// Its own earlier edit went live first: the removal is tried again on a later run.
-		else if (reason === FINISHED && next.unlink?.length) next = { ...next, retryAt: now + RETRY_BASE_MS, tries: 0 };
-		await st.save(next);
+		const { unlinkAt: _a, relink: _l, ...next } = withRetry(st.memo, status, now);
+		let memo: LinkMemo = next;
+		if (!next.unlink?.length) {
+			// Removals done. The links are checked on a pass after this one only when a try to link was waiting too.
+			if (asked && (status === "unlinked" || status === "unchanged")) memo = { ...next, retryAt: now + LINK_CHECK_MS, tries: 0 };
+		} else {
+			// Its own earlier edit went live first: the removal is tried again on a later run.
+			if (reason === FINISHED) memo = { ...next, retryAt: now + RETRY_BASE_MS, tries: 0 };
+			// The next turn is the removal's own again; a try to link that was waiting is remembered.
+			memo = { ...memo, ...(memo.retryAt === undefined ? {} : { unlinkAt: memo.retryAt }), ...(asked ? { relink: true as const } : {}) };
+		}
+		await st.save(memo);
 		return outcomeOf(key, slug, status, changes, reason, dateKept);
 	};
 	/** Done with these links (all of them when no slugs are given): they leave `unlink`. */
@@ -526,11 +634,10 @@ export async function unlinkEntry(ctx: PluginContext, options: AiOptions, collec
 	const waiting = await waitOrFinish(ctx, options, st, { collection, id, item, fields: fields.map((f) => f.slug), now });
 	if (waiting) return out(waiting.status, item.slug, [], waiting.reason, waiting.dateKept);
 
-	// Checked again right before the write: still missing from the index, and still confirmed gone.
-	const index = await glossaryFor(ctx, ctx.site?.url, { anySwitch: true });
-	if (!index) return out("no-index", item.slug);
-	const confirmed = (await readGoneState(ctx))?.gone ?? {};
-	const targets = (st.memo.unlink ?? []).filter((u) => confirmed[u.slug]?.qid === u.qid && !index(u.qid));
+	// Checked again right before the write: still confirmed gone, and neither its QID nor its slug in the site's index copy.
+	const check = await goneCheck(ctx);
+	if (!check) return out("no-index", item.slug);
+	const targets = (st.memo.unlink ?? []).filter(check.stands);
 	if (!targets.length) {
 		drop();
 		return out("unchanged", item.slug, [], "the terms are back, or no longer confirmed gone");
@@ -601,7 +708,9 @@ function stable(value: unknown): string {
 
 /**
  * Entries due for another try (draft, busy, conflict, staged, no index, error): linked again without a model call.
- * With `unlink` (Remove links to deleted terms on), an entry with links to take out has them taken out instead.
+ * With `unlink` (Remove links to deleted terms on, and not paused), an entry with links to take out has them taken out instead.
+ * Without it, a turn that was only for a removal is given up without linking (nobody asked for links; the term's
+ * entries are looked for again later).
  */
 export async function retryDue(ctx: PluginContext, options: AiOptions, limit: number, opts: { unlink?: boolean } = {}): Promise<number> {
 	const memos = linkMemos(ctx);
@@ -611,6 +720,11 @@ export async function retryDue(ctx: PluginContext, options: AiOptions, limit: nu
 			if (opts.unlink && data.unlink?.length) {
 				const outcome = await unlinkEntry(ctx, options, data.collection, data.entryId);
 				if (outcome.status === "unlinked") ctx.log.info("glossary.io links removed", { entry: id, slugs: outcome.changes.map((c) => c.slug), ...(outcome.dateKept === undefined ? {} : { dateKept: outcome.dateKept }) });
+				continue;
+			}
+			if (data.unlink?.length && !linkAsked(data)) {
+				const { retryAt: _r, tries: _t, unlinkAt: _a, ...rest } = data;
+				await memos.put(id, rest);
 				continue;
 			}
 			const outcome = await linkEntry(ctx, options, data.collection, data.entryId);

@@ -16,6 +16,8 @@ import * as LK from "./glossary-linker.ts";
 import * as G from "./glossary.ts";
 // @ts-ignore -- as above.
 import * as F from "../core/features.ts";
+// @ts-ignore -- as above.
+import * as GG from "./glossary-gone.ts";
 // @ts-ignore -- as above (outside src, so tsc never sees it).
 import * as OLD from "../../test/fixtures/glossary-linker-0.49.0.ts";
 
@@ -23,13 +25,17 @@ const links = GL as typeof import("./glossary-links.js");
 const linker = LK as typeof import("./glossary-linker.js");
 const glossary = G as typeof import("./glossary.js");
 const features = F as typeof import("../core/features.js");
+const goneTerms = GG as typeof import("./glossary-gone.js");
 const old049 = OLD as Pick<typeof import("./glossary-linker.js"), "linkEntry" | "retryDue">;
 
 features.registerFeatures([
 	{ id: "ai", label: "AI Enrichment", description: "", default: false },
 	{ id: "ai.glossary", label: "glossary.io definitions", description: "", default: true },
 	{ id: "ai.glossaryLinks", label: "glossary.io links", description: "", default: false },
+	goneTerms.REMOVE_GONE_FEATURE,
 ]);
+/** The stored switches with Remove links to deleted glossary.io terms on. */
+const REMOVE_ON = { ai: true, "ai.glossaryLinks": true, "ai.glossaryLinksRemoveGone": true };
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -161,8 +167,17 @@ interface SiteOptions {
 	memo?: Record<string, unknown>;
 	siteUrl?: string;
 	revisions?: boolean;
-	/** The index's terms (default: StumbleUpon and Google). */
-	terms?: Record<string, [string, string, string[]]>;
+	/** The index's terms (default: StumbleUpon and Google); null: the site has no copy of the index. */
+	terms?: Record<string, [string, string, string[]]> | null;
+	/** The stored feature switches (default: none stored). */
+	features?: Record<string, boolean>;
+	/** The entry was never analyzed successfully. */
+	notAnalyzed?: boolean;
+	/** Someone else's save lands right after this part's update, or right after its publish. */
+	saveAfterUpdate?: boolean;
+	saveAfterPublish?: boolean;
+	/** What publish returns instead of the published row (null: nothing). */
+	publishResult?: unknown;
 	/** aiGlossary/gone. */
 	gone?: Record<string, unknown> | null;
 	entities?: ReturnType<typeof ent>[];
@@ -193,15 +208,18 @@ function fakeSite(opts: SiteOptions = {}) {
 	let reads = 0;
 	let stamp = 0;
 	const tick = () => `2026-11-24T12:00:0${++stamp}.000Z`;
-	const record = { collection: "posts", entryId: "E1", title: "Joy", hash: "h", status: "ok", error: "", entities: opts.entities ?? [ent("Q911595", "StumbleUpon", { wikipedia: "https://en.wikipedia.org/wiki/StumbleUpon" }), ent("Q95", "Google")], description: "", descriptionStatus: "none", updated: "2026-11-23T00:00:00.000Z" };
+	const record = { collection: "posts", entryId: "E1", title: "Joy", hash: "h", status: opts.notAnalyzed ? "failed" : "ok", error: "", entities: opts.entities ?? [ent("Q911595", "StumbleUpon", { wikipedia: "https://en.wikipedia.org/wiki/StumbleUpon" }), ent("Q95", "Google")], description: "", descriptionStatus: "none", updated: "2026-11-23T00:00:00.000Z" };
 	const entries = new Map<string, unknown>([["posts:E1", record]]);
 	const memos = new Map<string, Record<string, unknown>>();
 	if (opts.memo) memos.set("posts:E1", { collection: "posts", entryId: "E1", linked: [], updated: "", ...opts.memo });
-	let terms = opts.terms ?? TERMS;
+	let terms = opts.terms === undefined ? TERMS : opts.terms;
+	const logged = (level: string) => (message: string, meta?: unknown) => void calls.push(`log.${level} ${message}${meta === undefined ? "" : ` ${JSON.stringify(meta)}`}`);
+	/** Someone else's save: one version on, a new date. */
+	const otherSave = () => void (item = { ...item, version: item.version + 1, updatedAt: tick() });
 	const ctx = {
 		site: { url: opts.siteUrl ?? "https://coywolf.com" },
-		settings: { get: async () => null },
-		log: { info() {}, warn() {}, error: (message: string) => void calls.push(`log.error ${message}`) },
+		settings: { get: async () => opts.features ?? null },
+		log: { info: logged("info"), warn: logged("warn"), error: (message: string) => void calls.push(`log.error ${message}`) },
 		schema: {
 			getCollection: async () => ({ slug: "posts", supports: revisions ? ["revisions", "drafts"] : ["drafts"], fields: [{ slug: "title", type: "string", sortOrder: 0 }, { slug: "content", type: "portableText", sortOrder: 1 }] }),
 		},
@@ -216,7 +234,7 @@ function fakeSite(opts: SiteOptions = {}) {
 				query: async () => ({ items: [...memos].filter(([, v]) => typeof v.retryAt === "number" && (v.retryAt as number) <= Date.now()).map(([id, data]) => ({ id, data: structuredClone(data) })), hasMore: false }),
 			},
 			aiGlossary: {
-				get: async (id: string) => (id === "index" ? { fetchedAt: Date.now(), format: 2, terms } : id === "gone" ? structuredClone(opts.gone ?? null) : null),
+				get: async (id: string) => (id === "index" ? (terms ? { fetchedAt: Date.now(), format: 2, terms } : null) : id === "gone" ? structuredClone(opts.gone ?? null) : null),
 				put: async () => {},
 			},
 		},
@@ -242,6 +260,10 @@ function fakeSite(opts: SiteOptions = {}) {
 				if (opts.updateThrows) throw new Error("D1 is busy");
 				// Someone's autosave lands right before this write: two versions, the last one theirs.
 				item = { ...item, data: { ...item.data, ...patch }, version: item.version + (opts.bumpDuringUpdate ? 2 : 1), updatedAt: tick(), draftRevisionId: revisions ? "R2" : null };
+				// What EmDash 1.5.0's plugin content update returns: the row its write left (no version, no revision ids).
+				const { version: _v, draftRevisionId: _d, liveRevisionId: _l, ...saved } = structuredClone(item);
+				if (opts.saveAfterUpdate) otherSave();
+				return saved;
 			},
 			getVersioned: async () => {
 				calls.push("getVersioned");
@@ -252,6 +274,10 @@ function fakeSite(opts: SiteOptions = {}) {
 				if (opts.publishConflict) throw Object.assign(new Error("Content has been modified"), { code: "CONFLICT" });
 				if (opts.publishThrows) throw new Error("timeout");
 				item = { ...item, draftRevisionId: null, liveRevisionId: item.draftRevisionId, version: item.version + 1, updatedAt: tick() };
+				// What EmDash 1.5.0's plugin publish returns: the row its transaction wrote.
+				const published = { item: structuredClone(item), _rev: `rev-${item.version}` };
+				if (opts.saveAfterPublish) otherSave();
+				return opts.publishResult === undefined ? published : (opts.publishResult ?? undefined);
 			},
 		},
 	};
@@ -261,25 +287,27 @@ function fakeSite(opts: SiteOptions = {}) {
 		fetches,
 		memos,
 		item: () => item,
-		setTerms: (next: Record<string, [string, string, string[]]>) => void (terms = next),
+		setTerms: (next: Record<string, [string, string, string[]]> | null) => void (terms = next),
 		/** Make the entry look saved long ago again (the fake's writes stamp "now"). */
 		age: () => void (item = { ...item, updatedAt: T_OLD }),
 	};
 }
 
-/** A recording stand-in for keepDates' database and purge. */
-function keepDatesSpy(changes = 1, opts: { throws?: boolean } = {}) {
+/** A recording stand-in for keepDates' database, purge and later purge. `changes`: rows the statement changes (a function plays D1's guard). */
+function keepDatesSpy(changes: number | ((args: unknown[]) => number) = 1, opts: { throws?: boolean } = {}) {
 	const statements: Array<{ sql: string; args: unknown[] }> = [];
 	const purges: unknown[] = [];
+	const laters: Array<() => Promise<void>> = [];
 	let databaseCalls = 0;
 	const db = {
 		prepare(sql: string) {
 			if (opts.throws) throw new Error("D1 is down");
-			return { bind: (...args: unknown[]) => ({ run: async () => (statements.push({ sql, args }), { meta: { changes } }) }) };
+			return { bind: (...args: unknown[]) => ({ run: async () => (statements.push({ sql, args }), { meta: { changes: typeof changes === "function" ? changes(args) : changes } }) }) };
 		},
 	};
 	const io = linker.keepDatesIo;
-	const saved = { database: io.database, purge: io.purge };
+	const saved = { database: io.database, purge: io.purge, later: io.later };
+	io.later = (run) => void laters.push(run);
 	io.database = async () => {
 		databaseCalls++;
 		return db as unknown as D1Database;
@@ -288,6 +316,7 @@ function keepDatesSpy(changes = 1, opts: { throws?: boolean } = {}) {
 	return {
 		statements,
 		purges,
+		laters,
 		databaseCalls: () => databaseCalls,
 		restore: () => Object.assign(io, saved),
 	};
@@ -324,9 +353,21 @@ const SCENARIOS: Array<{ name: string; site: SiteOptions; options?: Record<strin
 	{ name: "update fails", site: { updateThrows: true } },
 	{ name: "publish fails", site: { publishThrows: true } },
 	{ name: "retry pass, publish fails", site: { publishThrows: true, memo: { linked: [], retryAt: Date.now() - 1000, tries: 2 } }, retry: true },
+	{ name: "no index copy", site: { terms: null } },
+	{ name: "no index copy, on the retry pass", site: { terms: null, memo: { linked: [], retryAt: Date.now() - 1000, tries: 1 } }, retry: true },
+	{ name: "not analyzed", site: { notAnalyzed: true }, link: { textHash: "th" } },
+	{
+		name: "a conflict while finishing its own draft",
+		site: { draft: "R7", version: 9, publishConflict: true, memo: { pending: 3, draft: "R7", pendingQids: ["Q911595"], pendingSlugs: ["stumbleupon"], linked: [] } },
+	},
+	{
+		name: "a conflict while finishing its own draft, on the retry pass",
+		site: { draft: "R7", version: 9, publishConflict: true, memo: { pending: 3, draft: "R7", pendingQids: ["Q911595"], pendingSlugs: ["stumbleupon"], linked: [], retryAt: Date.now() - 1000, tries: 1 } },
+		retry: true,
+	},
 ];
 
-test("with keepDates and gone-term removal off, linkEntry and retryDue do byte-for-byte what 0.49.0 did: no D1 call, no extra read or fetch", async () => {
+test("with keepDates and gone-term removal off, linkEntry and retryDue do byte-for-byte what 0.49.0 did: no D1 call, no extra read, fetch or log line", async () => {
 	const spy = keepDatesSpy();
 	// New span and markDef keys are random, and retry times read the clock: the same for both runs.
 	const clock = Date.now;
@@ -355,6 +396,7 @@ test("with keepDates and gone-term removal off, linkEntry and retryDue do byte-f
 		}
 		assert.equal(spy.databaseCalls(), 0, "no D1 call");
 		assert.deepEqual(spy.purges, [], "no purge");
+		assert.deepEqual(spy.laters, [], "no later purge");
 	} finally {
 		Date.now = clock;
 		crypto.getRandomValues = random;
@@ -475,7 +517,7 @@ const WITHOUT_STUMBLE: Record<string, [string, string, string[]]> = { Q95: TERMS
 const UNLINK_MEMO = { linked: ["Q911595", "Q95"], unlink: [{ slug: "stumbleupon", qid: "Q911595" }], retryAt: Date.now() - 1000, tries: 0 };
 
 function goneSite(more: SiteOptions = {}) {
-	return fakeSite({ body: LINKED_BODY(), terms: WITHOUT_STUMBLE, gone: GONE, memo: UNLINK_MEMO, ...more });
+	return fakeSite({ body: LINKED_BODY(), terms: WITHOUT_STUMBLE, gone: GONE, features: REMOVE_ON, memo: UNLINK_MEMO, ...more });
 }
 
 test("unlinkEntry takes the link out, keeps the text, publishes only its own draft, and forgets the QID", async () => {
@@ -521,7 +563,8 @@ test("a memo with links to remove and a new definition to link: the removal, the
 		terms: { ...WITHOUT_STUMBLE, Q1: ["fastmail", "An email service.", ["Fastmail"]] },
 		gone: GONE,
 		entities: [ent("Q911595", "StumbleUpon"), ent("Q1", "Fastmail")],
-		memo: { linked: ["Q911595"], unlink: [{ slug: "stumbleupon", qid: "Q911595" }], retryAt: Date.now() - 1000, tries: 0 },
+		// The removal was queued a minute ago (unlinkAt); the site's request to link the entry again came after it (another retryAt).
+		memo: { linked: ["Q911595"], unlink: [{ slug: "stumbleupon", qid: "Q911595" }], unlinkAt: Date.now() - 60_000, retryAt: Date.now() - 1000, tries: 0 },
 	});
 	assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 1);
 	assert.deepEqual(linksOf(site.item().data.content), [], "first pass: the removal");
@@ -543,6 +586,8 @@ test("a memo with links to remove and a new definition to link: the removal, the
 	const memo = site.memos.get("posts:E1")!;
 	assert.deepEqual(memo.linked, ["Q1"]);
 	assert.equal(memo.retryAt, undefined, "done");
+	assert.equal(memo.unlinkAt, undefined);
+	assert.deepEqual(site.calls.filter((c) => c.startsWith("publish")), ["publish rev-4", "publish rev-6"], "the removal, then the link the site asked for");
 });
 
 test("unlinkEntry waits like linking: someone's draft, a recent save, a save before the write, a publish conflict, a collision", async () => {
@@ -671,4 +716,224 @@ test("unlinkEntry with keepDates puts the date back too; retryDue runs removals 
 	const on = goneSite();
 	assert.equal(await linker.retryDue(on.ctx, {}, 3, { unlink: true }), 1);
 	assert.deepEqual(linksOf(on.item().data.content), [["Google", "https://glossary.io/google/"]]);
+});
+
+// ── Review fixes (0.50.0) ────────────────────────────────────────
+
+const FASTMAIL_TERMS: Record<string, [string, string, string[]]> = { ...WITHOUT_STUMBLE, Q1: ["fastmail", "An email service.", ["Fastmail"]] };
+/** StumbleUpon's link is to come out; Fastmail (newly defined on glossary.io) is mentioned and not linked. */
+const fastmailSite = (memo: Record<string, unknown>, more: SiteOptions = {}) =>
+	fakeSite({
+		body: [block(["I miss ", { t: "StumbleUpon", href: STUMBLE }, ". Fastmail agrees."])],
+		terms: FASTMAIL_TERMS,
+		gone: GONE,
+		features: REMOVE_ON,
+		entities: [ent("Q911595", "StumbleUpon"), ent("Q1", "Fastmail")],
+		memo: { linked: ["Q911595"], unlink: [{ slug: "stumbleupon", qid: "Q911595" }], tries: 0, ...memo },
+		...more,
+	});
+
+test("a removal never links by itself: without a waiting try to link, the entry isn't linked afterwards (no second publish)", async () => {
+	glossary.resetGlossaryForTests();
+	// As the removal's queue writes it: retryAt and unlinkAt the same.
+	const queuedAt = Date.now() - 1000;
+	const site = fastmailSite({ retryAt: queuedAt, unlinkAt: queuedAt });
+	assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 1);
+	assert.deepEqual(linksOf(site.item().data.content), [], "the removal");
+	const memo = site.memos.get("posts:E1")!;
+	assert.equal(memo.retryAt, undefined, "no link check is scheduled");
+	assert.equal(memo.unlinkAt, undefined);
+	assert.equal(memo.relink, undefined);
+	// A day later: nothing is due, and Fastmail was never linked.
+	site.age();
+	const clock = Date.now;
+	Date.now = () => clock() + 24 * 60 * 60_000;
+	try {
+		glossary.resetGlossaryForTests();
+		assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 0);
+	} finally {
+		Date.now = clock;
+	}
+	assert.deepEqual(linksOf(site.item().data.content), [], "no link nobody asked for");
+	assert.deepEqual(site.calls.filter((c) => c.startsWith("publish")), ["publish rev-4"], "one publish: the removal");
+
+	// A link already removed by hand, and no try to link waiting: settled, nothing scheduled either.
+	glossary.resetGlossaryForTests();
+	const byHand = fastmailSite({ retryAt: queuedAt, unlinkAt: queuedAt }, { body: [block(["I miss StumbleUpon. Fastmail agrees."])] });
+	assert.equal((await linker.unlinkEntry(byHand.ctx, {}, "posts", "E1")).status, "unchanged");
+	assert.equal(byHand.memos.get("posts:E1")!.retryAt, undefined);
+});
+
+test("a try to link that was waiting when the removal was queued (relink) still happens after it; a removal that has to wait keeps both", async () => {
+	glossary.resetGlossaryForTests();
+	const queuedAt = Date.now() - 1000;
+	const site = fastmailSite({ retryAt: queuedAt, unlinkAt: queuedAt, relink: true });
+	assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 1);
+	const due = site.memos.get("posts:E1")!.retryAt as number;
+	assert.ok(Number.isInteger(due) && due - Date.now() > linker.BUSY_MS && due - Date.now() <= linker.LINK_CHECK_MS);
+	assert.equal(site.memos.get("posts:E1")!.relink, undefined, "handed over to the link check");
+	site.age();
+	const clock = Date.now;
+	Date.now = () => due + 1;
+	try {
+		glossary.resetGlossaryForTests();
+		assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 1);
+	} finally {
+		Date.now = clock;
+	}
+	assert.deepEqual(linksOf(site.item().data.content), [["Fastmail", "https://glossary.io/fastmail/"]]);
+
+	// The entry was saved a moment ago: the removal waits. Its next turn is still its own, and nothing is linked later.
+	glossary.resetGlossaryForTests();
+	const recent = new Date(Date.now() - 30_000).toISOString();
+	const busy = fastmailSite({ retryAt: queuedAt, unlinkAt: queuedAt }, { updatedAt: recent });
+	assert.equal((await linker.unlinkEntry(busy.ctx, {}, "posts", "E1")).status, "busy");
+	let memo = busy.memos.get("posts:E1")!;
+	assert.ok((memo.retryAt as number) > Date.now());
+	assert.equal(memo.unlinkAt, memo.retryAt, "the retry is the removal's own");
+	assert.equal(linker.linkAsked(memo), false);
+	// The same with a waiting try to link: it's remembered across the wait.
+	glossary.resetGlossaryForTests();
+	const busyAsked = fastmailSite({ retryAt: Date.now() - 500, unlinkAt: queuedAt }, { updatedAt: recent });
+	assert.equal((await linker.unlinkEntry(busyAsked.ctx, {}, "posts", "E1")).status, "busy");
+	memo = busyAsked.memos.get("posts:E1")!;
+	assert.equal(memo.relink, true);
+	assert.equal(linker.linkAsked(memo), true);
+});
+
+test("while removals are off or paused, a turn that was only for a removal isn't used to link", async () => {
+	glossary.resetGlossaryForTests();
+	const queuedAt = Date.now() - 1000;
+	const site = fastmailSite({ retryAt: queuedAt, unlinkAt: queuedAt });
+	assert.equal(await linker.retryDue(site.ctx, {}, 3), 1);
+	assert.deepEqual(linksOf(site.item().data.content), [["StumbleUpon", STUMBLE]], "nothing linked, nothing removed");
+	assert.ok(!site.calls.includes("get"), "the entry isn't even read");
+	const memo = site.memos.get("posts:E1")!;
+	assert.equal(memo.retryAt, undefined, "not due again every run");
+	assert.deepEqual(memo.unlink, [{ slug: "stumbleupon", qid: "Q911595" }], "the removal waits for the next look for entries");
+	// With a waiting try to link, the entry is linked as before, and that try counts as served.
+	glossary.resetGlossaryForTests();
+	const asked = fastmailSite({ retryAt: queuedAt, unlinkAt: queuedAt, relink: true });
+	assert.equal(await linker.retryDue(asked.ctx, {}, 3), 1);
+	assert.deepEqual(linksOf(asked.item().data.content).map(([text]) => text), ["StumbleUpon", "Fastmail"]);
+	assert.equal(asked.memos.get("posts:E1")!.relink, undefined);
+	assert.equal(asked.memos.get("posts:E1")!.unlinkAt, undefined);
+});
+
+test("unlinkEntry leaves a link whose slug another term has now (another QID): the address leads to a definition again", async () => {
+	glossary.resetGlossaryForTests();
+	const site = goneSite({ terms: { ...WITHOUT_STUMBLE, Q777: ["stumbleupon", "A new term at the old address.", ["StumbleUpon"]] } });
+	const out = await linker.unlinkEntry(site.ctx, {}, "posts", "E1");
+	assert.equal(out.status, "unchanged");
+	assert.ok(!site.calls.some((c) => c.startsWith("update")));
+	assert.deepEqual(linksOf(site.item().data.content).map(([, href]) => href), [STUMBLE, "https://glossary.io/google/"], "the link stays");
+	assert.equal(site.memos.get("posts:E1")!.unlink, undefined);
+});
+
+test("keepDates uses the row EmDash returned for its own write: a save that lands right after it always keeps its date", async () => {
+	// The guard as D1 applies it: the row must still be the one the statement names.
+	const guard = (site: ReturnType<typeof fakeSite>) => (args: unknown[]) => (site.item().updatedAt === args[2] && site.item().version === args[3] ? 1 : 0);
+	for (const [options, why, version] of [
+		[{ revisions: false, saveAfterUpdate: true }, "no revisions: a save right after the update", 4],
+		[{ saveAfterPublish: true }, "revisions: a settings save right after the publish", 5],
+	] as const) {
+		glossary.resetGlossaryForTests();
+		const site = fakeSite(options);
+		const spy = keepDatesSpy(guard(site));
+		try {
+			const out = await linker.linkEntry(site.ctx, KEEP, "posts", "E1");
+			assert.equal(out.status, "linked", why);
+			assert.equal(out.dateKept, false, why);
+			assert.equal(spy.statements.length, 1, why);
+			// The statement names the part's own row, not the row as it is now.
+			assert.equal(spy.statements[0].args[3], version, why);
+			assert.notEqual(spy.statements[0].args[2], site.item().updatedAt, why);
+			assert.equal(site.item().version, version + 1, why);
+			assert.notEqual(site.item().updatedAt, T_OLD, "the other save's date stays");
+			assert.deepEqual(spy.purges, [], why);
+			assert.ok(!site.calls.slice(site.calls.findIndex((c) => c.startsWith("update"))).includes("get"), "the entry isn't read again after the write");
+		} finally {
+			spy.restore();
+		}
+	}
+	// A publish that returns something else (not the draft live, another version): the date is left alone, D1 isn't asked.
+	for (const publishResult of [undefined, { item: { status: "published", version: 9, liveRevisionId: "R2", draftRevisionId: null, updatedAt: "2026-11-24T12:00:09.000Z" } }, { item: { status: "published", version: 5, liveRevisionId: "R8", draftRevisionId: null, updatedAt: "2026-11-24T12:00:09.000Z" } }]) {
+		glossary.resetGlossaryForTests();
+		const spy = keepDatesSpy();
+		try {
+			const site = fakeSite({ publishResult: publishResult ?? null });
+			const out = await linker.linkEntry(site.ctx, KEEP, "posts", "E1");
+			assert.equal(out.status, "linked");
+			assert.equal(out.dateKept, false);
+			assert.equal(spy.statements.length, 0);
+		} finally {
+			spy.restore();
+		}
+	}
+});
+
+test("keepDates clears the entry's cached pages twice: right away, and again a little later", async () => {
+	glossary.resetGlossaryForTests();
+	const spy = keepDatesSpy();
+	try {
+		const site = fakeSite();
+		assert.equal((await linker.linkEntry(site.ctx, KEEP, "posts", "E1")).dateKept, true);
+		assert.equal(spy.purges.length, 1);
+		assert.equal(spy.laters.length, 1, "a second purge is scheduled");
+		await spy.laters[0]();
+		assert.equal(spy.purges.length, 2);
+		assert.deepEqual(spy.purges[1], spy.purges[0], "the same pages");
+		assert.ok(linker.REPURGE_MS >= 10_000 && linker.REPURGE_MS <= 30_000);
+	} finally {
+		spy.restore();
+	}
+	// Nothing restored: nothing scheduled.
+	glossary.resetGlossaryForTests();
+	const none = keepDatesSpy(0);
+	try {
+		await linker.linkEntry(fakeSite().ctx, KEEP, "posts", "E1");
+		assert.equal(none.laters.length, 0);
+	} finally {
+		none.restore();
+	}
+});
+
+test("an unpublished removal of its own is published only while it still stands; otherwise its marker is dropped and the draft left alone", async () => {
+	const removedBody = [block(["I miss StumbleUpon. Google agrees."]), block(["More on ", { t: "Google", href: "https://glossary.io/google/" }, "."])];
+	const marker = { ...UNLINK_MEMO, pending: 3, draft: "R7", pendingUnlink: ["stumbleupon"] };
+	// No longer wanted: the part is off, the term's QID is back, its slug is another term's now, or a person kept its links.
+	for (const [more, why] of [
+		[{ features: { ai: true, "ai.glossaryLinks": true } }, "the part is off"],
+		[{ terms: TERMS }, "the QID is back"],
+		[{ terms: { ...WITHOUT_STUMBLE, Q777: ["stumbleupon", "Another term.", ["StumbleUpon"]] } }, "the slug is another term's"],
+		[{ gone: { ...GONE, gone: {}, keep: { stumbleupon: "Q911595" } } }, "its links are kept"],
+	] as Array<[SiteOptions, string]>) {
+		for (const via of ["unlinkEntry", "linkEntry"] as const) {
+			glossary.resetGlossaryForTests();
+			const site = goneSite({ draft: "R7", version: 4, memo: marker, draftBody: removedBody, ...more });
+			const out = await linker[via](site.ctx, {}, "posts", "E1");
+			assert.equal(out.status, "draft", `${why} (${via})`);
+			assert.deepEqual(site.calls.filter((c) => c.startsWith("publish") || c.startsWith("update")), [], `${why} (${via}): nothing published, nothing written`);
+			assert.equal(site.item().draftRevisionId, "R7", "the draft is left for a person");
+			const memo = site.memos.get("posts:E1")!;
+			assert.equal(memo.pending, undefined, `${why}: the marker is dropped`);
+			assert.equal(memo.draft, undefined);
+			assert.equal(memo.pendingUnlink, undefined);
+			assert.deepEqual(memo.linked, ["Q911595", "Q95"], "nothing recorded as removed");
+			assert.ok(site.calls.some((c) => c.startsWith("log.warn") && c.includes("no longer wanted")), `${why}: logged`);
+		}
+	}
+	// Can't be told now (removals paused by a refused index copy, or no index copy): nothing published, the marker stays for later.
+	for (const [more, why] of [
+		[{ gone: { ...GONE, held: { why: "index-shrank", slugs: ["a"], since: "", copyAt: 1 } } }, "paused"],
+		[{ terms: null }, "no index copy"],
+	] as Array<[SiteOptions, string]>) {
+		glossary.resetGlossaryForTests();
+		const site = goneSite({ draft: "R7", version: 4, memo: marker, draftBody: removedBody, ...more });
+		const out = await linker.unlinkEntry(site.ctx, {}, "posts", "E1");
+		assert.equal(out.status, "draft", why);
+		assert.deepEqual(site.calls.filter((c) => c.startsWith("publish")), [], why);
+		assert.equal(site.memos.get("posts:E1")!.draft, "R7", `${why}: the marker stays`);
+		assert.deepEqual(site.memos.get("posts:E1")!.pendingUnlink, ["stumbleupon"]);
+	}
 });

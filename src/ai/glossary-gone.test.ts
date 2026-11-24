@@ -45,19 +45,28 @@ function site(start: Terms) {
 	const memos = new Map<string, Record<string, unknown>>();
 	const fetched: string[] = [];
 	const errors: string[] = [];
+	const warnings: string[] = [];
+	/** The slug each D1 query looked for, and a slug whose query fails. */
+	const queries: string[] = [];
+	let failing: string | null = null;
 	let answer: (slug: string) => number | "timeout" = () => 404;
 	const sqlite = new DatabaseSync(":memory:");
 	sqlite.exec(`CREATE TABLE ec_posts (id TEXT PRIMARY KEY, slug TEXT, status TEXT, deleted_at TEXT, title TEXT, content TEXT)`);
 	const db = {
 		prepare: (sql: string) => ({
 			bind: (...args: unknown[]) => ({
-				all: async () => ({ results: sqlite.prepare(sql).all(...(args as string[])) }),
+				all: async () => {
+					const slug = String(args[0]).slice("glossary.io/".length, -1);
+					queries.push(slug);
+					if (slug === failing) throw new Error("D1 is busy");
+					return { results: sqlite.prepare(sql).all(...(args as string[])) };
+				},
 			}),
 		}),
 	} as unknown as D1Database;
 	const ctx = {
 		site: { url: "https://coywolf.com" },
-		log: { info() {}, warn() {}, error: (message: string) => void errors.push(message) },
+		log: { info() {}, warn: (message: string) => void warnings.push(message), error: (message: string) => void errors.push(message) },
 		storage: {
 			aiGlossary: {
 				get: async (id: string) => structuredClone(id === "index" ? index : (docs.get(id) ?? null)),
@@ -87,6 +96,9 @@ function site(start: Terms) {
 		db,
 		fetched,
 		errors,
+		warnings,
+		queries,
+		failOn: (slug: string | null) => void (failing = slug),
 		memos,
 		state: () => docs.get("gone") as import("./glossary-gone.js").GoneState,
 		setState: (s: unknown) => void docs.set("gone", structuredClone(s)),
@@ -96,8 +108,8 @@ function site(start: Terms) {
 		unlinked: (id: string) => void sqlite.prepare("UPDATE ec_posts SET content = ? WHERE id = ?").run(JSON.stringify([block("See SEO")]), id),
 		post: (id: string, href: string, more: { slug?: string; status?: string } = {}) =>
 			void sqlite.prepare("INSERT INTO ec_posts (id, slug, status, deleted_at, title, content) VALUES (?, ?, ?, NULL, ?, ?)").run(id, more.slug ?? id, more.status ?? "published", id, JSON.stringify([block("SEO", href)])),
-		run: (now: number, opts: { budget?: { used: number; max: number }; options?: Record<string, unknown> } = {}) =>
-			gone.checkGoneTerms(ctx as never, opts.options ?? {}, opts.budget ?? { used: 0, max: 40 }, { collections: ["posts"], now, db }),
+		run: (now: number, opts: { budget?: { used: number; max: number }; options?: Record<string, unknown>; deadline?: number } = {}) =>
+			gone.checkGoneTerms(ctx as never, opts.options ?? {}, opts.budget ?? { used: 0, max: 40 }, { collections: ["posts"], now, db, deadline: opts.deadline }),
 	};
 }
 
@@ -203,9 +215,9 @@ test("confirming a deleted term: two 404s 20 hours apart AND two index copies 20
 	assert.deepEqual(run.confirmed, ["seo"]);
 	assert.equal(s.fetched.length, 2, "no third check");
 	assert.equal(run.queued, 2);
-	assert.deepEqual(s.state().gone.seo, { qid: "Q180711", since: t1 + 24 * H, scannedAt: t1 + 24 * H, entries: 2 });
+	assert.deepEqual(s.state().gone.seo, { qid: "Q180711", since: t1 + 24 * H, approved: true, scannedAt: t1 + 24 * H, entries: 2 });
 	assert.deepEqual([...s.memos.keys()].sort(), ["posts:E1", "posts:E2"]);
-	assert.deepEqual(s.memos.get("posts:E1"), { collection: "posts", entryId: "E1", linked: [], unlink: [{ slug: "seo", qid: "Q180711" }], retryAt: t1 + 24 * H, tries: 0, updated: new Date(t1 + 24 * H).toISOString() });
+	assert.deepEqual(s.memos.get("posts:E1"), { collection: "posts", entryId: "E1", linked: [], unlink: [{ slug: "seo", qid: "Q180711" }], retryAt: t1 + 24 * H, unlinkAt: t1 + 24 * H, tries: 0, updated: new Date(t1 + 24 * H).toISOString() });
 
 	// Looked for again 6 hours later: already waiting (not queued twice); once no entry links to it, it's done.
 	await s.run(t1 + 26 * H);
@@ -263,13 +275,12 @@ test("a QID back in the index is dropped at every stage: suspect, confirmed, kep
 	assert.deepEqual(s.state().suspects, {});
 
 	const back = gone.observeCopy(
-		{ last: { fetchedAt: 1, slugs: {} }, suspects: {}, gone: { seo: { qid: "Q180711", since: 0 } }, keep: { old: "Q1000" }, approved: ["seo"], updated: "" },
+		{ last: { fetchedAt: 1, slugs: {} }, suspects: {}, gone: { seo: { qid: "Q180711", since: 0, approved: true } }, keep: { old: "Q1000" }, updated: "" },
 		{ fetchedAt: 2, terms: all },
 		3,
 	).state;
 	assert.deepEqual(back.gone, {});
 	assert.deepEqual(back.keep, {});
-	assert.deepEqual(back.approved, []);
 });
 
 test("at most 5 checks a run, within the run's subrequest budget", async () => {
@@ -324,8 +335,15 @@ test("caps: more than 5 terms at once, or more than 20 entries, hold for a perso
 	const approved = await gone.decideGone(many.ctx, "approve", Object.keys(six));
 	assert.equal(approved.ok, true);
 	assert.equal(many.state().held, undefined);
-	assert.equal((await many.run(T0 + 3 * H)).queued, 6);
-	assert.equal(many.state().approved, undefined);
+	// Five terms' entries are looked for per run; the sixth on the next one. The approval stays, so nothing holds again.
+	assert.equal((await many.run(T0 + 3 * H)).queued, 5);
+	assert.equal(many.state().held, undefined);
+	assert.equal((await many.run(T0 + 3 * H + 5 * 60_000)).queued, 1);
+	assert.equal(many.memos.size, 6);
+	assert.equal(many.state().held, undefined);
+	assert.equal((await many.run(T0 + 3 * H + 10 * 60_000)).queued, 0);
+	assert.equal(many.state().held, undefined, "still linked, still approved: not held again");
+	assert.equal(many.errors.length, 1, "no second prompt");
 
 	// More than 20 entries for one term.
 	const busy = site(all);
@@ -423,4 +441,199 @@ test("the summary the AI Enrichment page shows", async () => {
 	assert.equal(summary.checking, 1);
 	assert.deepEqual(summary.suspects, [{ slug: "seo", qid: "Q180711", since: new Date(T0 + 24 * H).toISOString(), goneAnswers: 1 }]);
 	assert.equal(summary.indexCopyAt, new Date(T0 + 24 * H).toISOString());
+});
+
+// ── Review fixes (0.50.0) ────────────────────────────────────────
+
+test("an approval lasts until the term is done: no second hold while its links come out, on later runs or at the 6-hour look", async () => {
+	const all = terms(40);
+	// Many terms: approved once, then never held again.
+	const six = Object.fromEntries([0, 1, 2, 3, 4, 5].map((i) => [`term-${i}`, `Q${1000 + i}`]));
+	const many = site(all);
+	many.setState(confirmedState(without(all, ...Object.values(six)), six, T0));
+	many.copy(without(all, ...Object.values(six)), T0);
+	for (const slug of Object.keys(six)) many.post(`E-${slug}`, `https://glossary.io/${slug}/`);
+	await many.run(T0 + H);
+	assert.equal(many.state().held!.why, "many-terms");
+	assert.equal((await gone.decideGone(many.ctx, "approve", Object.keys(six))).ok, true);
+	for (const at of [T0 + 2 * H, T0 + 2 * H + 5 * 60_000, T0 + 3 * H, T0 + 9 * H, T0 + 16 * H]) {
+		await many.run(at);
+		assert.equal(many.state().held, undefined, `no hold at +${(at - T0) / H} h`);
+	}
+	assert.equal(many.errors.length, 1, "one prompt, ever");
+	assert.equal(many.memos.size, 6);
+	assert.equal(Object.keys(many.state().gone).length, 6, "still linked: still listed, still approved");
+	assert.ok(Object.values(many.state().gone).every((g) => g.approved === true));
+
+	// Many entries: approved once; 6 hours later more than 20 still link to it, and it isn't held again.
+	const busy = site(all);
+	busy.setState(confirmedState(without(all, "Q1000"), { "term-0": "Q1000" }, T0));
+	busy.copy(without(all, "Q1000"), T0);
+	for (let i = 0; i < 60; i++) busy.post(`E${i}`, "https://glossary.io/term-0/");
+	await busy.run(T0 + H);
+	assert.equal(busy.state().held!.why, "many-entries");
+	assert.equal(busy.state().held!.entries, 60);
+	assert.equal((await gone.decideGone(busy.ctx, "approve", ["term-0"])).ok, true);
+	assert.equal((await busy.run(T0 + 2 * H)).queued, 60, "looked for right away, not 6 hours after the hold's look");
+	assert.equal(busy.state().held, undefined);
+	for (let i = 0; i < 30; i++) busy.unlinked(`E${i}`);
+	await busy.run(T0 + 9 * H);
+	assert.equal(busy.state().held, undefined, "30 still linked 6 hours later: no second hold");
+	assert.equal(busy.state().gone["term-0"].entries, 30);
+	assert.equal(busy.errors.length, 1);
+
+	// Terms already past the caps don't count toward them: 3 yesterday and 3 today is no hold.
+	const spread = site(all);
+	const first = { "term-0": "Q1000", "term-1": "Q1001", "term-2": "Q1002" };
+	const second = { "term-3": "Q1003", "term-4": "Q1004", "term-5": "Q1005" };
+	const gapped = without(all, ...Object.values(first), ...Object.values(second));
+	spread.setState(confirmedState(gapped, first, T0));
+	spread.copy(gapped, T0);
+	for (const slug of [...Object.keys(first), ...Object.keys(second)]) for (let i = 0; i < 6; i++) spread.post(`E-${slug}-${i}`, `https://glossary.io/${slug}/`);
+	assert.equal((await spread.run(T0 + H)).queued, 18);
+	const state = spread.state();
+	for (const [slug, qid] of Object.entries(second)) state.gone[slug] = { qid, since: T0 + 24 * H };
+	spread.setState(state);
+	assert.equal((await spread.run(T0 + 24 * H)).queued, 18, "the new three, under both caps on their own");
+	assert.equal(spread.state().held, undefined);
+	assert.equal(spread.errors.length, 0);
+	// A new batch that is over a cap holds by itself, while the approved terms carry on.
+	const more = spread.state();
+	for (let i = 10; i < 16; i++) more.gone[`term-${i}`] = { qid: `Q${1000 + i}`, since: T0 + 48 * H };
+	spread.setState(more);
+	await spread.run(T0 + 48 * H);
+	assert.deepEqual(spread.state().held!.slugs, ["term-10", "term-11", "term-12", "term-13", "term-14", "term-15"], "only the new ones wait");
+});
+
+test("looking for entries is bounded: 5 terms a run, the rest carried over, queries counted in the budget, none after the deadline", async () => {
+	const all = terms(400);
+	const lost = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`term-${i}`, `Q${1000 + i}`]));
+	const left = without(all, ...Object.values(lost));
+	const approvedState = () => {
+		const state = confirmedState(left, lost, T0) as { gone: Record<string, { approved?: true }> };
+		for (const g of Object.values(state.gone)) g.approved = true;
+		return state;
+	};
+	const s = site(all);
+	s.setState(approvedState());
+	s.copy(left, T0);
+	for (let i = 0; i < 12; i++) s.post(`E${i}`, `https://glossary.io/term-${i}/`);
+	assert.equal(gone.MAX_SCANS, 5);
+	const budget = { used: 0, max: 40 };
+	// In slug order: term-0, term-1, term-10, term-100, term-101 (the first three have a post).
+	assert.equal((await s.run(T0 + H, { budget })).queued, 3);
+	assert.deepEqual(s.queries, ["term-0", "term-1", "term-10", "term-100", "term-101"], "5 terms, one query each (one Portable Text field)");
+	assert.equal(s.state().gone["term-100"], undefined, "no entry links to it: done");
+	assert.equal(budget.used, 5, "each query counts against the run's budget");
+	const firstFive = [...s.queries];
+	await s.run(T0 + H + 5 * 60_000);
+	assert.equal(s.queries.length, 10);
+	assert.equal(new Set(s.queries).size, 10, "the next run carries on with other terms");
+	assert.ok(firstFive.slice(0, 3).every((slug) => s.state().gone[slug].scannedAt === T0 + H), "what was looked for is recorded");
+
+	// Two queries left in the budget: two terms. Past the deadline: none.
+	const tight = { used: 38, max: 40 };
+	await s.run(T0 + H + 10 * 60_000, { budget: tight });
+	assert.equal(s.queries.length, 12);
+	assert.equal(tight.used, 40);
+	await s.run(T0 + H + 15 * 60_000, { deadline: Date.now() - 1 });
+	assert.equal(s.queries.length, 12, "out of time: nothing is looked for");
+
+	// A query that fails: what the run found before it is queued and recorded, and isn't looked for again on the next run.
+	const f = site(all);
+	f.setState(approvedState());
+	f.copy(left, T0);
+	for (let i = 0; i < 12; i++) f.post(`E${i}`, `https://glossary.io/term-${i}/`);
+	f.failOn("term-10");
+	await f.run(T0 + H);
+	// Sorted by slug: term-0, term-1, term-10 (fails), …
+	assert.deepEqual(f.queries, ["term-0", "term-1", "term-10"]);
+	assert.deepEqual([...f.memos.keys()].sort(), ["posts:E0", "posts:E1"], "the two found before the failure are queued");
+	assert.equal(f.state().gone["term-0"].scannedAt, T0 + H);
+	assert.equal(f.warnings.length, 1);
+	f.failOn(null);
+	await f.run(T0 + H + 5 * 60_000);
+	assert.deepEqual(f.queries.slice(3), ["term-100", "term-101", "term-102", "term-103", "term-104"], "the next run moves on: nothing repeated, the failed term at the back of the line");
+});
+
+test("a slug another term has now is alive: suspects and confirmed terms with that slug are dropped, whatever the QID", async () => {
+	const all = terms(20, SEO);
+	const s = await started(all);
+	s.copy(without(all, "Q180711"), T0 + 24 * H);
+	await s.run(T0 + 24 * H);
+	assert.ok(s.state().suspects.seo);
+	// glossary.io gives /seo/ to another term (another QID).
+	const reused: Terms = { ...without(all, "Q180711"), Q999: ["seo", "Search engine optimisation, again."] };
+	s.copy(reused, T0 + 48 * H);
+	await s.run(T0 + 48 * H);
+	assert.deepEqual(s.state().suspects, {}, "the address works again");
+	assert.equal(s.fetched.length, 1, "not asked about again");
+
+	const state = { last: { fetchedAt: 1, slugs: { seo: "Q180711", old: "Q1" } }, suspects: { other: { qid: "Q5", since: 0, firstCopyAt: 0, checks: [] } }, gone: { seo: { qid: "Q180711", since: 0, approved: true as const } }, keep: { kept: "Q7" }, updated: "" };
+	const next = gone.observeCopy(state, { fetchedAt: 2, terms: { Q999: ["seo", "x"], Q998: ["other", "x"], Q997: ["kept", "x"], Q996: ["old", "x"] } }, 3, "approve").state;
+	assert.deepEqual(next.gone, {}, "confirmed, approved: dropped with its approval");
+	assert.deepEqual(next.suspects, {}, "a suspect's slug under another QID, and a lost term whose slug is reused, aren't suspects");
+	assert.deepEqual(next.keep, {});
+});
+
+test("a suspect that never gets a clear answer is asked less and less often (an hour, doubling to a day) and dropped after two weeks", async () => {
+	const all = terms(20, SEO);
+	const s = await started(all);
+	s.answer(() => 503);
+	const t1 = T0 + 24 * H;
+	s.copy(without(all, "Q180711"), t1);
+	await s.run(t1);
+	const asked: number[] = [0];
+	// A run every 30 minutes for 15 days.
+	for (let at = t1 + H / 2; at <= t1 + 15 * 24 * H && s.state().suspects.seo; at += H / 2) {
+		const before = s.fetched.length;
+		await s.run(at);
+		if (s.fetched.length > before) asked.push((at - t1) / H);
+	}
+	assert.deepEqual(asked.slice(0, 8), [0, 1, 3, 7, 15, 31, 55, 79], "after 1, 2, 4, 8, 16 hours, then every 24");
+	assert.ok(asked.length <= 20, `${asked.length} checks in two weeks, not one an hour`);
+	assert.equal(s.state().suspects.seo, undefined, "given up");
+	assert.deepEqual(s.state().gone, {}, "never removed");
+	assert.equal(s.warnings.filter((w) => w.includes("no clear answer")).length, 1, "logged");
+	// A clear answer resets the wait.
+	assert.equal(gone.checkDue({ qid: "Q1", since: 0, firstCopyAt: 0, checks: [], triedAt: 0, unknowns: 4 }, 7 * H), false);
+	assert.equal(gone.checkDue({ qid: "Q1", since: 0, firstCopyAt: 0, checks: [], triedAt: 0, unknowns: 4 }, 8 * H), true);
+	assert.equal(gone.checkDue({ qid: "Q1", since: 0, firstCopyAt: 0, checks: [], triedAt: 0, unknowns: 99 }, 24 * H), true);
+});
+
+test("after more than two days without a run (the part was off), it starts over from the current index: terms lost meanwhile are never removed", async () => {
+	const all = terms(20, SEO);
+	const s = await started(all);
+	await s.run(T0 + 24 * H);
+	// Off for five days; glossary.io deleted a term meanwhile.
+	s.copy(without(all, "Q180711"), T0 + 6 * 24 * H);
+	const run = await s.run(T0 + 6 * 24 * H);
+	assert.equal(run.paused, true, "like a first run");
+	assert.deepEqual(s.state().suspects, {}, "not a suspect");
+	assert.equal(s.state().last!.fetchedAt, T0 + 6 * 24 * H);
+	assert.equal(s.state().last!.slugs.seo, undefined);
+	await s.run(T0 + 6 * 24 * H + H);
+	assert.deepEqual(s.state().suspects, {});
+	assert.deepEqual(s.fetched, []);
+	// A quiet day or two is not a restart: a term lost then is checked as usual.
+	const on = await started(all);
+	await on.run(T0 + 24 * H);
+	on.copy(without(all, "Q180711"), T0 + 60 * H);
+	await on.run(T0 + 60 * H);
+	assert.ok(on.state().suspects.seo);
+});
+
+test("queued entries: the turn is marked as the removal's own; a try to link that was already waiting is remembered", async () => {
+	const all = terms(20, SEO);
+	const s = site(all);
+	s.setState(confirmedState(without(all, "Q180711"), { seo: "Q180711" }, T0));
+	s.copy(without(all, "Q180711"), T0);
+	s.post("E1", "https://glossary.io/seo/");
+	s.post("E2", "https://glossary.io/seo/");
+	// E2: the site asked for it to be linked again (as coywolf.com's json_set writes it: epoch ms, a number, tries 0).
+	s.memos.set("posts:E2", { collection: "posts", entryId: "E2", linked: ["Q5"], retryAt: T0 + 30 * 60_000, tries: 0, updated: "" });
+	const now = T0 + H;
+	assert.equal((await s.run(now)).queued, 2);
+	assert.deepEqual(s.memos.get("posts:E1"), { collection: "posts", entryId: "E1", linked: [], unlink: [{ slug: "seo", qid: "Q180711" }], retryAt: now, unlinkAt: now, tries: 0, updated: new Date(now).toISOString() });
+	assert.deepEqual(s.memos.get("posts:E2"), { collection: "posts", entryId: "E2", linked: ["Q5"], unlink: [{ slug: "seo", qid: "Q180711" }], retryAt: now, unlinkAt: now, relink: true, tries: 0, updated: new Date(now).toISOString() });
 });

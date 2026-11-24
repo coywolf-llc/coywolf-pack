@@ -6,22 +6,26 @@
  * copies of glossary.io's public index (src/ai/glossary.ts) and asks for a
  * term's public JSON (https://glossary.io/api/terms/<slug>.json) to read its
  * status code. It sends nothing to glossary.io and asks it for nothing else;
- * what it changes is the site's own entries.
+ * what it changes is the site's own entries. It never links anything.
  *
  * A term counts as gone only when all of these hold:
  * 1. Only good index copies count: the stored copy is only ever written after
  *    a 200 answer that parsed as version 1 and had terms.
- * 2. Shrink guard: a newer copy that lost more than max(5, 1%) of the terms
- *    (by QID) is refused. Nothing changes, the part holds with the list and
- *    logs an error once per copy; a later copy that has them back lets go by
- *    itself, or a person decides on the AI Enrichment page.
+ * 2. Shrink guard: a newer copy that lost more than 5 terms (by QID), or more
+ *    than 1% of them when that's larger, is refused. Nothing changes, the part
+ *    holds with the list and logs an error once per copy; a later copy that
+ *    has them back lets go by itself, or a person decides on the AI Enrichment
+ *    page.
  * 3. A renamed term (its QID under another slug) is alive: its links stay
- *    (glossary.io redirects the old address).
+ *    (glossary.io redirects the old address). So is a slug another term has
+ *    now (another QID): the links lead to a definition again.
  * 4. Each term missing from the index (a suspect) is checked, at most 5 a
  *    run: 404 or 410 records a "gone" answer; 2xx or 3xx means it's alive (the
  *    suspect is dropped); anything else (5xx, 403, 429, a timeout) counts for
- *    nothing, and the term is asked again an hour later. A QID back in the
- *    index drops it at every stage, right before the edit included.
+ *    nothing, and the term is asked again an hour later, then 2, 4… up to a
+ *    day; after two weeks of nothing else it's dropped (logged; its links
+ *    stay). A QID or slug back in the index drops it at every stage, right
+ *    before the edit included.
  * 5. Confirmed gone: two "gone" answers at least 20 hours apart, and the QID
  *    missing from two accepted copies at least 20 hours apart.
  *
@@ -29,12 +33,17 @@
  * Enrichment works on, found in D1 and confirmed by parsing their links, so
  * hand-made links count too) get it in their aiLinks memo's `unlink` list, and
  * the glossary links retry pass takes the links out (unlinkEntry in
- * src/ai/glossary-linker.ts). More than 5 terms confirmed at once, or more
- * than 20 entries that would change, waits for a person instead. A term's
- * entries are looked for again every 6 hours until none links to it.
+ * src/ai/glossary-linker.ts). More than 5 terms confirmed and not yet past the
+ * caps, or more than 20 entries of theirs that would change, waits for a
+ * person instead; a term that's past the caps (under them, or approved) stays
+ * past them until it's done. At most 5 terms' entries are looked for per run,
+ * and a term's entries are looked for again every 6 hours until none links to
+ * it.
  *
  * State: one document, aiGlossary/gone. The first run only records the
- * current index, so terms already missing then are never removed.
+ * current index, so terms already missing then are never removed. The same
+ * goes for a run after more than two days without one (the part was off): it
+ * starts over from the current index.
  */
 import type { PluginContext, StorageCollection } from "emdash";
 
@@ -66,12 +75,20 @@ export const MAX_GONE_TERMS = 5;
 export const MAX_GONE_ENTRIES = 20;
 /** Term checks per scheduled run. */
 export const MAX_CHECKS = 5;
+/** Confirmed terms whose entries are looked for per scheduled run (one D1 query per Portable Text field each). */
+export const MAX_SCANS = 5;
 /** Two "gone" answers, and two index copies without the term, at least this far apart. */
 export const CONFIRM_MS = 20 * 60 * 60_000;
-/** After a check that counted for nothing (an error, a timeout, a 429), this long before that term is asked again. */
+/** After a check that counted for nothing (an error, a timeout, a 429), this long before that term is asked again; doubled after each further one, up to RETRY_CHECK_MAX_MS. */
 export const RETRY_CHECK_MS = 60 * 60_000;
+export const RETRY_CHECK_MAX_MS = 24 * 60 * 60_000;
+/** A suspect with nothing but unclear answers for this long is dropped (its links stay). */
+export const GIVE_UP_MS = 14 * 24 * 60 * 60_000;
 /** How often a confirmed term's entries are looked for again (links still there are queued again; none left: done). */
 export const RESCAN_MS = 6 * 60 * 60_000;
+/** `ranAt` is written this often; a run that finds it older than RESTART_MS starts over from the current index. */
+const HEARTBEAT_MS = 24 * 60 * 60_000;
+export const RESTART_MS = 48 * 60 * 60_000;
 const CHECK_TIMEOUT_MS = 10_000;
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,99}$/;
@@ -88,13 +105,22 @@ export interface GoneSuspect {
 	checks: number[];
 	/** The last check, whatever it answered. */
 	triedAt?: number;
+	/** Unclear answers (an error, 403, 429, a timeout) in a row since the last clear one, and when the first of them came. */
+	unknowns?: number;
+	unknownSince?: number;
 }
 
 export interface GoneTerm {
 	qid: string;
 	/** When it was confirmed gone (epoch ms). */
 	since: number;
-	/** When its entries were last looked for, and how many link to it. */
+	/**
+	 * Past the caps: it was under them, or a person approved it. It stays so until
+	 * the term leaves the list (no entry links to it any more, its QID or slug is
+	 * back, or a person keeps its links), so it's never held again meanwhile.
+	 */
+	approved?: true;
+	/** When its entries were last looked for, and how many link to it. While approved: when they were last queued. */
 	scannedAt?: number;
 	entries?: number;
 }
@@ -113,14 +139,14 @@ export interface GoneState {
 	last: { fetchedAt: number; slugs: Record<string, string> } | null;
 	/** Terms missing from the index, being checked. */
 	suspects: Record<string, GoneSuspect>;
-	/** Confirmed gone, links not yet all removed. Dropped when no entry links to it any more, or when its QID returns. */
+	/** Confirmed gone, links not yet all removed. Dropped when no entry links to it any more, or when its QID or slug returns. */
 	gone: Record<string, GoneTerm>;
 	/** Waiting for a person: why, and which slugs. */
 	held?: GoneHold;
 	/** Links a person chose to keep (slug → QID): never removed until the term is back in the index. */
 	keep?: Record<string, string>;
-	/** Slugs a person let past the caps: their links are queued on the next run. */
-	approved?: string[];
+	/** When a scheduled run last worked on this (epoch ms; written about once a day). */
+	ranAt?: number;
 	updated: string;
 }
 
@@ -153,14 +179,18 @@ export const shrinkLimit = (count: number) => Math.max(5, count / 100);
  * A newer index copy: refused when it lost too many terms (the hold says
  * which; `last` stays), else accepted: terms it lost become suspects (or, for
  * a person's "keep" on a refused copy, kept), terms that are back leave every
- * list, and it becomes `last`. A person's "approve" or "keep" accepts a copy
- * the shrink guard refused. Pure: returns a new state.
+ * list, and it becomes `last`. "Back" is by QID (under any slug) or by slug
+ * (under any QID: glossary.io gave the address to another term, so the links
+ * work again). A person's "approve" or "keep" accepts a copy the shrink guard
+ * refused. Pure: returns a new state.
  */
 export function observeCopy(state: GoneState, copy: IndexCopy, now: number, decision?: "approve" | "keep"): { state: GoneState; lost: string[]; refused: boolean; newHold?: boolean } {
 	const last = state.last;
 	if (!last) return { state: { ...state, last: { fetchedAt: copy.fetchedAt, slugs: slugMap(copy.terms) } }, lost: [], refused: false };
 	if (copy.fetchedAt <= last.fetchedAt) return { state, lost: [], refused: false };
 	const qids = new Set(Object.keys(copy.terms));
+	const slugs = slugMap(copy.terms);
+	const back = (slug: string, qid: string) => qids.has(qid) || Object.hasOwn(slugs, slug);
 	const lost = Object.entries(last.slugs)
 		.filter(([, qid]) => !qids.has(qid))
 		.map(([slug]) => slug)
@@ -173,26 +203,29 @@ export function observeCopy(state: GoneState, copy: IndexCopy, now: number, deci
 	if (next.held?.why === "index-shrank") delete next.held;
 	for (const slug of lost) {
 		const qid = last.slugs[slug];
-		if (next.suspects[slug] || next.gone[slug] || next.keep?.[slug]) continue;
+		// A slug another term has now still leads to a definition: nothing to remove.
+		if (Object.hasOwn(slugs, slug) || next.suspects[slug] || next.gone[slug] || next.keep?.[slug]) continue;
 		if (decision === "keep") (next.keep ??= {})[slug] = qid;
 		else next.suspects[slug] = { qid, since: now, firstCopyAt: copy.fetchedAt, checks: [] };
 	}
-	// Back in the index (under any slug): nothing to remove.
-	for (const [slug, s] of Object.entries(next.suspects)) if (qids.has(s.qid)) delete next.suspects[slug];
-	for (const [slug, g] of Object.entries(next.gone)) if (qids.has(g.qid)) delete next.gone[slug];
-	for (const [slug, qid] of Object.entries(next.keep ?? {})) if (qids.has(qid)) delete next.keep![slug];
-	if (next.approved) next.approved = next.approved.filter((s) => next.gone[s]);
-	next.last = { fetchedAt: copy.fetchedAt, slugs: slugMap(copy.terms) };
+	// Back in the index (the QID under any slug, or the slug under any QID): nothing to remove.
+	for (const [slug, s] of Object.entries(next.suspects)) if (back(slug, s.qid)) delete next.suspects[slug];
+	for (const [slug, g] of Object.entries(next.gone)) if (back(slug, g.qid)) delete next.gone[slug];
+	for (const [slug, qid] of Object.entries(next.keep ?? {})) if (back(slug, qid)) delete next.keep![slug];
+	next.last = { fetchedAt: copy.fetchedAt, slugs };
 	return { state: next, lost, refused: false };
 }
 
 /** Two "gone" answers at least CONFIRM_MS apart. */
 const checksDone = (s: GoneSuspect) => s.checks.length >= 2 && s.checks[s.checks.length - 1] - s.checks[0] >= CONFIRM_MS;
 
-/** Whether a suspect is asked about now: never asked, or a day after its first "gone" answer, and not in the hour after a check. */
+/** How long after a check a suspect isn't asked about again: an hour, doubled after each further unclear answer, up to a day. */
+const retryWait = (s: GoneSuspect) => Math.min(RETRY_CHECK_MS * 2 ** Math.max(0, (s.unknowns ?? 0) - 1), RETRY_CHECK_MAX_MS);
+
+/** Whether a suspect is asked about now: never asked, or a day after its first "gone" answer, and not right after a check (retryWait). */
 export function checkDue(s: GoneSuspect, now: number): boolean {
 	if (checksDone(s)) return false;
-	if (s.triedAt !== undefined && now - s.triedAt < RETRY_CHECK_MS) return false;
+	if (s.triedAt !== undefined && now - s.triedAt < retryWait(s)) return false;
 	return s.checks.length === 0 || now - s.checks[0] >= CONFIRM_MS;
 }
 
@@ -246,8 +279,9 @@ let warnedNoDatabase = false;
  * One scheduled run's work (inside the AI lock, before the glossary links
  * retry pass): look at the newest index copy, check up to MAX_CHECKS
  * suspects, confirm, and queue the entries of confirmed terms. Each term
- * check counts 1 against the run's subrequest budget. `deadline` (epoch ms):
- * no check starts when it couldn't finish before it.
+ * check and each D1 query for entries counts 1 against the run's subrequest
+ * budget. `deadline` (epoch ms): no check starts when it couldn't finish
+ * before it, and no look for entries starts after it.
  */
 export async function checkGoneTerms(
 	ctx: PluginContext,
@@ -264,7 +298,15 @@ export async function checkGoneTerms(
 	const stored = await readGoneState(ctx);
 	if (!stored?.last) {
 		// First run: only the current index is recorded, so terms already missing are never removed.
-		await docs.put(GONE_DOC, { ...(stored ?? { suspects: {}, gone: {} }), last: { fetchedAt: copy.fetchedAt, slugs: slugMap(copy.terms) }, updated: iso(now) });
+		await docs.put(GONE_DOC, { ...(stored ?? { suspects: {}, gone: {} }), last: { fetchedAt: copy.fetchedAt, slugs: slugMap(copy.terms) }, ranAt: now, updated: iso(now) });
+		return run;
+	}
+	if (stored.ranAt !== undefined && now - stored.ranAt > RESTART_MS) {
+		// It hasn't run for more than two days (the part was off): it starts over from the current index, as on a first
+		// run, so terms that went missing meanwhile are never removed. What it was already checking carries on.
+		const restart = observeCopy({ ...stored, last: { fetchedAt: copy.fetchedAt - 1, slugs: slugMap(copy.terms) } }, copy, now).state;
+		await docs.put(GONE_DOC, { ...restart, ranAt: now, updated: iso(now) });
+		ctx.log.info("glossary.io links: checking for deleted terms starts over from the current glossary.io index (it hadn't run for more than two days)");
 		return run;
 	}
 	const before = JSON.stringify(stored);
@@ -283,9 +325,9 @@ export async function checkGoneTerms(
 
 	// Ask glossary.io about the suspects (oldest first).
 	const fetcher = ctx.http ? ctx.http.fetch.bind(ctx.http) : fetch;
-	const qids = new Set(Object.keys(copy.terms));
+	const slugsNow = slugMap(copy.terms);
 	for (const [slug, s] of Object.entries(state.suspects).sort(([, a], [, b]) => a.since - b.since)) {
-		if (qids.has(s.qid)) {
+		if (Object.hasOwn(copy.terms, s.qid) || Object.hasOwn(slugsNow, slug)) {
 			delete state.suspects[slug];
 			continue;
 		}
@@ -298,7 +340,19 @@ export async function checkGoneTerms(
 		if (answer === "alive") {
 			delete state.suspects[slug];
 			ctx.log.info("glossary.io links: a term missing from glossary.io's index still answers; its links stay", { slug });
-		} else if (answer === "gone") s.checks = s.checks.length ? [s.checks[0], now] : [now];
+		} else if (answer === "gone") {
+			s.checks = s.checks.length ? [s.checks[0], now] : [now];
+			delete s.unknowns;
+			delete s.unknownSince;
+		} else {
+			// No clear answer: asked again after an hour, then 2, 4… up to a day; given up after two weeks of them.
+			s.unknowns = (s.unknowns ?? 0) + 1;
+			s.unknownSince ??= now;
+			if (now - s.unknownSince >= GIVE_UP_MS) {
+				delete state.suspects[slug];
+				ctx.log.warn("glossary.io links: glossary.io gave no clear answer about a term missing from its index for two weeks; it's no longer checked, and its links stay", { slug, qid: s.qid });
+			}
+		}
 	}
 	for (const [slug, s] of Object.entries(state.suspects)) {
 		if (!isConfirmed(s, state.last!.fetchedAt)) continue;
@@ -308,16 +362,19 @@ export async function checkGoneTerms(
 		ctx.log.info("glossary.io links: a glossary.io term is gone for good", { slug, qid: s.qid });
 	}
 	try {
-		run.queued = await queueRemovals(ctx, options, state, { collections: opts.collections, now, db: opts.db });
+		run.queued = await queueRemovals(ctx, options, state, budget, { collections: opts.collections, now, deadline: opts.deadline, db: opts.db });
 	} catch (error) {
-		// The checks above are still kept; the entries are looked for again on the next run.
+		// The checks above and what was already queued are kept; the entries are looked for again on a later run.
 		ctx.log.warn("glossary.io links: couldn't look for entries that link to deleted terms", { error: String(error) });
 	}
 	await save();
 	return run;
 
 	async function save() {
-		if (JSON.stringify(state) === before) return;
+		// `ranAt` is written about once a day, so a long gap (the part was off) can be told from a quiet day.
+		const beat = state.ranAt === undefined || now - state.ranAt >= HEARTBEAT_MS;
+		if (!beat && JSON.stringify(state) === before) return;
+		if (beat) state.ranAt = now;
 		state.updated = iso(now);
 		await docs.put(GONE_DOC, state);
 	}
@@ -325,52 +382,121 @@ export async function checkGoneTerms(
 
 /**
  * Queue the entries that link to confirmed terms (in place on `state`): their
- * memo's `unlink` gets the term and `retryAt` now. A term no entry links to
- * any more is done. Caps hold for a person, unless the person approved these
- * slugs. Returns how many entries were queued.
+ * memo's `unlink` gets the term, and `retryAt` and `unlinkAt` now. A term no
+ * entry links to any more is done.
+ *
+ * Caps: the terms not yet past them (never approved) hold for a person when
+ * there are more than MAX_GONE_TERMS of them, or when their entries together
+ * are more than MAX_GONE_ENTRIES. A term past the caps (under them, or approved
+ * by a person) stays past them until it leaves the list, so it's never held
+ * again while its links are coming out.
+ *
+ * Bounded: at most MAX_SCANS terms are looked for per run (the rest on later
+ * runs), each query counts 1 against the run's budget, and nothing starts
+ * after `deadline`. What a run got done stays done when a later step fails.
+ * Returns how many entries were queued.
  */
-async function queueRemovals(ctx: PluginContext, options: AiOptions, state: GoneState, opts: { collections: string[]; now: number; db?: D1Database | null }): Promise<number> {
+async function queueRemovals(
+	ctx: PluginContext,
+	options: AiOptions,
+	state: GoneState,
+	budget: { used: number; max: number },
+	opts: { collections: string[]; now: number; deadline?: number; db?: D1Database | null },
+): Promise<number> {
 	const { now } = opts;
-	const slugs = Object.keys(state.gone).sort();
-	if (state.held && state.held.why !== "index-shrank" && !state.held.slugs.some((s) => state.gone[s])) delete state.held;
-	if (!slugs.length) {
-		delete state.approved;
-		return 0;
-	}
-	const approved = (state.approved ?? []).filter((s) => state.gone[s]);
-	let due: string[];
-	if (approved.length) due = approved;
-	else {
-		if (slugs.length > MAX_GONE_TERMS) {
-			hold(ctx, state, { why: "many-terms", slugs }, now);
-			return 0;
-		}
-		if (state.held?.why === "many-terms") delete state.held;
-		due = slugs.filter((s) => state.gone[s].scannedAt === undefined || now - state.gone[s].scannedAt! >= RESCAN_MS);
-	}
-	if (!due.length) return 0;
-	const db = opts.db !== undefined ? opts.db : await databaseFor();
-	if (!db) {
-		if (!warnedNoDatabase) ctx.log.error("glossary.io links: removing links to deleted terms needs the site's D1 binding (DB).");
-		warnedNoDatabase = true;
-		return 0;
-	}
+	const waits = (slug: string) => Boolean(state.gone[slug]) && !state.gone[slug].approved;
+	// A hold whose terms are all done, kept or approved is over.
+	if (state.held && state.held.why !== "index-shrank" && !state.held.slugs.some(waits)) delete state.held;
+	if (!Object.keys(state.gone).length) return 0;
+
+	const pending = Object.keys(state.gone).filter(waits).sort();
+	const manyTerms = pending.length > MAX_GONE_TERMS;
+	if (manyTerms) hold(ctx, state, { why: "many-terms", slugs: pending }, now);
+	else if (state.held?.why === "many-terms") delete state.held;
+
+	const stale = (slug: string) => state.gone[slug].scannedAt === undefined || now - state.gone[slug].scannedAt! >= RESCAN_MS;
 	const skip = new Set((options.glossaryLinks?.skip ?? []).map((s) => s.trim()).filter(Boolean));
-	const found = await findEntries(ctx, db, opts.collections, due, skip);
-	const entries = new Set([...found.values()].flat());
-	for (const slug of due) state.gone[slug] = { ...state.gone[slug], scannedAt: now, entries: found.get(slug)?.length ?? 0 };
-	if (!approved.length && entries.size > MAX_GONE_ENTRIES) {
-		hold(ctx, state, { why: "many-entries", slugs: due, entries: entries.size }, now);
-		return 0;
+	const outOfTime = () => opts.deadline !== undefined && Date.now() >= opts.deadline;
+	let db: D1Database | null | undefined;
+	let fields: Array<[string, string]> | undefined;
+	let scans = 0;
+	/** The entries that link to a term, or null when this run can't look (its limits, or no database). */
+	const scan = async (slug: string): Promise<string[] | null> => {
+		if (scans >= MAX_SCANS || outOfTime()) return null;
+		if (db === undefined) {
+			db = opts.db !== undefined ? opts.db : await databaseFor();
+			if (!db && !warnedNoDatabase) ctx.log.error("glossary.io links: removing links to deleted terms needs the site's D1 binding (DB).");
+			if (!db) warnedNoDatabase = true;
+		}
+		if (!db) return null;
+		fields ??= await textFields(ctx, opts.collections);
+		if (budget.used + fields.length > budget.max) return null;
+		scans++;
+		return findEntries(db, fields, slug, skip, budget);
+	};
+
+	// The terms not yet past the caps: all of them are looked for before any is queued.
+	const seen = new Map<string, string[]>();
+	if (!manyTerms && pending.length) {
+		let complete = true;
+		for (const slug of pending) {
+			if (!stale(slug)) continue;
+			const keys = await scan(slug);
+			if (!keys) {
+				complete = false;
+				break;
+			}
+			seen.set(slug, keys);
+			state.gone[slug] = { ...state.gone[slug], scannedAt: now, entries: keys.length };
+		}
+		if (complete) {
+			// Entries counted once when every term was looked for in this run; else each term's own count.
+			const total = pending.every((s) => seen.has(s)) ? new Set(pending.flatMap((s) => seen.get(s)!)).size : pending.reduce((n, s) => n + (state.gone[s].entries ?? 0), 0);
+			if (total > MAX_GONE_ENTRIES) hold(ctx, state, { why: "many-entries", slugs: pending, entries: total }, now);
+			else {
+				if (state.held?.why === "many-entries") delete state.held;
+				for (const slug of pending) {
+					const { scannedAt: _s, ...term } = state.gone[slug];
+					state.gone[slug] = { ...term, approved: true };
+				}
+			}
+		}
 	}
-	if (state.held && state.held.why !== "index-shrank") delete state.held;
-	delete state.approved;
+
+	// The terms past the caps: the ones just looked for, then never looked for, then the longest since.
+	const found = new Map<string, string[]>();
+	for (const [slug, keys] of seen) if (state.gone[slug].approved) found.set(slug, keys);
+	const order = (slug: string) => state.gone[slug].scannedAt ?? 0;
+	const due = Object.keys(state.gone)
+		.filter((s) => state.gone[s].approved && !found.has(s) && stale(s))
+		.sort((a, b) => order(a) - order(b) || state.gone[a].since - state.gone[b].since || (a < b ? -1 : 1));
+	let failed = false;
+	let failure: unknown;
+	for (const slug of due) {
+		let keys: string[] | null;
+		try {
+			keys = await scan(slug);
+		} catch (error) {
+			// What this run found so far is still queued below; this term goes to the back of the line.
+			state.gone[slug] = { ...state.gone[slug], scannedAt: now };
+			failed = true;
+			failure = error;
+			break;
+		}
+		if (!keys) break;
+		found.set(slug, keys);
+	}
 
 	const byEntry = new Map<string, Array<{ slug: string; qid: string }>>();
 	for (const [slug, keys] of found) for (const key of keys) byEntry.set(key, [...(byEntry.get(key) ?? []), { slug, qid: state.gone[slug].qid }]);
 	const memos = linkMemos(ctx);
 	let queued = 0;
+	let cut = false;
 	for (const [key, list] of byEntry) {
+		if (outOfTime()) {
+			cut = true;
+			break;
+		}
 		const colon = key.indexOf(":");
 		const memo: LinkMemo = (await memos.get(key)) ?? { collection: key.slice(0, colon), entryId: key.slice(colon + 1), linked: [], updated: "" };
 		const unlink = new Map((memo.unlink ?? []).map((u) => [u.slug, u]));
@@ -378,57 +504,71 @@ async function queueRemovals(ctx: PluginContext, options: AiOptions, state: Gone
 		for (const u of list) unlink.set(u.slug, u);
 		// Already waiting its turn with these terms.
 		if (unlink.size === had && memo.retryAt !== undefined) continue;
-		await memos.put(key, { ...memo, unlink: [...unlink.values()].sort((a, b) => (a.slug < b.slug ? -1 : 1)), retryAt: now, tries: 0, updated: iso(now) });
+		// A try that was already waiting (a site's request to link the entry again, or a link that had to wait) isn't
+		// used up by the removal: `relink` has the links checked once the removal is done. `unlinkAt` marks this turn as the removal's own.
+		const asked = memo.relink === true || (memo.retryAt !== undefined && memo.retryAt !== memo.unlinkAt);
+		await memos.put(key, { ...memo, unlink: [...unlink.values()].sort((a, b) => (a.slug < b.slug ? -1 : 1)), retryAt: now, unlinkAt: now, tries: 0, ...(asked ? { relink: true as const } : {}), updated: iso(now) });
 		queued++;
 	}
-	for (const slug of due) {
-		if (found.get(slug)?.length) continue;
-		delete state.gone[slug];
-		ctx.log.info("glossary.io links: no entry links to a deleted term any more", { slug });
+	// Out of time before every entry was queued: these terms are looked for again on the next run.
+	if (!cut) {
+		for (const [slug, keys] of found) {
+			if (keys.length) {
+				state.gone[slug] = { ...state.gone[slug], scannedAt: now, entries: keys.length };
+				continue;
+			}
+			delete state.gone[slug];
+			ctx.log.info("glossary.io links: no entry links to a deleted term any more", { slug });
+		}
 	}
-	if (queued) ctx.log.info("glossary.io links: entries queued to remove links to deleted terms", { entries: queued, slugs: due });
+	if (queued) ctx.log.info("glossary.io links: entries queued to remove links to deleted terms", { entries: queued, slugs: [...found.keys()] });
+	if (failed) throw failure;
 	return queued;
+}
+
+/** The Portable Text fields ([collection, field]) of the collections AI Enrichment works on. */
+async function textFields(ctx: PluginContext, collections: string[]): Promise<Array<[string, string]>> {
+	const out: Array<[string, string]> = [];
+	for (const collection of collections) {
+		if (!IDENT.test(collection)) continue;
+		const info = await ctx.schema?.getCollection(collection);
+		for (const f of info?.fields ?? []) if (f.type === "portableText" && IDENT.test(f.slug)) out.push([collection, f.slug]);
+	}
+	return out;
 }
 
 /**
  * Published entries (in the collections AI Enrichment works on) whose Portable
- * Text links to these slugs, by slug: found in D1 (the published columns,
- * so links made by hand count too), then confirmed by parsing the links (so
- * /seo never matches /seo-audit). Entries on the glossaryLinks skip list are
- * left out.
+ * Text links to this slug ("<collection>:<id>", sorted): found in D1 (the
+ * published columns, so links made by hand count too), then confirmed by
+ * parsing the links (so /seo never matches /seo-audit). Entries on the
+ * glossaryLinks skip list are left out. One query per field, each counted
+ * against the run's budget.
  */
-async function findEntries(ctx: PluginContext, db: D1Database, collections: string[], slugs: string[], skip: ReadonlySet<string>): Promise<Map<string, string[]>> {
-	const found = new Map<string, Set<string>>();
-	for (const collection of collections) {
-		if (!IDENT.test(collection)) continue;
-		const info = await ctx.schema?.getCollection(collection);
-		const fields = (info?.fields ?? []).filter((f) => f.type === "portableText" && IDENT.test(f.slug)).map((f) => f.slug);
-		for (const field of fields) {
-			for (const slug of slugs) {
-				if (!SLUG.test(slug)) continue;
-				const base = `glossary.io/${slug}`;
-				const { results } = await db
-					.prepare(
-						`SELECT id, slug, "${field}" AS body FROM "ec_${collection}" WHERE deleted_at IS NULL AND status = 'published' AND (instr(lower("${field}"), ?1) > 0 OR instr(lower("${field}"), ?2) > 0 OR instr(lower("${field}"), ?3) > 0 OR instr(lower("${field}"), ?4) > 0) LIMIT 200`,
-					)
-					.bind(`${base}/`, `${base}"`, `${base}?`, `${base}#`)
-					.all<{ id: string; slug: string | null; body: string | null }>();
-				for (const row of results ?? []) {
-					if (row.slug && (skip.has(row.slug) || skip.has(`${collection}:${row.slug}`))) continue;
-					let value: unknown;
-					try {
-						value = JSON.parse(row.body ?? "");
-					} catch {
-						continue;
-					}
-					if (!glossarySlugsIn(value).has(slug)) continue;
-					if (!found.has(slug)) found.set(slug, new Set());
-					found.get(slug)!.add(`${collection}:${row.id}`);
-				}
+async function findEntries(db: D1Database, fields: Array<[string, string]>, slug: string, skip: ReadonlySet<string>, budget: { used: number }): Promise<string[]> {
+	const found = new Set<string>();
+	if (!SLUG.test(slug)) return [];
+	const base = `glossary.io/${slug}`;
+	for (const [collection, field] of fields) {
+		budget.used++;
+		const { results } = await db
+			.prepare(
+				`SELECT id, slug, "${field}" AS body FROM "ec_${collection}" WHERE deleted_at IS NULL AND status = 'published' AND (instr(lower("${field}"), ?1) > 0 OR instr(lower("${field}"), ?2) > 0 OR instr(lower("${field}"), ?3) > 0 OR instr(lower("${field}"), ?4) > 0) LIMIT 200`,
+			)
+			.bind(`${base}/`, `${base}"`, `${base}?`, `${base}#`)
+			.all<{ id: string; slug: string | null; body: string | null }>();
+		for (const row of results ?? []) {
+			if (row.slug && (skip.has(row.slug) || skip.has(`${collection}:${row.slug}`))) continue;
+			let value: unknown;
+			try {
+				value = JSON.parse(row.body ?? "");
+			} catch {
+				continue;
 			}
+			if (glossarySlugsIn(value).has(slug)) found.add(`${collection}:${row.id}`);
 		}
 	}
-	return new Map([...found].map(([slug, keys]) => [slug, [...keys].sort()]));
+	return [...found].sort();
 }
 
 // ── Status and a person's decisions (the AI Enrichment page) ─────
@@ -493,8 +633,15 @@ export async function decideGone(ctx: PluginContext, action: "approve" | "dismis
 			next = structuredClone(state);
 			delete next.held;
 			if (action === "approve") {
-				next.approved = asked.filter((s) => next.gone[s]);
-				message = `Links to ${next.approved.length} deleted terms are removed over the next scheduled runs.`;
+				let count = 0;
+				for (const s of asked) {
+					if (!next.gone[s]) continue;
+					// Approved until the term leaves the list; its entries are looked for on the next runs.
+					const { scannedAt: _s, ...term } = next.gone[s];
+					next.gone[s] = { ...term, approved: true };
+					count++;
+				}
+				message = `Links to ${count} deleted terms are removed over the next scheduled runs.`;
 			} else {
 				for (const s of asked) {
 					if (!next.gone[s]) continue;
