@@ -161,6 +161,8 @@ interface SiteOptions {
 	publishConflict?: boolean;
 	publishThrows?: boolean;
 	updateThrows?: boolean;
+	/** The first this many updates throw; later ones work. */
+	updateThrowsTimes?: number;
 	draftBody?: unknown[];
 	slug?: string;
 	updatedAt?: string;
@@ -207,6 +209,7 @@ function fakeSite(opts: SiteOptions = {}) {
 	const fetches: string[] = [];
 	let reads = 0;
 	let stamp = 0;
+	let updateFails = opts.updateThrowsTimes ?? 0;
 	const tick = () => `2026-11-24T12:00:0${++stamp}.000Z`;
 	const record = { collection: "posts", entryId: "E1", title: "Joy", hash: "h", status: opts.notAnalyzed ? "failed" : "ok", error: "", entities: opts.entities ?? [ent("Q911595", "StumbleUpon", { wikipedia: "https://en.wikipedia.org/wiki/StumbleUpon" }), ent("Q95", "Google")], description: "", descriptionStatus: "none", updated: "2026-11-23T00:00:00.000Z" };
 	const entries = new Map<string, unknown>([["posts:E1", record]]);
@@ -257,7 +260,7 @@ function fakeSite(opts: SiteOptions = {}) {
 			},
 			update: async (_c: string, _id: string, patch: Record<string, unknown>) => {
 				calls.push(`update ${JSON.stringify(patch)}`);
-				if (opts.updateThrows) throw new Error("D1 is busy");
+				if (opts.updateThrows || updateFails-- > 0) throw new Error("D1 is busy");
 				// Someone's autosave lands right before this write: two versions, the last one theirs.
 				item = { ...item, data: { ...item.data, ...patch }, version: item.version + (opts.bumpDuringUpdate ? 2 : 1), updatedAt: tick(), draftRevisionId: revisions ? "R2" : null };
 				// What EmDash 1.5.0's plugin content update returns: the row its write left (no version, no revision ids).
@@ -799,6 +802,87 @@ test("a try to link that was waiting when the removal was queued (relink) still 
 	memo = busyAsked.memos.get("posts:E1")!;
 	assert.equal(memo.relink, true);
 	assert.equal(linker.linkAsked(memo), true);
+});
+
+test("a removal whose update throws keeps its next turn its own: no link nobody asked for once it goes through", async () => {
+	const clock = Date.now;
+	const at = async <T>(when: number, run: () => Promise<T>): Promise<T> => {
+		Date.now = () => when;
+		try {
+			glossary.resetGlossaryForTests();
+			return await run();
+		} finally {
+			Date.now = clock;
+		}
+	};
+	const queuedAt = Date.now() - 1000;
+
+	// No try to link waiting: the error's retry is the removal's, so the entry is never linked.
+	glossary.resetGlossaryForTests();
+	const site = fastmailSite({ retryAt: queuedAt, unlinkAt: queuedAt }, { updateThrowsTimes: 1 });
+	assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 1);
+	assert.ok(site.calls.some((c) => c.startsWith("log.warn glossary.io links (retry) failed")), "the update threw");
+	let memo = site.memos.get("posts:E1")!;
+	assert.ok((memo.retryAt as number) > Date.now(), "tried again later");
+	assert.equal(memo.unlinkAt, memo.retryAt, "the retry is the removal's own");
+	assert.equal(memo.relink, undefined);
+	assert.equal(linker.linkAsked(memo), false, "a failed removal isn't a request to link");
+	assert.deepEqual(memo.unlink, [{ slug: "stumbleupon", qid: "Q911595" }]);
+	// The removal goes through on its retry: nothing is scheduled after it.
+	const due = memo.retryAt as number;
+	assert.equal(await at(due + 1, () => linker.retryDue(site.ctx, {}, 3, { unlink: true })), 1);
+	assert.deepEqual(linksOf(site.item().data.content), [], "the removal");
+	memo = site.memos.get("posts:E1")!;
+	assert.equal(memo.retryAt, undefined, "no link check is scheduled");
+	assert.equal(memo.unlinkAt, undefined);
+	assert.equal(memo.relink, undefined);
+	site.age();
+	assert.equal(await at(due + 24 * 60 * 60_000, () => linker.retryDue(site.ctx, {}, 3, { unlink: true })), 0);
+	assert.deepEqual(linksOf(site.item().data.content), [], "Fastmail was never linked");
+	assert.equal(site.calls.filter((c) => c.startsWith("publish")).length, 1, "one publish: the removal");
+
+	// The same failure, then removals are turned off (or paused): the turn is given up, not used to link.
+	glossary.resetGlossaryForTests();
+	const off = fastmailSite({ retryAt: queuedAt, unlinkAt: queuedAt }, { updateThrowsTimes: 1 });
+	assert.equal(await linker.retryDue(off.ctx, {}, 3, { unlink: true }), 1);
+	const offDue = off.memos.get("posts:E1")!.retryAt as number;
+	assert.equal(await at(offDue + 1, () => linker.retryDue(off.ctx, {}, 3)), 1);
+	assert.deepEqual(linksOf(off.item().data.content), [["StumbleUpon", STUMBLE]], "nothing linked, nothing removed");
+	assert.equal(off.calls.filter((c) => c.startsWith("publish")).length, 0);
+	assert.equal(off.memos.get("posts:E1")!.retryAt, undefined);
+
+	// A site's request to link was waiting too (retryAt isn't unlinkAt): it survives the error, and the links are checked after the removal.
+	glossary.resetGlossaryForTests();
+	const asked = fastmailSite({ retryAt: queuedAt + 500, unlinkAt: queuedAt, tries: 0 }, { updateThrowsTimes: 1 });
+	assert.equal(await linker.retryDue(asked.ctx, {}, 3, { unlink: true }), 1);
+	memo = asked.memos.get("posts:E1")!;
+	assert.equal(linker.linkAsked(memo), true, "the site's request is kept");
+	assert.equal(memo.relink, true);
+	const askedDue = memo.retryAt as number;
+	assert.equal(await at(askedDue + 1, () => linker.retryDue(asked.ctx, {}, 3, { unlink: true })), 1);
+	assert.deepEqual(linksOf(asked.item().data.content), [], "the removal first");
+	const check = asked.memos.get("posts:E1")!.retryAt as number;
+	assert.ok(check > askedDue, "a link check is scheduled");
+	asked.age();
+	assert.equal(await at(check + 1, () => linker.retryDue(asked.ctx, {}, 3, { unlink: true })), 1);
+	assert.deepEqual(linksOf(asked.item().data.content), [["Fastmail", "https://glossary.io/fastmail/"]], "linked because the site asked");
+});
+
+test("afterError: without links to take out it is withRetry's error; with them the turn stays the removal's", () => {
+	const base = { collection: "posts", entryId: "E1", linked: [], updated: "" };
+	assert.deepEqual(linker.afterError({ ...base, retryAt: 5, tries: 1 }, 1000), linker.withRetry({ ...base, retryAt: 5, tries: 1 }, "error", 1000));
+	const unlink = [{ slug: "seo", qid: "Q180711" }];
+	const own = linker.afterError({ ...base, unlink, retryAt: 5, unlinkAt: 5, tries: 0 }, 1000);
+	assert.equal(own.unlinkAt, own.retryAt);
+	assert.equal(linker.linkAsked(own), false);
+	// The tries are used up: nothing scheduled, and no stale unlinkAt that a later retryAt could be read against.
+	const spent = linker.afterError({ ...base, unlink, retryAt: 5, unlinkAt: 5, tries: linker.MAX_TRIES }, 1000);
+	assert.equal(spent.retryAt, undefined);
+	assert.equal(spent.unlinkAt, undefined);
+	assert.equal(linker.linkAsked(spent), false);
+	// A request to link stays one, whichever way it was recorded.
+	assert.equal(linker.linkAsked(linker.afterError({ ...base, unlink, retryAt: 9, unlinkAt: 5, tries: 0 }, 1000)), true);
+	assert.equal(linker.linkAsked(linker.afterError({ ...base, unlink, retryAt: 5, unlinkAt: 5, relink: true, tries: linker.MAX_TRIES }, 1000)), true);
 });
 
 test("while removals are off or paused, a turn that was only for a removal isn't used to link", async () => {

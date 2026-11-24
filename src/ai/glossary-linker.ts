@@ -228,6 +228,21 @@ export function withRetry(memo: LinkMemo, status: LinkStatus | "error", now = Da
 	return { ...rest, tries, retryAt: now + RETRY_BASE_MS * 2 ** (tries - 1) };
 }
 
+/**
+ * The memo after a retry pass's turn threw: tried again later, like any error. With links still to take out, the
+ * next turn stays the removal's own (`unlinkAt` follows the new `retryAt`), as it does when a removal has to wait:
+ * otherwise the new `retryAt` would read as a request to link (linkAsked) that nobody made, and the entry would be
+ * linked once the removal went through, or at once while removals are off or paused. A try to link that really
+ * was waiting is remembered (`relink`).
+ */
+export function afterError(memo: LinkMemo, now = Date.now()): LinkMemo {
+	const next = withRetry(memo, "error", now);
+	if (!memo.unlink?.length) return next;
+	const asked = linkAsked(memo);
+	const { unlinkAt: _a, relink: _l, ...rest } = next;
+	return { ...rest, ...(rest.retryAt === undefined ? {} : { unlinkAt: rest.retryAt }), ...(asked ? { relink: true as const } : {}) };
+}
+
 /** The memo without an edit in progress. */
 const settled = (memo: LinkMemo): LinkMemo => {
 	const { pending: _p, draft: _d, pendingQids: _q, pendingSlugs: _s, pendingUnlink: _u, keepUpdatedAt: _k, ...rest } = memo;
@@ -732,7 +747,7 @@ export async function retryDue(ctx: PluginContext, options: AiOptions, limit: nu
 		} catch (error) {
 			ctx.log.warn("glossary.io links (retry) failed", { entry: id, error: String(error) });
 			const memo = await memos.get(id);
-			if (memo) await memos.put(id, withRetry(memo, "error"));
+			if (memo) await memos.put(id, afterError(memo));
 		}
 	}
 	return due.items.length;
