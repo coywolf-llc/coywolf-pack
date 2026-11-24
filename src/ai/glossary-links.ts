@@ -122,6 +122,8 @@ export interface Occurrence {
 	reject: string | null;
 	/** Usable only when the entity has no better mention. */
 	fallback: boolean;
+	/** Matched with a plural ending ("Threads" for Thread): an exact name at the same place wins. */
+	plural: boolean;
 }
 
 const GLOSSARY = "https://glossary.io";
@@ -144,13 +146,15 @@ const CITATION_HOST_PREFIX =
 	/^(docs|doc|developer|developers|dev|support|help|helpcenter|kb|blog|blogs|news|community|forum|forums|bugzilla|bugs|issues|status|press|newsroom|investor|investors|ir|learn|answers|discuss|get|merchant|merchants|business|partner|partners|seller|sellers|sell|ads|advertising|enterprise|signup|accounts|account|my|dashboard|console|portal|login|auth|careers|jobs|events|shop|store|download|downloads)\./;
 const CITATION_PATH = /\/(issues|pull|commit|commits|blob|tree|releases|wiki|answer|answers|article|articles|post|posts|news|blog|docs|documentation|reference|guide|guides|status|p|watch|video|videos|detail|details|dp|gp|item|itm|listing|show_bug\.cgi)(\/|$)|\/(19|20)\d\d\/|\.pdf$/i;
 /** Affiliate networks and their link shorteners (a host or any subdomain of it: automattic.pxf.io). */
-const AFFILIATE_HOSTS = ["amzn.to", "amzn.com", "a.co", "geni.us", "shareasale.com", "shrsl.com", "skimresources.com", "linksynergy.com", "pjtra.com", "pjatr.com", "anrdoezrs.net", "jdoqocy.com", "tkqlhce.com", "dpbolvw.net", "kqzyfj.com", "awin1.com", "sjv.io", "pxf.io", "evyy.net", "ojrq.net", "7eer.net", "mkr3.net", "prf.hn", "audw.net", "avantlink.com", "partnerstack.com", "clkbank.com", "clickbank.net", "go2cloud.org", "refersion.com", "viglink.com", "tidd.ly", "rstyle.me", "fave.co", "bit.ly"];
+const AFFILIATE_HOSTS = ["amzn.to", "amzn.com", "a.co", "geni.us", "shareasale.com", "shrsl.com", "skimresources.com", "linksynergy.com", "pjtra.com", "pjatr.com", "anrdoezrs.net", "jdoqocy.com", "tkqlhce.com", "dpbolvw.net", "kqzyfj.com", "awin1.com", "sjv.io", "pxf.io", "evyy.net", "ojrq.net", "7eer.net", "mkr3.net", "prf.hn", "audw.net", "avantlink.com", "partnerstack.com", "clkbank.com", "clickbank.net", "go2cloud.org", "refersion.com", "viglink.com", "tidd.ly", "rstyle.me", "fave.co", "bit.ly", "t.co", "ow.ly", "buff.ly", "dlvr.it"];
+/** Stores whose links can be for any product (amazon.com/dp/…?tag=…): their brand counts as unknown. */
+const MARKETPLACES = /(^|\.)(amazon|ebay|walmart|bestbuy|target|etsy|aliexpress|newegg|bhphotovideo|costco|homedepot|lowes)\.[a-z.]+$/;
 const AFFILIATE_PARAM = /[?&](ref|ref_|ref_id|referral|aff|aff_id|aff_c|affiliate|affiliate_id|afmc|via|tag|partner|ps_partner_key|ps_xid|gspk|gsxid|fpr|fp_ref|rfsn|lmref|awc|cjevent|cjdata|irclickid|irgwc|clickid|clickref|a_aid|sscid|ssaid|sjid|kaid|ranmid|raneaid|ransiteid|coupon)=/i;
 /** Subdomains used for affiliate and promo landing pages (try.shopify.com, go.nordvpn.net). */
 const AFFILIATE_HOST_PREFIX = /^(try|go|click|track|trk|refer|referral|aff|affiliate|affiliates|promo|deal|deals|offer|offers)\.[a-z0-9-]+\.[a-z0-9.-]+$/;
 /** Referral fragments some programs use (Backblaze: #af0118). */
 const AFFILIATE_FRAGMENT = /^#(af|aff|ref)[-_]?[0-9a-z]+$/i;
-const AFFILIATE_PATH = /\/(visit|go|recommends|refer|ref|aff|affiliate)\//i;
+const AFFILIATE_PATH = /^\/(visit|go|recommends|refer|ref|aff|affiliate)\//i;
 const STOP_TOKENS = new Set(["the", "and", "for", "with", "inc", "corp", "llc", "app", "apps", "social", "network", "search", "online", "web", "website", "project", "foundation", "protocol", "service", "studio", "media", "group", "labs", "com", "org", "net"]);
 
 /** The glossary.io slug a link points at, or null. */
@@ -163,6 +167,11 @@ export function glossarySlug(href: string, origin = GLOSSARY): string | null {
 
 export function glossaryUrl(slug: string, origin = GLOSSARY): string {
 	return `${origin}/${slug}/`;
+}
+
+/** A Portable Text body's text blocks as plain text (one line per block). */
+export function bodyText(content: unknown): string {
+	return textBlocks(Array.isArray(content) ? content : []).map((t) => t.text).join("\n");
 }
 
 /** The glossary.io slugs a Portable Text body already links to. */
@@ -283,7 +292,7 @@ export function classifyLink(href: string, entity: LinkEntity, siteHosts: readon
 }
 
 /** Host labels that say nothing about the brand (go.nordvpn.net is NordVPN's). */
-const GENERIC_LABELS = new Set(["www", "m", "go", "try", "click", "track", "trk", "refer", "referral", "aff", "affiliate", "affiliates", "promo", "deal", "deals", "offer", "offers", "get", "shop", "store", "app", "link", "links"]);
+const GENERIC_LABELS = new Set(["www", "m", "about", "go", "try", "click", "track", "trk", "refer", "referral", "aff", "affiliate", "affiliates", "promo", "deal", "deals", "offer", "offers", "get", "shop", "store", "app", "link", "links"]);
 
 /**
  * The brand an affiliate link is for, as lowercase letters and digits, or ""
@@ -302,6 +311,7 @@ export function affiliateBrand(href: string, siteHosts: readonly string[] = [], 
 		const i = /^(visit|go|recommends)$/i.test(segments[0] ?? "") ? 1 : 0;
 		return compact(segments[i] ?? "");
 	}
+	if (MARKETPLACES.test(host)) return "";
 	const network = AFFILIATE_HOSTS.find((n) => host === n || host.endsWith(`.${n}`));
 	if (network) return host === network ? "" : compact(host.slice(0, -network.length - 1).split(".").pop() ?? "");
 	const labels = host.split(".").filter((l) => !GENERIC_LABELS.has(l));
@@ -451,7 +461,7 @@ export function findOccurrences(tb: TextBlock, entityIndex: number, names: strin
 			else if (isAcronym(name) && /\(\s*$/.test(before)) reject = "abbreviation"; // "neuro-linguistic programming (NLP)"
 			const sentenceStart = SENTENCE_BREAK.test(before);
 			const fallback = insideQuotes(before) || (!/[\s\u00a0\u2010\u2011-]/.test(found) && sentenceStart && !isAcronym(name));
-			out.push({ entity: entityIndex, block: tb.index, child, start, end, text: found, reject, fallback });
+			out.push({ entity: entityIndex, block: tb.index, child, start, end, text: found, reject, fallback, plural: found.length > m[1].length });
 		}
 	}
 	return out;
@@ -506,7 +516,8 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 		for (const tb of blocks) occurrences.push(...findOccurrences(tb, i, a.names, a.concept));
 	});
 	// A mention inside a longer mention of another entity belongs to that one (Google in Google Analytics).
-	const live = occurrences.filter((o) => !occurrences.some((p) => p.entity !== o.entity && p.block === o.block && p.end - p.start > o.end - o.start && p.start < o.end && o.start < p.end));
+	const beats = (p: Occurrence, o: Occurrence) => p.end - p.start > o.end - o.start || (p.end - p.start === o.end - o.start && !p.plural && o.plural);
+	const live = occurrences.filter((o) => !occurrences.some((p) => p.entity !== o.entity && p.block === o.block && p.start < o.end && o.start < p.end && beats(p, o)));
 
 	type Edit = { kind: "add"; child: number; start: number; end: number; href: string } | { kind: "switch"; run: Run; href: string };
 	const edits = new Map<number, Edit[]>();
@@ -528,8 +539,9 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 			const n = normalizeName(text);
 			if (nameSet.has(n)) return true;
 			// A plural only for concepts and abbreviations ("PWAs"): "Threads" isn't the protocol "Thread".
-			const base = text.trim().replace(/e?s$/, "");
-			return (a.concept || a.names.some((name) => isAcronym(name) && name === base)) && nameSet.has(n.replace(/e?s$/, ""));
+			const bases = [text.trim().replace(/s$/, ""), text.trim().replace(/es$/, "")];
+			const plurals = [n.replace(/s$/, ""), n.replace(/es$/, "")];
+			return (a.concept || a.names.some((name) => isAcronym(name) && bases.includes(name))) && plurals.some((p) => nameSet.has(p));
 		};
 		// A mention inside link text, as a whole name ("Shopify free"; not "WP" in "WP Engine").
 		const mentions = (text: string) => a.names.some((name) => [...text.matchAll(namePattern(name))].some((m) => {
@@ -537,7 +549,8 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 			const e = s + m[0].length;
 			return caseMatches(m[1], name, a.concept) && !(s > 0 && WORD.test(text[s - 1])) && !(e < text.length && WORD.test(text[e])) && !joinsAfter(text.slice(e)) && !joinsBefore(text.slice(0, s));
 		}));
-		const tokens = [...new Set(a.names.flatMap((n) => nameTokens(n, 4)).map((t) => t.replace(/[^a-z0-9]/g, "")).filter((t) => t.length >= 4))];
+		const siteBrand = entity.website ? affiliateBrand(entity.website) : "";
+		const tokens = [...new Set([...a.names.flatMap((n) => nameTokens(n, 4)), ...(siteBrand ? [siteBrand] : [])].map((t) => t.replace(/[^a-z0-9]/g, "")).filter((t) => t.length >= 4))];
 		/** Whether an affiliate link is for this entity: its brand matches a name (shopify.pxf.io, /visit/yubico), or it's unknown (an Amazon short link). */
 		const forEntity = (href: string) => {
 			const brand = affiliateBrand(href, options.siteHosts, options.shortHosts);

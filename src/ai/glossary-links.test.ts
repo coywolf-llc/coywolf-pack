@@ -68,6 +68,8 @@ const TERMS: Record<string, { slug: string; names: string[] }> = {
 	Q21: { slug: "thread", names: ["Thread"] },
 	Q22: { slug: "wordpress", names: ["WordPress", "WP"] },
 	Q23: { slug: "mac-mini", names: ["Mac mini"] },
+	Q25: { slug: "database", names: ["database"] },
+	Q26: { slug: "threads", names: ["Threads"] },
 };
 const lookup = (qid: string) => TERMS[qid] ?? null;
 const ent = (qid: string, name: string, more: Record<string, unknown> = {}) => ({ qid, name, type: "Thing", description: "", wikipedia: "", website: "", primary: false, ...more });
@@ -313,6 +315,12 @@ test("an affiliate link naming the entity rules out a glossary link, whichever c
 	assert.equal(links.affiliateBrand("https://go.nordvpn.net/aff_c?offer_id=15"), "nordvpn");
 	assert.equal(links.affiliateBrand("https://amzn.to/3gbTYZI"), "");
 	assert.equal(links.affiliateBrand("https://shop.brand.co.uk/?ref=1"), "brand");
+	assert.equal(links.affiliateBrand("https://www.amazon.com/dp/B0D?tag=x-20"), "", "a store's link can be for any product");
+	const store = plan([block(["A ", { t: "refurbished Mac mini", href: "https://www.amazon.com/dp/B0D?tag=x-20" }, "."]), block(["The Mac mini is quiet."])], [ent("Q23", "Mac mini")]);
+	assert.equal(store.skipped[0].why, "affiliate");
+	const maker = plan([block(["A ", { t: "headless Mac mini", href: "https://apple.sjv.io/x" }, "."]), block(["The Mac mini is quiet."])], [ent("Q23", "Mac mini", { website: "https://www.apple.com/mac-mini/" })]);
+	assert.equal(maker.skipped[0].why, "affiliate", "the maker's affiliate link is for its product");
+	assert.notEqual(links.classifyLink("https://github.com/golang/go/", ent("Q20", "Go"), []), "affiliate", "/go/ deeper in a path isn't a redirect");
 });
 
 test("social profiles: a bare segment only where that's a profile; article slugs aren't profiles", () => {
@@ -334,11 +342,15 @@ test("Google I/O isn't Google; a plural anchor only matches concepts and abbrevi
 	assert.equal(threads.kept[0]?.why, "not-a-name");
 	const pwas = plan([block(["Install ", { t: "PWAs", href: "https://en.wikipedia.org/wiki/Progressive_web_app" }, " today."])], [ent("Q9", "progressive web app", { wikipedia: "https://en.wikipedia.org/wiki/Progressive_web_app" })]);
 	assert.equal(pwas.changes[0]?.action, "switch");
+	const dbs = plan([block(["Read about ", { t: "databases", href: "https://en.wikipedia.org/wiki/Database" }, "."])], [ent("Q25", "database", { wikipedia: "https://en.wikipedia.org/wiki/Database" })]);
+	assert.equal(dbs.changes[0]?.action, "switch", "\"databases\" is the plural of \"database\"");
+	const both = plan([block(["Meta's Threads is not the Thread protocol."])], [ent("Q21", "Thread"), ent("Q26", "Threads")]);
+	assert.deepEqual(linksOf(both.content), [["Threads", "https://glossary.io/threads/"], ["Thread", "https://glossary.io/thread/"]]);
 });
 
 // ── The entry edit ───────────────────────────────────────────────
 
-function fakeSite(opts: { draft?: string | null; version?: number; bumpBeforeWrite?: boolean; bumpDuringUpdate?: boolean; publishConflict?: boolean; slug?: string; updatedAt?: string; memo?: Record<string, unknown>; siteUrl?: string } = {}) {
+function fakeSite(opts: { draft?: string | null; version?: number; bumpBeforeWrite?: boolean; bumpDuringUpdate?: boolean; publishConflict?: boolean; updateThrows?: boolean; draftBody?: unknown[]; slug?: string; updatedAt?: string; memo?: Record<string, unknown>; siteUrl?: string } = {}) {
 	const body = [block(["I miss ", { t: "StumbleUpon", href: "https://en.wikipedia.org/wiki/StumbleUpon" }, ". Google agrees."])];
 	type Item = { id: string; slug: string; status: string; data: Record<string, unknown>; version: number; updatedAt: string; draftRevisionId: string | null; liveRevisionId: string | null };
 	let item: Item = { id: "E1", slug: opts.slug ?? "joy", status: "published", data: { title: "Joy", content: body }, version: opts.version ?? 3, updatedAt: opts.updatedAt ?? "2026-10-04T23:01:54.489Z", draftRevisionId: opts.draft ?? null, liveRevisionId: "R1" };
@@ -380,8 +392,10 @@ function fakeSite(opts: { draft?: string | null; version?: number; bumpBeforeWri
 				if (opts.bumpBeforeWrite && reads === 2) item = { ...item, version: item.version + 1 };
 				return structuredClone(item);
 			},
+			getRevision: async () => ({ data: { title: "Joy", content: opts.draftBody ?? body } }),
 			update: async (_c: string, _id: string, patch: Record<string, unknown>) => {
 				calls.update++;
+				if (opts.updateThrows) throw new Error("D1 is busy");
 				// Someone's autosave lands right before this write: two versions, the last one theirs.
 				item = { ...item, data: { ...item.data, ...patch }, version: item.version + (opts.bumpDuringUpdate ? 2 : 1), draftRevisionId: "R2" };
 			},
@@ -466,16 +480,38 @@ test("linkEntry: a publish conflict is staged and retried; a save during the wri
 	assert.deepEqual(collided.calls.publish, [], "nothing is published over someone's save");
 	assert.equal(collided.memos.get("posts:E1")!.retryAt, undefined, "a collision waits for a person");
 
-	// An edit whose publish never happened: its draft is version + 1 of the marker's version.
-	const own = fakeSite({ draft: "R7", version: 4, memo: { pending: 3, linked: [] } });
+	// An edit whose publish never happened: a draft one version after the marker, with the live text and the edit's links.
+	const linkedBody = [block(["I miss ", { t: "StumbleUpon", href: "https://glossary.io/stumbleupon/" }, ". Google agrees."])];
+	const marker = { pending: 3, pendingQids: ["Q911595"], pendingSlugs: ["stumbleupon"], linked: [] };
+	const own = fakeSite({ draft: "R7", version: 4, memo: marker, draftBody: linkedBody });
 	const finished = await linker.linkEntry(own.ctx, {}, "posts", "E1");
 	assert.equal(finished.status, "linked");
 	assert.deepEqual(own.calls.publish, ["rev-4"]);
 	assert.equal(own.memos.get("posts:E1")!.pending, undefined);
+	assert.deepEqual(own.memos.get("posts:E1")!.linked, ["Q911595"], "what it published is remembered");
 
-	const theirs = fakeSite({ draft: "R7", version: 6, memo: { pending: 3, linked: [] } });
+	// Same version, but an editor's draft (no glossary links, or other text): never published, and the stale marker is dropped.
+	const editors = fakeSite({ draft: "R7", version: 4, memo: marker });
+	assert.equal((await linker.linkEntry(editors.ctx, {}, "posts", "E1")).status, "draft");
+	assert.deepEqual(editors.calls.publish, []);
+	assert.equal(editors.memos.get("posts:E1")!.pending, undefined);
+	const edited = fakeSite({ draft: "R7", version: 4, memo: marker, draftBody: [block(["I miss ", { t: "StumbleUpon", href: "https://glossary.io/stumbleupon/" }, ". Google disagrees."])] });
+	assert.equal((await linker.linkEntry(edited.ctx, {}, "posts", "E1")).status, "draft");
+	assert.deepEqual(edited.calls.publish, []);
+
+	const theirs = fakeSite({ draft: "R7", version: 6, memo: marker, draftBody: linkedBody });
 	assert.equal((await linker.linkEntry(theirs.ctx, {}, "posts", "E1")).status, "draft");
 	assert.deepEqual(theirs.calls.publish, []);
+
+	// An update that fails without writing drops its marker.
+	const failing = fakeSite({ updateThrows: true });
+	await assert.rejects(linker.linkEntry(failing.ctx, {}, "posts", "E1"));
+	assert.equal(failing.memos.get("posts:E1")!.pending, undefined);
+
+	// Exclusions are remembered even when the entry has to wait.
+	const waiting = fakeSite({ draft: "R9" });
+	await linker.linkEntry(waiting.ctx, {}, "posts", "E1", { exclude: ["Q95"] });
+	assert.deepEqual(waiting.memos.get("posts:E1")!.linked, ["Q95"]);
 });
 
 test("retryDue links entries whose wait is over", async () => {

@@ -128,7 +128,7 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		tasks: [{ name: AI_TASK, schedule: "*/2 * * * *", handler: (ctx: PluginContext) => tick(ctx, options, { budgetMs: 8 * 60_000 }).then(() => undefined) }],
 		adminPages: [{ path: "/ai", label: "AI Enrichment", icon: "sparkle" }],
 		storage: STORAGE,
-		capabilities: ["network:request", "content:read", "content:write", "content:publish", "schema:read", "media:read", "media:bytes:read", "media:metadata:write"],
+		capabilities: ["network:request", "content:read", "content:write", "content:revisions:read", "content:publish", "schema:read", "media:read", "media:bytes:read", "media:metadata:write"],
 		allowedHosts: [...PROVIDER_HOSTS, WIKIDATA_HOST, WIKIDATA_QUERY_HOST, GLOSSARY_HOST],
 	};
 }

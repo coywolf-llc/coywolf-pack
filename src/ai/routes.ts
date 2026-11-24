@@ -8,7 +8,7 @@ import { z } from "zod";
 
 import { ctxFeatures, isOn, requireFeature } from "../core/features.js";
 import { parseInput } from "../shared.js";
-import { type QueueJob, cleanText, DESCRIPTION_MAX, ALT_MAX, CAPTION_MAX } from "./logic.js";
+import { type QueueJob, cleanText, DESCRIPTION_MAX, ALT_MAX, CAPTION_MAX, queueId } from "./logic.js";
 import { type ModelOption, PROVIDERS, chat, listModels } from "./providers.js";
 import {
 	type AiOptions,
@@ -32,7 +32,7 @@ import {
 	withLock,
 } from "./store.js";
 import { applyDescription, applyImageText, entryText, targetCollections, tick } from "./worker.js";
-import { type LinkOutcome, linkEntry } from "./glossary-linker.js";
+import { type LinkOutcome, linkEntry, linkMemos, withRetry } from "./glossary-linker.js";
 import { readOnlyRoute } from "../core/routes.js";
 
 const asCtx = (ctx: unknown) => ctx as PluginContext;
@@ -295,8 +295,8 @@ export function aiRoutes(options: AiOptions) {
 				}
 				const s = await readSettings(ctx, options);
 				const list = keys;
-				// Never alongside the scheduled AI run (it analyzes and links too): try again shortly when it's busy.
-				const results = await withLock(ctx, 5 * 60_000, async () => {
+				const queue = col<QueueJob>(ctx, "aiQueue");
+				const run = async () => {
 					const out: Array<LinkOutcome | { key: string; slug: null; status: "skipped" | "error"; changes: never[]; reason: string }> = [];
 					for (const key of list) {
 						const colon = key.indexOf(":");
@@ -309,16 +309,24 @@ export function aiRoutes(options: AiOptions) {
 						try {
 							const record = await records.get(key);
 							const item = record?.status === "ok" ? await ctx.content?.get(collection, id) : null;
-							// The text hash is remembered only when the analysis is of the current text, so a queued re-analysis still links.
-							const t = item ? await entryText(ctx, collection, item.data, s, features) : null;
-							const textHash = t && record && t.hash === record.hash ? t.textHash : undefined;
-							out.push(await linkEntry(ctx, options, collection, id, { dryRun: input.dryRun, exclude: input.exclude?.[key], record: record ?? undefined, textHash }));
+							// The text hash is remembered unless a re-analysis is queued (it may find other entities and should still link).
+							const queued = await queue.get(queueId({ kind: "entry", collection, entryId: id }));
+							const t = item && !queued ? await entryText(ctx, collection, item.data, s, features) : null;
+							out.push(await linkEntry(ctx, options, collection, id, { dryRun: input.dryRun, exclude: input.exclude?.[key], record: record ?? undefined, textHash: t?.textHash }));
 						} catch (error) {
 							out.push({ key, slug: null, status: "error", changes: [], reason: String(error).slice(0, 300) });
+							// Tried again by the scheduled run (an unpublished edit of its own is finished then).
+							if (!input.dryRun) {
+								const memos = linkMemos(ctx);
+								const memo = await memos.get(key).catch(() => null);
+								await memos.put(key, withRetry(memo ?? { collection, entryId: id, linked: [], updated: new Date().toISOString() }, "error")).catch(() => undefined);
+							}
 						}
 					}
 					return out;
-				});
+				};
+				// Writes never run alongside the scheduled AI run (it analyzes and links too); a dry run writes nothing.
+				const results = input.dryRun ? await run() : await withLock(ctx, 5 * 60_000, run);
 				if (!results) throw new PluginRouteError("CONFLICT", "The scheduled AI run is working; try again in a minute.", 409);
 				return { results, cursor, hasMore };
 			},

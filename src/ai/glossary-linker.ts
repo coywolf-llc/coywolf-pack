@@ -24,8 +24,9 @@
  *   ("collided") and logged as an error for a person to check (its earlier
  *   revision has the other save).
  * - An edit whose publish didn't happen (an error, a timeout) leaves a marker,
- *   and the next run publishes that draft (it's recognized as ours by its
- *   version) instead of leaving it pending forever.
+ *   and the next run publishes that draft instead of leaving it pending
+ *   forever. It's recognized by its draft id, or by its version together with
+ *   its text (unchanged) and links (all of the edit's); never by version alone.
  *
  * "Link existing entries" (POST ai/glossary-links) runs the same code on
  * entries analyzed before the part was turned on, with a dry run.
@@ -34,7 +35,7 @@ import type { PluginContext, StorageCollection } from "emdash";
 
 import { isConflict } from "../core/conflict.js";
 import { glossaryFor, isGlossarySite } from "./glossary.js";
-import { type GlossaryTarget, type LinkChange, glossarySlug, linkedGlossarySlugs, planGlossaryLinks } from "./glossary-links.js";
+import { type GlossaryTarget, type LinkChange, bodyText, glossarySlug, linkedGlossarySlugs, planGlossaryLinks } from "./glossary-links.js";
 // Types only (store.ts loads the providers, which the tests can't run): the collection lookups are repeated here.
 import type { AiOptions, EntryRecord } from "./store.js";
 
@@ -79,6 +80,9 @@ export interface LinkMemo {
 	pending?: number;
 	/** That edit's draft revision, once known. */
 	draft?: string;
+	/** That edit's QIDs and glossary slugs, so its draft can be recognized (and remembered) if its publish never happened. */
+	pendingQids?: string[];
+	pendingSlugs?: string[];
 	/** When to try again (epoch ms), and the tries so far. */
 	retryAt?: number;
 	tries?: number;
@@ -125,8 +129,10 @@ export function linkConfig(options: AiOptions, siteUrl?: string | null): { siteH
 /**
  * Whether a finished analysis should link: when the text changed since the
  * links last looked at it, or (nothing remembered yet) when the entry was never
- * analyzed successfully before. Entries analyzed before the part was turned on
- * wait for their next text change or for Link existing entries.
+ * analyzed successfully before. An entry analyzed before the part was turned
+ * on has nothing remembered: its next analysis only records its text (a text
+ * change and a settings re-analysis look the same), so it's linked by Link
+ * existing entries or by the text change after that.
  */
 export function shouldLink(memo: Pick<LinkMemo, "textHash"> | null | undefined, previous: { status: string; title: string; entities?: readonly unknown[] } | null | undefined, textHash: string): boolean {
 	if (memo) return memo.textHash !== textHash;
@@ -150,10 +156,10 @@ export function withRetry(memo: LinkMemo, status: LinkStatus | "error", now = Da
 	return { ...rest, tries, retryAt: now + RETRY_BASE_MS * 2 ** (tries - 1) };
 }
 
-const without = (memo: LinkMemo, ...fields: Array<"pending" | "draft">): LinkMemo => {
-	const copy = { ...memo };
-	for (const f of fields) delete copy[f];
-	return copy;
+/** The memo without an edit in progress. */
+const settled = (memo: LinkMemo): LinkMemo => {
+	const { pending: _p, draft: _d, pendingQids: _q, pendingSlugs: _s, ...rest } = memo;
+	return rest as LinkMemo;
 };
 
 /** Link one analyzed entry's entities to glossary.io (see the file comment). Throws only on unexpected errors. */
@@ -170,6 +176,8 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 		if (!opts.dryRun) await save(withRetry({ ...memo, ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now));
 		return { key, slug, status, changes, reason };
 	};
+	// Exclusions count from the start, so a run that has to wait (a draft, a recent save) can't link them later.
+	if (opts.exclude?.length && !opts.dryRun) memo = { ...memo, linked: [...new Set([...memo.linked, ...opts.exclude])].sort() };
 
 	const content = ctx.content;
 	if (!content?.get || !content.update || !content.getVersioned || !content.publish) throw new Error("Content write access is unavailable.");
@@ -188,9 +196,8 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	if (item.slug && (config.skip.has(item.slug) || config.skip.has(`${collection}:${item.slug}`))) return out("skipped", item.slug, [], "on the skip list");
 
 	if (pendingDraft(item)) {
-		// This part's own edit whose publish didn't happen goes live now (recognized by its draft id or its version).
-		const ours = (memo.draft && memo.draft === item.draftRevisionId) || (memo.pending !== undefined && item.version === memo.pending + 1);
-		if (ours && !opts.dryRun) {
+		// This part's own edit whose publish didn't happen goes live now; anyone else's draft is left alone.
+		if (!opts.dryRun && (await ownDraft(ctx, collection, item, memo, fields.map((f) => f.slug)))) {
 			const versioned = await content.getVersioned(collection, id);
 			if (versioned && versioned.item.draftRevisionId === item.draftRevisionId) {
 				try {
@@ -199,10 +206,12 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 					if (!isConflict(error)) throw error;
 					return out("conflict", item.slug);
 				}
-				memo = without(memo, "pending", "draft");
+				memo = { ...settled(memo), linked: [...new Set([...memo.linked, ...(memo.pendingQids ?? [])])].sort() };
 				return out("linked", item.slug, [], "published the draft an earlier run saved");
 			}
 		}
+		// A marker that doesn't match this draft is stale: the draft is someone else's.
+		if (memo.pending !== undefined || memo.draft) memo = settled(memo);
 		return out("draft", item.slug);
 	}
 	const savedAt = Date.parse(item.updatedAt);
@@ -224,6 +233,11 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 		if (t && linkedSlugs.has(t.slug)) handled.add(e.qid);
 	}
 	const exclude = new Set(handled);
+	// An affiliate link in any field rules its entity out in all of them.
+	for (const field of fields) {
+		const pre = planGlossaryLinks(item.data[field.slug], record.entities, lookup, { siteHosts: config.siteHosts, shortHosts: config.shortHosts });
+		for (const s of pre.skipped) if (s.why === "affiliate") exclude.add(s.qid);
+	}
 	const patch: Record<string, unknown> = {};
 	const changes: LinkChange[] = [];
 	for (const field of fields) {
@@ -243,16 +257,23 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	if (!fresh || versionOf(fresh) !== versionOf(item)) return out("conflict", item.slug);
 	const linked = [...new Set([...handled, ...changes.map((c) => c.qid)])].sort();
 	// The marker goes in first, so an edit whose publish never happens is recognized (and published) next time.
-	await save({ ...memo, pending: fresh.version ?? 0 });
-	await content.update(collection, id, patch);
+	await save({ ...memo, pending: fresh.version ?? 0, pendingQids: changes.map((c) => c.qid), pendingSlugs: [...new Set(changes.map((c) => c.slug))] });
+	try {
+		await content.update(collection, id, patch);
+	} catch (error) {
+		// Nothing was written: drop the marker so it can't be mistaken for a later draft.
+		const after = await content.get(collection, id).catch(() => null);
+		if (after && versionOf(after) === versionOf(fresh)) await save(settled(memo));
+		throw error;
+	}
 	if (!info.supports.includes("revisions")) {
-		memo = { ...without(memo, "pending"), linked };
+		memo = { ...settled(memo), linked };
 		return out("linked", item.slug, changes);
 	}
 	const versioned = await content.getVersioned(collection, id);
 	// Publish only the draft this edit created: exactly one version after the one read.
 	if (!versioned || versioned.item.version !== (fresh.version ?? 0) + 1 || !versioned.item.draftRevisionId) {
-		memo = without(memo, "pending");
+		memo = settled(memo);
 		ctx.log.error("glossary.io links: a save landed while the links were written; nothing was published. Check the entry's revisions.", { entry: key, slug: item.slug });
 		return out("collided", item.slug, changes);
 	}
@@ -262,11 +283,29 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	} catch (error) {
 		if (!isConflict(error)) throw error;
 		// Someone saved it in between (an open editor autosaves): their draft may not have the links, so they're tried again.
-		memo = without(memo, "pending", "draft");
+		memo = settled(memo);
 		return out("staged", item.slug, changes);
 	}
-	memo = { ...without(memo, "pending", "draft"), linked };
+	memo = { ...settled(memo), linked };
 	return out("linked", item.slug, changes);
+}
+
+/**
+ * Whether the entry's pending draft is this part's own unpublished edit: its
+ * recorded draft id, or (when the publish never happened before the id was
+ * known) a draft exactly one version after the marker whose text is the live
+ * text and which has every glossary link the edit made. Version alone isn't
+ * enough: an editor's draft can have that version too.
+ */
+async function ownDraft(ctx: PluginContext, collection: string, item: { id: string; version?: number; data: Record<string, unknown>; draftRevisionId?: string | null }, memo: LinkMemo, fields: string[]): Promise<boolean> {
+	if (memo.draft && memo.draft === item.draftRevisionId) return true;
+	if (memo.pending === undefined || item.version !== memo.pending + 1 || !memo.pendingSlugs?.length || !item.draftRevisionId || !ctx.content?.getRevision) return false;
+	const draft = await ctx.content.getRevision(collection, item.id, item.draftRevisionId).catch(() => null);
+	const data = (draft as { data?: Record<string, unknown> } | null)?.data;
+	if (!data) return false;
+	const sameText = fields.every((f) => !(f in data) || bodyText(data[f]) === bodyText(item.data[f]));
+	const slugs = new Set(fields.flatMap((f) => [...linkedGlossarySlugs(data[f])]));
+	return sameText && memo.pendingSlugs.every((s) => slugs.has(s));
 }
 
 /** Entries due for another try (draft, busy, conflict, staged, no index, error): linked again without a model call. */
