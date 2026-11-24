@@ -44,6 +44,12 @@ registerHooks({
 });
 // @ts-ignore -- as above.
 const routes = (await import("./routes.ts")) as typeof import("./routes.js");
+// @ts-ignore -- as above.
+const worker = (await import("./worker.ts")) as typeof import("./worker.js");
+// @ts-ignore -- as above.
+const pack = (await import("./pack.ts")) as typeof import("./pack.js");
+// @ts-ignore -- as above.
+const aiStore = (await import("./store.ts")) as typeof import("./store.js");
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -335,7 +341,12 @@ interface SiteOptions {
 	legacy?: Record<string, unknown>;
 	/** The entry has a queued analysis. */
 	queued?: boolean;
+	/** Fields over the entry's analysis as 0.51.0 stores it: hashes that aren't its text's now (the text changed since), say. */
+	analysis?: Record<string, unknown>;
 }
+
+/** An entry's hashes (title, text and settings; title and text) under a site's settings now, as its analysis records them. */
+const hashesFor = async (ctx: unknown, data: Record<string, unknown>) => (await worker.entryText(ctx as never, "posts", data, await aiStore.readSettings(ctx as never, {}), await features.ctxFeatures(ctx as never)))!;
 
 /** A site with one published post (posts:E1), recording content calls and memo writes. */
 function fakeSite(opts: SiteOptions = {}) {
@@ -350,9 +361,11 @@ function fakeSite(opts: SiteOptions = {}) {
 	};
 	let stamp = 0;
 	const tick = () => `2026-11-24T12:00:0${++stamp}.000Z`;
-	// An analysis as 0.51.0 stores it (with a text hash), unless `legacy`.
-	const record = { collection: "posts", entryId: "E1", title: "Joy", hash: "h", status: "ok", error: "", entities: ENTITIES, description: "", descriptionStatus: "none", updated: "2026-11-23T00:00:00.000Z", ...(opts.legacy ?? { textHash: "t" }) };
+	// An analysis as 0.51.0 stores it, with the hashes of the entry's title and text as they are (`analyzed` below puts them in before
+	// the first read), unless `legacy` (no text hash, and its own `hash`) or `analysis` says otherwise.
+	const record = { collection: "posts", entryId: "E1", title: "Joy", hash: "h", status: "ok", error: "", entities: ENTITIES, description: "", descriptionStatus: "none", updated: "2026-11-23T00:00:00.000Z", ...(opts.legacy ?? {}) };
 	const entries = new Map<string, unknown>(opts.record === null ? [] : [["posts:E1", record]]);
+	let analyzed: Promise<void> = Promise.resolve();
 	let entryRevision = 0;
 	const memos = new Map<string, Record<string, unknown>>();
 	if (opts.memo) memos.set("posts:E1", { collection: "posts", entryId: "E1", linked: [], updated: "", ...opts.memo });
@@ -378,21 +391,23 @@ function fakeSite(opts: SiteOptions = {}) {
 		schema: { listCollections: async () => [{ slug: "posts", routable: true, hidden: false }], getCollection: async () => ({ slug: "posts", supports: ["revisions", "drafts"], fields: [{ slug: "title", type: "string", sortOrder: 0 }, { slug: "content", type: "portableText", sortOrder: 1 }] }) },
 		storage: {
 			aiEntries: {
-				get: async (k: string) => entries.get(k) ?? null,
+				get: async (k: string) => (await analyzed, entries.get(k) ?? null),
 				put: async (k: string, v: unknown) => {
+					await analyzed;
 					calls.push("entry");
 					entryRevision++;
 					entries.set(k, v);
 				},
-				getVersioned: async (k: string) => (entries.has(k) ? { value: structuredClone(entries.get(k)), revision: String(entryRevision) } : null),
+				getVersioned: async (k: string) => (await analyzed, entries.has(k) ? { value: structuredClone(entries.get(k)), revision: String(entryRevision) } : null),
 				compareAndSet: async (k: string, rev: string | null, v: unknown) => {
+					await analyzed;
 					if ((entries.has(k) ? String(entryRevision) : null) !== rev) return { applied: false };
 					calls.push("entry");
 					entryRevision++;
 					entries.set(k, v);
 					return { applied: true };
 				},
-				query: async () => ({ items: [...entries].map(([id, data]) => ({ id, data })), hasMore: false }),
+				query: async () => (await analyzed, { items: [...entries].map(([id, data]) => ({ id, data })), hasMore: false }),
 			},
 			aiQueue: { get: async () => (opts.queued ? { kind: "entry", collection: "posts", entryId: "E1", due: 0 } : null), put: async () => void calls.push("queue") },
 			aiLinks: {
@@ -433,6 +448,10 @@ function fakeSite(opts: SiteOptions = {}) {
 			},
 		},
 	};
+	if (opts.record !== null && !opts.legacy) {
+		const data = structuredClone(item.data);
+		analyzed = hashesFor(ctx, data).then((t) => void Object.assign(record, { hash: t.hash, textHash: t.textHash }, opts.analysis ?? {}));
+	}
 	return { ctx: ctx as never, calls, logs, memos, item: () => item, entry: () => entries.get("posts:E1") as Record<string, unknown> | undefined };
 }
 
@@ -450,6 +469,13 @@ function keepDatesSpy() {
 }
 
 const writes = (site: ReturnType<typeof fakeSite>) => site.calls.filter((c) => c === "update" || c.startsWith("publish"));
+/** The entry's hashes under the site's settings now. */
+const hashesOf = (site: ReturnType<typeof fakeSite>) => hashesFor(site.ctx, site.item().data);
+/** EmDash's hooks after the Pack's own publish, as the site fires them. */
+const savedAndPublished = async (site: ReturnType<typeof fakeSite>) => {
+	for (const hook of ["content:afterSave", "content:afterPublish"] as const) await (pack.aiPack({}).hooks![hook] as unknown as (event: unknown, ctx: unknown) => Promise<void>)({ content: structuredClone(site.item()), collection: "posts" }, site.ctx);
+};
+const reasonOf = (out: { results: unknown[] }) => (out.results[0] as { reason?: string }).reason;
 
 test("an entry whose only change is a possessive: fixed and published once, status linked, no term counted as linked", async () => {
 	glossary.resetGlossaryForTests();
@@ -867,6 +893,10 @@ test("ai/glossary-links with only: \"possessive\": the dry run and the real run 
 		assert.deepEqual(texts(site.item().data.content), texts(body));
 		const { updated: _u, ...memo } = site.memos.get("posts:E1")!;
 		assert.deepEqual(memo, { collection: "posts", entryId: "E1", ...before }, "linked, the text hash and the waiting retry are untouched; exclude is ignored");
+		// The publish's save hooks, as the site fires them: the entry's text is what was analyzed, so no analysis is queued (an analysis could link).
+		assert.ok(site.calls.includes("get"));
+		await savedAndPublished(site);
+		assert.ok(!site.calls.includes("queue"), "the publish queues no analysis");
 	} finally {
 		spy.restore();
 	}
@@ -878,6 +908,8 @@ test("ai/glossary-links with only: \"possessive\": the dry run and the real run 
 	assert.equal(fixed.results[0].status, "linked");
 	assert.deepEqual(writes(blank), ["update", "publish rev-4"]);
 	assert.equal(blank.memos.has("posts:E1"), false);
+	await savedAndPublished(blank);
+	assert.ok(!blank.calls.includes("queue"), "the publish queues no analysis");
 	// Done: a second run finds nothing, and still leaves nothing.
 	const again = await call(blank, {}, { keys: ["posts:E1"], only: "possessive" });
 	assert.equal(again.results[0].status, "unchanged");
@@ -948,9 +980,6 @@ test("linkEntry with only: \"possessive\" never calls the rules for links, whate
 });
 
 // ── A possessives-only run never causes linking, now or later ────
-
-// @ts-ignore -- as above.
-const worker = (await import("./worker.ts")) as typeof import("./worker.js");
 
 const RECORD = { collection: "posts", entryId: "E1", title: "Joy", hash: "h", status: "ok" as const, error: "", entities: ENTITIES, description: "", descriptionStatus: "none" as const, updated: "2026-11-23T00:00:00.000Z" };
 /** The entry's next analysis, of text the links have never seen (the entry was analyzed before). */
@@ -1299,18 +1328,6 @@ test("an analysis that can't record the entry's text schedules no retry (a retry
 
 // ── Review fixes: analyses made before 0.51.0, and memos that count as nothing remembered ──
 
-// @ts-ignore -- as above.
-const pack = (await import("./pack.ts")) as typeof import("./pack.js");
-// @ts-ignore -- as above.
-const aiStore = (await import("./store.ts")) as typeof import("./store.js");
-
-/** The entry's hashes under the site's settings now. */
-const hashesOf = async (site: ReturnType<typeof fakeSite>) => (await worker.entryText(site.ctx, "posts", site.item().data, await aiStore.readSettings(site.ctx, {}), await features.ctxFeatures(site.ctx)))!;
-/** EmDash's hooks after the Pack's own publish, as the site fires them. */
-const savedAndPublished = async (site: ReturnType<typeof fakeSite>) => {
-	for (const hook of ["content:afterSave", "content:afterPublish"] as const) await (pack.aiPack({}).hooks![hook] as unknown as (event: unknown, ctx: unknown) => Promise<void>)({ content: structuredClone(site.item()), collection: "posts" }, site.ctx);
-};
-const reasonOf = (out: { results: unknown[] }) => (out.results[0] as { reason?: string }).reason;
 
 test("a possessives-only run of an analysis made before 0.51.0 under other settings records its text hash first, so its publish queues no re-analysis; a dry run writes nothing", async () => {
 	// The analysis has no text hash, and its hash isn't today's (the model changed since).
@@ -1372,6 +1389,54 @@ test("a possessives-only run leaves an entry alone when its analysis has no text
 	assert.equal((await call(normal, {}, { keys: ["posts:E1"] })).results[0].status, "linked");
 });
 
+test("a possessives-only run leaves an entry alone when its text changed since its analysis and no analysis is queued: its publish would queue one, and that analysis links", async () => {
+	// The analysis has a text hash, but of other text: it changed while no job could be queued (AI Enrichment off, the queue cleared…).
+	const STALE = { hash: "h", textHash: "t" };
+	for (const dryRun of [true, false]) {
+		glossary.resetGlossaryForTests();
+		const site = fakeSite({ body: MIXED_BODY(), features: ON, analysis: STALE });
+		const before = structuredClone(site.item());
+		const out = await call(site, {}, { ...ONLY, dryRun });
+		assert.equal(out.results[0].status, "skipped");
+		assert.equal(reasonOf(out), "text changed since its analysis");
+		assert.deepEqual(writes(site), [], "nothing is published");
+		assert.deepEqual(site.calls.filter((c) => c === "entry" || c === "queue" || c.startsWith("memo")), [], "and nothing is written");
+		assert.deepEqual(site.item(), before);
+		assert.deepEqual(site.entry(), { ...RECORD, ...STALE }, "the analysis is as it was");
+		// Why: the save hooks a publish fires queue this entry.
+		await savedAndPublished(site);
+		assert.ok(site.calls.includes("queue"), "a publish would have queued an analysis");
+	}
+
+	// Either hash still being the entry's is enough: the save hooks skip it.
+	for (const stale of [{ hash: "h" }, { textHash: "t" }]) {
+		glossary.resetGlossaryForTests();
+		const site = fakeSite({ body: MIXED_BODY(), features: ON, analysis: stale });
+		assert.equal((await call(site, {}, ONLY)).results[0].status, "linked", JSON.stringify(stale));
+		await savedAndPublished(site);
+		assert.ok(!site.calls.includes("queue"));
+	}
+
+	// An analysis that's already queued runs with or without this edit: the run goes ahead, dry run too.
+	for (const dryRun of [true, false]) {
+		glossary.resetGlossaryForTests();
+		const queued = fakeSite({ body: MIXED_BODY(), features: ON, analysis: STALE, queued: true });
+		assert.equal((await call(queued, {}, { ...ONLY, dryRun })).results[0].status, dryRun ? "planned" : "linked");
+		assert.deepEqual(writes(queued), dryRun ? [] : ["update", "publish rev-4"]);
+		assert.equal(queued.memos.has("posts:E1"), false);
+	}
+
+	// An entry without text is never queued by the save hooks.
+	glossary.resetGlossaryForTests();
+	const empty = fakeSite({ body: [], features: ON, legacy: { ...STALE } });
+	assert.equal((await call(empty, {}, ONLY)).results[0].status, "unchanged");
+
+	// A normal run isn't held back: it's how a person links the entry.
+	glossary.resetGlossaryForTests();
+	const normal = fakeSite({ body: MIXED_BODY(), features: ON, analysis: STALE });
+	assert.equal((await call(normal, {}, { keys: ["posts:E1"] })).results[0].status, "linked");
+});
+
 /** A memo that counts as nothing remembered (a removal's queue made it), which a site then asked to link (retryAt, tries: 0). */
 const ASKED = () => ({ linked: [], pendingNew: true, retryAt: Date.now() - 1000, tries: 0 });
 
@@ -1408,6 +1473,37 @@ test("a retry of a memo that counts as nothing remembered keeps it that way (it 
 		assert.equal(memo.pendingNew, undefined);
 		assert.equal(memo.textHash, queued ? undefined : (await hashesOf(byPerson)).textHash, "withheld while a re-analysis is queued, so that analysis still links");
 	}
+});
+
+test("a retry of a memo that counts as nothing remembered whose update throws keeps it that way: the next analysis of the same text doesn't link", async () => {
+	glossary.resetGlossaryForTests();
+	const site = fakeSite({ body: MIXED_BODY(), features: ON, memo: ASKED() });
+	const update = contentOf(site).update;
+	contentOf(site).update = async () => {
+		throw new Error("database is down");
+	};
+	assert.equal(await linker.retryDue(site.ctx, {}, 3), 1);
+	assert.deepEqual(writes(site), []);
+	const left = site.memos.get("posts:E1")!;
+	assert.deepEqual([left.linked, left.pendingNew, left.textHash, left.pending, left.draft, left.pendingQids, left.tries], [[], true, undefined, undefined, undefined, undefined, 1], "no marker is left, and it still counts as nothing remembered");
+	assert.equal(typeof left.retryAt, "number", "it's tried again, like any error");
+	assert.equal(linker.shouldLink(left as never, RECORD, "h1"), false);
+	// The next analysis (new settings; the same text) records the text and links nothing.
+	contentOf(site).update = update;
+	await analyze(site);
+	assert.deepEqual(writes(site), []);
+	assert.deepEqual(linksOf(site.item().data.content), MIXED_LINKS);
+	assert.equal(site.memos.get("posts:E1")!.textHash, "h1");
+	assert.equal(site.memos.get("posts:E1")!.pendingNew, undefined);
+
+	// A person's run that fails the same way stays an ordinary memo (the route says to forget the flag): nothing is put back.
+	glossary.resetGlossaryForTests();
+	const byPerson = fakeSite({ body: MIXED_BODY(), features: ON, memo: { linked: [], pendingNew: true } });
+	contentOf(byPerson).update = async () => {
+		throw new Error("database is down");
+	};
+	assert.equal((await call(byPerson, {}, { keys: ["posts:E1"] })).results[0].status, "error");
+	assert.equal(byPerson.memos.get("posts:E1")!.pendingNew, undefined);
 });
 
 test("a normal run's edit of a memo that counted as nothing remembered leaves an ordinary marker when its publish fails: the next analysis links, which finishes its draft", async () => {

@@ -555,7 +555,7 @@ async function publishOwnEdit(
 	ctx: PluginContext,
 	options: AiOptions,
 	st: MemoState,
-	edit: { collection: string; id: string; item: Item; info: CollectionSchemaInfo; patch: Record<string, unknown>; marker: Partial<LinkMemo>; collided: string; ordinary?: boolean },
+	edit: { collection: string; id: string; item: Item; info: CollectionSchemaInfo; patch: Record<string, unknown>; marker: Partial<LinkMemo>; collided: string; ordinary?: boolean; restoreNew?: boolean },
 ): Promise<{ status: "done" | "conflict" | "collided" | "staged"; dateKept?: boolean }> {
 	const { collection, id, item } = edit;
 	const content = ctx.content!;
@@ -573,9 +573,14 @@ async function publishOwnEdit(
 	try {
 		updated = await content.update!(collection, id, edit.patch);
 	} catch (error) {
-		// Nothing was written: drop the marker so it can't be mistaken for a later draft.
+		// Nothing was written: drop the marker so it can't be mistaken for a later draft. A memo that counted as nothing remembered when
+		// the run started, in a run that records no text (`restoreNew`: a retry), counts as nothing remembered again: `ordinary` took the
+		// flag off for the marker, and a memo left without the flag and without a text hash would make the entry's next analysis link.
 		const after = await content.get(collection, id).catch(() => null);
-		if (after && versionOf(after) === versionOf(fresh)) await st.save(settled(st.memo));
+		if (after && versionOf(after) === versionOf(fresh)) {
+			st.memo = settled(edit.restoreNew ? { ...st.memo, pendingNew: true } : st.memo);
+			await st.save(st.memo);
+		}
 		throw error;
 	}
 	if (!edit.info.supports.includes("revisions")) {
@@ -770,6 +775,8 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 		marker: { pendingQids: terms.map((c) => c.qid), pendingSlugs: [...new Set(terms.map((c) => c.slug))], ...(fixes.length ? { pendingPossessive: fixes.length } : {}) },
 		collided: "glossary.io links: a save landed while the links were written; nothing was published. Check the entry's revisions.",
 		ordinary: !only,
+		// As in `out`: without a text hash or a person's word, a memo that started as nothing remembered stays that way.
+		restoreNew: !only && unseen && !opts.textHash && opts.forgetNew !== true,
 	}).catch(async (error: unknown) => {
 		// A possessives-only run that failed with no edit left pending leaves nothing remembered, as before it ran. (With an edit still
 		// pending, the marker stays so the next possessives-only run finishes it.) Whatever is left when this fails too (a memo that

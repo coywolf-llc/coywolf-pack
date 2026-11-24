@@ -328,7 +328,8 @@ test("a job skipped because the hash still matches records the text hash of an a
 	const site = fakeSite();
 	const entry = site.add(item("A"));
 	assert.equal(await analyze(site, jobFor("A")), "done");
-	const old = legacy(site.record("A")!);
+	// A fixed old date: an analysis made long before, so a rewrite of `updated` can't go unnoticed.
+	const old = { ...legacy(site.record("A")!), updated: "2026-01-02T03:04:05.000Z" };
 	await site.storage.aiEntries.put("articles:A", old);
 	const before = site.writes("aiEntries").length;
 	assert.equal(await analyze(site, jobFor("A")), "skipped");

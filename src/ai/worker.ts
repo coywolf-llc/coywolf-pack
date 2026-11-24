@@ -561,28 +561,50 @@ async function fillTextHash(
 
 /**
  * Before a possessives-only edit of an entry (the ai/glossary-links route with
- * `only`): its publish fires the save hooks, and for an analysis made before
- * 0.51.0 (no text hash) under other settings than today's, they'd queue a
- * paid re-analysis, though the text is the same. So such an analysis gets its
- * text hash first, by fillTextHash's rules (in a dry run, nothing is written:
- * it only tells whether it would). Null: go ahead (it has a text hash, would
- * get one, or its hash still matches, so the save hooks queue nothing). A
- * reason: no text hash could be recorded and the hash differs, so the entry
- * must be left alone.
+ * `only`): its publish fires the save hooks (src/ai/pack.ts), which queue an
+ * analysis when the entry's title or text isn't what its analysis saw, and
+ * that analysis could link. So the edit goes ahead only when those hooks
+ * would queue nothing for the entry as it is now. Null: go ahead. A reason:
+ * the entry must be left alone.
+ *
+ * - An analysis made before 0.51.0 (no text hash) under other settings than
+ *   today's would be queued for a paid re-analysis though its text is the
+ *   same. It gets its text hash first, by fillTextHash's rules (in a dry
+ *   run, nothing is written: it only tells whether it would). When none can
+ *   be recorded and its hash isn't today's: "text hash not recorded (…)".
+ * - An analysis whose text hash isn't the entry's current one (the text
+ *   changed while no job could be queued: AI Enrichment off, the collection
+ *   not covered, the queue cleared, a bulk run stopped) and whose hash isn't
+ *   today's either: "text changed since its analysis", unless a job is
+ *   already queued for the entry (that analysis runs with or without this
+ *   edit).
  */
 export async function textHashBeforeEdit(ctx: PluginContext, s: Settings, features: FeatureMap, key: string, record: EntryRecord | null | undefined, dryRun: boolean): Promise<string | null> {
-	if (!record || record.status !== "ok" || record.textHash) return null;
-	const outcome = await fillTextHash(ctx, s, features, key, record, { dryRun });
-	if (outcome === "filled" || outcome === "set") return null;
+	// No successful analysis: linkEntry skips the entry ("not analyzed").
+	if (!record || record.status !== "ok") return null;
 	const colon = key.indexOf(":");
 	const collection = key.slice(0, colon);
-	const now = (await col<EntryRecord>(ctx, "aiEntries").get(key)) ?? record;
-	if (now.status !== "ok" || now.textHash) return null;
-	const item = await ctx.content?.get(collection, key.slice(colon + 1));
+	const id = key.slice(colon + 1);
+	let now = record;
+	let unfilled: string | null = null;
+	if (!record.textHash) {
+		const outcome = await fillTextHash(ctx, s, features, key, record, { dryRun });
+		// Its text hash is (or, in a dry run, would be) the entry's current one.
+		if (outcome === "filled") return null;
+		if (outcome !== "set") unfilled = outcome.reason;
+		now = (await col<EntryRecord>(ctx, "aiEntries").get(key)) ?? record;
+		// It failed meanwhile: the save hooks queue a failed analysis whatever its hashes say.
+		if (now.status !== "ok") return "not analyzed";
+	}
+	// The save hooks' own condition (onContent in src/ai/pack.ts), on the entry as it is now.
+	const item = await ctx.content?.get(collection, id);
 	const t = item ? await entryText(ctx, collection, item.data, s, features) : null;
-	// No entry or no text: the save hooks queue nothing for it. The same hash: they skip it, as before 0.51.0.
-	if (!t || t.hash === now.hash) return null;
-	return `text hash not recorded (${outcome.reason})`;
+	// No entry or no text: the save hooks queue nothing for it. The same hash or text hash: they skip it.
+	if (!t || now.hash === t.hash || now.textHash === t.textHash) return null;
+	if (!now.textHash) return `text hash not recorded (${unfilled ?? "changed meanwhile"})`;
+	// A job that's already queued analyzes the entry anyway: this edit's publish adds no analysis.
+	if (await col<QueueJob>(ctx, "aiQueue").get(queueId({ kind: "entry", collection, entryId: id }))) return null;
+	return "text changed since its analysis";
 }
 
 /**
