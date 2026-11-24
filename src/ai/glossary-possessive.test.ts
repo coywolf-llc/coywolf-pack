@@ -326,6 +326,8 @@ interface SiteOptions {
 	draftTitle?: string;
 	/** null: the entry has no analysis. */
 	record?: null;
+	/** aiGlossary/gone: the terms confirmed deleted. */
+	gone?: Record<string, unknown>;
 	memo?: Record<string, unknown>;
 	updatedAt?: string;
 	features?: Record<string, boolean>;
@@ -383,7 +385,7 @@ function fakeSite(opts: SiteOptions = {}) {
 				},
 				query: async () => ({ items: [...memos].filter(([, v]) => typeof v.retryAt === "number" && (v.retryAt as number) <= Date.now()).map(([id, data]) => ({ id, data: structuredClone(data) })), hasMore: false }),
 			},
-			aiGlossary: { get: async (id: string) => (id === "index" ? { fetchedAt: Date.now(), format: 2, terms: INDEX } : null), put: async () => {} },
+			aiGlossary: { get: async (id: string) => (id === "index" ? { fetchedAt: Date.now(), format: 2, terms: INDEX } : id === "gone" ? structuredClone(opts.gone ?? null) : null), put: async () => {} },
 		},
 		http: { fetch: async () => new Response("{}", { status: 500 }) },
 		content: {
@@ -860,14 +862,9 @@ test("ai/glossary-links with only: \"possessive\": the dry run and the real run 
 	assert.deepEqual(writes(blank), ["update", "publish rev-4"]);
 	assert.equal(blank.memos.has("posts:E1"), false);
 
-	// An entry that was never analyzed is fixed too (nothing is planned from an analysis).
+	// An entry that was never analyzed is skipped, like in a normal run (its own test below says why).
 	glossary.resetGlossaryForTests();
-	const unanalyzed = fakeSite({ body: MIXED_BODY(), features: ON, record: null });
-	const u = await call(unanalyzed, {}, { keys: ["posts:E1"], only: "possessive" });
-	assert.equal(u.results[0].status, "linked");
-	assert.deepEqual(linksOf(unanalyzed.item().data.content).map(([text]) => text), ["StumbleUpon", "SEO’s"]);
-	glossary.resetGlossaryForTests();
-	assert.equal((await call(fakeSite({ body: MIXED_BODY(), features: ON, record: null }), {}, { keys: ["posts:E1"] })).results[0].status, "skipped", "a normal run still needs the analysis");
+	assert.equal((await call(fakeSite({ body: MIXED_BODY(), features: ON, record: null }), {}, { keys: ["posts:E1"] })).results[0].status, "skipped", "a normal run needs the analysis");
 
 	// The option takes only that one value, and the part has to be on for a real run.
 	await assert.rejects(call(fakeSite({ features: ON }), {}, { keys: ["posts:E1"], only: "links" }));
@@ -1022,7 +1019,9 @@ test("a possessives-only edit whose publish throws (or whose Worker dies) leaves
 	const queued = fakeSite({ body: MIXED_BODY(), features: ON, memo: { pending: 3, pendingQids: [], pendingSlugs: [], pendingPossessive: 1, pendingNew: true, unlink: [{ slug: "oldterm", qid: "Q1" }], retryAt: at, unlinkAt: at } });
 	assert.equal((await call(queued, {}, ONLY)).results[0].status, "linked");
 	const { updated: _q, ...kept } = queued.memos.get("posts:E1")!;
-	assert.deepEqual(kept, { collection: "posts", entryId: "E1", linked: [], unlink: [{ slug: "oldterm", qid: "Q1" }], retryAt: at, unlinkAt: at });
+	// It still says no text was ever recorded with it (pendingNew): without that, once the links are out, its missing text hash would make the next analysis link.
+	assert.deepEqual(kept, { collection: "posts", entryId: "E1", linked: [], pendingNew: true, unlink: [{ slug: "oldterm", qid: "Q1" }], retryAt: at, unlinkAt: at });
+	assert.equal(linker.shouldLink(kept as never, RECORD, "h1"), false);
 });
 
 test("a possessives-only run leaves a removal's marker exactly as it is: the removal's own turn settles it, and nothing is linked", async () => {
@@ -1090,4 +1089,188 @@ test("a possessives-only run never publishes a normal run's unfinished link edit
 	assert.deepEqual(writes(own), ["publish rev-4"]);
 	const { updated: _u, ...memo } = own.memos.get("posts:E1")!;
 	assert.deepEqual(memo, { collection: "posts", entryId: "E1", linked: ["Q1"], textHash: "seen" });
+});
+
+// ── What's left when a run fails twice, entries never analyzed, stale writes, removals ──
+
+/** The stored memo without its time. */
+const memoOf = (site: ReturnType<typeof fakeSite>) => {
+	const memo = site.memos.get("posts:E1");
+	if (!memo) return null;
+	const { updated: _u, ...rest } = memo;
+	return rest;
+};
+const memoWrites = (site: ReturnType<typeof fakeSite>) => site.calls.filter((c) => c.startsWith("memo"));
+const storageOf = (site: ReturnType<typeof fakeSite>) => (site.ctx as { storage: { aiLinks: Record<string, (...args: never[]) => Promise<unknown>> } }).storage.aiLinks;
+
+test("a possessives-only edit whose update throws AND whose memo can't be deleted leaves a memo that counts as nothing remembered: the next analysis doesn't link", async () => {
+	glossary.resetGlossaryForTests();
+	const site = fakeSite({ body: MIXED_BODY(), features: ON });
+	const update = contentOf(site).update;
+	const remove = storageOf(site).delete;
+	contentOf(site).update = async () => {
+		throw new Error("database is down");
+	};
+	storageOf(site).delete = async () => {
+		throw new Error("storage is down");
+	};
+	const out = await call(site, {}, ONLY);
+	assert.equal(out.results[0].status, "error");
+	assert.deepEqual(writes(site), []);
+	// The edit's marker is gone, and what's left says no text was ever recorded with it.
+	assert.deepEqual(memoOf(site), { collection: "posts", entryId: "E1", linked: [], pendingNew: true });
+	assert.equal(linker.onlyMarker(site.memos.get("posts:E1") as never), true);
+	assert.equal(linker.shouldLink(site.memos.get("posts:E1") as never, RECORD, "h1"), false);
+	assert.equal(await linker.retryDue(site.ctx, {}, 3), 0);
+
+	// The next analysis of the same text only records it: nothing is linked or switched, then or after.
+	contentOf(site).update = update;
+	await analyze(site);
+	assert.deepEqual(writes(site), []);
+	assert.deepEqual(linksOf(site.item().data.content), MIXED_LINKS);
+	assert.deepEqual(memoOf(site), { collection: "posts", entryId: "E1", linked: [], textHash: "h1" });
+	await analyze(site);
+	assert.deepEqual(writes(site), []);
+
+	// Without an analysis in between, the next possessives-only run deletes the leftover (and fixes the possessive).
+	glossary.resetGlossaryForTests();
+	const left = fakeSite({ body: MIXED_BODY(), features: ON, memo: { pendingNew: true } });
+	assert.equal((await call(left, {}, ONLY)).results[0].status, "linked");
+	assert.equal(left.memos.has("posts:E1"), false);
+
+	// A published edit whose memo can't be deleted afterwards: reported as done, and what's left is a marker that never reads as a text change.
+	glossary.resetGlossaryForTests();
+	const done = fakeSite({ body: MIXED_BODY(), features: ON });
+	storageOf(done).delete = async () => {
+		throw new Error("storage is down");
+	};
+	assert.equal((await call(done, {}, ONLY)).results[0].status, "linked");
+	assert.deepEqual(writes(done), ["update", "publish rev-4"]);
+	assert.equal(linker.onlyMarker(done.memos.get("posts:E1") as never), true);
+	await analyze(done);
+	assert.deepEqual(writes(done), ["update", "publish rev-4"], "nothing is linked");
+	assert.equal(done.memos.get("posts:E1")!.textHash, "h1");
+});
+
+test("a possessives-only run skips an entry without an ok analysis, dry run too: publishing it would queue its first analysis, and a first analysis links", async () => {
+	for (const input of [{ ...ONLY, dryRun: true }, ONLY]) {
+		glossary.resetGlossaryForTests();
+		const site = fakeSite({ body: MIXED_BODY(), features: ON, record: null });
+		const out = await call(site, {}, input);
+		assert.deepEqual([out.results[0].status, (out.results[0] as { reason?: string }).reason], ["skipped", "not analyzed"]);
+		assert.deepEqual(out.results[0].changes, []);
+		assert.deepEqual(writes(site), [], "nothing is published");
+		assert.deepEqual(memoWrites(site), []);
+		assert.equal(site.memos.has("posts:E1"), false);
+		assert.deepEqual(linksOf(site.item().data.content), MIXED_LINKS);
+	}
+	// A failed analysis isn't one either (a save queues the entry again, and that analysis may link as a first one).
+	glossary.resetGlossaryForTests();
+	const failed = fakeSite({ body: MIXED_BODY(), features: ON });
+	const out = await linker.linkEntry(failed.ctx, {}, "posts", "E1", { only: "possessive", record: { ...RECORD, status: "error", title: "", entities: [] } as never });
+	assert.deepEqual([out.status, out.reason], ["skipped", "not analyzed"]);
+	assert.deepEqual(writes(failed), []);
+	assert.equal(failed.memos.has("posts:E1"), false);
+});
+
+test("a possessives-only run writes the memo only when its own edit changed it, and never the text hash, the linked terms or the retry", async () => {
+	const at = Date.now() + 60 * 60_000;
+	const REMEMBERED = { linked: ["Q5"], textHash: "seen", retryAt: at, tries: 2 };
+	const DONE_BODY = () => links.linkPossessives(MIXED_BODY()).content as unknown[];
+	// Nothing to do, a skip, a recent save, someone's draft: no memo write at all.
+	for (const [more, status] of [
+		[{ body: DONE_BODY() }, "unchanged"],
+		[{ body: MIXED_BODY(), record: null }, "skipped"],
+		[{ body: MIXED_BODY(), updatedAt: new Date(Date.now() - 30_000).toISOString() }, "busy"],
+		[{ body: MIXED_BODY(), draft: "R9" }, "draft"],
+	] as const) {
+		glossary.resetGlossaryForTests();
+		const site = fakeSite({ features: ON, memo: REMEMBERED, ...more });
+		const before = structuredClone(site.memos.get("posts:E1"));
+		assert.equal((await call(site, {}, ONLY)).results[0].status, status);
+		assert.deepEqual(memoWrites(site), [], status);
+		assert.deepEqual(site.memos.get("posts:E1"), before, status);
+	}
+
+	// A run that outlived its lock: while it writes, an analysis records new text, a handled term and a retry. Its own
+	// writes carry only its edit's marker, so none of that is put back to what the run read at its start.
+	glossary.resetGlossaryForTests();
+	const site = fakeSite({ body: MIXED_BODY(), features: ON, memo: REMEMBERED });
+	const update = contentOf(site).update as (...args: unknown[]) => Promise<unknown>;
+	const later = at + 1000;
+	(contentOf(site) as Record<string, unknown>).update = async (...args: unknown[]) => {
+		site.memos.set("posts:E1", { ...site.memos.get("posts:E1")!, textHash: "newer", linked: ["Q5", "Q9"], retryAt: later, tries: 0 });
+		return update(...args);
+	};
+	assert.equal((await call(site, {}, ONLY)).results[0].status, "linked");
+	assert.deepEqual(writes(site), ["update", "publish rev-4"]);
+	assert.deepEqual(memoOf(site), { collection: "posts", entryId: "E1", linked: ["Q5", "Q9"], textHash: "newer", retryAt: later, tries: 0 });
+
+	// The same for an entry with nothing remembered: what an analysis recorded meanwhile isn't deleted with the run's marker.
+	glossary.resetGlossaryForTests();
+	const blank = fakeSite({ body: MIXED_BODY(), features: ON });
+	const blankUpdate = contentOf(blank).update as (...args: unknown[]) => Promise<unknown>;
+	(contentOf(blank) as Record<string, unknown>).update = async (...args: unknown[]) => {
+		const { pendingNew: _n, ...memo } = blank.memos.get("posts:E1")!;
+		blank.memos.set("posts:E1", { ...memo, textHash: "newer", linked: ["Q9"] });
+		return blankUpdate(...args);
+	};
+	assert.equal((await call(blank, {}, ONLY)).results[0].status, "linked");
+	assert.deepEqual(memoOf(blank), { collection: "posts", entryId: "E1", linked: ["Q9"], textHash: "newer" });
+});
+
+test("a removal queued for an entry with nothing remembered leaves nothing remembered once it's done: the next analysis of the same text doesn't link", async () => {
+	glossary.resetGlossaryForTests();
+	// A link a person made to a term that's now deleted from glossary.io; the entry was analyzed before the links knew it (no memo).
+	const body = () => [block(["I miss ", { t: "StumbleUpon", href: WIKI }, " a lot. Google is fine. Read ", { t: "Old term", href: gl("oldterm") }, " too."])];
+	const queuedAt = Date.now() - 1000;
+	// As the removal's queue writes it for an entry without a memo (src/ai/glossary-gone.ts; glossary-gone.test.ts has the queue's side).
+	const queued = { linked: [], pendingNew: true, unlink: [{ slug: "oldterm", qid: "Q1" }], retryAt: queuedAt, unlinkAt: queuedAt, tries: 0 };
+	const site = fakeSite({ body: body(), features: ON, gone: { last: null, suspects: {}, gone: { oldterm: { qid: "Q1", since: 0 } }, updated: "" }, memo: queued });
+	assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 1);
+	assert.deepEqual(writes(site), ["update", "publish rev-4"], "the removal");
+	assert.deepEqual(linksOf(site.item().data.content), [["StumbleUpon", WIKI]]);
+	assert.deepEqual(memoOf(site), { collection: "posts", entryId: "E1", linked: [], pendingNew: true });
+	assert.equal(await linker.retryDue(site.ctx, {}, 3, { unlink: true }), 0);
+
+	// The entry's next analysis (new settings, say; the same text): it only records the text. StumbleUpon isn't switched, Google isn't linked.
+	await analyze(site);
+	assert.deepEqual(writes(site), ["update", "publish rev-4"], "no second publish");
+	assert.deepEqual(linksOf(site.item().data.content), [["StumbleUpon", WIKI]]);
+	assert.deepEqual(memoOf(site), { collection: "posts", entryId: "E1", linked: [], textHash: "h1" });
+	await analyze(site);
+	assert.deepEqual(writes(site), ["update", "publish rev-4"]);
+	// From then on it's an ordinary memo: a text change links, as for any entry.
+	assert.equal(linker.shouldLink(site.memos.get("posts:E1") as never, RECORD, "h2"), true);
+
+	// unlinkEntry on an entry whose memo is gone (deleted since the pass read it) leaves nothing that reads as a text change either.
+	glossary.resetGlossaryForTests();
+	const gone = fakeSite({ body: body(), features: ON });
+	assert.equal((await linker.unlinkEntry(gone.ctx, {}, "posts", "E1")).status, "unchanged");
+	assert.equal(linker.shouldLink((gone.memos.get("posts:E1") ?? null) as never, RECORD, "h1"), false);
+});
+
+test("an analysis that can't record the entry's text schedules no retry (a retry links without asking whether the text changed)", async () => {
+	// What a failed possessives-only run or a finished removal can leave, and an entry with nothing remembered at all.
+	for (const memo of [{ pendingNew: true }, undefined]) {
+		glossary.resetGlossaryForTests();
+		const site = fakeSite({ body: MIXED_BODY(), features: ON, ...(memo ? { memo } : {}) });
+		const before = structuredClone(site.memos.get("posts:E1") ?? null);
+		const put = storageOf(site).put as (...args: unknown[]) => Promise<unknown>;
+		let failed = 0;
+		(storageOf(site) as Record<string, unknown>).put = async (...args: unknown[]) => {
+			if (!failed++) throw new Error("storage is down");
+			return put(...args);
+		};
+		await analyze(site);
+		assert.equal(failed, 1, "only the write that failed: no retry is written after it");
+		assert.deepEqual(site.memos.get("posts:E1") ?? null, before);
+		assert.equal(await linker.retryDue(site.ctx, {}, 3), 0);
+		assert.deepEqual(writes(site), []);
+		// The next analysis records the text, and nothing is linked.
+		await analyze(site);
+		assert.deepEqual(writes(site), []);
+		assert.deepEqual(memoOf(site), { collection: "posts", entryId: "E1", linked: [], textHash: "h1" });
+		assert.deepEqual(linksOf(site.item().data.content), MIXED_LINKS);
+	}
 });

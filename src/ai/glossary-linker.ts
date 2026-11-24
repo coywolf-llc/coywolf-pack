@@ -139,7 +139,13 @@ export interface LinkMemo {
 	pendingSlugs?: string[];
 	/** That edit's possessives moved inside glossary.io links (how many), so its draft can be recognized too. */
 	pendingPossessive?: number;
-	/** That edit is a possessives-only run's, for an entry with nothing remembered before it: once it's done, nothing stays remembered. */
+	/**
+	 * Nothing was remembered about this entry when this memo was made, by a possessives-only run's edit or by a
+	 * removal's queue, and no text has been recorded with it since: until an analysis or a normal run records the
+	 * text (and takes this off), the memo counts as nothing remembered (onlyMarker), so its missing text hash never
+	 * reads as a text change. It outlives the edit's marker (settled keeps it): a possessives-only run deletes such
+	 * a memo once nothing else is in it.
+	 */
 	pendingNew?: true;
 	/** A removal in progress: the glossary slugs it takes out (instead of pendingQids and pendingSlugs). */
 	pendingUnlink?: string[];
@@ -171,7 +177,9 @@ export interface LinkOptions {
 	 * Nothing is linked or switched, `exclude` and `textHash` are ignored, what's
 	 * remembered as linked stays as it is, and no retry is scheduled (one already
 	 * waiting stays): an entry that has to wait (draft, busy, conflict, staged)
-	 * is fixed by running it again. The entry needn't be analyzed.
+	 * is fixed by running it again. The entry has to be analyzed (an "ok"
+	 * analysis), like for a normal run: publishing an entry without one queues
+	 * its first analysis, and a first analysis links.
 	 */
 	only?: "possessive";
 }
@@ -249,17 +257,18 @@ export function linkConfig(options: AiOptions, siteUrl?: string | null): { siteH
  * analyzed successfully before. An entry analyzed before the part was turned
  * on has nothing remembered: its next analysis only records its text (a text
  * change and a settings re-analysis look the same), so it's linked by Link
- * existing entries or by the text change after that. The marker a
- * possessives-only run left for an entry with nothing remembered (pendingNew,
- * there when that run's edit failed or its Worker died) is nothing remembered
- * too: it has no text hash, and must never read as a text change.
+ * existing entries or by the text change after that. A memo made for an entry
+ * with nothing remembered by a possessives-only run's edit (there when that
+ * edit failed or its Worker died) or by a removal's queue (pendingNew) is
+ * nothing remembered too: it has no text hash, and must never read as a text
+ * change.
  */
 export function shouldLink(memo: Pick<LinkMemo, "textHash" | "pendingNew"> | null | undefined, previous: { status: string; title: string; entities?: readonly unknown[] } | null | undefined, textHash: string): boolean {
 	if (memo && !onlyMarker(memo)) return memo.textHash !== textHash;
 	return !previous || (previous.status !== "ok" && !previous.title && !previous.entities?.length);
 }
 
-/** Whether a memo is nothing but a possessives-only run's marker for an entry with nothing remembered: no text was ever recorded with it. */
+/** Whether a memo was made for an entry with nothing remembered (by a possessives-only run's edit, or a removal's queue) and no text was ever recorded with it: nothing remembered still. */
 export const onlyMarker = (memo: Pick<LinkMemo, "textHash" | "pendingNew">): boolean => memo.pendingNew === true && memo.textHash === undefined;
 
 /** The memo as a normal run or an analysis records it: what it remembers from now on is the entry's own, not a possessives-only run's to forget. */
@@ -300,11 +309,37 @@ export function afterError(memo: LinkMemo, now = Date.now()): LinkMemo {
 	return { ...rest, ...(rest.retryAt === undefined ? {} : { unlinkAt: rest.retryAt }), ...(asked ? { relink: true as const } : {}) };
 }
 
-/** The memo without an edit in progress. */
+/**
+ * The memo without an edit in progress. `pendingNew` stays: a memo without a text hash that lost it would make the
+ * entry's next analysis link (shouldLink). Only recording the text, or a normal run, takes it off (withoutPendingNew).
+ */
 const settled = (memo: LinkMemo): LinkMemo => {
-	const { pending: _p, draft: _d, pendingQids: _q, pendingSlugs: _s, pendingPossessive: _o, pendingNew: _n, pendingUnlink: _u, keepUpdatedAt: _k, ...rest } = memo;
+	const { pending: _p, draft: _d, pendingQids: _q, pendingSlugs: _s, pendingPossessive: _o, pendingUnlink: _u, keepUpdatedAt: _k, ...rest } = memo;
 	return rest as LinkMemo;
 };
+
+/** A new entry's memo, for a run that must leave nothing remembered about it (a possessives-only run, a removal). */
+export const unseenMemo = (collection: string, entryId: string): LinkMemo => ({ collection, entryId, linked: [], pendingNew: true, updated: "" });
+
+/** Only the fields of an edit in progress (what `settled` takes off). */
+function markerOf(memo: LinkMemo): Partial<LinkMemo> {
+	const { pending, draft, pendingQids, pendingSlugs, pendingPossessive, pendingUnlink, keepUpdatedAt } = memo;
+	return Object.fromEntries(Object.entries({ pending, draft, pendingQids, pendingSlugs, pendingPossessive, pendingUnlink, keepUpdatedAt }).filter(([, v]) => v !== undefined)) as Partial<LinkMemo>;
+}
+
+/**
+ * What a possessives-only run may store: the memo as it's stored right now (read again, so a run that outlived its
+ * lock can't put back an older text hash, list of linked terms or retry), with only the fields of the edit in
+ * progress from the run's own copy. With nothing stored, a memo that counts as nothing remembered (unseenMemo).
+ */
+const onlyMerge = (stored: LinkMemo | null, mine: LinkMemo): LinkMemo => ({ ...settled(stored ?? unseenMemo(mine.collection, mine.entryId)), ...markerOf(mine) });
+
+/** Whether two memos are the same, their `updated` time aside. */
+const sameMemo = (a: LinkMemo, b: LinkMemo): boolean => stable({ ...a, updated: "" }) === stable({ ...b, updated: "" });
+
+/** Whether a memo holds nothing at all: made for an entry with nothing remembered, and no text, edit in progress, handled term, removal or retry in it. As good as no memo. */
+const emptyMemo = (memo: LinkMemo): boolean =>
+	onlyMarker(memo) && !Object.keys(markerOf(memo)).length && !memo.linked.length && !memo.unlink?.length && memo.retryAt === undefined && memo.unlinkAt === undefined && memo.relink === undefined;
 
 /** The memo once its edit in progress is live: what a link edit linked is remembered; a removal's terms are forgotten and leave `unlink`. */
 function finished(memo: LinkMemo): LinkMemo {
@@ -334,12 +369,28 @@ interface MemoState {
 	save(next: LinkMemo): Promise<void>;
 }
 
-function memoState(memos: StorageCollection<LinkMemo>, key: string, initial: LinkMemo, dryRun: boolean): MemoState {
+/**
+ * `markersOnly` (a possessives-only run): a save writes only the edit in progress over what's stored at that moment
+ * (onlyMerge), and nothing when that changes nothing.
+ */
+function memoState(memos: StorageCollection<LinkMemo>, key: string, initial: LinkMemo, dryRun: boolean, markersOnly = false): MemoState {
 	const state: MemoState = {
 		memo: initial,
 		async save(next) {
-			state.memo = { ...next, updated: new Date().toISOString() };
-			if (!dryRun) await memos.put(key, state.memo);
+			const updated = new Date().toISOString();
+			if (!markersOnly || dryRun) {
+				state.memo = { ...next, updated };
+				if (!dryRun) await memos.put(key, state.memo);
+				return;
+			}
+			const stored = await memos.get(key);
+			const merged = onlyMerge(stored, next);
+			if (stored && sameMemo(stored, merged)) {
+				state.memo = stored;
+				return;
+			}
+			state.memo = { ...merged, updated };
+			await memos.put(key, state.memo);
 		},
 	};
 	return state;
@@ -580,16 +631,28 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	const now = Date.now();
 	const only = opts.only === "possessive";
 	const existing = await memos.get(key);
-	const st = memoState(memos, key, existing ?? { collection, entryId: id, linked: [], updated: "" }, Boolean(opts.dryRun));
-	// A possessives-only run for an entry with nothing remembered leaves nothing remembered (a memo without a text hash would make the next analysis link).
-	// Its own earlier marker counts as nothing remembered only while nothing else was added to it (a text hash, a retry, links to take out).
-	const fresh = only && (!existing || (onlyMarker(existing) && existing.retryAt === undefined && !existing.unlink?.length && !existing.linked.length));
+	// A possessives-only run for an entry with nothing remembered starts from a memo that counts as nothing remembered (pendingNew), and its
+	// saves write only its edit in progress (memoState's markersOnly): a memo without a text hash would make the next analysis link.
+	const st = memoState(memos, key, existing ?? (only ? unseenMemo(collection, id) : { collection, entryId: id, linked: [], updated: "" }), Boolean(opts.dryRun), only);
+	/**
+	 * The end of a possessives-only run: only its edit in progress is written (or taken off), over what's stored now, and only when that
+	 * changes something; the text hash, the linked terms and the retry schedule are never touched (a retry would link). A memo with
+	 * nothing in it (emptyMemo: the entry had nothing remembered, and no edit is left pending) is deleted. When the delete fails, what's
+	 * left still counts as nothing remembered (pendingNew), and the next possessives-only run deletes it.
+	 */
+	const endOnly = async (): Promise<void> => {
+		const stored = await memos.get(key);
+		// Nothing stored: nothing to write, unless an edit of this run's is still pending.
+		if (!stored && st.memo.pending === undefined) return;
+		const merged = onlyMerge(stored, st.memo);
+		if (emptyMemo(merged)) {
+			await memos.delete(key).catch((error: unknown) => ctx.log.warn("glossary.io links: couldn't delete an empty memo; it's deleted by the next possessives-only run", { entry: key, error: String(error) }));
+		} else if (!stored || !sameMemo(stored, merged)) await memos.put(key, { ...merged, updated: new Date().toISOString() });
+	};
 	const out = async (status: LinkStatus, slug: string | null, changes: LinkChange[] = [], reason?: string, dateKept?: boolean): Promise<LinkOutcome> => {
 		if (opts.dryRun) return outcomeOf(key, slug, status, changes, reason, dateKept);
-		// A possessives-only run changes neither the text hash nor the retry schedule: a retry would link.
 		if (!only) await st.save(linkServed(withRetry({ ...withoutPendingNew(st.memo), ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now)));
-		else if (fresh && st.memo.pending === undefined) await memos.delete(key);
-		else await st.save(st.memo);
+		else await endOnly();
 		return outcomeOf(key, slug, status, changes, reason, dateKept);
 	};
 	// Exclusions count from the start, so a run that has to wait (a draft, a recent save) can't link them later.
@@ -602,8 +665,10 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	if (!config.siteHosts.length) return out("skipped", null, [], "the site's own URL isn't known");
 
 	const record = opts.record ?? (await store<EntryRecord>(ctx, "aiEntries").get(key));
-	if (!only && (!record || record.status !== "ok")) return out("skipped", null, [], "not analyzed");
-	const entities = record?.status === "ok" ? record.entities : [];
+	// A possessives-only run needs the analysis too, though it plans nothing from it: its publish fires the save hooks, which queue an
+	// entry without an "ok" analysis for its first one, and a first analysis links.
+	if (!record || record.status !== "ok") return out("skipped", null, [], "not analyzed");
+	const entities = record.entities;
 	const info = await ctx.schema?.getCollection(collection);
 	const fields = (info?.fields ?? []).filter((f) => f.type === "portableText").sort((a, b) => a.sortOrder - b.sortOrder);
 	if (!info || !fields.length) return out("skipped", null, [], "no Portable Text field");
@@ -684,13 +749,13 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 		item,
 		info,
 		patch,
-		marker: { pendingQids: terms.map((c) => c.qid), pendingSlugs: [...new Set(terms.map((c) => c.slug))], ...(fixes.length ? { pendingPossessive: fixes.length } : {}), ...(fresh ? { pendingNew: true as const } : {}) },
+		marker: { pendingQids: terms.map((c) => c.qid), pendingSlugs: [...new Set(terms.map((c) => c.slug))], ...(fixes.length ? { pendingPossessive: fixes.length } : {}) },
 		collided: "glossary.io links: a save landed while the links were written; nothing was published. Check the entry's revisions.",
 	}).catch(async (error: unknown) => {
-		// A possessives-only run that failed with no edit left pending leaves nothing remembered, as before it ran: the marker it saved
-		// has no text hash. (With an edit still pending, the marker stays so the next possessives-only run finishes it; shouldLink and
-		// the analysis treat it as nothing remembered.)
-		if (fresh && st.memo.pending === undefined) await memos.delete(key).catch(() => undefined);
+		// A possessives-only run that failed with no edit left pending leaves nothing remembered, as before it ran. (With an edit still
+		// pending, the marker stays so the next possessives-only run finishes it.) Whatever is left when this fails too (a memo that
+		// couldn't be deleted) still has pendingNew, so shouldLink and the analysis treat it as nothing remembered.
+		if (only) await endOnly().catch(() => undefined);
 		throw error;
 	});
 	if (edit.status === "conflict") return out("conflict", item.slug);
@@ -720,7 +785,8 @@ export async function unlinkEntry(ctx: PluginContext, options: AiOptions, collec
 	const key = entryKey(collection, id);
 	const memos = linkMemos(ctx);
 	const now = Date.now();
-	const st = memoState(memos, key, (await memos.get(key)) ?? { collection, entryId: id, linked: [], updated: "" }, false);
+	// Without a memo (deleted since the pass read it) there's nothing to remove: what's written counts as nothing remembered.
+	const st = memoState(memos, key, (await memos.get(key)) ?? unseenMemo(collection, id), false);
 	const asked = linkAsked(st.memo);
 	const out = async (status: LinkStatus, slug: string | null, changes: UnlinkChange[] = [], reason?: string, dateKept?: boolean): Promise<LinkOutcome> => {
 		const { unlinkAt: _a, relink: _l, ...next } = withRetry(st.memo, status, now);

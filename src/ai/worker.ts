@@ -259,22 +259,31 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
  * glossary.io links after an analysis: after a first analysis, or one whose
  * text changed since the links last looked (never a re-analysis for new
  * settings). Otherwise the text hash is remembered, so the next text change
- * links. Never fails the analysis: a failure is tried again later.
+ * links. Never fails the analysis: a failure to link is tried again later.
+ * Only that: a retry links without asking whether the text changed, so a
+ * failure before linking was decided (the memo couldn't be read, or the text
+ * couldn't be recorded) schedules none, and the next analysis decides again.
  */
 export async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: EntryRecord, previous: EntryRecord | null, textHash: string, budget: Budget): Promise<void> {
 	const key = entryKey(record.collection, record.entryId);
 	const memos = linkMemos(ctx);
+	let linking = false;
 	try {
 		const memo = await memos.get(key);
 		if (!record.entities.length || !shouldLink(memo, previous, textHash)) {
-			// A possessives-only run's marker (pendingNew) becomes an ordinary memo once the text is recorded with it: an edit of that run's still pending stays recognizable.
+			// A memo made for an entry with nothing remembered (pendingNew: a possessives-only run's marker, a removal's) becomes an ordinary memo once the text is recorded with it: an edit still pending stays recognizable.
 			if (memo?.textHash !== textHash || memo?.pendingNew) await memos.put(key, { ...withoutPendingNew(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash, updated: new Date().toISOString() });
 			return;
 		}
+		linking = true;
 		budget.used += LINK_SUBREQUESTS;
 		const linked = await linkEntry(ctx, options, record.collection, record.entryId, { record, textHash });
 		if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("glossary.io links", { entry: key, status: linked.status, ...changeCounts(linked.changes), ...(linked.dateKept === undefined ? {} : { dateKept: linked.dateKept }) });
 	} catch (error) {
+		if (!linking) {
+			ctx.log.warn("glossary.io links: couldn't read or record what's remembered about the entry; nothing is linked", { entry: key, error: String(error) });
+			return;
+		}
 		ctx.log.warn("glossary.io links failed; trying again later", { entry: key, error: String(error) });
 		const memo = await memos.get(key).catch(() => null);
 		await memos.put(key, withRetry({ ...withoutPendingNew(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash }, "error")).catch(() => undefined);

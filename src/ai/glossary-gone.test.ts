@@ -217,7 +217,8 @@ test("confirming a deleted term: two 404s 20 hours apart AND two index copies 20
 	assert.equal(run.queued, 2);
 	assert.deepEqual(s.state().gone.seo, { qid: "Q180711", since: t1 + 24 * H, approved: true, scannedAt: t1 + 24 * H, entries: 2 });
 	assert.deepEqual([...s.memos.keys()].sort(), ["posts:E1", "posts:E2"]);
-	assert.deepEqual(s.memos.get("posts:E1"), { collection: "posts", entryId: "E1", linked: [], unlink: [{ slug: "seo", qid: "Q180711" }], retryAt: t1 + 24 * H, unlinkAt: t1 + 24 * H, tries: 0, updated: new Date(t1 + 24 * H).toISOString() });
+	// An entry with nothing remembered: its new memo says so (pendingNew), or once the links are out its missing text hash would make the next analysis link.
+	assert.deepEqual(s.memos.get("posts:E1"), { collection: "posts", entryId: "E1", linked: [], pendingNew: true, unlink: [{ slug: "seo", qid: "Q180711" }], retryAt: t1 + 24 * H, unlinkAt: t1 + 24 * H, tries: 0, updated: new Date(t1 + 24 * H).toISOString() });
 
 	// Looked for again 6 hours later: already waiting (not queued twice); once no entry links to it, it's done.
 	await s.run(t1 + 26 * H);
@@ -634,6 +635,6 @@ test("queued entries: the turn is marked as the removal's own; a try to link tha
 	s.memos.set("posts:E2", { collection: "posts", entryId: "E2", linked: ["Q5"], retryAt: T0 + 30 * 60_000, tries: 0, updated: "" });
 	const now = T0 + H;
 	assert.equal((await s.run(now)).queued, 2);
-	assert.deepEqual(s.memos.get("posts:E1"), { collection: "posts", entryId: "E1", linked: [], unlink: [{ slug: "seo", qid: "Q180711" }], retryAt: now, unlinkAt: now, tries: 0, updated: new Date(now).toISOString() });
+	assert.deepEqual(s.memos.get("posts:E1"), { collection: "posts", entryId: "E1", linked: [], pendingNew: true, unlink: [{ slug: "seo", qid: "Q180711" }], retryAt: now, unlinkAt: now, tries: 0, updated: new Date(now).toISOString() });
 	assert.deepEqual(s.memos.get("posts:E2"), { collection: "posts", entryId: "E2", linked: ["Q5"], unlink: [{ slug: "seo", qid: "Q180711" }], retryAt: now, unlinkAt: now, relink: true, tries: 0, updated: new Date(now).toISOString() });
 });
