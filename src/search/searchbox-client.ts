@@ -27,6 +27,8 @@ const ANNOUNCE_DELAY_MS = 700;
 
 export interface SearchItem {
 	title?: string;
+	/** The title as escaped HTML with the matches in <mark> (the server's and the title matcher's highlighting). */
+	titleHtml?: string;
 	snippet?: string;
 	url: string;
 	type: string;
@@ -111,7 +113,10 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 	// The title index and its matcher, from the live results client (null until loaded, or without it).
 	let tools: LiveTools | null = null;
 	let prepared: unknown[] | null = null;
-	let primed = false;
+	let indexAsked = false;
+	let warmed = false;
+	// Escape closed the list: answers still on their way are cached, not shown, until the next keystroke.
+	let dismissed = false;
 	// Search insights: a suggestion search counts once the visitor stops typing (or opens one); off without data-seen.
 	const seen = createSeenSignal({ endpoint: d.seen, current: () => input.value.trim() });
 
@@ -131,6 +136,7 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 	const current = (query: string) => keyOf(input.value.trim()) === keyOf(query);
 
 	function close() {
+		clearTimeout(announceTimer);
 		list.hidden = true;
 		list.classList.remove("is-open");
 		if (live) input.setAttribute("aria-expanded", "false");
@@ -173,6 +179,8 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 		list.replaceChildren();
 		options = [];
 		active = -1;
+		// The old rows are gone, ids are reused: nothing is active until a row is picked again below.
+		input.removeAttribute("aria-activedescendant");
 		shownFor = keyOf(query);
 		const words = terms(query);
 		if (fallback && items.length) {
@@ -198,7 +206,9 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 			const title = document.createElement("span");
 			title.className = "cw-search__title";
 			const text = document.createElement("span");
-			highlight(text, item.title || item.url, words);
+			// The server and the title matcher escape titles and add only <mark>; escape anything else again to be safe.
+			if (item.titleHtml) text.innerHTML = item.titleHtml.replace(MARK, "&lt;");
+			else highlight(text, item.title || item.url, words);
 			title.appendChild(text);
 			if (d.showType && item.type) {
 				const type = document.createElement("span");
@@ -234,10 +244,11 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 			partial,
 		);
 		open();
-		// A row the visitor picked stays picked when the server's answer fills the list in.
+		// A row the visitor picked stays picked when the server's answer fills the list in (if it's still there).
 		if (pickedUrl) {
 			const again = options.findIndex((o) => urlKey(o.dataset.url) === urlKey(pickedUrl));
 			if (again >= 0) setActive(again);
+			else pickedUrl = "";
 		}
 	}
 
@@ -247,6 +258,8 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 		const local = tools.localItems(prepared, query, limit);
 		if (!local.length) return false;
 		render(query, local, false, true);
+		// Search insights: opening one of these before the server answers counts too.
+		seen.settle(query, local.length);
 		return true;
 	}
 
@@ -255,25 +268,34 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 		const local = tools && prepared ? tools.localItems(prepared, query, limit) : [];
 		const items = local.length && tools ? tools.merge(local, data.items, limit) : data.items;
 		render(query, items, data.fallback && !local.length, false);
-		seen.settle(query, data.items.length);
+		// What the visitor saw: title matches the server didn't find still count as results.
+		seen.settle(query, items.length);
 	}
 
-	/** Wake the server and load the title index, once, when the visitor heads for the field. */
+	/** Wake the server and load the title index (once each) when the visitor heads for the field. */
 	function prime() {
-		if (primed || !live) return;
-		primed = true;
-		tools = liveTools();
+		if (!live || indexAsked) return;
+		tools ??= liveTools();
 		if (!tools) {
-			// An older live results client (or none): no index, but still wake an isolate.
-			fetch(`${d.endpoint}?warm=1`, { credentials: "same-origin", priority: "low" } as RequestInit).catch(() => undefined);
+			// No live results client yet (it runs after this script, at the end of the page, so a visitor can get
+			// here first), or an older one without the tools: wake an isolate now, look again on the next focus,
+			// pointer or keystroke.
+			if (!warmed) {
+				warmed = true;
+				fetch(`${d.endpoint}?warm=1`, { credentials: "same-origin", priority: "low" } as RequestInit).catch(() => undefined);
+			}
 			return;
 		}
-		tools.warm();
+		indexAsked = true;
+		if (!warmed) {
+			warmed = true;
+			tools.warm();
+		}
 		tools.titles(d.collections || undefined, d.locale || undefined)?.then((list) => {
 			prepared = list.length ? list : null;
 			// The index arrived while the visitor was typing: show its matches unless the server already answered.
 			const query = input.value.trim();
-			if (prepared && document.activeElement === input && query.length >= minChars && query === lastQuery && !cache.has(keyOf(query))) showLocal(query);
+			if (prepared && !dismissed && document.activeElement === input && query.length >= minChars && query === lastQuery && !cache.has(keyOf(query))) showLocal(query);
 		});
 	}
 
@@ -294,9 +316,9 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 			const data = body.data ?? body;
 			if (!Array.isArray(data?.items)) throw new Error("Unexpected answer");
 			cache.set(key, data);
-			// An answer for a query the visitor has typed past is kept for backspacing, not shown; nor
-			// is one that arrives after they left the box.
-			if (current(query) && form.contains(document.activeElement)) showServer(query, data);
+			// An answer for a query the visitor has typed past is kept for backspacing, not shown; nor is
+			// one that arrives after they closed the list with Escape or left the box.
+			if (current(query) && !dismissed && form.contains(document.activeElement)) showServer(query, data);
 		} catch (error) {
 			if ((error as Error).name === "AbortError" || !current(query)) return;
 			// Title matches for this query stay; an older query's results don't.
@@ -315,6 +337,7 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 		lastQuery = "";
 		shownFor = "";
 		pickedUrl = "";
+		dismissed = false;
 		status.textContent = "";
 		close();
 	}
@@ -322,9 +345,13 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 	input.addEventListener("input", () => {
 		const query = input.value.trim();
 		clear.hidden = input.value === "";
+		if (!live) return;
+		// A keystroke that leaves the query as it was (a space) changes nothing: the request waiting on the
+		// debounce and the settled-search timer keep going.
+		if (query.length >= minChars && query === lastQuery && isOpen()) return;
 		clearTimeout(timer);
 		seen.cancel();
-		if (!live) return;
+		dismissed = false;
 		prime();
 		if (query.length < minChars) {
 			controller?.abort();
@@ -334,9 +361,10 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 			status.textContent = "";
 			return close();
 		}
-		if (query === lastQuery && isOpen()) return;
 		lastQuery = query;
 		pickedUrl = "";
+		// A row picked for the last query isn't one for this one (its rows may stay until the answer comes).
+		if (active >= 0) setActive(-1);
 		const cached = cache.get(keyOf(query));
 		if (cached) return showServer(query, cached);
 		showLocal(query);
@@ -352,6 +380,8 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 		if (e.key === "Escape") {
 			if (isOpen()) {
 				close();
+				clearTimeout(timer);
+				dismissed = true;
 			} else if (input.value) {
 				reset();
 			} else {
@@ -384,10 +414,16 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 
 	input.addEventListener("focus", () => {
 		prime();
-		if (options.length && input.value.trim().length >= minChars) open();
+		const query = input.value.trim();
+		if (!live || !options.length || query.length < minChars) return;
+		// Back in the box: show results for what's typed now, never an older query's rows.
+		const cached = cache.get(keyOf(query));
+		if (cached) return showServer(query, cached);
+		if (shownFor === keyOf(query)) return open();
+		showLocal(query);
 	});
 	// The pointer reaching the field (or a touch on it) is a head start on the index and the warm-up.
-	form.querySelector(".cw-search__field")?.addEventListener("pointerenter", prime, { once: true });
+	form.querySelector(".cw-search__field")?.addEventListener("pointerenter", prime);
 
 	// A suggestion opened with the pointer counts at once; a submitted form is counted by the search page.
 	list.addEventListener("click", (e) => {

@@ -205,7 +205,14 @@ const SCRIPT = String.raw`function (config, css, tools) {
 	/** The prepared title index for these collections and locale (a promise, never rejected), or null without an index. */
 	function indexFor(collections, locale) {
 		if (!config.indexEndpoint) return null;
-		var key = (collections || "") + "|" + (locale || "");
+		// "pages,posts" and "posts, pages" are one index.
+		var names = String(collections || "").split(",").map(function (c) {
+			return c.trim();
+		}).filter(Boolean).sort();
+		collections = names.filter(function (c, i) {
+			return names.indexOf(c) === i;
+		}).join(",");
+		var key = collections + "|" + (locale || "");
 		if (indexes[key]) return indexes[key];
 		var params = new URLSearchParams({ v: config.version });
 		if (collections) params.set("collections", collections);
