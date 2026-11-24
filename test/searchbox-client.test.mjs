@@ -333,3 +333,15 @@ test("SearchBox: titles use the server's and the matcher's highlighting (accents
 	delete ANSWERS.ecole;
 	await done(p);
 });
+
+test("SearchBox: an answer that arrived while the visitor was away shows on refocus, even with no rows before", async () => {
+	const p = await page({ withClient: false, delay: 40 });
+	p.input.focus();
+	p.type("coy");
+	p.input.blur();
+	await p.settle(120);
+	assert.equal(p.list.hidden, true, "not shown while away");
+	p.input.focus();
+	assert.deepEqual(p.rows(), ["/coywolf/", "/coyote/", "/jackal/"]);
+	await done(p);
+});

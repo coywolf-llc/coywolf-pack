@@ -415,10 +415,12 @@ export function enhanceSearchBox(form: HTMLFormElement): void {
 	input.addEventListener("focus", () => {
 		prime();
 		const query = input.value.trim();
-		if (!live || !options.length || query.length < minChars) return;
-		// Back in the box: show results for what's typed now, never an older query's rows.
+		if (!live || query.length < minChars) return;
+		// Back in the box: show results for what's typed now (an answer that came while away), never an older
+		// query's rows.
 		const cached = cache.get(keyOf(query));
 		if (cached) return showServer(query, cached);
+		if (!options.length) return;
 		if (shownFor === keyOf(query)) return open();
 		showLocal(query);
 	});
