@@ -8,6 +8,7 @@ import { ArrowClockwise, Check, DownloadSimple, Play, Sparkle, Stop, X } from "@
 import * as React from "react";
 
 import { apiGet, apiPost, errorText } from "./api.js";
+import { useConfirm } from "./confirm-dialog.js";
 import { DocsLink, FeaturesLink, Loading, PageHeader } from "./page.js";
 import { entitiesToCsv } from "../ai/export.js";
 import { saveFile, siteSlug, today } from "./download.js";
@@ -51,10 +52,21 @@ interface Bulk {
 	finished?: string;
 }
 
+/** Remove links to deleted glossary.io terms (src/ai/glossary-gone.ts goneSummary). */
+interface GoneSummary {
+	checking: number;
+	suspects: Array<{ slug: string; qid: string; since: string; goneAnswers: number }>;
+	confirmed: Array<{ slug: string; qid: string; entries: number | null }>;
+	held: { why: "index-shrank" | "many-terms" | "many-entries"; slugs: string[]; entries?: number; since: string } | null;
+	kept: string[];
+	indexCopyAt: string | null;
+}
+
 interface Status {
 	settings: Settings;
 	providers: Array<{ id: ProviderId; label: string; textModel: string; visionModel: string }>;
-	features: { ai: boolean; entities: boolean; descriptions: boolean; imageText: boolean; entitiesStandalone: boolean };
+	features: { ai: boolean; entities: boolean; descriptions: boolean; imageText: boolean; entitiesStandalone: boolean; glossaryLinks?: boolean; glossaryLinksRemoveGone?: boolean };
+	glossaryGone?: GoneSummary | null;
 	queue: { entries: number; media: number };
 	bulk: { entries: Bulk | null; media: Bulk | null };
 	callsToday: number;
@@ -227,6 +239,7 @@ function Overview(props: { status: Status; reload: () => Promise<void>; setNotic
 				</dl>
 				{status.callsToday >= limit && <Banner className="mt-4" variant="default" title="Today's call limit is reached. Work resumes after midnight UTC." />}
 			</Section>
+			{status.glossaryGone && <GoneTerms gone={status.glossaryGone} reload={props.reload} setNotice={props.setNotice} setError={props.setError} />}
 			<Section title="Bulk runs" description={`Collections: ${status.collections.join(", ") || "none found"}.`}>
 				<BulkRow
 					kind="entries"
@@ -252,6 +265,100 @@ function Overview(props: { status: Status; reload: () => Promise<void>; setNotic
 				/>
 			</Section>
 		</div>
+	);
+}
+
+// ── Links to deleted glossary.io terms ──────────────────────────
+
+/** What a hold is about. */
+function holdText(held: NonNullable<GoneSummary["held"]>): { title: string; description: string } {
+	const n = held.slugs.length;
+	if (held.why === "index-shrank") {
+		return {
+			title: `glossary.io's index is missing ${n} terms at once`,
+			description: "That's more than usual, so it may be a problem on glossary.io. No links are removed while this waits, and it clears by itself if the terms come back.",
+		};
+	}
+	if (held.why === "many-terms") return { title: `${n} glossary.io terms were deleted at once`, description: "Their links stay until you decide." };
+	return { title: `Links to ${n} deleted glossary.io terms are in ${held.entries ?? "many"} entries`, description: "They stay until you decide." };
+}
+
+function GoneTerms(props: { gone: GoneSummary; reload: () => Promise<void>; setNotice: (s: string) => void; setError: (s: string) => void }) {
+	const { gone } = props;
+	const [confirm, confirmDialog] = useConfirm();
+	const [pending, setPending] = React.useState(false);
+	const held = gone.held;
+	const decide = async (action: "approve" | "dismiss") => {
+		if (!held) return;
+		const shrank = held.why === "index-shrank";
+		const ok = await confirm(
+			action === "approve"
+				? {
+						title: shrank ? "Check these terms one by one?" : "Remove these links?",
+						description: shrank
+							? "Each missing term is then checked on its own, and its links come out only if glossary.io says it's gone twice, a day apart."
+							: "The links come out of the entries over the next scheduled runs. The text stays.",
+						confirmLabel: shrank ? "Check them" : "Remove links",
+					}
+				: { title: "Keep these links?", description: "They're never removed unless a term comes back and is deleted again.", confirmLabel: "Keep links", variant: "primary" },
+		);
+		if (!ok) return;
+		setPending(true);
+		try {
+			const r = await post<{ message: string }>("glossary-links", { gone: action, slugs: held.slugs });
+			props.setNotice(r.message);
+			await props.reload();
+		} catch (cause) {
+			props.setError(errorText(cause, "The request failed"));
+		} finally {
+			setPending(false);
+		}
+	};
+	const text = held ? holdText(held) : null;
+	return (
+		<Section title="Links to deleted glossary.io terms" description="When a glossary.io term is gone for good (checked twice, a day apart), its links come out of your entries and the text stays.">
+			{confirmDialog}
+			{held && text && (
+				<div className="mb-4">
+					<Banner variant="default" title={text.title} description={text.description} />
+					<p className="mt-2 text-sm">
+						{held.slugs.slice(0, 40).join(", ")}
+						{held.slugs.length > 40 ? `, and ${held.slugs.length - 40} more` : ""}
+					</p>
+					<div className="mt-2 flex gap-2">
+						<Button variant="secondary" disabled={pending} onClick={() => void decide("approve")}>
+							{held.why === "index-shrank" ? "Check them one by one" : "Remove their links"}
+						</Button>
+						<Button variant="secondary" disabled={pending} onClick={() => void decide("dismiss")}>
+							Keep the links
+						</Button>
+					</div>
+				</div>
+			)}
+			<dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+				<div>
+					<dt className="text-kumo-subtle">Terms being checked</dt>
+					<dd className="text-lg font-semibold tabular-nums">{gone.checking}</dd>
+				</div>
+				<div>
+					<dt className="text-kumo-subtle">Deleted, links coming out</dt>
+					<dd className="text-lg font-semibold tabular-nums">{gone.confirmed.length}</dd>
+				</div>
+				<div>
+					<dt className="text-kumo-subtle">Links kept</dt>
+					<dd className="text-lg font-semibold tabular-nums">{gone.kept.length}</dd>
+				</div>
+				<div>
+					<dt className="text-kumo-subtle">Index compared</dt>
+					<dd className="font-medium">{gone.indexCopyAt ? dateTime.format(new Date(gone.indexCopyAt)) : "Not yet"}</dd>
+				</div>
+			</dl>
+			{gone.confirmed.length > 0 && (
+				<p className="mt-4 text-sm text-kumo-subtle">
+					Deleted: {gone.confirmed.map((c) => `${c.slug}${c.entries === null ? "" : ` (${c.entries} ${c.entries === 1 ? "entry" : "entries"})`}`).join(", ")}
+				</p>
+			)}
+		</Section>
 	);
 }
 

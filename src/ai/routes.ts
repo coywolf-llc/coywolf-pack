@@ -33,6 +33,7 @@ import {
 } from "./store.js";
 import { applyDescription, applyImageText, entryText, targetCollections, tick } from "./worker.js";
 import { type LinkOutcome, linkEntry, linkMemos, withRetry } from "./glossary-linker.js";
+import { decideGone, goneSummary, readGoneState, removeGoneOn } from "./glossary-gone.js";
 import { readOnlyRoute } from "../core/routes.js";
 
 const asCtx = (ctx: unknown) => ctx as PluginContext;
@@ -63,6 +64,9 @@ const glossaryLinksInput = z.object({
 	cursor: z.string().max(2000).optional(),
 	limit: z.number().int().min(1).max(25).optional(),
 	exclude: z.record(z.string().max(300), z.array(z.string().regex(/^Q[1-9][0-9]{0,11}$/)).max(100)).optional(),
+	/** Remove links to deleted terms: its status, or a person's decision on the slugs the page showed (src/ai/glossary-gone.ts decideGone). */
+	gone: z.enum(["status", "approve", "dismiss"]).optional(),
+	slugs: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,99}$/)).min(1).max(5000).optional(),
 });
 
 const entryRef = z.object({ collection: z.string().min(1).max(200), id: z.string().min(1).max(200) });
@@ -93,7 +97,10 @@ export function aiRoutes(options: AiOptions) {
 						imageText: isOn(features, "ai.imageText"),
 						entitiesStandalone: isOn(features, "ai.entitiesStandalone"),
 						glossaryLinks: isOn(features, "ai.glossaryLinks"),
+						glossaryLinksRemoveGone: isOn(features, "ai.glossaryLinksRemoveGone"),
 					},
+					/** Remove links to deleted glossary.io terms: what's being checked, and any hold (while the part is on). */
+					glossaryGone: removeGoneOn(features) ? goneSummary(await readGoneState(ctx)) : null,
 					queue: await queueCounts(ctx),
 					bulk: { entries: entriesBulk, media: mediaBulk },
 					callsToday: await callsToday(ctx),
@@ -273,6 +280,8 @@ export function aiRoutes(options: AiOptions) {
 		 * a batch): the same code the analysis runs. `keys` ("posts:<id>") or pages
 		 * of analyzed entries (`cursor`); `dryRun` plans without writing (allowed
 		 * with the part off); `exclude` lists QIDs never to link, per entry key.
+		 * `gone` is Remove links to deleted terms instead: "status", or "approve" /
+		 * "dismiss" with the `slugs` the AI Enrichment page showed.
 		 */
 		"ai/glossary-links": definePluginRoute({
 			permission: "plugins:manage",
@@ -282,6 +291,19 @@ export function aiRoutes(options: AiOptions) {
 				const ctx = asCtx(raw);
 				const input = parseInput(glossaryLinksInput, (raw as { input: unknown }).input);
 				const features = await ctxFeatures(ctx);
+				if (input.gone === "status") return { gone: goneSummary(await readGoneState(ctx)) };
+				if (input.gone) {
+					if (!removeGoneOn(features)) throw PluginRouteError.notFound("Turn on Remove links to deleted glossary.io terms first (AI Enrichment).");
+					if (!input.slugs?.length) throw PluginRouteError.badRequest("List the terms (slugs) this decision is for.");
+					const action = input.gone;
+					const slugs = input.slugs;
+					// Never alongside the scheduled AI run, which updates the same record.
+					const decided = await withLock(ctx, 60_000, () => decideGone(ctx, action, slugs));
+					if (!decided) throw new PluginRouteError("CONFLICT", "The scheduled AI run is working; try again in a minute.", 409);
+					if (!decided.ok) throw PluginRouteError.badRequest(decided.message);
+					ctx.log.info("glossary.io links: a person decided about deleted terms", { action, slugs: slugs.slice(0, 50) });
+					return { gone: decided.summary, message: decided.message };
+				}
 				if (!input.dryRun && !isOn(features, "ai.glossaryLinks")) throw PluginRouteError.notFound("Turn on glossary.io links first (AI Enrichment).");
 				const records = col<EntryRecord>(ctx, "aiEntries");
 				let keys = input.keys;

@@ -54,6 +54,7 @@ import {
 } from "./store.js";
 import { WikidataBusyError, entityDetails, searchCandidates } from "./wikidata.js";
 import { linkEntry, linkMemos, retryDue, shouldLink, withRetry } from "./glossary-linker.js";
+import { checkGoneTerms, removeGoneOn } from "./glossary-gone.js";
 import { VERSION } from "../version.js";
 
 type Settings = AiSettings & { apiKey: string };
@@ -267,7 +268,7 @@ async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: Ent
 		}
 		budget.used += LINK_SUBREQUESTS;
 		const linked = await linkEntry(ctx, options, record.collection, record.entryId, { record, textHash });
-		if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("glossary.io links", { entry: key, status: linked.status, links: linked.changes.length });
+		if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("glossary.io links", { entry: key, status: linked.status, links: linked.changes.length, ...(linked.dateKept === undefined ? {} : { dateKept: linked.dateKept }) });
 	} catch (error) {
 		ctx.log.warn("glossary.io links failed; trying again later", { entry: key, error: String(error) });
 		const memo = await memos.get(key).catch(() => null);
@@ -550,8 +551,19 @@ export async function tick(ctx: PluginContext, options: AiOptions, opts: { maxJo
 		}
 		// glossary.io links that waited (a draft, a busy or changed entry, no index yet): no model calls.
 		if (isOn(features, "ai.glossaryLinks") && isOn(features, "ai.entities") && Date.now() - started < opts.budgetMs) {
+			// Remove links to deleted glossary.io terms (src/ai/glossary-gone.ts): checked first, so the removals it
+			// queues share the retry pass below. While it can't decide (no good index copy, a refused copy), the pass only links.
+			let unlink = false;
+			if (removeGoneOn(features)) {
+				try {
+					const gone = await checkGoneTerms(ctx, options, budget, { collections: await targetCollections(ctx, s), deadline: started + opts.budgetMs });
+					unlink = !gone.paused;
+				} catch (error) {
+					ctx.log.warn("glossary.io links: checking for deleted glossary.io terms failed", { error: String(error) });
+				}
+			}
 			const room = Math.min(3, Math.floor((budget.max - budget.used) / LINK_SUBREQUESTS));
-			if (room > 0) await retryDue(ctx, options, room).catch((error) => ctx.log.warn("glossary.io links retry failed", { error: String(error) }));
+			if (room > 0) await retryDue(ctx, options, room, { unlink }).catch((error) => ctx.log.warn("glossary.io links retry failed", { error: String(error) }));
 		}
 		await pruneUsage(ctx).catch(() => undefined);
 		return out;

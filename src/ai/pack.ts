@@ -10,6 +10,7 @@ import { cachedCtxFeatures, ctxFeatures, isOn, registerFeatures } from "../core/
 import type { PackModule } from "../core/module.js";
 import { getEntryEntities } from "./entities.js";
 import { GLOSSARY_HOST } from "./glossary.js";
+import { REMOVE_GONE_FEATURE } from "./glossary-gone.js";
 import { PROVIDER_HOSTS } from "./providers.js";
 import { aiRoutes } from "./routes.js";
 import { type AiOptions, STORAGE, col, enqueue, entryKey, readSettings, type EntryRecord } from "./store.js";
@@ -51,6 +52,7 @@ const FEATURES = [
 		description: "After an entry's entities are found, link each one that has a glossary.io definition to it, once per entry: an existing link to its home page, Wikipedia article or profile is switched, or its first mention is linked. Internal and affiliate links never change.",
 		default: false,
 	},
+	REMOVE_GONE_FEATURE,
 	{
 		id: "ai.descriptions",
 		label: "Meta descriptions",
