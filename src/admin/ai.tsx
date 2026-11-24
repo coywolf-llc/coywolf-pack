@@ -240,7 +240,10 @@ function Overview(props: { status: Status; reload: () => Promise<void>; setNotic
 				{status.callsToday >= limit && <Banner className="mt-4" variant="default" title="Today's call limit is reached. Work resumes after midnight UTC." />}
 			</Section>
 			{status.glossaryGone && <GoneTerms gone={status.glossaryGone} reload={props.reload} setNotice={props.setNotice} setError={props.setError} />}
-			<Section title="Bulk runs" description={`Collections: ${status.collections.join(", ") || "none found"}.`}>
+			<Section
+				title="Bulk runs"
+				description={`Collections: ${status.collections.join(", ") || "none found"}. A save analyzes an entry again only when its title or text changed: after you change the model or the parts that are on, Run bulk applies the new settings to the entries analyzed before.`}
+			>
 				<BulkRow
 					kind="entries"
 					label="Entities and meta descriptions for published entries"

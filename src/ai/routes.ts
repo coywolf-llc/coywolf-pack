@@ -15,8 +15,10 @@ import {
 	type BulkState,
 	type EntryRecord,
 	type MediaRecord,
+	type TextHashFillState,
 	type UsageRow,
 	SETTINGS_SCHEMA,
+	TEXT_HASHES_KEY,
 	bulkKey,
 	callsToday,
 	col,
@@ -31,7 +33,7 @@ import {
 	takeCall,
 	withLock,
 } from "./store.js";
-import { applyDescription, applyImageText, entryText, targetCollections, tick } from "./worker.js";
+import { applyDescription, applyImageText, entryText, fillTextHashes, targetCollections, tick } from "./worker.js";
 import { type LinkOutcome, linkEntry, linkMemos, withRetry } from "./glossary-linker.js";
 import { decideGone, goneSummary, readGoneState, removeGoneOn } from "./glossary-gone.js";
 import { readOnlyRoute } from "../core/routes.js";
@@ -71,6 +73,13 @@ const glossaryLinksInput = z.object({
 	slugs: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,99}$/)).min(1).max(5000).optional(),
 });
 
+const textHashesInput = z.object({
+	dryRun: z.boolean().optional(),
+	keys: z.array(z.string().min(3).max(300)).min(1).max(50).optional(),
+	cursor: z.string().max(2000).optional(),
+	limit: z.number().int().min(1).max(50).optional(),
+});
+
 const entryRef = z.object({ collection: z.string().min(1).max(200), id: z.string().min(1).max(200) });
 const listInput = z.object({ cursor: z.string().max(2000).optional(), filter: z.string().max(40).optional() });
 
@@ -88,7 +97,7 @@ export function aiRoutes(options: AiOptions) {
 				const ctx = asCtx(raw);
 				const settings = await readSettings(ctx, options);
 				const features = await ctxFeatures(ctx);
-				const [entriesBulk, mediaBulk] = await Promise.all([ctx.kv.get<BulkState>(bulkKey("entries")), ctx.kv.get<BulkState>(bulkKey("media"))]);
+				const [entriesBulk, mediaBulk, textHashes] = await Promise.all([ctx.kv.get<BulkState>(bulkKey("entries")), ctx.kv.get<BulkState>(bulkKey("media")), ctx.kv.get<TextHashFillState>(TEXT_HASHES_KEY)]);
 				return {
 					settings: publicSettings(settings),
 					providers: PROVIDERS,
@@ -105,6 +114,8 @@ export function aiRoutes(options: AiOptions) {
 					glossaryGone: removeGoneOn(features) ? goneSummary(await readGoneState(ctx)) : null,
 					queue: await queueCounts(ctx),
 					bulk: { entries: entriesBulk, media: mediaBulk },
+					/** The scheduled run's pass that gives analyses made before 0.51.0 their text hash (null until it starts). */
+					textHashes,
 					callsToday: await callsToday(ctx),
 					running: await lockHeld(ctx),
 					collections: await targetCollections(ctx, settings).catch(() => []),
@@ -362,6 +373,33 @@ export function aiRoutes(options: AiOptions) {
 				return { results, cursor, hasMore };
 			},
 		}),
+
+		/**
+		 * Text hashes for analyses made before 0.51.0, so a save that leaves an
+		 * entry's title and text as they are stops re-analyzing it (the
+		 * scheduled run does the same a few at a time; fillTextHashes in
+		 * src/ai/worker.ts). `keys` ("posts:<id>") or pages of analyses
+		 * (`limit`, `cursor`), up to 50; `dryRun` writes nothing. No model calls,
+		 * and nothing a page shows changes.
+		 */
+		"ai/text-hashes": readOnlyRoute(definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (raw) => {
+				const ctx = asCtx(raw);
+				const input = parseInput(textHashesInput, (raw as { input: unknown }).input);
+				const run = async () => {
+					const { complete: _c, ...result } = await fillTextHashes(ctx, options, { dryRun: input.dryRun, keys: input.keys, cursor: input.cursor, limit: input.limit ?? 50 });
+					return result;
+				};
+				// Never alongside the scheduled AI run, which analyzes (and fills) the same records; a dry run writes nothing.
+				const result = input.dryRun ? await run() : await withLock(ctx, 5 * 60_000, run);
+				if (!result) throw new PluginRouteError("CONFLICT", "The scheduled AI run is working; try again in a minute.", 409);
+				if (!input.dryRun && result.counts.filled) ctx.log.info("AI: text hashes recorded", { filled: result.counts.filled, skipped: result.counts.skipped });
+				return result;
+			},
+		})),
 
 		"ai/description/apply": definePluginRoute({
 			permission: "plugins:manage",

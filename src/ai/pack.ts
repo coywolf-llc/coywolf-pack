@@ -71,7 +71,11 @@ registerFeatures(FEATURES);
 export const AI_TASK = "ai-queue";
 
 export function aiPack(options: AiOptions = {}): PackModule {
-	/** Queue an entry when its text changed since the last analysis (debounced). Never makes a model call. */
+	/**
+	 * Queue an entry when its title or text changed since the last analysis (debounced). Never makes a model call.
+	 * New settings alone (another model, a part switched on) don't re-analyze on a save: a bulk run applies them.
+	 * An analysis made before 0.51.0 has no text hash yet, so its hash (text and settings) decides, as before.
+	 */
 	async function onContent(event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) {
 		const content = event.content;
 		const id = typeof content.id === "string" ? content.id : null;
@@ -87,8 +91,8 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		const t = await entryText(ctx, event.collection, data, s, features);
 		if (!t) return;
 		const prev = await col<EntryRecord>(ctx, "aiEntries").get(entryKey(event.collection, id));
-		if (prev?.status === "ok" && prev.hash === t.hash) return;
-		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000 });
+		if (prev?.status === "ok" && (prev.hash === t.hash || prev.textHash === t.textHash)) return;
+		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000, source: "save" });
 	}
 
 	return {
