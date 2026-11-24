@@ -8,6 +8,7 @@
  *   aiMedia   — per-image suggestion and what was written
  *   aiUsage   — one row per model call (kept 30 days)
  *   aiGlossary — glossary.io's entity index ("index"), refreshed about daily
+ *   aiLinks   — glossary.io links per entry: QIDs linked, text hash, retries
  */
 import type { PluginContext, StorageCollection } from "emdash";
 
@@ -42,6 +43,8 @@ export const STORAGE = {
 	aiUsage: { indexes: ["time"] },
 	/** glossary.io's entity index, one document ("index"; src/ai/glossary.ts). */
 	aiGlossary: { indexes: [] as string[] },
+	/** glossary.io links: what each entry's links remember (LinkMemo in src/ai/glossary-linker.ts). Kept when an entry is trashed. */
+	aiLinks: { indexes: ["retryAt"] },
 };
 
 export const SETTINGS_SCHEMA = {
@@ -180,12 +183,6 @@ export interface EntryRecord {
 	description: string;
 	descriptionStatus: "none" | "suggested" | "applied" | "dismissed";
 	updated: string;
-	/** Hash of the title and text alone (no settings): glossary links run only when it changes. Since 0.49.0. */
-	textHash?: string;
-	/** QIDs glossary links handled in this entry (linked, found linked, or excluded): never linked again. */
-	glossaryLinked?: string[];
-	/** The draft revision a glossary-links edit saved, until it's published (a failed publish is finished on the next run). */
-	glossaryDraft?: string;
 }
 
 export interface MediaRecord {

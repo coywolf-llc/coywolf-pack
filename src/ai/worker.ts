@@ -53,7 +53,7 @@ import {
 	withLock,
 } from "./store.js";
 import { WikidataBusyError, entityDetails, searchCandidates } from "./wikidata.js";
-import { linkEntry } from "./glossary-linker.js";
+import { linkEntry, linkMemos, retryDue, shouldLink, withRetry } from "./glossary-linker.js";
 import { VERSION } from "../version.js";
 
 type Settings = AiSettings & { apiKey: string };
@@ -238,31 +238,41 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 		entryId: id,
 		title: t.title,
 		hash: t.hash,
-		textHash: t.textHash,
 		status: "ok",
 		error: "",
 		entities,
 		description,
 		descriptionStatus,
 		updated: new Date().toISOString(),
-		...(previous?.glossaryLinked ? { glossaryLinked: previous.glossaryLinked } : {}),
-		...(previous?.glossaryDraft ? { glossaryDraft: previous.glossaryDraft } : {}),
 	};
 	await records.put(key, record);
-
-	// glossary.io links: after a first analysis, or one whose text changed (not a re-analysis for new settings).
-	const textChanged = !previous || previous.status !== "ok" || previous.textHash !== t.textHash;
-	if (isOn(features, "ai.glossaryLinks") && entities.length && textChanged) {
-		budget.used += LINK_SUBREQUESTS;
-		try {
-			const linked = await linkEntry(ctx, options, collection, id, { record });
-			if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("AI glossary links", { entry: key, status: linked.status, links: linked.changes.length });
-		} catch (error) {
-			// Never fails the analysis: the entry is linked after its next text change, or with Link existing entries.
-			ctx.log.warn("AI glossary links failed", { entry: key, error: String(error) });
-		}
-	}
+	if (wantEntities && isOn(features, "ai.glossaryLinks")) await afterAnalysis(ctx, options, record, previous, t.textHash, budget);
 	return "done";
+}
+
+/**
+ * glossary.io links after an analysis: after a first analysis, or one whose
+ * text changed since the links last looked (never a re-analysis for new
+ * settings). Otherwise the text hash is remembered, so the next text change
+ * links. Never fails the analysis: a failure is tried again later.
+ */
+async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: EntryRecord, previous: EntryRecord | null, textHash: string, budget: Budget): Promise<void> {
+	const key = entryKey(record.collection, record.entryId);
+	const memos = linkMemos(ctx);
+	try {
+		const memo = await memos.get(key);
+		if (!record.entities.length || !shouldLink(memo, previous, textHash)) {
+			if (memo?.textHash !== textHash) await memos.put(key, { ...(memo ?? { collection: record.collection, entryId: record.entryId, linked: [] }), textHash, updated: new Date().toISOString() });
+			return;
+		}
+		budget.used += LINK_SUBREQUESTS;
+		const linked = await linkEntry(ctx, options, record.collection, record.entryId, { record, textHash });
+		if (linked.changes.length || linked.status !== "unchanged") ctx.log.info("glossary.io links", { entry: key, status: linked.status, links: linked.changes.length });
+	} catch (error) {
+		ctx.log.warn("glossary.io links failed; trying again later", { entry: key, error: String(error) });
+		const memo = await memos.get(key).catch(() => null);
+		await memos.put(key, withRetry({ ...(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash }, "error")).catch(() => undefined);
+	}
 }
 
 /**
@@ -537,6 +547,11 @@ export async function tick(ctx: PluginContext, options: AiOptions, opts: { maxJo
 					await queue.put(id, { ...job, attempts: job.attempts + 1, deferrals: 0, due: next, lastError: message });
 				}
 			}
+		}
+		// glossary.io links that waited (a draft, a busy or changed entry, no index yet): no model calls.
+		if (isOn(features, "ai.glossaryLinks") && isOn(features, "ai.entities") && Date.now() - started < opts.budgetMs) {
+			const room = Math.min(3, Math.floor((budget.max - budget.used) / LINK_SUBREQUESTS));
+			if (room > 0) await retryDue(ctx, options, room).catch((error) => ctx.log.warn("glossary.io links retry failed", { error: String(error) }));
 		}
 		await pruneUsage(ctx).catch(() => undefined);
 		return out;

@@ -29,9 +29,10 @@ import {
 	queueCounts,
 	readSettings,
 	takeCall,
+	withLock,
 } from "./store.js";
 import { applyDescription, applyImageText, entryText, targetCollections, tick } from "./worker.js";
-import { linkEntry } from "./glossary-linker.js";
+import { type LinkOutcome, linkEntry } from "./glossary-linker.js";
 import { readOnlyRoute } from "../core/routes.js";
 
 const asCtx = (ctx: unknown) => ctx as PluginContext;
@@ -293,26 +294,32 @@ export function aiRoutes(options: AiOptions) {
 					hasMore = page.hasMore;
 				}
 				const s = await readSettings(ctx, options);
-				const results = [];
-				for (const key of keys) {
-					const colon = key.indexOf(":");
-					const collection = key.slice(0, colon);
-					const id = key.slice(colon + 1);
-					if (colon < 1 || !id) {
-						results.push({ key, slug: null, status: "skipped", changes: [], reason: "bad key" });
-						continue;
+				const list = keys;
+				// Never alongside the scheduled AI run (it analyzes and links too): try again shortly when it's busy.
+				const results = await withLock(ctx, 5 * 60_000, async () => {
+					const out: Array<LinkOutcome | { key: string; slug: null; status: "skipped" | "error"; changes: never[]; reason: string }> = [];
+					for (const key of list) {
+						const colon = key.indexOf(":");
+						const collection = key.slice(0, colon);
+						const id = key.slice(colon + 1);
+						if (colon < 1 || !id) {
+							out.push({ key, slug: null, status: "skipped", changes: [], reason: "bad key" });
+							continue;
+						}
+						try {
+							const record = await records.get(key);
+							const item = record?.status === "ok" ? await ctx.content?.get(collection, id) : null;
+							// The text hash is remembered only when the analysis is of the current text, so a queued re-analysis still links.
+							const t = item ? await entryText(ctx, collection, item.data, s, features) : null;
+							const textHash = t && record && t.hash === record.hash ? t.textHash : undefined;
+							out.push(await linkEntry(ctx, options, collection, id, { dryRun: input.dryRun, exclude: input.exclude?.[key], record: record ?? undefined, textHash }));
+						} catch (error) {
+							out.push({ key, slug: null, status: "error", changes: [], reason: String(error).slice(0, 300) });
+						}
 					}
-					try {
-						const outcome = await linkEntry(ctx, options, collection, id, {
-							dryRun: input.dryRun,
-							exclude: input.exclude?.[key],
-							hashText: async (data) => (await entryText(ctx, collection, data, s, features))?.textHash,
-						});
-						results.push(outcome);
-					} catch (error) {
-						results.push({ key, slug: null, status: "error", changes: [], reason: String(error).slice(0, 300) });
-					}
-				}
+					return out;
+				});
+				if (!results) throw new PluginRouteError("CONFLICT", "The scheduled AI run is working; try again in a minute.", 409);
 				return { results, cursor, hasMore };
 			},
 		}),

@@ -65,6 +65,9 @@ const TERMS: Record<string, { slug: string; names: string[] }> = {
 	Q10: { slug: "seo", names: ["SEO", "Search engine optimization"] },
 	Q11: { slug: "signal", names: ["Signal"] },
 	Q12: { slug: "fathom-analytics", names: ["Fathom Analytics"] },
+	Q21: { slug: "thread", names: ["Thread"] },
+	Q22: { slug: "wordpress", names: ["WordPress", "WP"] },
+	Q23: { slug: "mac-mini", names: ["Mac mini"] },
 };
 const lookup = (qid: string) => TERMS[qid] ?? null;
 const ent = (qid: string, name: string, more: Record<string, unknown> = {}) => ({ qid, name, type: "Thing", description: "", wikipedia: "", website: "", primary: false, ...more });
@@ -281,16 +284,67 @@ test("hostIn and linkedGlossarySlugs", () => {
 	assert.deepEqual([...links.linkedGlossarySlugs([block([{ t: "x", href: "https://glossary.io/seo/" }, " ", { t: "y", href: "https://glossary.io/" }])])], ["seo"]);
 });
 
+// ── Review round: affiliates first, stricter profiles, edge names ─────
+
+test("an affiliate link naming the entity rules out a glossary link, whichever comes first", () => {
+	const shop = ent("Q5", "Shopify", { website: "https://www.shopify.com/" });
+	const identityFirst = plan([block(["See ", { t: "Shopify", href: "https://www.shopify.com/" }, "."]), block(["Start a ", { t: "Shopify", href: "https://shopify.pxf.io/je22rv" }, " trial."])], [shop]);
+	const affiliateFirst = plan([block(["Start a ", { t: "Shopify", href: "https://coywolf.io/shopify" }, " trial."]), block(["See ", { t: "Shopify", href: "https://www.shopify.com/" }, "."])], [shop]);
+	const looseAnchor = plan([block(["Try ", { t: "Shopify free", href: "https://shopify.pxf.io/x" }, "."]), block(["Shopify is big."])], [shop]);
+	for (const r of [identityFirst, affiliateFirst, looseAnchor]) {
+		assert.equal(r.changes.length, 0);
+		assert.equal(r.skipped[0].why, "affiliate");
+	}
+	assert.equal(links.classifyLink("https://try.shopify.com/", shop, []), "affiliate");
+	assert.equal(links.classifyLink("https://bit.ly/3abc", shop, []), "affiliate");
+	assert.equal(links.classifyLink("https://shop.example.com/?rfsn=123", shop, []), "affiliate");
+	assert.equal(links.classifyLink("https://go.dev/", ent("Q20", "Go"), []), "home", "go.dev is a site, not an affiliate subdomain");
+
+	// A loose mention counts only when the affiliate link is for the entity (or its destination is unknown).
+	const wp = ent("Q22", "WordPress");
+	const hosting = plan([block(["Use ", { t: "Pressable WordPress hosting", href: "/visit/pressable" }, "."]), block(["WordPress runs the web."])], [wp]);
+	assert.deepEqual(linksOf(hosting.content)[1], ["WordPress", "https://glossary.io/wordpress/"]);
+	const mac = plan([block(["I use a ", { t: "headless Mac mini", href: "https://amzn.to/32SaMzI" }, "."]), block(["The Mac mini is quiet."])], [ent("Q23", "Mac mini")]);
+	assert.equal(mac.skipped[0].why, "affiliate", "an Amazon short link can be for the Mac mini itself");
+	assert.equal(links.affiliateBrand("https://shopify.pxf.io/x"), "shopify");
+	assert.equal(links.affiliateBrand("/visit/yubico/"), "yubico");
+	assert.equal(links.affiliateBrand("https://coywolf.io/fastmail", [], ["coywolf.io"]), "fastmail");
+	assert.equal(links.affiliateBrand("https://usefathom.com/ref/AANN81"), "usefathom");
+	assert.equal(links.affiliateBrand("https://go.nordvpn.net/aff_c?offer_id=15"), "nordvpn");
+	assert.equal(links.affiliateBrand("https://amzn.to/3gbTYZI"), "");
+	assert.equal(links.affiliateBrand("https://shop.brand.co.uk/?ref=1"), "brand");
+});
+
+test("social profiles: a bare segment only where that's a profile; article slugs aren't profiles", () => {
+	const g = ent("Q95", "Google");
+	assert.equal(links.classifyLink("https://medium.com/some-long-article-slug-about-it-1a2b3c", g, []), "citation");
+	assert.equal(links.classifyLink("https://x.com/google", g, []), "social");
+	assert.equal(links.classifyLink("https://medium.com/@google", g, []), "social");
+});
+
+test("Google I/O isn't Google; a plural anchor only matches concepts and abbreviations", () => {
+	const io = plan([block(["At Google I/O, the keynote ran long. I think Google won."])], [ent("Q95", "Google")]);
+	assert.match(io.changes[0].context, /I think \[\[Google\]\] won/);
+	const sentence = plan([block(["We trust Google I think."])], [ent("Q95", "Google")]);
+	const contraction = plan([block(["The minimalist Google I\u2019m launching is small."])], [ent("Q95", "Google")]);
+	assert.equal(contraction.changes.length, 1, "\"I\u2019m\" after a name isn't part of it");
+	assert.equal(links.classifyLink("https://www.tiktok.com/about", ent("Q24", "TikTok"), []), "home");
+	assert.equal(sentence.changes.length, 1, "\"I use\" after a name isn't part of it");
+	const threads = plan([block(["Post on ", { t: "Threads", href: "https://en.wikipedia.org/wiki/Thread_(network_protocol)" }, "."])], [ent("Q21", "Thread", { wikipedia: "https://en.wikipedia.org/wiki/Thread_(network_protocol)" })]);
+	assert.equal(threads.kept[0]?.why, "not-a-name");
+	const pwas = plan([block(["Install ", { t: "PWAs", href: "https://en.wikipedia.org/wiki/Progressive_web_app" }, " today."])], [ent("Q9", "progressive web app", { wikipedia: "https://en.wikipedia.org/wiki/Progressive_web_app" })]);
+	assert.equal(pwas.changes[0]?.action, "switch");
+});
+
 // ── The entry edit ───────────────────────────────────────────────
 
-function fakeSite(opts: { draft?: string | null; bumpBeforeWrite?: boolean; publishConflict?: boolean; slug?: string; record?: Record<string, unknown> } = {}) {
+function fakeSite(opts: { draft?: string | null; version?: number; bumpBeforeWrite?: boolean; bumpDuringUpdate?: boolean; publishConflict?: boolean; slug?: string; updatedAt?: string; memo?: Record<string, unknown>; siteUrl?: string } = {}) {
 	const body = [block(["I miss ", { t: "StumbleUpon", href: "https://en.wikipedia.org/wiki/StumbleUpon" }, ". Google agrees."])];
 	type Item = { id: string; slug: string; status: string; data: Record<string, unknown>; version: number; updatedAt: string; draftRevisionId: string | null; liveRevisionId: string | null };
-	let item: Item = { id: "E1", slug: opts.slug ?? "joy", status: "published", data: { title: "Joy", content: body }, version: 3, updatedAt: "2026-10-04T23:01:54.489Z", draftRevisionId: opts.draft ?? null, liveRevisionId: "R1" };
+	let item: Item = { id: "E1", slug: opts.slug ?? "joy", status: "published", data: { title: "Joy", content: body }, version: opts.version ?? 3, updatedAt: opts.updatedAt ?? "2026-10-04T23:01:54.489Z", draftRevisionId: opts.draft ?? null, liveRevisionId: "R1" };
 	const calls = { update: 0, publish: [] as string[] };
 	let reads = 0;
-	const records = new Map<string, Record<string, unknown>>();
-	records.set("posts:E1", {
+	const record = {
 		collection: "posts",
 		entryId: "E1",
 		title: "Joy",
@@ -301,27 +355,35 @@ function fakeSite(opts: { draft?: string | null; bumpBeforeWrite?: boolean; publ
 		description: "",
 		descriptionStatus: "none",
 		updated: "2026-11-23T00:00:00.000Z",
-		...opts.record,
-	});
+	};
+	const entries = new Map<string, unknown>([["posts:E1", record]]);
+	const memos = new Map<string, Record<string, unknown>>();
+	if (opts.memo) memos.set("posts:E1", { collection: "posts", entryId: "E1", linked: [], updated: "", ...opts.memo });
 	const ctx = {
-		site: { url: "https://coywolf.com" },
+		site: { url: opts.siteUrl ?? "https://coywolf.com" },
 		settings: { get: async () => null },
 		log: { info() {}, warn() {}, error() {} },
 		schema: { getCollection: async () => ({ slug: "posts", supports: ["revisions", "drafts"], fields: [{ slug: "title", type: "string", sortOrder: 0 }, { slug: "content", type: "portableText", sortOrder: 1 }] }) },
 		storage: {
-			aiEntries: { get: async (k: string) => records.get(k) ?? null, put: async (k: string, v: Record<string, unknown>) => void records.set(k, v) },
+			aiEntries: { get: async (k: string) => entries.get(k) ?? null, put: async (k: string, v: unknown) => void entries.set(k, v) },
+			aiLinks: {
+				get: async (k: string) => memos.get(k) ?? null,
+				put: async (k: string, v: Record<string, unknown>) => void memos.set(k, structuredClone(v)),
+				query: async () => ({ items: [...memos].filter(([, v]) => typeof v.retryAt === "number" && (v.retryAt as number) <= Date.now()).map(([id, data]) => ({ id, data })), hasMore: false }),
+			},
 			aiGlossary: { get: async () => ({ fetchedAt: Date.now(), format: 2, terms: { Q911595: ["stumbleupon", "A defunct discovery service.", ["StumbleUpon"]], Q95: ["google", "A technology company.", ["Google"]] } }), put: async () => {} },
 		},
 		http: { fetch: async () => new Response("{}", { status: 500 }) },
 		content: {
 			get: async () => {
 				reads++;
-				if (opts.bumpBeforeWrite && reads === 2) item = { ...item, version: 4 };
+				if (opts.bumpBeforeWrite && reads === 2) item = { ...item, version: item.version + 1 };
 				return structuredClone(item);
 			},
 			update: async (_c: string, _id: string, patch: Record<string, unknown>) => {
 				calls.update++;
-				item = { ...item, data: { ...item.data, ...patch }, version: item.version + 1, draftRevisionId: "R2" };
+				// Someone's autosave lands right before this write: two versions, the last one theirs.
+				item = { ...item, data: { ...item.data, ...patch }, version: item.version + (opts.bumpDuringUpdate ? 2 : 1), draftRevisionId: "R2" };
 			},
 			getVersioned: async () => ({ item: structuredClone(item), _rev: `rev-${item.version}` }),
 			publish: async (_c: string, _id: string, o: { _rev: string }) => {
@@ -331,13 +393,13 @@ function fakeSite(opts: { draft?: string | null; bumpBeforeWrite?: boolean; publ
 			},
 		},
 	};
-	return { ctx: ctx as never, calls, records, item: () => item };
+	return { ctx: ctx as never, calls, memos, item: () => item };
 }
 
 test("linkEntry links, publishes only its own draft, and remembers what it linked", async () => {
 	glossary.resetGlossaryForTests();
 	const site = fakeSite();
-	const out = await linker.linkEntry(site.ctx, {}, "posts", "E1", { hashText: async () => "th" });
+	const out = await linker.linkEntry(site.ctx, {}, "posts", "E1", { textHash: "th" });
 	assert.equal(out.status, "linked");
 	assert.equal(site.calls.update, 1);
 	assert.deepEqual(site.calls.publish, ["rev-4"]);
@@ -345,11 +407,12 @@ test("linkEntry links, publishes only its own draft, and remembers what it linke
 		["StumbleUpon", "https://glossary.io/stumbleupon/"],
 		["Google", "https://glossary.io/google/"],
 	]);
-	const rec = site.records.get("posts:E1")!;
-	assert.deepEqual(rec.glossaryLinked, ["Q911595", "Q95"]);
-	assert.equal(rec.textHash, "th");
-	assert.equal(rec.glossaryDraft, undefined);
-	assert.equal(rec.updated, "2026-11-23T00:00:00.000Z", "the analysis date isn't touched");
+	const memo = site.memos.get("posts:E1")!;
+	assert.deepEqual(memo.linked, ["Q911595", "Q95"]);
+	assert.equal(memo.textHash, "th");
+	assert.equal(memo.pending, undefined);
+	assert.equal(memo.draft, undefined);
+	assert.equal(memo.retryAt, undefined);
 
 	// Running again finds nothing to do and writes nothing.
 	const again = await linker.linkEntry(site.ctx, {}, "posts", "E1");
@@ -357,11 +420,16 @@ test("linkEntry links, publishes only its own draft, and remembers what it linke
 	assert.equal(site.calls.update, 1);
 });
 
-test("linkEntry leaves drafts, conflicts, skipped entries and removed links alone; a dry run writes nothing", async () => {
+test("linkEntry leaves drafts, busy entries, conflicts, skipped entries and removed links alone; a dry run writes nothing", async () => {
 	glossary.resetGlossaryForTests();
 	const draft = fakeSite({ draft: "R9" });
 	assert.equal((await linker.linkEntry(draft.ctx, {}, "posts", "E1")).status, "draft");
 	assert.equal(draft.calls.update, 0);
+	assert.equal(typeof draft.memos.get("posts:E1")!.retryAt, "number", "a draft is tried again later");
+
+	const busy = fakeSite({ updatedAt: new Date(Date.now() - 30_000).toISOString() });
+	assert.equal((await linker.linkEntry(busy.ctx, {}, "posts", "E1")).status, "busy");
+	assert.equal(busy.calls.update, 0);
 
 	const conflict = fakeSite({ bumpBeforeWrite: true });
 	assert.equal((await linker.linkEntry(conflict.ctx, {}, "posts", "E1")).status, "conflict");
@@ -370,7 +438,10 @@ test("linkEntry leaves drafts, conflicts, skipped entries and removed links alon
 	const skipped = fakeSite({ slug: "privacy-policy" });
 	assert.equal((await linker.linkEntry(skipped.ctx, { glossaryLinks: { skip: ["privacy-policy"] } }, "posts", "E1")).status, "skipped");
 
-	const removed = fakeSite({ record: { glossaryLinked: ["Q911595", "Q95"] } });
+	const noHost = fakeSite({ siteUrl: "" });
+	assert.equal((await linker.linkEntry(noHost.ctx, {}, "posts", "E1")).status, "skipped");
+
+	const removed = fakeSite({ memo: { linked: ["Q911595", "Q95"] } });
 	assert.equal((await linker.linkEntry(removed.ctx, {}, "posts", "E1")).status, "unchanged");
 	assert.equal(removed.calls.update, 0);
 
@@ -379,19 +450,54 @@ test("linkEntry leaves drafts, conflicts, skipped entries and removed links alon
 	assert.equal(planned.status, "planned");
 	assert.deepEqual(planned.changes.map((c) => c.slug), ["stumbleupon"]);
 	assert.equal(dry.calls.update, 0);
-	assert.equal(dry.records.get("posts:E1")!.glossaryLinked, undefined);
+	assert.equal(dry.memos.size, 0, "a dry run remembers nothing");
 });
 
-test("linkEntry: a publish conflict leaves the edit staged and the new links unremembered; its own failed draft is published next time", async () => {
+test("linkEntry: a publish conflict is staged and retried; a save during the write is a collision; an unpublished edit of its own is finished", async () => {
 	glossary.resetGlossaryForTests();
 	const site = fakeSite({ publishConflict: true });
-	const out = await linker.linkEntry(site.ctx, {}, "posts", "E1");
-	assert.equal(out.status, "staged");
-	assert.deepEqual(site.records.get("posts:E1")!.glossaryLinked, []);
+	assert.equal((await linker.linkEntry(site.ctx, {}, "posts", "E1")).status, "staged");
+	const staged = site.memos.get("posts:E1")!;
+	assert.deepEqual(staged.linked, [], "links that may not have stuck aren't remembered");
+	assert.equal(typeof staged.retryAt, "number");
 
-	const own = fakeSite({ draft: "R7", record: { glossaryDraft: "R7" } });
+	const collided = fakeSite({ bumpDuringUpdate: true });
+	assert.equal((await linker.linkEntry(collided.ctx, {}, "posts", "E1")).status, "collided");
+	assert.deepEqual(collided.calls.publish, [], "nothing is published over someone's save");
+	assert.equal(collided.memos.get("posts:E1")!.retryAt, undefined, "a collision waits for a person");
+
+	// An edit whose publish never happened: its draft is version + 1 of the marker's version.
+	const own = fakeSite({ draft: "R7", version: 4, memo: { pending: 3, linked: [] } });
 	const finished = await linker.linkEntry(own.ctx, {}, "posts", "E1");
 	assert.equal(finished.status, "linked");
-	assert.deepEqual(own.calls.publish, ["rev-3"]);
-	assert.equal(own.records.get("posts:E1")!.glossaryDraft, undefined);
+	assert.deepEqual(own.calls.publish, ["rev-4"]);
+	assert.equal(own.memos.get("posts:E1")!.pending, undefined);
+
+	const theirs = fakeSite({ draft: "R7", version: 6, memo: { pending: 3, linked: [] } });
+	assert.equal((await linker.linkEntry(theirs.ctx, {}, "posts", "E1")).status, "draft");
+	assert.deepEqual(theirs.calls.publish, []);
+});
+
+test("retryDue links entries whose wait is over", async () => {
+	glossary.resetGlossaryForTests();
+	const site = fakeSite({ memo: { linked: [], retryAt: Date.now() - 1000, tries: 1 } });
+	assert.equal(await linker.retryDue(site.ctx, {}, 3), 1);
+	assert.equal(site.calls.update, 1);
+	assert.equal(site.memos.get("posts:E1")!.retryAt, undefined);
+});
+
+test("shouldLink and withRetry", () => {
+	const ok = { status: "ok" as const, title: "Joy", entities: [ent("Q95", "Google")] };
+	assert.equal(linker.shouldLink(null, null, "a"), true, "a first analysis links");
+	assert.equal(linker.shouldLink(null, ok, "a"), false, "an entry analyzed before the part was on waits");
+	assert.equal(linker.shouldLink(null, { status: "error" as const, title: "", entities: [] }, "a"), true, "a first analysis that failed before still links");
+	assert.equal(linker.shouldLink(null, { status: "error" as const, title: "Joy", entities: ok.entities }, "a"), false, "a failed re-analysis of an old entry doesn't");
+	assert.equal(linker.shouldLink({ textHash: "a" }, ok, "a"), false, "same text: a settings re-analysis");
+	assert.equal(linker.shouldLink({ textHash: "a" }, ok, "b"), true, "the text changed");
+	const memo = { collection: "posts", entryId: "E1", linked: [], updated: "" };
+	let m = linker.withRetry(memo, "draft", 0);
+	assert.equal(m.retryAt, 30 * 60_000);
+	for (let i = 0; i < linker.MAX_TRIES; i++) m = linker.withRetry(m, "busy", 0);
+	assert.equal(m.retryAt, undefined, "it stops after the last try");
+	assert.equal(linker.withRetry({ ...memo, retryAt: 5, tries: 2 }, "linked").retryAt, undefined);
 });

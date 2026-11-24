@@ -137,13 +137,17 @@ const STARTERS = new Set(
 /** Titles that can come right before a person's name (CEO Tim Cook, Dr. Jane Doe). */
 const TITLES = new Set("ceo cto coo cfo cmo cpo cio ciso vp svp evp dr mr mrs ms mx prof president founder cofounder co-founder chairman chair director editor engineer developer analyst reporter journalist author host senator".split(" "));
 const SOCIAL_HOSTS = ["twitter.com", "x.com", "linkedin.com", "facebook.com", "instagram.com", "threads.net", "threads.com", "bsky.app", "github.com", "youtube.com", "tiktok.com", "medium.com", "flipboard.com", "about.me"];
+/** Social sites whose profiles are a bare first path segment (x.com/name); elsewhere a profile is /@name, /in/name… */
+const BARE_PROFILE_HOSTS = ["twitter.com", "x.com", "facebook.com", "instagram.com", "github.com", "about.me"];
 /** Subdomains whose pages are about something specific (docs, sign-up, stores), not the entity itself. */
 const CITATION_HOST_PREFIX =
 	/^(docs|doc|developer|developers|dev|support|help|helpcenter|kb|blog|blogs|news|community|forum|forums|bugzilla|bugs|issues|status|press|newsroom|investor|investors|ir|learn|answers|discuss|get|merchant|merchants|business|partner|partners|seller|sellers|sell|ads|advertising|enterprise|signup|accounts|account|my|dashboard|console|portal|login|auth|careers|jobs|events|shop|store|download|downloads)\./;
 const CITATION_PATH = /\/(issues|pull|commit|commits|blob|tree|releases|wiki|answer|answers|article|articles|post|posts|news|blog|docs|documentation|reference|guide|guides|status|p|watch|video|videos|detail|details|dp|gp|item|itm|listing|show_bug\.cgi)(\/|$)|\/(19|20)\d\d\/|\.pdf$/i;
 /** Affiliate networks and their link shorteners (a host or any subdomain of it: automattic.pxf.io). */
-const AFFILIATE_HOSTS = ["amzn.to", "amzn.com", "geni.us", "shareasale.com", "skimresources.com", "linksynergy.com", "pjtra.com", "pjatr.com", "anrdoezrs.net", "jdoqocy.com", "tkqlhce.com", "dpbolvw.net", "kqzyfj.com", "awin1.com", "sjv.io", "pxf.io", "evyy.net", "ojrq.net", "7eer.net", "mkr3.net", "prf.hn", "audw.net", "avantlink.com", "partnerstack.com", "clkbank.com", "clickbank.net", "go2cloud.org", "refersion.com"];
-const AFFILIATE_PARAM = /[?&](ref|ref_id|aff|aff_id|aff_c|affiliate|affiliate_id|via|tag|partner|fpr|irclickid|irgwc|clickid|clickref|a_aid|sscid|ssaid|sjid|kaid|ranmid|raneaid|ransiteid|coupon)=/i;
+const AFFILIATE_HOSTS = ["amzn.to", "amzn.com", "a.co", "geni.us", "shareasale.com", "shrsl.com", "skimresources.com", "linksynergy.com", "pjtra.com", "pjatr.com", "anrdoezrs.net", "jdoqocy.com", "tkqlhce.com", "dpbolvw.net", "kqzyfj.com", "awin1.com", "sjv.io", "pxf.io", "evyy.net", "ojrq.net", "7eer.net", "mkr3.net", "prf.hn", "audw.net", "avantlink.com", "partnerstack.com", "clkbank.com", "clickbank.net", "go2cloud.org", "refersion.com", "viglink.com", "tidd.ly", "rstyle.me", "fave.co", "bit.ly"];
+const AFFILIATE_PARAM = /[?&](ref|ref_|ref_id|referral|aff|aff_id|aff_c|affiliate|affiliate_id|afmc|via|tag|partner|ps_partner_key|ps_xid|gspk|gsxid|fpr|fp_ref|rfsn|lmref|awc|cjevent|cjdata|irclickid|irgwc|clickid|clickref|a_aid|sscid|ssaid|sjid|kaid|ranmid|raneaid|ransiteid|coupon)=/i;
+/** Subdomains used for affiliate and promo landing pages (try.shopify.com, go.nordvpn.net). */
+const AFFILIATE_HOST_PREFIX = /^(try|go|click|track|trk|refer|referral|aff|affiliate|affiliates|promo|deal|deals|offer|offers)\.[a-z0-9-]+\.[a-z0-9.-]+$/;
 /** Referral fragments some programs use (Backblaze: #af0118). */
 const AFFILIATE_FRAGMENT = /^#(af|aff|ref)[-_]?[0-9a-z]+$/i;
 const AFFILIATE_PATH = /\/(visit|go|recommends|refer|ref|aff|affiliate)\//i;
@@ -248,7 +252,7 @@ export function classifyLink(href: string, entity: LinkEntity, siteHosts: readon
 	if (hostIn(host, shortHosts)) return "affiliate";
 	if (host === "relative.invalid" || hostIn(host, siteHosts)) return /^\/(visit|go|recommends)\//.test(u.pathname) ? "affiliate" : "internal";
 	if (host === bareHost(new URL(GLOSSARY).hostname)) return "glossary";
-	if (hostIn(host, AFFILIATE_HOSTS) || AFFILIATE_PARAM.test(u.search) || AFFILIATE_FRAGMENT.test(u.hash) || AFFILIATE_PATH.test(u.pathname)) return "affiliate";
+	if (hostIn(host, AFFILIATE_HOSTS) || AFFILIATE_HOST_PREFIX.test(host) || AFFILIATE_PARAM.test(u.search) || AFFILIATE_FRAGMENT.test(u.hash) || AFFILIATE_PATH.test(u.pathname)) return "affiliate";
 	if (host.endsWith("wikipedia.org") && u.pathname.startsWith("/wiki/")) {
 		return entity.wikipedia && !u.hash && comparable(href) === comparable(entity.wikipedia) ? "wikipedia" : "citation";
 	}
@@ -258,9 +262,13 @@ export function classifyLink(href: string, entity: LinkEntity, siteHosts: readon
 	const site = entity.website ? parse(entity.website) : null;
 	const siteHost = site && site.hostname !== "relative.invalid" ? bareHost(site.hostname) : "";
 	if (siteHost && host === siteHost && !u.hash && !u.search && comparable(href) === comparable(entity.website!)) return "website";
+	const homePath = segments.length === 0 || (segments.length === 1 && /^(about|about-us|home|index\.html?|en|en-us)$/i.test(segments[0]));
+	if (homePath && !u.search && !u.hash && !CITATION_HOST_PREFIX.test(host)) return "home";
 	if (hostIn(host, SOCIAL_HOSTS) || /^\/@[^/]+$/.test(path)) {
-		const profile = /^\/(@[^/]+|in\/[^/]+|company\/[^/]+|profile\/[^/]+|c\/[^/]+|channel\/[^/]+|user\/[^/]+|[A-Za-z0-9_.-]+)$/.test(path);
-		return profile && !u.search && !u.hash ? "social" : "citation";
+		const profile =
+			/^\/(@[^/]+|in\/[^/]+|company\/[^/]+|profile\/[^/]+|c\/[^/]+|channel\/[^/]+|user\/[^/]+)$/.test(path) || (hostIn(host, BARE_PROFILE_HOSTS) && /^\/[A-Za-z0-9_.-]+$/.test(path));
+		const slugLike = path.split("/").some((s) => s.split(/[-_]/).length >= 6);
+		return profile && !slugLike && !u.search && !u.hash ? "social" : "citation";
 	}
 	const article = segments.some((s) => /^\d{5,}$/.test(s) || s.split(/[-_]/).length >= 6);
 	if (u.search || u.hash || CITATION_HOST_PREFIX.test(host) || CITATION_PATH.test(path) || segments.length > 3 || article) return "citation";
@@ -272,6 +280,35 @@ export function classifyLink(href: string, entity: LinkEntity, siteHosts: readon
 	const compactHost = host.replace(/[^a-z0-9]/g, "");
 	if (nameTokens(entity.name, 4).some((t) => compactHost.includes(t))) return pathNames ? "named" : "citation";
 	return "other";
+}
+
+/** Host labels that say nothing about the brand (go.nordvpn.net is NordVPN's). */
+const GENERIC_LABELS = new Set(["www", "m", "go", "try", "click", "track", "trk", "refer", "referral", "aff", "affiliate", "affiliates", "promo", "deal", "deals", "offer", "offers", "get", "shop", "store", "app", "link", "links"]);
+
+/**
+ * The brand an affiliate link is for, as lowercase letters and digits, or ""
+ * when the URL doesn't say (amzn.to/abc can be any product): the site's own
+ * redirect target (/visit/yubico, coywolf.io/shopify), a network subdomain
+ * (shopify.pxf.io, macpaw.audw.net), or the brand's own domain
+ * (usefathom.com/ref/…, try.shopify.com, go.nordvpn.net).
+ */
+export function affiliateBrand(href: string, siteHosts: readonly string[] = [], shortHosts: readonly string[] = []): string {
+	const u = parse(href);
+	if (!u) return "";
+	const host = bareHost(u.hostname);
+	const compact = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+	const segments = u.pathname.split("/").filter(Boolean);
+	if (host === "relative.invalid" || hostIn(host, siteHosts) || hostIn(host, shortHosts)) {
+		const i = /^(visit|go|recommends)$/i.test(segments[0] ?? "") ? 1 : 0;
+		return compact(segments[i] ?? "");
+	}
+	const network = AFFILIATE_HOSTS.find((n) => host === n || host.endsWith(`.${n}`));
+	if (network) return host === network ? "" : compact(host.slice(0, -network.length - 1).split(".").pop() ?? "");
+	const labels = host.split(".").filter((l) => !GENERIC_LABELS.has(l));
+	const n = labels.length;
+	// brand.co.uk, brand.com.au: the label before the two-part suffix.
+	if (n >= 3 && /^(co|com|org|net|ac|gov)$/.test(labels[n - 2])) return compact(labels[n - 3]);
+	return compact(n > 1 ? labels[n - 2] : (labels[0] ?? ""));
 }
 
 const IDENTITY: ReadonlySet<LinkKind> = new Set(["wikipedia", "wikidata", "website", "home", "social", "named"]);
@@ -332,7 +369,7 @@ function joinsBefore(before: string): boolean {
 }
 
 /** Whether the text right after a name continues it with a capitalized word (Google Search Console, Shopify Unite). */
-const joinsAfter = (after: string) => new RegExp(`^${SPACES}\\p{Lu}`, "u").test(after) && !new RegExp(`^${SPACES}I\\b`).test(after);
+const joinsAfter = (after: string) => new RegExp(`^${SPACES}\\p{Lu}`, "u").test(after) && !new RegExp(`^${SPACES}I(${SPACES}\\p{Ll}|['\\u2019])`, "u").test(after);
 
 function insideQuotes(before: string): boolean {
 	const open = (before.match(/\u201c/g) ?? []).length;
@@ -489,11 +526,34 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 		const nameSet = new Set(a.names.map(normalizeName));
 		const isName = (text: string) => {
 			const n = normalizeName(text);
-			return nameSet.has(n) || nameSet.has(n.replace(/e?s$/, ""));
+			if (nameSet.has(n)) return true;
+			// A plural only for concepts and abbreviations ("PWAs"): "Threads" isn't the protocol "Thread".
+			const base = text.trim().replace(/e?s$/, "");
+			return (a.concept || a.names.some((name) => isAcronym(name) && name === base)) && nameSet.has(n.replace(/e?s$/, ""));
+		};
+		// A mention inside link text, as a whole name ("Shopify free"; not "WP" in "WP Engine").
+		const mentions = (text: string) => a.names.some((name) => [...text.matchAll(namePattern(name))].some((m) => {
+			const s = m.index!;
+			const e = s + m[0].length;
+			return caseMatches(m[1], name, a.concept) && !(s > 0 && WORD.test(text[s - 1])) && !(e < text.length && WORD.test(text[e])) && !joinsAfter(text.slice(e)) && !joinsBefore(text.slice(0, s));
+		}));
+		const tokens = [...new Set(a.names.flatMap((n) => nameTokens(n, 4)).map((t) => t.replace(/[^a-z0-9]/g, "")).filter((t) => t.length >= 4))];
+		/** Whether an affiliate link is for this entity: its brand matches a name (shopify.pxf.io, /visit/yubico), or it's unknown (an Amazon short link). */
+		const forEntity = (href: string) => {
+			const brand = affiliateBrand(href, options.siteHosts, options.shortHosts);
+			// A brand too short to compare ("hp") counts as unknown.
+			return brand.length < 4 || tokens.some((t) => brand.includes(t) || t.includes(brand) || t.slice(0, 4) === brand.slice(0, 4));
 		};
 
-		// 2. An existing link that names the entity.
-		let affiliate = false;
+		// 2a. An affiliate link that names the entity, or mentions it and is for it ("Shopify free"), rules out a glossary link.
+		for (const run of runs) {
+			if (classifyLink(run.href, entity, options.siteHosts, options.shortHosts) !== "affiliate") continue;
+			if (!isName(run.text) && !(mentions(run.text) && forEntity(run.href))) continue;
+			plan.kept.push({ qid: entity.qid, entity: entity.name, anchor: run.text, href: run.href, why: "affiliate" });
+			return skip("affiliate", "named by an affiliate link");
+		}
+
+		// 2b. An existing link that names the entity.
 		for (const run of runs) {
 			if (switched.has(run)) continue;
 			const named = isName(run.text);
@@ -507,7 +567,6 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 				continue;
 			}
 			if (!switchable(kind)) {
-				if (kind === "affiliate") affiliate = true;
 				keep(kind);
 				continue;
 			}
@@ -523,7 +582,6 @@ export function planGlossaryLinks(content: unknown, entities: LinkEntity[], look
 				return;
 			}
 		}
-		if (affiliate) return skip("affiliate", "named by an affiliate link");
 
 		// 3. The first plain mention in a paragraph or list item.
 		const mine = live
