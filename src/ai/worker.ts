@@ -53,7 +53,7 @@ import {
 	withLock,
 } from "./store.js";
 import { WikidataBusyError, entityDetails, searchCandidates } from "./wikidata.js";
-import { changeCounts, linkEntry, linkMemos, retryDue, shouldLink, withRetry } from "./glossary-linker.js";
+import { changeCounts, linkEntry, linkMemos, retryDue, shouldLink, withRetry, withoutPendingNew } from "./glossary-linker.js";
 import { checkGoneTerms, removeGoneOn } from "./glossary-gone.js";
 import { VERSION } from "../version.js";
 
@@ -257,13 +257,14 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
  * settings). Otherwise the text hash is remembered, so the next text change
  * links. Never fails the analysis: a failure is tried again later.
  */
-async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: EntryRecord, previous: EntryRecord | null, textHash: string, budget: Budget): Promise<void> {
+export async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: EntryRecord, previous: EntryRecord | null, textHash: string, budget: Budget): Promise<void> {
 	const key = entryKey(record.collection, record.entryId);
 	const memos = linkMemos(ctx);
 	try {
 		const memo = await memos.get(key);
 		if (!record.entities.length || !shouldLink(memo, previous, textHash)) {
-			if (memo?.textHash !== textHash) await memos.put(key, { ...(memo ?? { collection: record.collection, entryId: record.entryId, linked: [] }), textHash, updated: new Date().toISOString() });
+			// A possessives-only run's marker (pendingNew) becomes an ordinary memo once the text is recorded with it: an edit of that run's still pending stays recognizable.
+			if (memo?.textHash !== textHash || memo?.pendingNew) await memos.put(key, { ...withoutPendingNew(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash, updated: new Date().toISOString() });
 			return;
 		}
 		budget.used += LINK_SUBREQUESTS;
@@ -272,7 +273,7 @@ async function afterAnalysis(ctx: PluginContext, options: AiOptions, record: Ent
 	} catch (error) {
 		ctx.log.warn("glossary.io links failed; trying again later", { entry: key, error: String(error) });
 		const memo = await memos.get(key).catch(() => null);
-		await memos.put(key, withRetry({ ...(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash }, "error")).catch(() => undefined);
+		await memos.put(key, withRetry({ ...withoutPendingNew(memo ?? { collection: record.collection, entryId: record.entryId, linked: [], updated: "" }), textHash }, "error")).catch(() => undefined);
 	}
 }
 

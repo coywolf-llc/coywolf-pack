@@ -249,11 +249,23 @@ export function linkConfig(options: AiOptions, siteUrl?: string | null): { siteH
  * analyzed successfully before. An entry analyzed before the part was turned
  * on has nothing remembered: its next analysis only records its text (a text
  * change and a settings re-analysis look the same), so it's linked by Link
- * existing entries or by the text change after that.
+ * existing entries or by the text change after that. The marker a
+ * possessives-only run left for an entry with nothing remembered (pendingNew,
+ * there when that run's edit failed or its Worker died) is nothing remembered
+ * too: it has no text hash, and must never read as a text change.
  */
-export function shouldLink(memo: Pick<LinkMemo, "textHash"> | null | undefined, previous: { status: string; title: string; entities?: readonly unknown[] } | null | undefined, textHash: string): boolean {
-	if (memo) return memo.textHash !== textHash;
+export function shouldLink(memo: Pick<LinkMemo, "textHash" | "pendingNew"> | null | undefined, previous: { status: string; title: string; entities?: readonly unknown[] } | null | undefined, textHash: string): boolean {
+	if (memo && !onlyMarker(memo)) return memo.textHash !== textHash;
 	return !previous || (previous.status !== "ok" && !previous.title && !previous.entities?.length);
+}
+
+/** Whether a memo is nothing but a possessives-only run's marker for an entry with nothing remembered: no text was ever recorded with it. */
+export const onlyMarker = (memo: Pick<LinkMemo, "textHash" | "pendingNew">): boolean => memo.pendingNew === true && memo.textHash === undefined;
+
+/** The memo as a normal run or an analysis records it: what it remembers from now on is the entry's own, not a possessives-only run's to forget. */
+export function withoutPendingNew(memo: LinkMemo): LinkMemo {
+	const { pendingNew: _n, ...rest } = memo;
+	return rest;
 }
 
 const versionOf = (item: { version?: number; updatedAt?: string; draftRevisionId?: string | null }) =>
@@ -570,11 +582,12 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	const existing = await memos.get(key);
 	const st = memoState(memos, key, existing ?? { collection, entryId: id, linked: [], updated: "" }, Boolean(opts.dryRun));
 	// A possessives-only run for an entry with nothing remembered leaves nothing remembered (a memo without a text hash would make the next analysis link).
-	const fresh = only && (!existing || existing.pendingNew === true);
+	// Its own earlier marker counts as nothing remembered only while nothing else was added to it (a text hash, a retry, links to take out).
+	const fresh = only && (!existing || (onlyMarker(existing) && existing.retryAt === undefined && !existing.unlink?.length && !existing.linked.length));
 	const out = async (status: LinkStatus, slug: string | null, changes: LinkChange[] = [], reason?: string, dateKept?: boolean): Promise<LinkOutcome> => {
 		if (opts.dryRun) return outcomeOf(key, slug, status, changes, reason, dateKept);
 		// A possessives-only run changes neither the text hash nor the retry schedule: a retry would link.
-		if (!only) await st.save(linkServed(withRetry({ ...st.memo, ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now)));
+		if (!only) await st.save(linkServed(withRetry({ ...withoutPendingNew(st.memo), ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now)));
 		else if (fresh && st.memo.pending === undefined) await memos.delete(key);
 		else await st.save(st.memo);
 		return outcomeOf(key, slug, status, changes, reason, dateKept);
@@ -598,6 +611,13 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 	const item = await content.get(collection, id);
 	if (!item || item.status !== "published") return out("skipped", item?.slug ?? null, [], "not published");
 	if (item.slug && (config.skip.has(item.slug) || config.skip.has(`${collection}:${item.slug}`))) return out("skipped", item.slug, [], "on the skip list");
+
+	// A possessives-only run finishes or drops only a possessives-only edit's marker. A removal's marker, or a link edit's (its draft has
+	// adds or switches), is left exactly as it is, with nothing published and nothing remembered or forgotten: settling a removal here
+	// would leave its retry behind as a request to link, and publishing a link edit's draft links. The normal paths handle those.
+	if (only && (st.memo.pendingUnlink?.length || st.memo.pendingSlugs?.length || st.memo.pendingQids?.length)) {
+		return outcomeOf(key, item.slug, "draft", [], st.memo.pendingUnlink?.length ? "a removal of links is unfinished; it's left for the removal's own run" : "an edit with new links is unfinished; it's left for a normal run");
+	}
 
 	const waiting = await waitOrFinish(ctx, options, st, { collection, id, item, fields: fields.map((f) => f.slug), now, dryRun: opts.dryRun });
 	if (waiting) return out(waiting.status, item.slug, [], waiting.reason, waiting.dateKept);
@@ -666,6 +686,12 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 		patch,
 		marker: { pendingQids: terms.map((c) => c.qid), pendingSlugs: [...new Set(terms.map((c) => c.slug))], ...(fixes.length ? { pendingPossessive: fixes.length } : {}), ...(fresh ? { pendingNew: true as const } : {}) },
 		collided: "glossary.io links: a save landed while the links were written; nothing was published. Check the entry's revisions.",
+	}).catch(async (error: unknown) => {
+		// A possessives-only run that failed with no edit left pending leaves nothing remembered, as before it ran: the marker it saved
+		// has no text hash. (With an edit still pending, the marker stays so the next possessives-only run finishes it; shouldLink and
+		// the analysis treat it as nothing remembered.)
+		if (fresh && st.memo.pending === undefined) await memos.delete(key).catch(() => undefined);
+		throw error;
 	});
 	if (edit.status === "conflict") return out("conflict", item.slug);
 	// Links that may not have stuck aren't remembered.
