@@ -11,6 +11,7 @@ import { type FeatureMap, ctxFeatures, isOn } from "../core/features.js";
 import {
 	type Entity,
 	type GroundedMention,
+	type ImageText,
 	type QueueJob,
 	type StageCache,
 	applyChoices,
@@ -49,6 +50,7 @@ import {
 	entryKey,
 	logUsage,
 	providerConfig,
+	pruneDrafts,
 	pruneUsage,
 	readSettings,
 	takeCall,
@@ -170,10 +172,28 @@ async function callModel(
 
 // ── Entries ──────────────────────────────────────────────────────
 
-async function groundEntities(ctx: PluginContext, options: AiOptions, s: Settings, t: EntryText, ref: string, cache: StageCache, budget: Budget): Promise<Entity[]> {
+/** For a person waiting on the result (the editor's AI Enrich button): each model call's timeout, and no new stage after `deadline` (epoch ms). */
+export interface CallLimits {
+	timeoutMs?: number;
+	deadline?: number;
+}
+
+/** A stage wasn't started because the caller's deadline had passed (CallLimits). Outputs already paid for are in the cache. */
+export class OutOfTimeError extends Error {
+	constructor() {
+		super("it took too long");
+		this.name = "OutOfTimeError";
+	}
+}
+
+const inTime = (limits: CallLimits | undefined) => {
+	if (limits?.deadline !== undefined && Date.now() >= limits.deadline) throw new OutOfTimeError();
+};
+
+export async function groundEntities(ctx: PluginContext, options: AiOptions, s: Settings, t: EntryText, ref: string, cache: StageCache, budget: Budget, limits?: CallLimits): Promise<Entity[]> {
 	// Stage 1 (cached on the job, so a retry doesn't pay for it twice).
 	cache.mentions ??= parseMentions(
-		await callModel(ctx, options, s, "entities", { system: EXTRACT_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 2000 }, ref, budget),
+		await callModel(ctx, options, s, "entities", { system: EXTRACT_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 2000, timeoutMs: limits?.timeoutMs }, ref, budget),
 	);
 	const mentions = cache.mentions;
 	if (!mentions.length) return [];
@@ -182,19 +202,24 @@ async function groundEntities(ctx: PluginContext, options: AiOptions, s: Setting
 	const ua = userAgent(VERSION, ctx.site?.url);
 	// Stage 2: real candidates, one lookup at a time (Wikimedia's API etiquette).
 	const candidates = [];
-	for (const m of mentions) candidates.push(await searchCandidates(f, m.name, lang, ua));
+	for (const m of mentions) {
+		inTime(limits);
+		candidates.push(await searchCandidates(f, m.name, lang, ua));
+	}
 	let { mentions: grounded, ambiguous } = attachCandidates(mentions, candidates);
 	// Stage 3: the model chooses among real candidates only.
 	if (ambiguous.length) {
 		const subset: GroundedMention[] = ambiguous.map((i) => grounded[i]);
+		if (!cache.choices) inTime(limits);
 		cache.choices ??= parseChoices(
-			await callModel(ctx, options, s, "entities", { system: DISAMBIGUATE_SYSTEM, user: disambiguatePrompt(subset, t.title, t.text), maxTokens: 1000 }, ref, budget),
+			await callModel(ctx, options, s, "entities", { system: DISAMBIGUATE_SYSTEM, user: disambiguatePrompt(subset, t.title, t.text), maxTokens: 1000, timeoutMs: limits?.timeoutMs }, ref, budget),
 		);
 		grounded = applyChoices(grounded, ambiguous, cache.choices);
 	}
 	// Stage 4: type verification against P31.
 	const resolved = grounded.filter((m) => m.qid);
 	if (!resolved.length) return [];
+	inTime(limits);
 	const details = await entityDetails(f, resolved.map((m) => m.qid), lang, ua);
 	if (!details) throw new Error("Wikidata didn't answer, so the entities couldn't be verified. Retrying later.");
 	return verifyEntities(resolved, details);
@@ -231,10 +256,7 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 	let description = previous?.description ?? "";
 	let descriptionStatus: EntryRecord["descriptionStatus"] = hasDescription && previous?.descriptionStatus !== "applied" ? "none" : (previous?.descriptionStatus ?? "none");
 	if (wantDescription) {
-		cache.description ??= cleanDescription(
-			await callModel(ctx, options, s, "descriptions", { system: DESCRIBE_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 300 }, ref, budget),
-		);
-		description = cache.description;
+		description = await suggestDescription(ctx, options, s, t, ref, cache, budget);
 		descriptionStatus = description ? "suggested" : "none";
 		if (description && s.descriptionsMode === "apply") {
 			descriptionStatus = (await applyDescription(ctx, collection, id, description, false)) ? "applied" : "none";
@@ -257,6 +279,14 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 	await records.put(key, record);
 	if (wantEntities && isOn(features, "ai.glossaryLinks")) await afterAnalysis(ctx, options, record, previous, t.textHash, budget);
 	return "done";
+}
+
+/** A meta description for the entry's text (cached with the other stage outputs, so a retry doesn't pay for it twice). */
+export async function suggestDescription(ctx: PluginContext, options: AiOptions, s: Settings, t: EntryText, ref: string, cache: StageCache, budget: Budget, limits?: CallLimits): Promise<string> {
+	cache.description ??= cleanDescription(
+		await callModel(ctx, options, s, "descriptions", { system: DESCRIBE_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 300, timeoutMs: limits?.timeoutMs }, ref, budget),
+	);
+	return cache.description;
 }
 
 /**
@@ -363,6 +393,39 @@ async function imageArticleContext(ctx: PluginContext, mediaId: string): Promise
 	}
 }
 
+/**
+ * One image's alt text, title and caption from the vision model. `articleContext`: the entry it's used in
+ * (buildImageContext), read only once the image's bytes are ready. Throws SkipError when the image can't be sent.
+ */
+export async function describeImage(
+	ctx: PluginContext,
+	options: AiOptions,
+	s: Settings,
+	media: { id: string; filename: string; mimeType: string; width?: number | null; height?: number | null },
+	articleContext: string | (() => Promise<string>),
+	ref: string,
+	budget: Budget,
+	limits?: CallLimits,
+): Promise<ImageText> {
+	const payload = await imagePayload(ctx, options, media);
+	const raw = await callModel(
+		ctx,
+		options,
+		s,
+		"imageText",
+		{
+			system: IMAGE_SYSTEM,
+			user: imagePrompt({ filename: media.filename, site: await siteName(ctx), locale: ctx.site?.locale || "en", extra: s.imageInstructions, articleContext: typeof articleContext === "string" ? articleContext : await articleContext() }),
+			image: payload,
+			maxTokens: 1024,
+			timeoutMs: limits?.timeoutMs,
+		},
+		ref,
+		budget,
+	);
+	return parseImageText(raw);
+}
+
 export async function analyzeMedia(ctx: PluginContext, options: AiOptions, s: Settings, job: QueueJob, budget: Budget): Promise<"done" | "skipped"> {
 	const id = job.mediaId!;
 	const media = await ctx.media?.get(id);
@@ -380,29 +443,14 @@ export async function analyzeMedia(ctx: PluginContext, options: AiOptions, s: Se
 	const needsCaption = s.imageCaption && !media.caption?.trim();
 	if (!job.force && !s.imageOverwrite && !needsAlt && !needsCaption) return "skipped";
 
-	let payload: { mimeType: string; base64: string };
+	let suggestion: ImageText;
 	try {
-		payload = await imagePayload(ctx, options, media);
+		suggestion = await describeImage(ctx, options, s, media, () => imageArticleContext(ctx, id), `media:${id}`, budget);
 	} catch (error) {
 		if (!(error instanceof SkipError)) throw error;
 		await records.put(id, { ...base, suggestion: null, status: "skipped", written: [], error: error.message });
 		return "skipped";
 	}
-	const raw = await callModel(
-		ctx,
-		options,
-		s,
-		"imageText",
-		{
-			system: IMAGE_SYSTEM,
-			user: imagePrompt({ filename: media.filename, site: await siteName(ctx), locale: ctx.site?.locale || "en", extra: s.imageInstructions, articleContext: await imageArticleContext(ctx, id) }),
-			image: payload,
-			maxTokens: 1024,
-		},
-		`media:${id}`,
-		budget,
-	);
-	const suggestion = parseImageText(raw);
 
 	let written: string[] = [];
 	if (s.imageMode === "apply") written = await applyImageText(ctx, id, suggestion, { caption: s.imageCaption, overwrite: s.imageOverwrite });
@@ -796,6 +844,7 @@ export async function tick(ctx: PluginContext, options: AiOptions, opts: { maxJo
 		// Text hashes for analyses made before 0.51.0 (no model calls), with what the run has left.
 		if (entriesOn) await fillTextHashesTick(ctx, options, budget, started + opts.budgetMs).catch((error) => ctx.log.warn("AI: recording text hashes failed", { error: String(error) }));
 		await pruneUsage(ctx).catch(() => undefined);
+		await pruneDrafts(ctx).catch(() => undefined);
 		return out;
 	});
 	return result ?? { processed: 0, skipped: 0, failed: 0, stoppedForLimit: false, busy: true };

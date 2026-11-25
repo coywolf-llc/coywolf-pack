@@ -11,11 +11,13 @@
  *               what Remove links to deleted terms tracks ("gone"; src/ai/glossary-gone.ts)
  *   aiLinks   — glossary.io links per entry: QIDs linked, text hash, links to
  *               remove, retries
+ *   aiDrafts  — analyses made by the editor's AI Enrich button (src/ai/editor-enrich.ts),
+ *               waiting for the entry's publish (kept 30 days)
  */
 import type { PluginContext, StorageCollection } from "emdash";
 
 import { workerEnv } from "../shared.js";
-import { type Entity, type ImageText, type QueueJob, dayKey, mergeJob, queueId } from "./logic.js";
+import { type Entity, type ImageText, type QueueJob, type StageCache, dayKey, mergeJob, queueId } from "./logic.js";
 import { PROVIDERS, type ProviderConfig, type ProviderId } from "./providers.js";
 
 export interface AiOptions {
@@ -52,6 +54,8 @@ export const STORAGE = {
 	aiGlossary: { indexes: [] as string[] },
 	/** glossary.io links: what each entry's links remember (LinkMemo in src/ai/glossary-linker.ts). Kept when an entry is trashed. */
 	aiLinks: { indexes: ["retryAt"] },
+	/** AI Enrich in the editor: an entry's analysis of its unpublished text (DraftRecord), until its publish (src/ai/pack.ts). */
+	aiDrafts: { indexes: ["updated"] },
 };
 
 export const SETTINGS_SCHEMA = {
@@ -198,6 +202,28 @@ export interface EntryRecord {
 	updated: string;
 }
 
+/**
+ * An analysis the editor's AI Enrich button made (aiDrafts, id "<collection>:<id>"). Never in aiEntries: the live
+ * page's JSON-LD keeps the live entry's entities until the publish whose title and text are one of `textHashes`
+ * promotes it there (src/ai/pack.ts). `partial`: a click that stopped early, with the outputs it paid for in `cache`.
+ */
+export interface DraftRecord {
+	collection: string;
+	entryId: string;
+	title: string;
+	/** EntryText.hash of the text the patch makes. */
+	hash: string;
+	/** EntryText.textHash before and after the patch (captions change the text; links and alt text don't). */
+	textHashes: string[];
+	entities: Entity[];
+	description: string;
+	/** Whether the click wrote (or didn't need) a description: Meta descriptions was on. */
+	described: boolean;
+	partial?: true;
+	cache?: StageCache;
+	updated: string;
+}
+
 export interface MediaRecord {
 	mediaId: string;
 	filename: string;
@@ -223,6 +249,11 @@ export interface UsageRow {
 
 export function col<T>(ctx: Pick<PluginContext, "storage">, name: keyof typeof STORAGE): StorageCollection<T> {
 	return (ctx.storage as Record<string, StorageCollection>)[name] as StorageCollection<T>;
+}
+
+/** A storage collection that may not be there (a host that hasn't synced a newly declared one yet, a test's partial storage). */
+export function optionalCol<T>(ctx: Pick<PluginContext, "storage">, name: keyof typeof STORAGE): StorageCollection<T> | undefined {
+	return (ctx.storage as Record<string, StorageCollection | undefined>)[name] as StorageCollection<T> | undefined;
 }
 
 export const entryKey = (collection: string, id: string) => `${collection}:${id}`;
@@ -289,23 +320,31 @@ export async function pruneUsage(ctx: Pick<PluginContext, "storage">): Promise<v
 	if (old.items.length) await usage.deleteMany(old.items.map((i) => i.id));
 }
 
+/** Delete AI Enrich analyses whose entry wasn't published within 30 days, a page at a time. */
+export async function pruneDrafts(ctx: Pick<PluginContext, "storage">): Promise<void> {
+	const cutoff = new Date(Date.now() - 30 * 86_400_000).toISOString();
+	const drafts = col<DraftRecord>(ctx, "aiDrafts");
+	const old = await drafts.query({ where: { updated: { lt: cutoff } }, limit: 200 });
+	if (old.items.length) await drafts.deleteMany(old.items.map((i) => i.id));
+}
+
 // ── Lock ─────────────────────────────────────────────────────────
 
 const LOCK_KEY = "state:ai:lock";
 
-/** A soft lock so the cron tick and "Run now" don't process the queue concurrently. */
-export async function withLock<T>(ctx: Pick<PluginContext, "kv">, ttlMs: number, fn: () => Promise<T>): Promise<T | null> {
+/** A soft lock so the cron tick and "Run now" don't process the queue concurrently. `key`: another lock (AI Enrich's per entry). */
+export async function withLock<T>(ctx: Pick<PluginContext, "kv">, ttlMs: number, fn: () => Promise<T>, key = LOCK_KEY): Promise<T | null> {
 	const now = Date.now();
-	const current = await ctx.kv.getVersioned<{ until: number; token: string }>(LOCK_KEY);
+	const current = await ctx.kv.getVersioned<{ until: number; token: string }>(key);
 	if (current?.value && current.value.until > now) return null;
 	const token = crypto.randomUUID();
-	const taken = await ctx.kv.compareAndSet(LOCK_KEY, current?.revision ?? null, { until: now + ttlMs, token });
+	const taken = await ctx.kv.compareAndSet(key, current?.revision ?? null, { until: now + ttlMs, token });
 	if (!taken.applied) return null;
 	try {
 		return await fn();
 	} finally {
-		const mine = await ctx.kv.getVersioned<{ token: string }>(LOCK_KEY);
-		if (mine?.value?.token === token) await ctx.kv.compareAndDelete(LOCK_KEY, mine.revision).catch(() => undefined);
+		const mine = await ctx.kv.getVersioned<{ token: string }>(key);
+		if (mine?.value?.token === token) await ctx.kv.compareAndDelete(key, mine.revision).catch(() => undefined);
 	}
 }
 
@@ -344,3 +383,5 @@ export interface TextHashFillState {
 export const TEXT_HASHES_KEY = "state:ai:textHashes";
 /** Epoch ms until which Wikidata asked to slow down (shared by every entry job, so one Retry-After throttles them all). */
 export const WIKIDATA_BUSY_KEY = "state:ai:wikidataBusyUntil";
+/** AI Enrich's lock for one entry, so two clicks don't pay for the same work. */
+export const editorLockKey = (collection: string, id: string) => `state:ai:editor:${collection}:${id}`;

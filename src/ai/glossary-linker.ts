@@ -50,6 +50,11 @@
  *
  * "Link existing entries" (POST ai/glossary-links) runs the same code on
  * entries analyzed before the part was turned on, with a dry run.
+ *
+ * The editor's AI Enrich button (since 0.52.0; src/ai/editor-enrich.ts) plans
+ * links by the same rules (planEntryLinks) into the editor's unsaved draft,
+ * for a person to review. What it proposed waits in memo.planned, never as
+ * linked, until the entry's publish settles it (settlePlanned).
  */
 import type { CollectionSchemaInfo, PluginContext, StorageCollection } from "emdash";
 
@@ -160,6 +165,11 @@ export interface LinkMemo {
 	/** When to try again (epoch ms), and the tries so far. A site asks for an entry to be linked again by setting retryAt (and tries: 0). */
 	retryAt?: number;
 	tries?: number;
+	/**
+	 * Links the editor's AI Enrich button proposed (src/ai/editor-enrich.ts), until the entry's next publish settles
+	 * them (settlePlanned). Never counted as linked before that: the proposal may not be applied.
+	 */
+	planned?: { qids: string[]; slugs: string[]; at: number };
 	updated: string;
 }
 
@@ -281,6 +291,22 @@ export const onlyMarker = (memo: Pick<LinkMemo, "textHash" | "pendingNew">): boo
 export function withoutPendingNew(memo: LinkMemo): LinkMemo {
 	const { pendingNew: _n, ...rest } = memo;
 	return rest;
+}
+
+/**
+ * The memo after a publish of an entry AI Enrich planned links for (memo.planned). When the published text has any
+ * planned link, or the plan added none, the proposal was applied: its QIDs count as handled, so a planned link taken
+ * out by hand before the publish stays out. Otherwise only `planned` goes. `check` (the entry's analysis is of the
+ * published text): the text hash is recorded and the links are checked once by the retry pass (LINK_CHECK_MS),
+ * which links only what's missing, without a model call.
+ */
+export function settlePlanned(memo: LinkMemo, publishedSlugs: ReadonlySet<string>, check: { textHash: string; now: number } | null): LinkMemo {
+	const { planned, ...rest } = memo;
+	if (!planned) return memo;
+	const applied = !planned.slugs.length || planned.slugs.some((slug) => publishedSlugs.has(slug));
+	const linked = applied ? [...new Set([...rest.linked, ...planned.qids])].sort() : rest.linked;
+	if (!check) return { ...rest, linked };
+	return { ...withoutPendingNew({ ...rest, linked }), textHash: check.textHash, retryAt: check.now + LINK_CHECK_MS, tries: 0 };
 }
 
 const versionOf = (item: { version?: number; updatedAt?: string; draftRevisionId?: string | null }) =>
@@ -638,6 +664,82 @@ async function possessiveChanges(ctx: PluginContext, fixes: PossessiveFix[], ent
 	});
 }
 
+/** What planEntryLinks would change: each field's new value, the term links made or switched, the possessives moved, and the QIDs handled. */
+export interface EntryLinkPlan {
+	patch: Record<string, unknown>;
+	terms: TermLinkChange[];
+	/** The field each of `terms` is in. */
+	termFields: string[];
+	fixes: PossessiveFix[];
+	/** The field each of `fixes` is in. */
+	fixFields: string[];
+	/** QIDs never to link again in this entry: `exclude`, and the entities already linked to their term. */
+	handled: Set<string>;
+}
+
+/**
+ * The links one entry gets, by the rules (pure): one link per entity across its Portable Text `fields` (in order),
+ * none for a QID in `exclude` or one already linked to its term, none for an entity an affiliate link in any field
+ * names, then the possessives right after glossary.io links moved inside them. `only`: possessives alone. A field
+ * whose possessive fix fails keeps its possessives (`onFixError`). Used by linkEntry and the editor's AI Enrich button.
+ */
+export function planEntryLinks(
+	data: Record<string, unknown>,
+	fields: string[],
+	entities: readonly LinkEntity[],
+	lookup: (qid: string) => GlossaryTarget | null,
+	config: { siteHosts: string[]; shortHosts: string[] },
+	exclude: readonly string[],
+	opts: { only?: boolean; onFixError?: (field: string, error: unknown) => void } = {},
+): EntryLinkPlan {
+	const list = entities as LinkEntity[];
+	const handled = new Set<string>();
+	const patch: Record<string, unknown> = {};
+	const terms: TermLinkChange[] = [];
+	const termFields: string[] = [];
+	// A possessives-only run plans no links at all.
+	if (!opts.only) {
+		// One link per entity across all the entry's Portable Text fields.
+		for (const qid of exclude) handled.add(qid);
+		const linkedSlugs = new Set(fields.flatMap((f) => [...linkedGlossarySlugs(data[f])]));
+		for (const e of list) {
+			const t = lookup(e.qid);
+			if (t && linkedSlugs.has(t.slug)) handled.add(e.qid);
+		}
+		const ruledOut = new Set(handled);
+		// An affiliate link in any field rules its entity out in all of them.
+		for (const field of fields) {
+			const pre = planGlossaryLinks(data[field], list, lookup, { siteHosts: config.siteHosts, shortHosts: config.shortHosts });
+			for (const s of pre.skipped) if (s.why === "affiliate") ruledOut.add(s.qid);
+		}
+		for (const field of fields) {
+			const plan = planGlossaryLinks(data[field], list, lookup, { siteHosts: config.siteHosts, shortHosts: config.shortHosts, exclude: ruledOut });
+			for (const c of plan.changes) ruledOut.add(c.qid);
+			if (plan.changes.length) {
+				patch[field] = plan.content;
+				terms.push(...plan.changes);
+				termFields.push(...plan.changes.map(() => field));
+			}
+		}
+	}
+	// Possessives right after glossary.io links (this part's, switched ones, a person's) go inside them: "[Google]'s" → "[Google's]".
+	// A field whose fix fails (content the fix can't read) keeps its possessives where they are; the term links still go ahead.
+	const fixes: PossessiveFix[] = [];
+	const fixFields: string[] = [];
+	for (const field of fields) {
+		try {
+			const fixed = possessivesIo.fix(field in patch ? patch[field] : data[field]);
+			if (!fixed.fixes.length) continue;
+			patch[field] = fixed.content;
+			fixes.push(...fixed.fixes);
+			fixFields.push(...fixed.fixes.map(() => field));
+		} catch (error) {
+			opts.onFixError?.(field, error);
+		}
+	}
+	return { patch, terms, termFields, fixes, fixFields, handled };
+}
+
 /** Link one analyzed entry's entities to glossary.io (see the file comment). Throws only on unexpected errors. */
 export async function linkEntry(ctx: PluginContext, options: AiOptions, collection: string, id: string, opts: LinkOptions = {}): Promise<LinkOutcome> {
 	const key = entryKey(collection, id);
@@ -719,46 +821,18 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 		return term && slug ? { slug, names: term.names ?? [] } : null;
 	};
 
-	const handled = new Set<string>();
-	const patch: Record<string, unknown> = {};
-	const terms: TermLinkChange[] = [];
-	// A possessives-only run plans no links at all.
-	if (!only) {
-		// One link per entity across all the entry's Portable Text fields.
-		for (const qid of [...st.memo.linked, ...(opts.exclude ?? [])]) handled.add(qid);
-		const linkedSlugs = new Set(fields.flatMap((f) => [...linkedGlossarySlugs(item.data[f.slug])]));
-		for (const e of entities) {
-			const t = lookup(e.qid);
-			if (t && linkedSlugs.has(t.slug)) handled.add(e.qid);
-		}
-		const exclude = new Set(handled);
-		// An affiliate link in any field rules its entity out in all of them.
-		for (const field of fields) {
-			const pre = planGlossaryLinks(item.data[field.slug], entities, lookup, { siteHosts: config.siteHosts, shortHosts: config.shortHosts });
-			for (const s of pre.skipped) if (s.why === "affiliate") exclude.add(s.qid);
-		}
-		for (const field of fields) {
-			const plan = planGlossaryLinks(item.data[field.slug], entities, lookup, { siteHosts: config.siteHosts, shortHosts: config.shortHosts, exclude });
-			for (const c of plan.changes) exclude.add(c.qid);
-			if (plan.changes.length) {
-				patch[field.slug] = plan.content;
-				terms.push(...plan.changes);
-			}
-		}
-	}
-	// Possessives right after glossary.io links (this part's, switched ones, a person's) go inside them: "[Google]'s" → "[Google's]".
-	// A field whose fix fails (content the fix can't read) keeps its possessives where they are; the term links still go ahead.
-	const fixes: PossessiveFix[] = [];
-	for (const field of fields) {
-		try {
-			const fixed = possessivesIo.fix(field.slug in patch ? patch[field.slug] : item.data[field.slug]);
-			if (!fixed.fixes.length) continue;
-			patch[field.slug] = fixed.content;
-			fixes.push(...fixed.fixes);
-		} catch (error) {
-			ctx.log.warn("glossary.io links: couldn't check a field's possessives; they stay as they are", { entry: key, slug: item.slug, field: field.slug, error: String(error) });
-		}
-	}
+	const { patch, terms, fixes, handled } = planEntryLinks(
+		item.data,
+		fields.map((f) => f.slug),
+		entities,
+		lookup,
+		config,
+		[...st.memo.linked, ...(opts.exclude ?? [])],
+		{
+			only,
+			onFixError: (field, error) => ctx.log.warn("glossary.io links: couldn't check a field's possessives; they stay as they are", { entry: key, slug: item.slug, field, error: String(error) }),
+		},
+	);
 	const changes: LinkChange[] = [...terms, ...(fixes.length ? await possessiveChanges(ctx, fixes, entities, lookup) : [])];
 	if (opts.dryRun) return out(changes.length ? "planned" : "unchanged", item.slug, changes);
 	if (!only) st.memo = { ...st.memo, linked: [...handled].sort() };
