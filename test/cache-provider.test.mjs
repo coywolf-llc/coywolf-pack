@@ -29,7 +29,10 @@ export const exports = new Proxy({}, { get: (_, k) => globalThis.__moduleExports
 	},
 });
 
-const { default: coywolfCloudflareCache } = await import("../src/cache-provider.ts");
+const { default: coywolfCloudflareCache, batching } = await import("../src/cache-provider.ts");
+// Short waits, so the tests don't sit through the real 1.5 s (with room for a slow CI machine).
+batching.quietMs = 20;
+batching.maxWaitMs = 2_000;
 const { PURGE_PROP } = await import("../src/core/scheduled-purge.ts");
 const { stripTrackingParams } = await import("../src/worker.ts");
 
@@ -68,7 +71,11 @@ function site(work, { respond } = {}) {
 		},
 	});
 	const ctx = { exports: { default: ownDefault }, waitUntil: (p) => waits.push(p) };
-	return { wrapped, ctx, loopbacks, waits };
+	/** Wait for everything the run handed to ctx.waitUntil, including what's handed over meanwhile (the batch's purge). */
+	const drain = async () => {
+		for (let i = 0; i < waits.length; i++) await waits[i];
+	};
+	return { wrapped, ctx, loopbacks, waits, drain };
 }
 
 test("it's Astro's Cloudflare provider: name, setHeaders and its config are Astro's", () => {
@@ -119,8 +126,9 @@ test("in a scheduled run: the tags Astro would purge go through the Worker's own
 	reset();
 	const provider = coywolfCloudflareCache(undefined);
 	const tags = ["posts", "01X"];
-	const { wrapped, ctx, loopbacks } = site(() => provider.invalidate({ tags, path: "/p" }));
+	const { wrapped, ctx, loopbacks, drain } = site(() => provider.invalidate({ tags, path: "/p" }));
 	await wrapped.scheduled({}, {}, ctx);
+	await drain();
 	assert.deepEqual(loopbacks, [{ props: { [PURGE_PROP]: { tags: ["posts", "01X", "astro-path:/p"] } }, method: "POST" }]);
 	assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts", "01X", "astro-path:/p"] }, inFetch: true }]);
 	assert.deepEqual(globalThis.__astro.invalidates, [], "Astro's direct purge, which clears nothing here, isn't made");
@@ -136,12 +144,15 @@ test("in a scheduled run: no tags, no call; over 100 tags, one call per 100 (dup
 		await provider.invalidate({ tags: [""] });
 	});
 	await none.wrapped.scheduled({}, {}, none.ctx);
+	await none.drain();
+	assert.equal(none.waits.length, 0, "nothing to purge: the run isn't held open");
 	assert.equal(none.loopbacks.length, 0);
 
 	reset();
 	const many = ["posts", ...Array.from({ length: 100 }, (_, i) => `id-${i}`), "posts"];
 	const big = site(() => provider.invalidate({ tags: many }));
 	await big.wrapped.scheduled({}, {}, big.ctx);
+	await big.drain();
 	assert.deepEqual(
 		big.loopbacks.map((l) => l.props[PURGE_PROP].tags.length),
 		[100, 1],
@@ -157,15 +168,21 @@ test("in a scheduled run: a purge that's refused or fails is logged, never throw
 	globalThis.__purgeOk = false;
 	let ran = site(() => provider.invalidate({ tags: ["posts"] }));
 	await assert.doesNotReject(ran.wrapped.scheduled({}, {}, ran.ctx));
+	await assert.doesNotReject(ran.drain());
 	assert.equal(ran.loopbacks.length, 1);
 
 	reset();
 	ran = site(() => provider.invalidate({ tags: ["posts"] }), { respond: () => new Response("oops", { status: 500 }) });
 	await assert.doesNotReject(ran.wrapped.scheduled({}, {}, ran.ctx));
+	await assert.doesNotReject(ran.drain());
+	assert.equal(ran.loopbacks.length, 1);
 
 	reset();
+	const held = [];
 	ran = site(() => provider.invalidate({ tags: ["posts"] }));
-	await assert.doesNotReject(ran.wrapped.scheduled({}, {}, { waitUntil() {} }), "no ctx.exports: refused and logged");
+	await assert.doesNotReject(ran.wrapped.scheduled({}, {}, { waitUntil: (p) => held.push(p) }), "no ctx.exports: refused and logged");
+	await assert.doesNotReject(Promise.all(held));
+	assert.equal(held.length, 1);
 	assert.deepEqual(globalThis.__purges, []);
 });
 
@@ -180,7 +197,7 @@ test("EmDash's scheduled publishing: the provider it keeps on globalThis purges 
 			{ collection: "posts", id: "01A" },
 			{ collection: "posts", id: "01B" },
 		];
-		const { wrapped, ctx, loopbacks, waits } = site((runCtx) => {
+		const { wrapped, ctx, loopbacks, drain } = site((runCtx) => {
 			runCtx.waitUntil(
 				(async () => {
 					await new Promise((resolve) => setTimeout(resolve, 2));
@@ -191,12 +208,54 @@ test("EmDash's scheduled publishing: the provider it keeps on globalThis purges 
 			);
 		});
 		wrapped.scheduled({ cron: "0 * * * *" }, {}, ctx);
-		await Promise.all(waits);
+		await drain();
 		assert.deepEqual(loopbacks.map((l) => l.props[PURGE_PROP]), [{ tags: ["posts", "01A", "01B"] }]);
 		assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts", "01A", "01B"] }, inFetch: true }]);
 	} finally {
 		globalThis[KEY] = previous;
 	}
+});
+
+test("in a scheduled run: EmDash's purges are gathered into one (glossary.io's daily run publishes up to 25 entries), and invalidate() doesn't wait for it", async () => {
+	reset();
+	const provider = coywolfCloudflareCache(undefined);
+	let loopbacksWhenDone = -1;
+	const { wrapped, ctx, loopbacks, drain } = site(async () => {
+		// One purge per publish, as EmDash's plugin content actions make them, a few milliseconds apart.
+		for (let i = 0; i < 25; i++) {
+			await provider.invalidate({ tags: ["terms", `term-${i}`] });
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		loopbacksWhenDone = loopbacks.length;
+	});
+	await wrapped.scheduled({}, {}, ctx);
+	assert.equal(loopbacksWhenDone, 0, "nothing purged while the run is still publishing");
+	await drain();
+	assert.equal(loopbacks.length, 1, "one purge, not 25");
+	assert.deepEqual(loopbacks[0].props[PURGE_PROP].tags, ["terms", ...Array.from({ length: 25 }, (_, i) => `term-${i}`)]);
+	assert.deepEqual(globalThis.__purges.map((p) => p.inFetch), [true]);
+});
+
+test("in a scheduled run: a batch is purged at most maxWaitMs after its first tags, even while more keep coming; a string tag counts", async (t) => {
+	reset();
+	const saved = batching.maxWaitMs;
+	batching.maxWaitMs = 60;
+	t.after(() => (batching.maxWaitMs = saved));
+	const provider = coywolfCloudflareCache(undefined);
+	const { wrapped, ctx, loopbacks, drain } = site(async () => {
+		const until = Date.now() + batching.maxWaitMs * 2.5;
+		let i = 0;
+		while (Date.now() < until) {
+			await provider.invalidate({ tags: `one-${i++}` });
+			await new Promise((resolve) => setTimeout(resolve, 2));
+		}
+	});
+	await wrapped.scheduled({}, {}, ctx);
+	await drain();
+	assert.ok(loopbacks.length >= 2, `${loopbacks.length} purges`);
+	const all = loopbacks.flatMap((l) => l.props[PURGE_PROP].tags);
+	assert.equal(new Set(all).size, all.length, "each tag once");
+	assert.equal(all[0], "one-0");
 });
 
 test("package.json exports it, and @astrojs/cloudflare is an optional peer (only this file needs it)", () => {

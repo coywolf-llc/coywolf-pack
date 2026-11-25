@@ -129,6 +129,7 @@ Some features depend on EmDash behavior that EmDash doesn't promise to plugins. 
 
 **Not checked (review by hand at an EmDash upgrade):**
 
+- **EmDash's scheduled-run purges** (`src/cache-provider.ts`). `@emdash-cms/cloudflare`'s `createScheduledHandler` purges scheduled publishing (`invalidatePublishedTags`) and plugin content actions (`invalidateContentTags`) through the site's Astro cache provider (`app.manifest.cacheProvider`, kept on `globalThis` under `Symbol.for("@emdash-cms/cloudflare:cache-provider")`), with `provider.invalidate({ tags })`, inside the Worker's `scheduled` handler (so inside the wrapper's scheduled-run store). And `@astrojs/cloudflare`'s provider still purges `collectInvalidationTags(options)` with `cache.purge({ tags })`: the pack's provider repeats that in the scheduled run, and `test/fixtures/astro-cloudflare-cache-provider.mjs` copies it (from 14.4.8). Neither package is installed in the pack, so check both by hand at an EmDash or adapter upgrade.
 - D1 itself. SQLite stands in for it, so D1's own limits (statement size, bound parameters, batch behavior) aren't covered.
 - Astro's route cache object (`context.cache`). The middleware wraps its `invalidate` to notice content writes (`watchInvalidation` in `src/pageCache/lib.ts`), which assumes EmDash calls `cache.invalidate(…)` on the object it's handed.
 - How EmDash's admin behaves in a browser beyond the Settings page markup above, such as single-page navigation to the Settings page and when the guides script's `MutationObserver` runs.
