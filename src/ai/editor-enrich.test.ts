@@ -2198,6 +2198,62 @@ test("a collection with revisions: a save is never the publish, also when the st
 	forgetOwn();
 });
 
+test("a bulk run's job already queued when the SEO save comes: the merged job is no save's job, so the save hands it what the click paid for, and the staged row stays for its publish", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ status: "published", features: ALL_ON });
+	Object.assign(site.item, { data: draftFields(), liveRevisionId: "R1", draftRevisionId: "R1" });
+	await store.enqueue(site.ctx, { kind: "entry", collection: "posts", entryId: "E1", due: Date.now() });
+	const answer = await site.click();
+	const staged = structuredClone(site.storage.aiDrafts.value<DraftRecord>("posts:E1"))!;
+	const paid = m.calls.length;
+	await seoSave(site, valueOf(answer, "seo.description"));
+	assert.equal(jobOf(site)!.source, undefined, "still the bulk run's job: new settings would re-analyze it");
+	assert.deepEqual(jobOf(site)!.cache, store.stagedCache(staged, (await textOf(site, draftFields())).hash));
+	assert.deepEqual(site.storage.aiDrafts.value<DraftRecord>("posts:E1"), staged, "nothing deleted by the save");
+	assert.equal(await runJob(site), "done");
+	assert.equal(m.calls.length, paid, "the job paid for nothing");
+	assert.deepEqual(site.storage.aiDrafts.value<DraftRecord>("posts:E1"), staged, "and the row still waits for the patched text");
+	forgetOwn();
+
+	// A forced job (Analyze again) takes nothing from the save.
+	reset();
+	const forced = fakeSite({ status: "published", features: ALL_ON });
+	Object.assign(forced.item, { data: draftFields(), liveRevisionId: "R1", draftRevisionId: "R1" });
+	await store.enqueue(forced.ctx, { kind: "entry", collection: "posts", entryId: "E1", due: Date.now(), force: true });
+	await seoSave(forced, valueOf(await forced.click(), "seo.description"));
+	assert.deepEqual([jobOf(forced)!.force, jobOf(forced)!.cache], [true, undefined]);
+
+	// An analysis staged under another provider or model is handed to no job.
+	forced.storage.aiQueue.rows.clear();
+	forced.storage.aiDrafts.rows.set("posts:E1", { data: { ...forced.storage.aiDrafts.value<DraftRecord>("posts:E1")!, model: "another" }, revision: 900 });
+	await forced.hook("content:afterSave", forced.entry());
+	assert.deepEqual([jobOf(forced)!.source, jobOf(forced)!.cache], ["save", undefined]);
+	forgetOwn();
+});
+
+test("a suggestion marked applied is written only onto the record as the hook read it: one a job wrote meanwhile stays", async () => {
+	reset();
+	model();
+	const site = fakeSite({ status: "published", features: { ...LINKS_ONLY, "ai.descriptions": true } });
+	const record = { ...(await analyzed(site, draftFields())), description: "Live suggestion.", descriptionStatus: "suggested" as const };
+	site.storage.aiEntries.rows.set("posts:E1", { data: record, revision: 0 });
+	// Analyze again finishes between the hook's read and its write.
+	const fresh = { ...record, updated: "2026-11-25T00:00:00.000Z" };
+	const get = site.storage.aiEntries.get;
+	let reads = 0;
+	site.storage.aiEntries.get = async (id: string) => {
+		const out = await get(id);
+		if (++reads === 1) site.storage.aiEntries.rows.set("posts:E1", { data: fresh, revision: 1 });
+		return out;
+	};
+	await seoSave(site, "Live suggestion.");
+	assert.deepEqual(site.storage.aiEntries.value<EntryRecord>("posts:E1"), fresh);
+	// The next hook reads that record and marks it.
+	await site.hook("content:afterSave", site.entry());
+	assert.deepEqual(site.storage.aiEntries.value<EntryRecord>("posts:E1"), { ...fresh, descriptionStatus: "applied" });
+});
+
 // ── Helpers that need EmDash's dist ──────────────────────────────
 
 /** A function EmDash's dist exports from a hashed chunk, found by name (as test/emdash-contract.test.mjs does). */

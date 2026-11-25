@@ -109,9 +109,14 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		const exact = prev?.status === "ok" && prev.hash === t.hash;
 		const current = prev?.status === "ok" && (exact || prev.textHash === t.textHash);
 		// A suggested description that's the live one now was applied (AI Enrich's review fills it through the editor).
+		// Written only onto the record as it was read: one a job wrote meanwhile (Analyze again) stays as it is.
 		if (prev && current && prev.descriptionStatus === "suggested" && prev.description.trim() && liveDescription(content) === prev.description.trim()) {
-			prev = { ...prev, descriptionStatus: "applied" };
-			await col<EntryRecord>(ctx, "aiEntries").put(key, prev).catch(() => undefined);
+			const records = col<EntryRecord>(ctx, "aiEntries");
+			const now = await records.get(key).catch(() => null);
+			if (now && now.updated === prev.updated && now.hash === prev.hash && now.description === prev.description && now.descriptionStatus === "suggested") {
+				prev = { ...now, descriptionStatus: "applied" };
+				await records.put(key, prev).catch(() => undefined);
+			}
 		}
 		const waits = save && !own && (await saveWaits(ctx, key, data, t, s));
 		// An analysis of this text under today's settings needs nothing from a click (what one staged for this text is
@@ -123,7 +128,10 @@ export function aiPack(options: AiOptions = {}): PackModule {
 			);
 		}
 		if (current || staged?.record) return;
-		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000, source: "save", ...(staged?.cache ? { cache: staged.cache } : {}) }, t.hash);
+		// A save that waits hands the job a copy of what the click paid for this text, and the staged row stays for its
+		// publish: a job a bulk run queued, merged with this one, is no save's job, and wouldn't look at the row itself.
+		const cache = staged?.cache ?? (waits ? await waitingCache(ctx, key, t, s) : undefined);
+		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000, source: "save", ...(cache ? { cache } : {}) }, t.hash);
 		// Only once the job has it: a failed enqueue leaves what the click paid for where the next publish finds it.
 		await staged?.handed?.();
 	}
@@ -133,7 +141,7 @@ export function aiPack(options: AiOptions = {}): PackModule {
 	 * stays as it is: nothing is promoted, forgotten or settled, and a job the save queues takes what the click paid
 	 * for from the staged row itself (analyzeEntry in src/ai/worker.ts).
 	 * - A collection with revisions: always. Its text goes live only by a publish, so a save that gets here changed
-	 *   something else (the SEO panel, the slug).
+	 *   something else (the SEO panel; in EmDash 1.6 a new slug waits in the draft too).
 	 * - Without revisions a save is the publish. Only one of the text a click analyzed that still lacks its patch
 	 *   waits: the staged analysis is for the patch's text too, or the links planned for this text aren't in it.
 	 */
@@ -146,6 +154,12 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		if (!planned?.texts?.includes(t.textHash)) return false;
 		const fields = t.info.fields.filter((f) => f.type === "portableText").map((f) => f.slug);
 		return !plannedApplied(planned, new Set(fields.flatMap((f) => [...glossarySlugsIn(data[f])])));
+	}
+
+	/** What a click paid for this text under today's provider and model, as a job's stage cache; the staged row is left alone. */
+	async function waitingCache(ctx: PluginContext, key: string, t: EntryText, s: Awaited<ReturnType<typeof readSettings>>): Promise<StageCache | undefined> {
+		const staged = await optionalCol<DraftRecord>(ctx, "aiDrafts")?.get(key).catch(() => null);
+		return staged?.textHashes?.includes(t.textHash) && staged.model === modelSignature(s) ? stagedCache(staged, t.hash) : undefined;
 	}
 
 	/**
