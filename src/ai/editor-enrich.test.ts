@@ -534,6 +534,13 @@ test("a body over 2 MiB is refused before anything is read; a 103 KB field is pa
 	const huge = await site.click({ ...draftFields(), excerpt: "x".repeat(enrich.MAX_BODY_BYTES) });
 	assert.deepEqual(huge, { toast: { type: "error", message: enrich.TOASTS.tooLarge } });
 	assert.equal(m.calls.length, 0);
+	// EmDash reads at most 1 MiB of a declared JSON body unless the route says more (test/emdash-contract.test.mjs).
+	const route = routes.aiRoutes({})["ai/editor-enrich"] as unknown as { request: { body: string; maxBytes: number } };
+	assert.deepEqual(route.request, { body: "json", maxBytes: enrich.MAX_BODY_BYTES });
+	// @ts-ignore -- as above.
+	const panel = (await import("../admin/enrich-core.ts")) as typeof import("../admin/enrich-core.js");
+	assert.equal(panel.MAX_BODY_BYTES, enrich.MAX_BODY_BYTES, "the panel checks the same cap before sending");
+	assert.equal(panel.MESSAGES.tooLarge, enrich.TOASTS.tooLarge);
 
 	// @ts-ignore -- as above.
 	const { jsonBytes } = (await import("./editor-images.ts")) as typeof import("./editor-images.js");

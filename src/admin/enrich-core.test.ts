@@ -257,6 +257,11 @@ test("answers without a patch end in their message; a read-only editor never sen
 	const { bodies } = script(patched("rev:0"));
 	assert.deepEqual(await core.startRun("posts", "E9", readOnly.draft), { phase: "failed", message: core.MESSAGES.readOnly });
 	assert.equal(bodies.length, 0);
+	// A draft over the route's 2 MiB isn't sent at all.
+	const huge = fakeDraft({ title: "Big", content: [{ _type: "block", _key: "b", text: "x".repeat(core.MAX_BODY_BYTES) }] });
+	const none = script(patched("rev:0"));
+	assert.deepEqual(await core.startRun("posts", "E7", huge.draft), { phase: "failed", message: core.MESSAGES.tooLarge });
+	assert.equal(none.bodies.length, 0);
 	// A late answer for another revision than the one sent is never reviewed.
 	script(patched("rev:7"));
 	assert.equal((await core.startRun("posts", "E8", fakeDraft().draft)).phase, "stale");

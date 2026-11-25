@@ -1609,3 +1609,62 @@ test("Buttondown Drafts: entryTerms reads every term an entry has in one taxonom
 	assert.deepEqual(ancestorTrail("bd-special", parents), ["bd-newsletter", "bd-special"]);
 });
 
+
+// ── AI Enrich in the AI suggestions panel (src/admin/enrich.tsx, src/ai/editor-enrich.ts; EmDash 1.6+) ──
+
+/** EmDash's admin type declarations (.d.ts), concatenated. */
+const adminTypes = () =>
+	readdirSync(join(adminDir, "dist"))
+		.filter((f) => f.endsWith(".d.ts"))
+		.map((f) => readFileSync(join(adminDir, "dist", f), "utf8"))
+		.join("\n");
+
+test("AI Enrich: a native editor panel gets editorDraft (get(), and patch() with the revision it read), exported by @emdash-cms/admin", () => {
+	const types = adminTypes();
+	assert.match(types, /interface ContentEditorPanelContext \{[^}]*?editorDraft\?: ContentEditorDraft;\s*\}/, "the panel's props have editorDraft (optional: absent on older hosts)");
+	assert.match(types, /interface ContentEditorDraft \{\s*get\(\): ContentEditorDraftSnapshot;[\s\S]{0,700}?patch\(operations: readonly EditorDraftPatchOperation\[\], options: \{\s*expectedRevision: string;\s*\}\): ContentEditorDraftPatchResult;\s*\}/);
+	assert.match(types, /interface ContentEditorDraftSnapshot \{[\s\S]{0,300}?revision: string;[\s\S]{0,200}?readOnly: boolean;[\s\S]{0,300}?fields: Record<string, unknown>;\s*fieldDefinitions: EditorDraftFieldDefinition\[\];/);
+	assert.match(types, /code: "EDITOR_DRAFT_STALE" \| "EDITOR_DRAFT_READ_ONLY" \| "EDITOR_DRAFT_INVALID";/);
+	assert.match(readFileSync(join(adminDir, "dist/index.d.ts"), "utf8"), /type ContentEditorDraft,[\s\S]*?type ContentEditorPanelContext,/);
+	// The editor hands the panels its draft (one object per entry it shows).
+	assert.match(admin, /jsx\(Panel, \{\s*collection,\s*entry: item,\s*locale: [^,]+,\s*editorDraft\s*\}\)/);
+	assert.match(admin, /const editorDraft = React\$1\.useMemo\(\(\) => \{[\s\S]{0,200}?return createContentEditorDraft\(\{/);
+});
+
+test("AI Enrich: the admin's draft checks are the ones the route's answer is shaped for (src/ai/editor-enrich.ts FIELD_SHAPES)", () => {
+	const draft = functionSource(admin, "createContentEditorDraft");
+	for (const code of ["EDITOR_DRAFT_STALE", "EDITOR_DRAFT_READ_ONLY", "EDITOR_DRAFT_INVALID"]) assert.ok(draft.includes(`refuse("${code}"`), `${code} in patch()`);
+	assert.match(draft, /revisionOf\(serializeValues\(keys, state\)\) !== expectedRevisionOf\(options\)\) return refuse\("EDITOR_DRAFT_STALE"/, "any change since get() is stale");
+	// The host keys: slug, and in collections with SEO seo.title (200) and seo.description (500).
+	assert.match(admin, /key: "seo\.title",\s*type: "string",[\s\S]{0,120}?holds: "title",\s*maxLength: 200/);
+	assert.match(admin, /key: "seo\.description",\s*type: "text",[\s\S]{0,120}?holds: "description",\s*maxLength: 500/);
+	// The value shapes the route checks the draft by, and sets: rich text, images, booleans as 0/1.
+	assert.match(admin, /portableText: \{\s*accepts: arrayOf\(\(block\) => isRecord\$?\w*\(block\) && typeof block\._type === "string"\)/);
+	assert.match(admin, /image: \{\s*accepts: isRecord\$?\w*,/);
+	assert.match(admin, /boolean: \{\s*accepts: \(value\) => value === true \|\| value === false \|\| value === 0 \|\| value === 1,/);
+	// No size limits for a trusted panel: the 256 KB editor-extension limit is the sandboxed path's only.
+	assert.doesNotMatch(draft + functionSource(admin, "checkPatch"), /bytes|Bytes|maxFields|MAX_/);
+	const limited = [...emdashDist.entries()].filter(([, src]) => src.includes("EDITOR_EXTENSION_REQUEST_MAX_BYTES =")).map(([file]) => file);
+	assert.equal(limited.length, 1);
+	assert.match(limited[0], /http-route-dispatch/);
+});
+
+test("AI Enrich: Apply remounts a patched rich text field (EmDash 1.6's fix) and marks the form dirty, so the autosave keeps the links", () => {
+	const apply = admin.slice(admin.indexOf("const applyDraftChanges = React$1.useCallback("), admin.indexOf("const applyDraftChanges = React$1.useCallback(") + 2500);
+	assert.ok(apply.length > 100, "no applyDraftChanges in the admin");
+	assert.match(apply, /setFieldGenerations\(\(generations\) => \{[\s\S]{0,200}?next\[name\] = \(next\[name\] \?\? 0\) \+ 1;/);
+	assert.match(apply, /markDirty\(\);/);
+	assert.match(apply, /if \(changes\.seo\) \{/, "the SEO text goes to the SEO panel, which saves it itself");
+});
+
+test("AI Enrich's route body: EmDash reads at most 1 MiB of a declared JSON body (8 MiB at most) unless the route sets maxBytes, as ai/editor-enrich does (2 MiB)", async () => {
+	const types = await import(pathToFileURL(join(packageDir("@emdash-cms/plugin-types", emdashDir), "dist/index.js")).href);
+	assert.equal(types.PLUGIN_ROUTE_DEFAULT_BODY_BYTES, 1024 * 1024);
+	assert.equal(types.PLUGIN_ROUTE_MAX_BODY_BYTES, 8 * 1024 * 1024);
+	const wire = [...emdashDist.values()].find((src) => src.includes("async function parseDeclaredPluginRouteInput("));
+	assert.match(functionSource(wire, "parseDeclaredPluginRouteInput"), /const limit = declaration\.maxBytes \?\? PLUGIN_ROUTE_DEFAULT_BODY_BYTES;\s*const bytes = await readRouteBody\(request, Math\.min\(limit, PLUGIN_ROUTE_MAX_BODY_BYTES\)\);/);
+	// The panel's copy of the route's cap (src/ai/editor-enrich.test.ts checks they're the same).
+	const { MAX_BODY_BYTES } = await import("../src/admin/enrich-core.ts");
+	assert.ok(MAX_BODY_BYTES > types.PLUGIN_ROUTE_DEFAULT_BODY_BYTES && MAX_BODY_BYTES <= types.PLUGIN_ROUTE_MAX_BODY_BYTES);
+	assert.match(readFileSync(join(root, "src/ai/routes.ts"), "utf8"), /"ai\/editor-enrich": definePluginRoute\(\{\s*permission: "plugins:manage",\s*methods: \["POST"\],\s*request: \{ body: "json", maxBytes: MAX_BODY_BYTES \},/);
+});

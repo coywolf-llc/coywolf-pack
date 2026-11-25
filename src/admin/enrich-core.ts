@@ -81,6 +81,8 @@ export const RUNNING_WAIT_MS = 10_000;
 export const RETRY_WAIT_MS = 5_000;
 /** A request answers in about 85 seconds at worst (src/ai/editor-enrich.ts START_BY_MS); past this one is lost. */
 export const ANSWER_TIMEOUT_MS = 95_000;
+/** The route's body cap (src/ai/editor-enrich.ts MAX_BODY_BYTES): a larger draft isn't sent at all. */
+export const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 export const MESSAGES = {
 	working: "Working… (about half a minute)",
@@ -93,6 +95,7 @@ export const MESSAGES = {
 	stale: "The entry changed while AI Enrich worked, so nothing was applied.",
 	applied: "Added. Save or publish as usual.",
 	didntFinish: "AI Enrich didn't finish. Click again: what was already paid for is kept.",
+	tooLarge: "This entry is too large for AI Enrich (over 2 MB).",
 } as const;
 
 export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -199,6 +202,15 @@ export const enrichIo = {
 	deadline: (ms: number): AbortSignal | undefined => (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined),
 };
 
+/** A request body's size as JSON, in bytes (Infinity when it can't be serialized). */
+function bodyBytes(body: unknown): number {
+	try {
+		return new TextEncoder().encode(JSON.stringify(body)).byteLength;
+	} catch {
+		return Number.POSITIVE_INFINITY;
+	}
+}
+
 /** The draft's revision now, or "" when it can't be read (the editor shows another entry, or unmounted). */
 function revisionNow(draft: EditorDraft): string {
 	try {
@@ -222,6 +234,7 @@ export async function startRun(collection: string, entryId: string, draft: Edito
 		return setRun(key, { phase: "failed", message: MESSAGES.readOnly });
 	}
 	if (snap.readOnly || !snap.revision) return setRun(key, { phase: "failed", message: MESSAGES.readOnly });
+	if (bodyBytes(buildBody(collection, entryId, snap, MAX_ROUNDS)) > MAX_BODY_BYTES) return setRun(key, { phase: "failed", message: MESSAGES.tooLarge });
 	let round = 1;
 	let retried = false;
 	let waits = 0;

@@ -10,7 +10,7 @@ import { ctxFeatures, isOn, requireFeature } from "../core/features.js";
 import { parseInput } from "../shared.js";
 import { type QueueJob, cleanText, DESCRIPTION_MAX, ALT_MAX, CAPTION_MAX, queueId } from "./logic.js";
 import { type ModelOption, PROVIDERS, chat, listModels } from "./providers.js";
-import { editorEnrich } from "./editor-enrich.js";
+import { MAX_BODY_BYTES, editorEnrich } from "./editor-enrich.js";
 import {
 	type AiOptions,
 	type BulkState,
@@ -300,12 +300,13 @@ export function aiRoutes(options: AiOptions) {
 		 * `{ collection, entryId, draft: { revision, fields, fieldDefinitions }, round }`, the editor's draft as EmDash's
 		 * editorDraft.get() reads it. Answers `{ toast, patch?, review?, revision, more?, running?, progress? }`; never
 		 * fails, and never writes to the entry (the panel applies the patch after a review). Not a settings change
-		 * (NO_SETTINGS_CHANGE in src/pageCache/lib.ts).
+		 * (NO_SETTINGS_CHANGE in src/pageCache/lib.ts). EmDash reads at most 1 MiB of a declared JSON body unless
+		 * the route says more: this one takes MAX_BODY_BYTES (2 MiB), and refuses more itself too.
 		 */
 		"ai/editor-enrich": definePluginRoute({
 			permission: "plugins:manage",
 			methods: ["POST"],
-			request: { body: "json" },
+			request: { body: "json", maxBytes: MAX_BODY_BYTES },
 			handler: async (raw) => editorEnrich(asCtx(raw), options, (raw as { input: unknown }).input),
 		}),
 
