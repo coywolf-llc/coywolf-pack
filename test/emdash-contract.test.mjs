@@ -1655,6 +1655,9 @@ test("AI Enrich: Apply remounts a patched rich text field (EmDash 1.6's fix) and
 	assert.match(apply, /setFieldGenerations\(\(generations\) => \{[\s\S]{0,200}?next\[name\] = \(next\[name\] \?\? 0\) \+ 1;/);
 	assert.match(apply, /markDirty\(\);/);
 	assert.match(apply, /if \(changes\.seo\) \{/, "the SEO text goes to the SEO panel, which saves it itself");
+	// The remount itself: each field's React key ends with its own generation, so a bumped one mounts the field again.
+	assert.ok(admin.includes('const fieldKey = `${name}:${item?.id ?? "new"}:${fieldsGeneration}:${fieldGenerations[name] ?? 0}`;'), "the field key includes fieldGenerations[name]");
+	assert.match(admin, /jsxs?\([\s\S]{0,400}?, fieldKey\);/, "and it's the field's key");
 });
 
 test("AI Enrich's route body: EmDash reads at most 1 MiB of a declared JSON body (8 MiB at most) unless the route sets maxBytes, as ai/editor-enrich does (2 MiB)", async () => {
