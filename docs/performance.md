@@ -86,6 +86,19 @@ Every one of them also carries the settings generation's tag (see **After Coywol
 
 Crawlers ask for `/robots.txt` constantly, and each answer used to run the Worker. It's now kept in the edge cache for a day, whether the pack's Robots.txt module or EmDash's own file serves it (tag `coywolf-robots`; the pack clears it after its admin saves and settings changes, so edits show at once). Saving EmDash's **SEO** settings or the **Site URL** (General, or **Change domain**) clears `/robots.txt` too, whichever file serves it (EmDash builds its own from the SEO robots.txt setting, and both name the sitemap at the Site URL), and again about five minutes later like other saves: Cloudflare's purge by URL doesn't reach Workers Cache. A `robots.txt` asked for below the root (`/news/robots.txt`, which crawlers try) gets a small plain-text 404, also cached for a day, instead of a rendered 404 page. The live search client (`/_emdash/api/plugins/coywolf-pack/search/live-client?v=<hash>`) is kept at the edge for a year when the URL names the current version (5 minutes otherwise); live results and the title index are kept for minutes to a day (see the table above).
 
+### Purges from scheduled runs
+
+A Workers Cache purge made while the Worker runs its scheduled handler (the Cron Trigger) reports success and clears nothing. Tested on November 25, 2026 with a throwaway Worker: purges by tag, by path prefix and by both left the pages cached, while the same purges made in a fetch invocation cleared them at once. EmDash runs the pack's scheduled tasks and its own scheduled publishing (which runs the pack's content hooks) from that handler, so until 0.51.1 the purges they made did nothing. On coywolf.com, a post the hourly run had linked to glossary.io kept serving its cached copy from before the run.
+
+Since 0.51.1 the pack sends those purges to the Worker itself as a fetch call, where they work, with the same tags and paths. This covers glossary.io links with `keepDates`, Social Images, slug-change redirects, child pages, Discovery's files and the caption refresh.
+
+- **What it needs:** the `stripTrackingParams` wrapper in `src/worker.ts`, with the site's `scheduled` handler inside the wrapped export as on all eight sites (see [Tracking parameters](cloudflare-checkup.md#tracking-parameters)), `ctx.exports` (a compatibility date of 2025-11-17 or later), and `nodejs_compat` (the wrapper uses `node:async_hooks`; EmDash needs the flag anyway). The `SELF` binding isn't enough: the call carries the purge in `ctx.props`, which only the Worker's own code can set, so nothing from the internet can make it purge.
+- **When it can't purge:** if the call fails or takes over 8 seconds, the purge is logged (`page cache purge from the scheduled run failed`) and counted as refused. A Worker that can't call itself (no `ctx.exports`) logs that once per isolate and refuses every such purge. A refused purge from the caption refresh is kept for the settling purge (see [Purge budget](#purge-budget)); the others are only logged, as when the rate limit refuses them in a request. (A call that answers after the 8 seconds has still purged; it's only counted as refused.)
+- **When the wrapper is missing:** if a pack task runs outside the wrapper's scheduled run on a Worker with Workers Cache, the Worker logs that once per isolate.
+- **What it doesn't cover:** EmDash's own purges from that handler (the `[collection, id]` tags when a scheduled entry is published, and after a plugin edits an entry from a scheduled task) go straight through Astro's cache provider, so they still clear nothing. So does a purge from any other invocation that isn't a request, such as co-editing room saves (a separate entrypoint; co-editing is off on the Coywolf sites), which hasn't been tested.
+
+Code: `src/core/scheduled-purge.ts`.
+
 ### Purge budget
 
 Workers Cache purges always use Cloudflare's Free-tier limits: 5 purge requests a minute, a burst of 25, for the whole account (every site in it, and EmDash's own content purges, share them). The pack keeps to one purge call per action and puts tags and path prefixes together in it (up to Cloudflare's 100 per call):
@@ -95,7 +108,9 @@ Workers Cache purges always use Cloudflare's Free-tier limits: 5 purge requests 
 - a video change, a Stream webhook call, or the hourly caption refresh: one (its pages and the video sitemap together);
 - a deploy: none (a rollback, or a gradual deployment's version flip at most every 10 minutes, one).
 
-A refused purge is kept for the settling purge (see **After Coywolf Pack settings change**).
+A purge made during a scheduled run is still one purge, plus one call from the Worker to itself (see [Purges from scheduled runs](#purges-from-scheduled-runs)).
+
+A refused purge from a settings save, a video change, robots.txt or a rollback is kept for the settling purge (see **After Coywolf Pack settings change**); other refused purges are logged.
 
 ### Rate limiting
 

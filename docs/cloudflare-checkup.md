@@ -107,6 +107,7 @@ If the row stays at **Installed, no cache hit seen yet** after a few tracked vis
 - A redirect that stays on the site gets the removed parameters added back to its `Location`, so the visitor lands with them in the address bar: a slash-less URL, a moved page, and `www.` to the bare domain (or back). Add other hostnames the Worker sends visitors to with `hosts: ["example.net"]`. A redirect to any other site never gets them. A relative `Location` whose path would start with `//` once resolved is given as an absolute URL, so it can't be read as another host.
 - If the call through the cache fails or answers with a server error (5xx), the request is served as it came.
 - EmDash's admin and API (`/_emdash/`), Astro's `/_astro/` and `/_image` are never touched, nor are other methods.
+- The wrapper also runs the site's `scheduled` handler (the Cron Trigger), and answers the pack's own page cache purges from it, which only work in a fetch call ([Purges from scheduled runs](performance.md#purges-from-scheduled-runs)). The pack recognizes those calls by a `ctx.props` value that only the Worker's own code can set, and answers them before the site's handler runs. So keep the `scheduled` handler inside the wrapped export, as above.
 - What the call did is recorded for the checkup (whether there's a way to call itself, and the call's `cf-cache-status`) in plugin KV (`state:cloudflare:tracking`), a couple of D1 writes per isolate at most, after the response. The D1 binding is `DB` unless you pass `database: "NAME"`.
 
 **The checkup's Tracking parameters row:**
@@ -121,7 +122,7 @@ If the row stays at **Installed, no cache hit seen yet** after a few tracked vis
 
 **Analytics.** Fathom, Google Analytics and other analytics that run in the browser read the address bar, which still has the parameters: a server-side change doesn't reach them. Only code on the server would stop seeing them.
 
-**Cost.** Each request with tracking parameters runs the Worker once (the wrapper only, a few milliseconds of CPU) and is billed twice: the request and the call through the cache. Requests without them cost nothing extra.
+**Cost.** Each request with tracking parameters runs the Worker once (the wrapper only, a few milliseconds of CPU) and is billed twice: the request and the call through the cache. Requests without them cost nothing extra. Each page cache purge made during a scheduled run adds one call from the Worker to itself, with almost no CPU time.
 
 **Parameters removed** (`TRACKING_PARAMS` and `TRACKING_PREFIXES`, exported): every `utm_…`, `fbclid`, `gclid`, `gclsrc`, `gbraid`, `wbraid`, `dclid`, `msclkid`, `twclid`, `ttclid`, `li_fat_id`, `igshid`, `yclid`, `srsltid`, `mc_cid`, `mc_eid`, `_hsenc`, `_hsmi`, `mkt_tok`, `_ga`, `_gl` and `ref`. Names match case-insensitively; everything else in the query stays exactly as sent. `ref` is in the list because referral links add it (Product Hunt, newsletters) and none of the Coywolf sites reads it on the server (checked November 2026). A site whose server code reads one of them keeps it: `stripTrackingParams(handler, { keep: ["ref"] })`. A whole list of your own goes in `params` (and `prefixes`).
 

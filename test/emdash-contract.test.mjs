@@ -676,6 +676,41 @@ test("ctx.email and ctx.users: no ctx.email until a provider is selected, then s
 	assert.deepEqual(Object.keys(items[0]).sort(), ["createdAt", "email", "id", "name", "role"]);
 });
 
+test("the Worker's scheduled-run store reaches plugin hooks EmDash runs from a scheduled run: cron tasks and content:afterPublish (src/core/scheduled-purge.ts)", async () => {
+	// The pack's page cache purges made in these hooks go through the Worker's own fetch only while the store is
+	// there: EmDash's hook pipeline (timeouts, its own context) must keep the async context it's called in.
+	const { AsyncLocalStorage } = await import("node:async_hooks");
+	const { installScheduledRuns, scheduledRun } = await import("../src/core/scheduled-purge.ts");
+	const { createHookPipeline, definePlugin } = await import("emdash");
+	const seen = [];
+	const pack = definePlugin({
+		id: PLUGIN_ID,
+		version: "0.0.0",
+		// Content hooks need content:read (EmDash skips them without it); the pack declares it.
+		capabilities: ["content:read"],
+		hooks: {
+			cron: { handler: async () => void seen.push(["cron", scheduledRun()]) },
+			"content:afterPublish": { handler: async () => void seen.push(["afterPublish", scheduledRun()]) },
+		},
+	});
+	const pipeline = createHookPipeline([pack], { db });
+	const storage = installScheduledRuns(() => new AsyncLocalStorage());
+	const run = { ctx: { marker: "scheduled" }, env: {} };
+	await storage.run(run, async () => {
+		await pipeline.invokeCronHook(PLUGIN_ID, { name: "contract", scheduledAt: new Date().toISOString() });
+		await pipeline.runContentAfterPublish({ id: "e1", slug: "e1", status: "published" }, "posts");
+	});
+	await pipeline.invokeCronHook(PLUGIN_ID, { name: "contract", scheduledAt: new Date().toISOString() });
+	assert.deepEqual(
+		seen.map(([hook, store]) => [hook, store?.ctx?.marker ?? null]),
+		[
+			["cron", "scheduled"],
+			["afterPublish", "scheduled"],
+			["cron", null],
+		],
+	);
+});
+
 test("ctx.cron: schedule, list and cancel by name", async () => {
 	await cron.schedule("contract-task", { schedule: "@daily" });
 	assert.deepEqual((await cron.list()).map((t) => [t.name, t.schedule]), [["contract-task", "@daily"]]);

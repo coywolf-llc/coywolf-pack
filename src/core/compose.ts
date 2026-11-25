@@ -7,7 +7,9 @@ import { type FeatureMap, cachedCtxFeatures, freshCtxFeatures, ctxFeatures, isOn
 import type { PackModule, TaskDef } from "./module.js";
 import { noteReadFailure } from "./read-failures.js";
 import { requestStore } from "./request-memo.js";
+import { warnOutsideScheduledRun } from "./scheduled-purge.js";
 import { withOutcome } from "./task-health.js";
+import { trackingWrapperInstalled } from "./tracking-params.js";
 import { afterResponse } from "../shared.js";
 
 /**
@@ -306,6 +308,8 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 	hooks.cron = {
 		timeout: CRON_TIMEOUT_MS,
 		handler: async (event: { name: string }, ctx) => {
+			// A task's page cache purges work only inside the Worker's scheduled-run store (src/core/scheduled-purge.ts): say so once if it's missing.
+			await warnOutsideScheduledRun(trackingWrapperInstalled() !== null);
 			const task = tasks.find((t) => t.name === event.name);
 			if (!task) {
 				// A task an earlier version scheduled: its module cleans up and cancels it.
