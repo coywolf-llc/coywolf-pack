@@ -1,8 +1,9 @@
 /**
  * AI Enrich's image text, pure (src/ai/editor-enrich.ts): the images in an
  * entry's draft that miss alt text or a caption, the draft with text filled
- * in (only where it's empty: text a person wrote is never replaced), and the
- * size limits EmDash puts on an editor action's answer.
+ * in (only where it's empty: text a person wrote is never replaced), the
+ * size limits EmDash puts on an editor action's answer, and the patch
+ * trimmed to them (fitPatch).
  *
  * Images: every Portable Text image node (`_type: "image"` with an `asset`)
  * at any depth, galleries too, and each image field's value. A media item is
@@ -95,6 +96,78 @@ function setAt(value: unknown, path: ReadonlyArray<string | number>, fill: Image
 export function withImageText(value: unknown, fills: readonly ImageFill[]): unknown {
 	let out = value;
 	for (const fill of fills) out = setAt(out, fill.path, fill);
+	return out;
+}
+
+// ── Fitting the patch ────────────────────────────────────────────
+
+/** One field's part of the patch: its value in the draft, that value with its glossary.io links (when it gets any), and its image text. */
+export interface FieldPatch<F extends ImageFill = ImageFill> {
+	field: string;
+	base: unknown;
+	linked?: unknown;
+	fills: F[];
+}
+
+export interface FittedPatch<F extends ImageFill = ImageFill> {
+	/** The value to set for each field that's in. */
+	values: Map<string, unknown>;
+	/** The image text that's in, per field. */
+	fills: Map<string, F[]>;
+	/** The fields whose links are in. */
+	linked: Set<string>;
+	/** Something was left out. */
+	trimmed: boolean;
+}
+
+/** The fills without the last caption, or (when there's none) without the last alt text. Null when nothing is left to drop. */
+function lighter<F extends ImageFill>(fills: readonly F[]): F[] | null {
+	for (const prop of ["caption", "alt"] as const) {
+		for (let i = fills.length - 1; i >= 0; i--) {
+			if (!fills[i][prop]) continue;
+			const copy: F = { ...fills[i] };
+			delete copy[prop];
+			return copy.alt || copy.caption ? fills.map((x, j) => (j === i ? copy : x)) : fills.filter((_, j) => j !== i);
+		}
+	}
+	return null;
+}
+
+/** A field's versions, fullest first: with its links and less and less image text, then (when it has links) its image text alone, the same way. */
+function* versions<F extends ImageFill>(f: FieldPatch<F>): Generator<{ value: unknown; fills: F[]; linked: boolean }> {
+	const starts = f.linked === undefined ? [{ value: f.base, linked: false }] : [{ value: f.linked, linked: true }, { value: f.base, linked: false }];
+	for (const start of starts) {
+		for (let fills: F[] | null = f.fills; fills; fills = lighter(fills)) {
+			if (fills.length || start.linked) yield { value: withImageText(start.value, fills), fills, linked: start.linked };
+		}
+	}
+}
+
+/**
+ * Fit a patch into EmDash's limits (`fits`: whether these field values can go together), keeping what fits. Each
+ * field in turn, the ones with links first, takes the fullest version of itself that fits with the fields already
+ * in: its links and all its image text, then without captions from the last image backward, then without alt text
+ * the same way, then (when its links alone don't fit) its image text without the links. It's left out only when
+ * none fits, so a field that's too big never costs another field its image text.
+ */
+export function fitPatch<F extends ImageFill>(fields: ReadonlyArray<FieldPatch<F>>, fits: (values: ReadonlyMap<string, unknown>) => boolean): FittedPatch<F> {
+	const out: FittedPatch<F> = { values: new Map(), fills: new Map(), linked: new Set(), trimmed: false };
+	for (const f of [...fields.filter((x) => x.linked !== undefined), ...fields.filter((x) => x.linked === undefined)]) {
+		if (f.linked === undefined && !f.fills.length) continue;
+		let fullest = true;
+		let taken = false;
+		for (const version of versions(f)) {
+			if (fits(new Map([...out.values, [f.field, version.value]]))) {
+				out.values.set(f.field, version.value);
+				if (version.fills.length) out.fills.set(f.field, version.fills);
+				if (version.linked) out.linked.add(f.field);
+				taken = true;
+				break;
+			}
+			fullest = false;
+		}
+		if (!taken || !fullest) out.trimmed = true;
+	}
 	return out;
 }
 
