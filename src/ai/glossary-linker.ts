@@ -168,11 +168,12 @@ export interface LinkMemo {
 	/**
 	 * Links the editor's AI Enrich button proposed (src/ai/editor-enrich.ts), until the entry's next publish by a
 	 * person settles them (settlePlanned). Never counted as linked before that: the proposal may not be applied.
-	 * `qids`: the entities it linked or found linked; `slugs`: the links it added; `at`: when. Ignored after
-	 * PLANNED_MS (livePlanned), and dropped when this part publishes its own links (a later publish would find
-	 * those and take the proposal for applied).
+	 * `qids`: the entities it linked or found linked; `slugs`: the links it added; `at`: when; `texts` (since
+	 * 0.52.0): the text hashes it was made for, before and after its patch. Ignored after PLANNED_MS (livePlanned),
+	 * and dropped when this part publishes its own links (a later publish would find those and take the proposal
+	 * for applied).
 	 */
-	planned?: { qids: string[]; slugs: string[]; at: number };
+	planned?: { qids: string[]; slugs: string[]; at: number; texts?: string[] };
 	updated: string;
 }
 

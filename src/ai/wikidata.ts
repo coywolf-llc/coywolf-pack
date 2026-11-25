@@ -18,6 +18,11 @@ const SPARQL = `https://${WIKIDATA_QUERY_HOST}/sparql`;
 const CACHE_MAX = 500;
 const searchCache = new Map<string, Candidate[]>();
 
+/** Tests only: forget every search, as another isolate would have. */
+export function resetSearchCacheForTests(): void {
+	searchCache.clear();
+}
+
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 /** Wikidata asked us to slow down (HTTP 429, or api.php's maxlag): try the job again after `retryAfterMs`. */

@@ -27,7 +27,7 @@ import type { CollectionSchemaInfo, PluginContext, StorageCollection } from "emd
 
 import { type FeatureMap, ctxFeatures, isOn } from "../core/features.js";
 import { afterResponse } from "../shared.js";
-import { type ImageFill, type ImageSlot, LEFT_ALONE_REASON, imageSlots, jsonBytes, withImageText } from "./editor-images.js";
+import { type ImageFill, type ImageSlot, LEFT_ALONE_REASON, REVIEW_HINT, imageSlots, jsonBytes, withImageText } from "./editor-images.js";
 import { glossaryFor, isGlossarySite } from "./glossary.js";
 import { type EntryLinkPlan, type LinkMemo, linkConfig, linkMemos, livePlanned, planEntryLinks, plannedApplied, unseenMemo } from "./glossary-linker.js";
 import { glossarySlug, glossarySlugsIn } from "./glossary-links.js";
@@ -73,8 +73,8 @@ export type EnrichOperation = { op: "set"; field: string; value: unknown };
 
 /** What the panel's review lists: exactly what the patch adds. */
 export interface EnrichReview {
-	/** Each term linked, with the field it's in (one per entity). */
-	links: Array<{ name: string; slug: string; url: string; field: string }>;
+	/** Each term linked, with the field it's in (one per entity). `action`: a new link, or an existing link switched to glossary.io. */
+	links: Array<{ name: string; slug: string; url: string; field: string; action: "add" | "switch" }>;
 	/** Possessives moved inside their glossary.io link. */
 	possessives: number;
 	/** Each image use given text: only what's added. */
@@ -101,10 +101,11 @@ export interface EnrichAnswer {
 }
 
 /**
- * A model call gives up after this long, and none starts after START_BY_MS, so a request answers in about 85
- * seconds at worst (a call started at the last moment, Wikidata's answer after it, and the wait for the scheduled
- * run's lock before the state is written), inside the 100 seconds after which the zone's proxy answers 524. A
- * request usually ends in 20 to 40 seconds; one stopped by time answers `more`, and the panel asks again.
+ * A model call gives up after this long, and none starts after START_BY_MS (an image's is checked again once its
+ * file is read), so a request answers in about 85 seconds at worst: a call started at the last moment (65 seconds),
+ * an image file still being read then, and up to about 10 seconds for the scheduled run's lock before the state is
+ * written. That's inside the 100 seconds after which the zone's proxy answers 524. A request usually ends in 20 to
+ * 40 seconds; one stopped by time answers `more`, and the panel asks again.
  */
 const CALL_TIMEOUT_MS = 40_000;
 export const START_BY_MS = 25_000;
@@ -121,8 +122,16 @@ export const LOCK_MAX_MS = 110_000;
 /** Images described per request, at most, and how many model calls for them run at once (their files are read one at a time). */
 const MAX_VISION = 8;
 const VISION_AT_ONCE = 3;
-/** A request body over this is refused: a sanity cap (EmDash puts none on a plugin route), far above any real entry. */
+/** Distinct media items looked up per request, at most (one read each). */
+const MAX_IMAGES = 200;
+/**
+ * The request body's cap, far above any real entry. The route declares it (src/ai/routes.ts), so EmDash answers a
+ * larger body with 413 before this runs and the panel checks the size before sending; the check here is for a
+ * caller that isn't the route.
+ */
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;
+/** A staged analysis keeps this much of the title (it comes from the browser). */
+const TITLE_MAX = 500;
 /** EmDash's limit on seo.description (the editor refuses a longer one); the pack's own are 155 characters. */
 const SEO_DESCRIPTION_MAX = 500;
 
@@ -152,7 +161,7 @@ export const TOASTS = {
 	nothingThere: "There's no text or image to work on yet.",
 	limit: "Today's AI call limit is reached. Raise it on the AI Enrichment page, or try again tomorrow (UTC).",
 	noIndex: "The glossary.io index isn't loaded yet. Open any page on the site, then click again.",
-	review: "Review the changes, then save.",
+	review: REVIEW_HINT,
 	nothingToAdd: "Nothing to add: the links and image text are already in place.",
 	noEntities: "No entities found in this text, so there are no glossary.io links to add.",
 	outOfTime: "AI Enrich ran out of time before it was done. Click again to finish: what was already paid for is kept.",
@@ -242,7 +251,7 @@ function checkedFields(info: CollectionSchemaInfo, supplied: Record<string, unkn
 			if (saved[field.slug] !== null && saved[field.slug] !== undefined) out[field.slug] = null;
 			continue;
 		}
-		if (FIELD_SHAPES[field.type]?.(value)) out[field.slug] = value;
+		if (Object.hasOwn(FIELD_SHAPES, field.type) && FIELD_SHAPES[field.type](value)) out[field.slug] = value;
 	}
 	return out;
 }
@@ -449,12 +458,15 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	if (!live && describe && !described && !(t0?.info.hasSeo && noDescription)) described = true;
 	const wantDescription = links && describe && !described;
 
+	// Whether this request got anything new (an output in the cache, an image's text): a round stopped by time asks for another only then.
+	const cacheBefore = JSON.stringify(cache);
+	let progressed = false;
 	// Set by the tasks below (an object, so the checks after them aren't narrowed away).
 	const issues: { entity?: Issue; description?: Issue; image?: Issue; links?: Issue } = {};
 
 	// ── Saved as soon as it's paid: a partial stage with the outputs so far, one write after another ──
 	const hashesSoFar = [...new Set([...(earlier?.textHashes ?? []), ...(t0 ? [t0.textHash] : [])])];
-	const partialStage = (textHashes: string[]): DraftRecord => ({ collection, entryId: id, title: t0!.title, hash: t0!.hash, textHashes, entities: [], description: cache.description ?? "", described: false, partial: true, cache: structuredClone(cache), model, updated: new Date().toISOString() });
+	const partialStage = (textHashes: string[]): DraftRecord => ({ collection, entryId: id, title: t0!.title.slice(0, TITLE_MAX), hash: t0!.hash, textHashes, entities: [], description: cache.description ?? "", described: false, partial: true, cache: structuredClone(cache), model, updated: new Date().toISOString() });
 	let checkpointed = false;
 	let saving: Promise<void> = Promise.resolve();
 	const checkpoint = (): Promise<void> => {
@@ -509,7 +521,8 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	const filenames = new Map<string, string>();
 	const imageTask = async () => {
 		if (!slots.length || !ctx.media) return;
-		const ids = [...new Set(slots.map((slot) => slot.mediaId).filter((v): v is string => Boolean(v)))];
+		// A real entry has far fewer: the rest (a made-up request's) are left as they are.
+		const ids = [...new Set(slots.map((slot) => slot.mediaId).filter((v): v is string => Boolean(v)))].slice(0, MAX_IMAGES);
 		if (!ids.length) return;
 		const mediaRecords = col<MediaRecord>(ctx, "aiMedia");
 		const [items, stored] = await Promise.all([Promise.all(ids.map((mid) => ctx.media!.get(mid).catch(() => null))), mediaRecords.getMany(ids)]);
@@ -556,6 +569,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 				try {
 					const suggestion = await describeImage(ctx, options, s, m, buildImageContext(title, fields, mid, null), `media:${mid}`, budget, limits);
 					fresh.set(mid, suggestion);
+					progressed = true;
 					let written: string[] = [];
 					if (s.imageMode === "apply") {
 						written = await applyImageText(ctx, mid, suggestion, { caption: s.imageCaption, overwrite: false }).catch((error: unknown) => {
@@ -574,6 +588,8 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 						await mediaRecords.put(mid, { mediaId: mid, filename: m.filename, url: m.url, updated: new Date().toISOString(), suggestion: null, status: "skipped", written: [], error: error.message }).catch(() => undefined);
 						return;
 					}
+					// Its file wasn't read in time, so no call was made: the next round's.
+					if (error instanceof OutOfTimeError) return void pendingIds.add(mid);
 					issues.image ??= classify(error);
 					if (error instanceof DailyLimitError) stop = true;
 				}
@@ -636,10 +652,11 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	const termFields = plan ? plan.terms.map((c, i) => ({ c, field: plan!.termFields[i] })).filter((t) => linkValues.has(t.field)) : [];
 	const terms = termFields.map((t) => t.c);
 	const fixes = plan ? plan.fixes.filter((_, i) => linkValues.has(plan!.fixFields[i])) : [];
-	// The meta description, only into an empty one, in a collection with SEO whose editor takes it (the draft lists it),
-	// and never one the person dismissed, or removed after it was applied.
+	// The meta description, only with the links (the button's line says so: it comes with their analysis), only into an
+	// empty one, in a collection with SEO whose editor takes it (the draft lists it), and never one the person
+	// dismissed, or removed after it was applied, while the live analysis is of this text.
 	const liveTold = live && (live.descriptionStatus === "dismissed" || live.descriptionStatus === "applied");
-	const fillDescription = describe && Boolean(t0?.info.hasSeo) && draft.defined.has("seo.description") && noDescription && !liveTold ? description.trim() : "";
+	const fillDescription = links && describe && Boolean(t0?.info.hasSeo) && draft.defined.has("seo.description") && noDescription && !liveTold ? description.trim() : "";
 	if (fillDescription && fillDescription.length <= SEO_DESCRIPTION_MAX) ops.push({ op: "set", field: "seo.description", value: fillDescription });
 	const describedNow = ops.some((o) => o.field === "seo.description");
 
@@ -654,7 +671,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	} else if (links && t0 && t1 && found && (!live || t1.textHash !== t0.textHash)) {
 		// A description that failed leaves `described` false: the next click writes it, or the publish's job does (only that).
 		// The texts an earlier click's analysis (reused here) was of stay in it.
-		stage = { collection, entryId: id, title: t1.title, hash: t1.hash, textHashes: [...new Set([...hashesSoFar, t1.textHash])], entities: found, description, described, model, updated: now };
+		stage = { collection, entryId: id, title: t1.title.slice(0, TITLE_MAX), hash: t1.hash, textHashes: [...new Set([...hashesSoFar, t1.textHash])], entities: found, description, described, model, updated: now };
 	}
 	const forget = !stage && links && Boolean(found) && (Boolean(staged) || checkpointed);
 	// The QIDs it adds, and the ones already linked in the draft (handled, not remembered yet): at the publish they
@@ -666,6 +683,8 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 				qids: [...new Set([...terms.map((c) => c.qid), ...[...plan.handled].filter((q) => !remembered.has(q))])].sort(),
 				slugs: [...new Set([...terms.map((c) => c.slug), ...(applied?.slugs ?? [])])].sort(),
 				at: Date.now(),
+				// The text it's for, before and after the patch: a save of that text without the links isn't its publish (src/ai/pack.ts).
+				...(t0 ? { texts: [...new Set([t0.textHash, ...(t1 ? [t1.textHash] : [])])] } : {}),
 			}
 		: null;
 	if (planned && !planned.qids.length && !planned.slugs.length && !memo?.planned) planned = null;
@@ -704,9 +723,10 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	const what = parts.join(" ");
 	const issue: Issue | undefined = issues.entity ?? issues.description ?? issues.image ?? issues.links;
 	// Only time, or images past this request's cap, stopped it: the panel asks again, and that round starts where this one stopped.
-	const more = issue?.kind === "time" || (!issue && left > 0);
+	// A round that timed out with nothing new (Wikidata too slow for even one lookup) would only repeat itself.
+	const more = issue?.kind === "time" ? progressed || JSON.stringify(cache) !== cacheBefore : !issue && left > 0;
 	const review: EnrichReview = {
-		links: termFields.map(({ c, field }) => ({ name: c.entity, slug: c.slug, url: c.href, field })),
+		links: termFields.map(({ c, field }) => ({ name: c.entity, slug: c.slug, url: c.href, field, action: c.action === "add" ? ("add" as const) : ("switch" as const) })),
 		possessives: fixes.length,
 		images: fills.map((f) => ({ field: f.slot.field, mediaId: f.slot.mediaId, filename: (f.slot.mediaId && filenames.get(f.slot.mediaId)) || "", ...(f.alt ? { alt: f.alt } : {}), ...(f.caption ? { caption: f.caption } : {}) })),
 		...(describedNow ? { description: fillDescription } : {}),

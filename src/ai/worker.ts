@@ -79,6 +79,11 @@ export class SkipError extends Error {}
 
 const schemaCache = new Map<string, { info: CollectionSchemaInfo | null; at: number }>();
 
+/** Tests only: read every collection's schema again. */
+export function resetSchemaCacheForTests(): void {
+	schemaCache.clear();
+}
+
 async function collectionInfo(ctx: PluginContext, slug: string): Promise<CollectionSchemaInfo | null> {
 	const hit = schemaCache.get(slug);
 	if (hit && Date.now() - hit.at < 60_000) return hit.info;
@@ -184,7 +189,8 @@ async function callModel(
  * For a person waiting on the result (the editor's AI Enrich button): each model call's timeout, and no new stage
  * after `deadline` (epoch ms). `paid`: called once a model call's output is in the cache, so the caller can save it
  * right away (a failure there is the caller's to handle; it never fails the stage). `oneAtATime`: runs an image's
- * read and resize, so images described at once don't hold several large files in memory together.
+ * read and resize, so images described at once don't hold several large files in memory together. describeImage
+ * throws OutOfTimeError when the deadline passes before its file is read: no call is made for that image.
  */
 export interface CallLimits {
 	timeoutMs?: number;
@@ -230,10 +236,19 @@ export async function groundEntities(ctx: PluginContext, options: AiOptions, s: 
 	const f = fetcher(ctx, budget);
 	const ua = userAgent(VERSION, ctx.site?.url);
 	// Stage 2: real candidates, one lookup at a time (Wikimedia's API etiquette).
+	// With a deadline (AI Enrich), what was found is kept in the cache: the next round goes on after it. A lookup that
+	// found nothing isn't (Wikidata may not have answered), so it's tried again.
+	const known = limits?.deadline !== undefined ? (cache.candidates ??= {}) : null;
 	const candidates = [];
 	for (const m of mentions) {
+		if (known && Object.hasOwn(known, m.name)) {
+			candidates.push(known[m.name]);
+			continue;
+		}
 		inTime(limits);
-		candidates.push(await searchCandidates(f, m.name, lang, ua));
+		const found = await searchCandidates(f, m.name, lang, ua);
+		if (known && found.length) known[m.name] = found;
+		candidates.push(found);
 	}
 	let { mentions: grounded, ambiguous } = attachCandidates(mentions, candidates);
 	// Stage 3: the model chooses among real candidates only.
@@ -293,6 +308,11 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 
 	let description = previous?.description ?? "";
 	let descriptionStatus: EntryRecord["descriptionStatus"] = hasDescription && previous?.descriptionStatus !== "applied" ? "none" : (previous?.descriptionStatus ?? "none");
+	// The live description is the one AI Enrich's review filled in (the staged analysis'): applied, as the publish would mark it.
+	if (hasDescription && staged?.description.trim() && item.seo!.description!.trim() === staged.description.trim()) {
+		description = staged.description;
+		descriptionStatus = "applied";
+	}
 	if (wantDescription) {
 		description = await suggestDescription(ctx, options, s, t, ref, cache, budget);
 		descriptionStatus = description ? "suggested" : "none";
@@ -460,7 +480,14 @@ export async function describeImage(
 	budget: Budget,
 	limits?: CallLimits,
 ): Promise<ImageText> {
-	const payload = await (limits?.oneAtATime ? limits.oneAtATime(() => imagePayload(ctx, options, media)) : imagePayload(ctx, options, media));
+	// The deadline is checked again when the image's turn to be read comes, and once it's read: the reads queue one
+	// behind another, so the check before this call can be long past by then.
+	const read = () => {
+		inTime(limits);
+		return imagePayload(ctx, options, media);
+	};
+	const payload = await (limits?.oneAtATime ? limits.oneAtATime(read) : read());
+	inTime(limits);
 	const raw = await callModel(
 		ctx,
 		options,

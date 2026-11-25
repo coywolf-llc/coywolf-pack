@@ -46,6 +46,8 @@ const store = (await import("./store.ts")) as typeof import("./store.js");
 const linker = (await import("./glossary-linker.ts")) as typeof import("./glossary-linker.js");
 // @ts-ignore -- as above.
 const worker = (await import("./worker.ts")) as typeof import("./worker.js");
+// @ts-ignore -- as above.
+const wikidataApi = (await import("./wikidata.ts")) as typeof import("./wikidata.js");
 
 enrich.enrichIo.wait = async () => {};
 /** The entry lock's renewals, run by hand: a click here ends long before a real one would renew. */
@@ -190,7 +192,7 @@ const DRAFT_TYPES: Record<string, string> = { title: "string", content: "portabl
 /** The keys of the editor's draft that aren't collection fields. */
 const HOST_KEYS = new Set(["slug", "seo.title", "seo.description"]);
 
-function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<string, unknown>; index?: boolean; status?: string; skip?: string[]; extraFields?: Array<{ slug: string; type: string }> } = {}) {
+function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<string, unknown>; index?: boolean; status?: string; skip?: string[]; extraFields?: Array<{ slug: string; type: string }>; supports?: string[] } = {}) {
 	const settings = new Map<string, unknown>([
 		["features", opts.features ?? { ai: true, "ai.entities": true, "ai.glossaryLinks": true, "ai.imageText": true }],
 		["aiProvider", "anthropic"],
@@ -255,7 +257,7 @@ function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<
 							slug: "posts",
 							hasSeo: true,
 							titleField: "title",
-							supports: ["revisions", "drafts"],
+							supports: opts.supports ?? ["revisions", "drafts"],
 							fields: [
 								{ slug: "title", type: "string", sortOrder: 0, translatable: true },
 								{ slug: "content", type: "portableText", sortOrder: 1, translatable: true },
@@ -1149,6 +1151,127 @@ test("must pass: after Apply and the editor's autosave, the saved draft's text h
 	forgetOwn();
 });
 
+test("an image whose file is read only after the deadline gets no model call: it waits for the next round, and no other file is read", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ features: { ai: true, "ai.imageText": true } });
+	const realNow = Date.now;
+	let skew = 0;
+	Date.now = () => realNow() + skew;
+	let reads = 0;
+	const media = (site.ctx as { media: { readBytes: (id: string) => Promise<unknown> } }).media;
+	const read = media.readBytes;
+	media.readBytes = async (id: string) => {
+		reads++;
+		// The read took the request's time (three workers had passed the deadline check before it).
+		skew = enrich.START_BY_MS + 1;
+		return read(id);
+	};
+	let first: Answer;
+	try {
+		first = await site.click();
+	} finally {
+		Date.now = realNow;
+	}
+	assert.equal(visionCalls(m), 0, "no call starts after the deadline");
+	assert.equal(reads, 1, "the files queued behind it aren't read");
+	assert.equal(first.more, true, "only time stopped it");
+	assert.equal(first.review?.remaining, 2, "the image uses that still have nothing (the featured image has the library's alt text)");
+	assert.match(first.toast.message, /Click AI Enrich again for the rest\./);
+	assert.equal(first.toast.type, "success");
+	// The next round does them.
+	const second = await site.click();
+	assert.equal(visionCalls(m), 3);
+	assert.equal(second.more, undefined);
+	assert.equal(second.review?.remaining, 0);
+});
+
+test("a round stopped by time during the Wikidata lookups keeps what it found: the next round looks up only the rest, and a round with nothing new doesn't ask for another", async () => {
+	reset();
+	wikidataApi.resetSearchCacheForTests();
+	const m = model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	const http = (site.ctx as { http: { fetch: (url: string) => Promise<Response> } }).http;
+	const fetchWikidata = http.fetch;
+	const realNow = Date.now;
+	let skew = 0;
+	Date.now = () => realNow() + skew;
+	http.fetch = async (url) => {
+		const out = await fetchWikidata(url);
+		// The first lookup took the rest of the request's time.
+		skew = enrich.START_BY_MS + 1;
+		return out;
+	};
+	let first: Answer;
+	try {
+		first = await site.click();
+	} finally {
+		Date.now = realNow;
+		skew = 0;
+	}
+	assert.deepEqual(first, told("info", enrich.TOASTS.outOfTime, { more: true }));
+	assert.equal(site.wd.searches, 1);
+	assert.deepEqual(Object.keys(site.storage.aiDrafts.value<DraftRecord>("posts:E1")!.cache?.candidates ?? {}), ["Fastmail"]);
+
+	// Another isolate answers the next round (nothing in memory): only Google is looked up.
+	wikidataApi.resetSearchCacheForTests();
+	http.fetch = fetchWikidata;
+	const second = await site.click(draftFields(), {}, "E1", 2);
+	assert.match(second.toast.message, /^Added 2 glossary\.io links/);
+	assert.equal(site.wd.searches, 2, "Fastmail wasn't looked up again");
+	assert.equal(textCalls(m), 1, "and the extraction wasn't paid for again");
+	assert.equal(site.storage.aiDrafts.value<DraftRecord>("posts:E1")!.cache, undefined, "a complete analysis keeps no candidates");
+
+	// Wikidata doesn't answer in time, round after round: the second such round has nothing new, and says so without `more`.
+	reset();
+	wikidataApi.resetSearchCacheForTests();
+	model({ mentions: [{ surface: "Nobody", name: "Nobody Known", type: "Person", description: "", primary: true }, { surface: "No one", name: "No One Known", type: "Person", description: "", primary: false }] });
+	const slow = fakeSite({ features: LINKS_ONLY });
+	const slowHttp = (slow.ctx as { http: { fetch: (url: string) => Promise<Response> } }).http;
+	slowHttp.fetch = async () => {
+		skew = enrich.START_BY_MS + 1;
+		throw new Error("timed out");
+	};
+	Date.now = () => realNow() + skew;
+	try {
+		assert.equal((await slow.click()).more, true, "the extraction is new");
+		skew = 0;
+		assert.deepEqual(await slow.click(draftFields(), {}, "E1", 2), told("info", enrich.TOASTS.outOfTime), "nothing new: the panel stops asking");
+	} finally {
+		Date.now = realNow;
+		wikidataApi.resetSearchCacheForTests();
+	}
+});
+
+test("a made-up request with hundreds of images: at most 200 media items are looked up; a title kept with the analysis is cut to 500 characters", async () => {
+	reset();
+	model();
+	const site = fakeSite();
+	let lookups = 0;
+	const media = (site.ctx as { media: { get: (id: string) => Promise<unknown> } }).media;
+	const get = media.get;
+	media.get = async (id: string) => {
+		if (id.startsWith("X")) lookups++;
+		return get(id);
+	};
+	const many = Array.from({ length: 260 }, (_, i) => img(`x${i}`, `X${i}`));
+	await site.click({ ...draftFields(), title: "T".repeat(5_000), content: [para("b1", "I use Fastmail for email."), ...many] });
+	assert.ok(lookups > 0 && lookups <= 200, `${lookups} lookups`);
+	assert.equal(site.storage.aiDrafts.value<DraftRecord>("posts:E1")!.title.length, 500);
+});
+
+test("the meta description comes only with the links: with glossary.io links off, a live analysis' suggestion isn't offered", async () => {
+	reset();
+	model();
+	const site = fakeSite({ status: "published", features: { ai: true, "ai.entities": true, "ai.imageText": true, "ai.descriptions": true } });
+	const record = await analyzed(site, draftFields());
+	site.storage.aiEntries.rows.set("posts:E1", { data: { ...record, description: "Live suggestion.", descriptionStatus: "suggested" }, revision: 0 });
+	const answer = await site.click();
+	assert.ok(answer.patch, "the image text still goes");
+	assert.equal(valueOf(answer, "seo.description"), undefined);
+	assert.equal(answer.review?.description, undefined);
+});
+
 test("images: their files are read one at a time (large ones together could exhaust the Worker's memory), while the model calls overlap", async () => {
 	reset();
 	model();
@@ -1302,6 +1425,7 @@ test("the toast tells links switched to glossary.io from links added", async () 
 	];
 	const answer = await site.click({ title: "Email I like", content, excerpt: "", featured_image: null });
 	assert.match(answer.toast.message, /^Added 1 glossary\.io link and switched 1 link to glossary\.io \((Fastmail, Google|Google, Fastmail)\)\. Review the changes, then save\.$/);
+	assert.deepEqual(Object.fromEntries(answer.review!.links.map((l) => [l.name, l.action])), { Fastmail: "switch", Google: "add" }, "the review says which is which");
 });
 
 test("the review counts possessives moved inside a glossary.io link the text already had", async () => {
@@ -1833,6 +1957,174 @@ test("writing a meta description is the pack's own save: it settles nothing a cl
 		assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1"), memo, "and so do its planned links");
 		assert.equal(linker.isOwnPublish("posts:E1", "R2"), false, "a person's publish (another revision) is still theirs");
 	} finally {
+		forgetOwn();
+	}
+});
+
+// ── The editor's own SEO save after Apply (EmDash saves the SEO panel 500 ms after the patch, before its autosave) ──
+
+const ALL_ON = { ai: true, "ai.entities": true, "ai.glossaryLinks": true, "ai.imageText": true, "ai.descriptions": true };
+/** The SEO panel's save of the description the review filled: content:afterSave of the live entry, its text as it was. */
+async function seoSave(site: Site, description: unknown) {
+	site.items.set("posts:E1", { ...site.entry(), seo: { description: description as string } });
+	await site.hook("content:afterSave", site.entry());
+}
+
+test("the editor's SEO save after Apply (a published entry never analyzed): nothing is promoted, forgotten or settled, and the publish of the patched text pays for nothing", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ status: "published", features: ALL_ON });
+	Object.assign(site.item, { data: draftFields(), liveRevisionId: "R1", draftRevisionId: "R1" });
+	const form = draftFields();
+	const answer = await site.click(form);
+	const description = valueOf(answer, "seo.description");
+	assert.equal(description, "A summary of the post.");
+	const staged = structuredClone(site.storage.aiDrafts.value<DraftRecord>("posts:E1"))!;
+	const memo = structuredClone(site.storage.aiLinks.value<LinkMemo>("posts:E1"))!;
+	assert.equal(staged.textHashes.length, 2, "the captions change the text: the analysis waits for the patch's");
+	assert.ok(memo.planned?.slugs.length);
+	const paid = m.calls.length;
+
+	await seoSave(site, description);
+	assert.deepEqual(site.storage.aiDrafts.value<DraftRecord>("posts:E1"), staged, "the staged analysis still waits for its publish");
+	assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1"), memo, "and so do the planned links");
+	assert.equal(site.storage.aiEntries.rows.size, 0, "nothing promoted");
+	assert.equal(jobOf(site)?.source, "save", "queued like any save of an entry that has no analysis");
+
+	// The scheduled run gets to that job before the publish: it takes what the click paid for, and the row stays.
+	assert.equal(await runJob(site), "done");
+	site.storage.aiQueue.rows.clear();
+	assert.equal(m.calls.length, paid, "the job paid for nothing");
+	assert.equal(site.storage.aiEntries.value<EntryRecord>("posts:E1")!.descriptionStatus, "applied", "the live description is the click's");
+	assert.deepEqual(site.storage.aiDrafts.value<DraftRecord>("posts:E1"), staged);
+
+	// The autosave made a pending draft (no hook work); then the publish of the patched text.
+	await site.publish(applied(form, answer), { seo: site.entry().seo });
+	assert.equal(m.calls.length, paid, "the publish pays for nothing");
+	assert.equal(site.storage.aiQueue.rows.size, 0, "promoted: nothing queued");
+	assert.equal(site.storage.aiDrafts.rows.size, 0);
+	const record = site.storage.aiEntries.value<EntryRecord>("posts:E1")!;
+	assert.equal(record.textHash, (await textOf(site, applied(form, answer))).textHash);
+	assert.equal(record.descriptionStatus, "applied");
+	assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1")!.linked, ["Q1", "Q95"]);
+	forgetOwn();
+});
+
+test("the same when the publish comes before the scheduled run: the job the SEO save queued is skipped, with no model call", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ status: "published", features: ALL_ON });
+	Object.assign(site.item, { data: draftFields(), liveRevisionId: "R1", draftRevisionId: "R1" });
+	const answer = await site.click();
+	const paid = m.calls.length;
+	await seoSave(site, valueOf(answer, "seo.description"));
+	await site.publish(applied(draftFields(), answer), { seo: site.entry().seo });
+	assert.equal(site.storage.aiDrafts.rows.size, 0, "promoted");
+	assert.equal(site.storage.aiQueue.rows.size, 1, "the SEO save's job is still queued");
+	assert.equal(await runJob(site), "skipped");
+	assert.equal(m.calls.length, paid);
+});
+
+test("the editor's SEO save after Apply, the live analysis exact: the planned links wait, so one taken out by hand before the publish stays out; the suggestion is marked applied", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ status: "published", features: { ...LINKS_ONLY, "ai.descriptions": true } });
+	Object.assign(site.item, { data: draftFields(), liveRevisionId: "R1", draftRevisionId: "R1" });
+	const t0 = await textOf(site, site.item.data);
+	const entities = [ENT, { ...ENT, name: "Google", qid: "Q95", primary: false }];
+	const live: EntryRecord = { collection: "posts", entryId: "E1", title: t0.title, hash: t0.hash, textHash: t0.textHash, status: "ok", error: "", entities, description: "Live suggestion.", descriptionStatus: "suggested", updated: "2026-11-01T00:00:00.000Z" };
+	site.storage.aiEntries.rows.set("posts:E1", { data: live, revision: 0 });
+	site.storage.aiLinks.rows.set("posts:E1", { data: { collection: "posts", entryId: "E1", linked: [], textHash: t0.textHash, updated: "" }, revision: 0 });
+	const form = draftFields();
+	const answer = await site.click(form);
+	assert.equal(m.calls.length, 0, "the live analysis is of this text");
+	assert.equal(valueOf(answer, "seo.description"), "Live suggestion.");
+	const memo = structuredClone(site.storage.aiLinks.value<LinkMemo>("posts:E1"))!;
+	assert.deepEqual(memo.planned?.slugs, ["fastmail", "google"]);
+
+	await seoSave(site, "Live suggestion.");
+	assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1"), memo, "nothing settled half a second after Apply");
+	assert.equal(site.storage.aiEntries.value<EntryRecord>("posts:E1")!.descriptionStatus, "applied");
+	assert.equal(site.storage.aiQueue.rows.size, 0);
+	// A second click now offers no description again.
+	const again = await site.click(applied(form, answer), { "seo.description": "Live suggestion." });
+	assert.equal(valueOf(again, "seo.description"), undefined);
+
+	// The Google link is taken out by hand, then the entry is published: Google counts as handled.
+	const edited = { ...applied(form, answer), content: withoutLink(valueOf(answer, "content"), "google") };
+	await site.publish(edited, { seo: site.entry().seo });
+	const settled = site.storage.aiLinks.value<LinkMemo>("posts:E1")!;
+	assert.equal(settled.planned, undefined);
+	assert.deepEqual(settled.linked, ["Q1", "Q95"]);
+	// The retry pass's check adds nothing back.
+	site.storage.aiLinks.rows.set("posts:E1", { data: { ...settled, retryAt: Date.now() - 1 }, revision: 900 });
+	await linker.retryDue(site.ctx, site.options, 3);
+	assert.deepEqual(site.writes, [], "no edit");
+	assert.deepEqual(linksOf(site.entry().data.content), [["Fastmail", "https://glossary.io/fastmail/"]]);
+	assert.equal(m.calls.length, 0);
+	forgetOwn();
+});
+
+test("a suggested description that isn't the live one stays suggested on a save", async () => {
+	reset();
+	model();
+	const site = fakeSite({ status: "published", features: { ...LINKS_ONLY, "ai.descriptions": true } });
+	const record = await analyzed(site, draftFields());
+	site.storage.aiEntries.rows.set("posts:E1", { data: { ...record, description: "Live suggestion.", descriptionStatus: "suggested" }, revision: 0 });
+	await seoSave(site, "What a person wrote.");
+	assert.equal(site.storage.aiEntries.value<EntryRecord>("posts:E1")!.descriptionStatus, "suggested");
+});
+
+test("a collection without revisions (a save is the publish): the SEO save of the text before the patch waits, the save of the patched text promotes and settles, and a save of another text is a publish as before", async () => {
+	reset();
+	worker.resetSchemaCacheForTests();
+	try {
+		const m = model();
+		const site = fakeSite({ status: "published", features: ALL_ON, supports: [] });
+		Object.assign(site.item, { data: draftFields(), liveRevisionId: null, draftRevisionId: null });
+		const form = draftFields();
+		const answer = await site.click(form);
+		const paid = m.calls.length;
+		const staged = structuredClone(site.storage.aiDrafts.value<DraftRecord>("posts:E1"))!;
+		const memo = structuredClone(site.storage.aiLinks.value<LinkMemo>("posts:E1"))!;
+		assert.equal(memo.planned?.texts?.length, 2, "the planned links know their text, before and after the patch");
+		await seoSave(site, valueOf(answer, "seo.description"));
+		assert.deepEqual(site.storage.aiDrafts.value<DraftRecord>("posts:E1"), staged);
+		assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1"), memo);
+		assert.equal(site.storage.aiEntries.rows.size, 0);
+		site.storage.aiQueue.rows.clear();
+		// The editor's autosave of the patched form: this collection's publish.
+		site.items.set("posts:E1", { ...site.entry(), data: applied(form, answer) });
+		await site.hook("content:afterSave", site.entry());
+		assert.equal(m.calls.length, paid);
+		assert.equal(site.storage.aiDrafts.rows.size, 0, "promoted");
+		assert.equal(site.storage.aiQueue.rows.size, 0);
+		assert.equal(site.storage.aiEntries.value<EntryRecord>("posts:E1")!.descriptionStatus, "applied");
+		const settled = site.storage.aiLinks.value<LinkMemo>("posts:E1")!;
+		assert.equal(settled.planned, undefined);
+		assert.deepEqual(settled.linked, ["Q1", "Q95"]);
+
+		// Links alone (no captions, so one text hash): the SEO-less save of the text without the planned links waits too.
+		reset();
+		const plain = fakeSite({ status: "published", features: LINKS_ONLY, supports: [] });
+		Object.assign(plain.item, { data: draftFields(), liveRevisionId: null, draftRevisionId: null });
+		const linked = await plain.click(form);
+		const before = structuredClone(plain.storage.aiLinks.value<LinkMemo>("posts:E1"))!;
+		assert.equal(plain.storage.aiDrafts.value<DraftRecord>("posts:E1")!.textHashes.length, 1);
+		await plain.hook("content:afterSave", plain.entry());
+		assert.equal(plain.storage.aiDrafts.rows.size, 1, "the links aren't in the text yet");
+		assert.deepEqual(plain.storage.aiLinks.value<LinkMemo>("posts:E1"), before);
+		plain.storage.aiQueue.rows.clear();
+		// Another text (the person wrote on without applying): a publish like any other.
+		const changed = { ...form, content: [...(form.content as unknown[]), para("b9", "A new paragraph.")] };
+		plain.items.set("posts:E1", { ...plain.entry(), data: changed });
+		await plain.hook("content:afterSave", plain.entry());
+		assert.equal(plain.storage.aiDrafts.rows.size, 0, "its publish has happened");
+		assert.equal(plain.storage.aiLinks.value<LinkMemo>("posts:E1")!.planned, undefined);
+		assert.equal(plain.storage.aiQueue.rows.size, 1);
+		void linked;
+	} finally {
+		worker.resetSchemaCacheForTests();
 		forgetOwn();
 	}
 });

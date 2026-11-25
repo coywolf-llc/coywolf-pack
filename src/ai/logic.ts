@@ -531,6 +531,11 @@ export interface StageCache {
 	hash: string;
 	mentions?: Mention[];
 	choices?: Record<string, string | null>;
+	/**
+	 * Wikidata's candidates by mention name, kept only for a caller with a deadline (the editor's AI Enrich button),
+	 * so a round stopped by time doesn't look the same names up again in the next.
+	 */
+	candidates?: Record<string, Candidate[]>;
 	/** The grounded, verified entities (the end of groundEntities), so nothing is looked up or paid for again. */
 	entities?: Entity[];
 	description?: string;

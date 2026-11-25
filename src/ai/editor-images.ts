@@ -3,7 +3,7 @@
  * entry's draft that miss alt text or a caption, and the draft with text
  * filled in (only where it's empty: text a person wrote is never replaced).
  * No imports, so the admin's panel (src/admin/enrich-core.ts) can share
- * LEFT_ALONE_REASON.
+ * LEFT_ALONE_REASON and REVIEW_HINT.
  *
  * Images: every Portable Text image node (`_type: "image"` with an `asset`)
  * at any depth, galleries too, and each image field's value. A media item is
@@ -98,6 +98,9 @@ export function withImageText(value: unknown, fills: readonly ImageFill[]): unkn
 	for (const fill of fills) out = setAt(out, fill.path, fill);
 	return out;
 }
+
+/** What an answer's toast ends with when it has a patch (the panel's review leaves it out: it's the review). */
+export const REVIEW_HINT = "Review the changes, then save.";
 
 /** Why an image without text is left as it is (the answer's toast, and the panel's review). */
 export const LEFT_ALONE_REASON = "AI Enrich skips images whose suggestion was dismissed or marked decorative, SVGs, and images it can't read from the media library.";

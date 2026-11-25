@@ -11,7 +11,7 @@ import type { PackModule } from "../core/module.js";
 import { getEntryEntities } from "./entities.js";
 import { GLOSSARY_HOST } from "./glossary.js";
 import { REMOVE_GONE_FEATURE } from "./glossary-gone.js";
-import { LINK_CHECK_MS, type LinkMemo, isOwnPublish, linkMemos, livePlanned, settlePlanned, shouldLink, withoutPendingNew, withoutPlanned } from "./glossary-linker.js";
+import { LINK_CHECK_MS, type LinkMemo, isOwnPublish, linkMemos, livePlanned, plannedApplied, settlePlanned, shouldLink, withoutPendingNew, withoutPlanned } from "./glossary-linker.js";
 import { glossarySlugsIn } from "./glossary-links.js";
 import { PROVIDER_HOSTS } from "./providers.js";
 import { aiRoutes } from "./routes.js";
@@ -72,6 +72,12 @@ registerFeatures(FEATURES);
 
 export const AI_TASK = "ai-queue";
 
+/** The entry's meta description as a content hook reports it (trimmed; "" when there's none). */
+function liveDescription(content: Record<string, unknown>): string {
+	const description = (content.seo as { description?: unknown } | null | undefined)?.description;
+	return typeof description === "string" ? description.trim() : "";
+}
+
 export function aiPack(options: AiOptions = {}): PackModule {
 	/**
 	 * Queue an entry when its title or text changed since the last analysis (debounced). Never makes a model call.
@@ -79,9 +85,11 @@ export function aiPack(options: AiOptions = {}): PackModule {
 	 * An analysis made before 0.51.0 has no text hash yet, so its hash (text and settings) decides, as before.
 	 * An analysis the editor's AI Enrich button staged for this title and text is used instead (useStaged), and the
 	 * links it planned are settled (settleLinks). Not on this part's own publishes (a link edit, a removal): those
-	 * change no text, and what a person's click staged or planned isn't theirs to settle.
+	 * change no text, and what a person's click staged or planned isn't theirs to settle. And not on a save that
+	 * isn't the publish a click waits for (`save`, saveWaits): EmDash saves the SEO panel half a second after AI
+	 * Enrich's review fills the meta description, before the patched text is saved or published.
 	 */
-	async function onContent(event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) {
+	async function onContent(event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext, save = false) {
 		const content = event.content;
 		const id = typeof content.id === "string" ? content.id : null;
 		// Only live content: skip unpublished entries and draft saves (autosaves) of published ones,
@@ -97,13 +105,19 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		if (!t) return;
 		const key = entryKey(event.collection, id);
 		const own = isOwnPublish(key, content.liveRevisionId);
-		const prev = await col<EntryRecord>(ctx, "aiEntries").get(key);
+		let prev = await col<EntryRecord>(ctx, "aiEntries").get(key);
 		const exact = prev?.status === "ok" && prev.hash === t.hash;
 		const current = prev?.status === "ok" && (exact || prev.textHash === t.textHash);
+		// A suggested description that's the live one now was applied (AI Enrich's review fills it through the editor).
+		if (prev && current && prev.descriptionStatus === "suggested" && prev.description.trim() && liveDescription(content) === prev.description.trim()) {
+			prev = { ...prev, descriptionStatus: "applied" };
+			await col<EntryRecord>(ctx, "aiEntries").put(key, prev).catch(() => undefined);
+		}
+		const waits = save && !own && (await saveWaits(ctx, key, data, t, s));
 		// An analysis of this text under today's settings needs nothing from a click (what one staged for this text is
 		// moot, and goes); one under other settings can take a click's newer one.
-		const staged = own ? null : exact ? await forgetStaged(ctx, key, t) : await useStaged(ctx, event.collection, id, content, t, current ? prev : null, prev, features, s);
-		if (isOn(features, "ai.glossaryLinks") && !own) {
+		const staged = own ? null : exact ? await forgetStaged(ctx, key, t) : waits ? null : await useStaged(ctx, event.collection, id, content, t, current ? prev : null, prev, features, s);
+		if (isOn(features, "ai.glossaryLinks") && !own && !waits) {
 			await settleLinks(ctx, event.collection, id, data, t, prev, staged?.record ?? (current ? "current" : "queued")).catch((error: unknown) =>
 				ctx.log.warn("glossary.io links: couldn't settle AI Enrich's planned links", { entry: key, error: String(error) }),
 			);
@@ -112,6 +126,26 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000, source: "save", ...(staged?.cache ? { cache: staged.cache } : {}) }, t.hash);
 		// Only once the job has it: a failed enqueue leaves what the click paid for where the next publish finds it.
 		await staged?.handed?.();
+	}
+
+	/**
+	 * Whether a save (content:afterSave of a live entry) is no publish for what a click staged or planned, which then
+	 * stays as it is: nothing is promoted, forgotten or settled, and a job the save queues takes what the click paid
+	 * for from the staged row itself (analyzeEntry in src/ai/worker.ts).
+	 * - A collection with revisions: always. Its text goes live only by a publish, so a save that gets here changed
+	 *   something else (the SEO panel, the slug).
+	 * - Without revisions a save is the publish. Only one of the text a click analyzed that still lacks its patch
+	 *   waits: the staged analysis is for the patch's text too, or the links planned for this text aren't in it.
+	 */
+	async function saveWaits(ctx: PluginContext, key: string, data: Record<string, unknown>, t: EntryText, s: Awaited<ReturnType<typeof readSettings>>): Promise<boolean> {
+		if (t.info.supports?.includes("revisions")) return true;
+		const drafts = optionalCol<DraftRecord>(ctx, "aiDrafts");
+		const staged = drafts ? await drafts.get(key).catch(() => null) : null;
+		if (staged?.textHashes?.includes(t.textHash) && staged.model === modelSignature(s) && !stagedSpent(staged, t)) return true;
+		const planned = livePlanned(await linkMemos(ctx).get(key).catch(() => null));
+		if (!planned?.texts?.includes(t.textHash)) return false;
+		const fields = t.info.fields.filter((f) => f.type === "portableText").map((f) => f.slug);
+		return !plannedApplied(planned, new Set(fields.flatMap((f) => [...glossarySlugsIn(data[f])])));
 	}
 
 	/**
@@ -161,8 +195,8 @@ export function aiPack(options: AiOptions = {}): PackModule {
 			await forget();
 			return null;
 		}
-		const seoDescription = (content.seo as { description?: unknown } | null | undefined)?.description;
-		const hasDescription = typeof seoDescription === "string" && seoDescription.trim().length > 0;
+		const live = liveDescription(content);
+		const hasDescription = live.length > 0;
 		const wantDescription = isOn(features, "ai.descriptions") && t.info.hasSeo && !hasDescription;
 		const complete = !staged.partial;
 		if (!sameText && (!complete || (wantDescription && (!staged.described || (Boolean(staged.description) && s.descriptionsMode === "apply"))))) {
@@ -174,7 +208,6 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		// The click's description, by what's live now (the panel may have filled the empty one, which EmDash saves at
 		// once): the same text was applied; another text is the person's, which stays, and the click's is dismissed;
 		// none is a suggestion, as from an analysis (written by the queued job above in "apply" mode).
-		const live = hasDescription ? (seoDescription as string).trim() : "";
 		if (isOn(features, "ai.descriptions") && t.info.hasSeo && staged.description) {
 			if (live && live === staged.description.trim()) {
 				description = staged.description;
@@ -238,7 +271,7 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		features: FEATURES,
 		routes: aiRoutes(options),
 		hooks: {
-			"content:afterSave": onContent,
+			"content:afterSave": (event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) => onContent(event, ctx, true),
 			"content:afterPublish": onContent,
 			"content:afterRestore": onContent,
 			/** Forget a deleted (or trashed) entry: its analysis, any queued job, and what AI Enrich staged. A restore queues it again. */
