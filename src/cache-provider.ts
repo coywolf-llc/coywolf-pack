@@ -31,7 +31,7 @@
  * account's purge limit (5 a minute, a burst of 25, shared by every site) would
  * otherwise run out, refusing editors' saves on every site for minutes after.
  * invalidate() then returns before the purge is made; the scheduled run is kept
- * open until it is (ctx.waitUntil).
+ * open until it is (ctx.waitUntil). A refused batch is logged, not retried.
  *
  * Astro loads this module through its own entrypoint (bundled into the Worker),
  * and @astrojs/cloudflare comes from the site. No static cloudflare:workers or
@@ -50,9 +50,12 @@ const TAGS_PER_PURGE = 100;
 /**
  * How a scheduled run's purges are gathered: purged once no more come for
  * `quietMs`, at most `maxWaitMs` after the first, and at once when there are
- * 100 tags. (Tests change these.)
+ * 100 tags. Nothing waits for the purge, so the quiet time can be long enough
+ * for a task that publishes an entry every second or two (glossary.io's daily
+ * run: 25 terms in up to 25 seconds, each a few D1 trips away). (Tests change
+ * these.)
  */
-export const batching = { quietMs: 1_500, maxWaitMs: 10_000 };
+export const batching = { quietMs: 5_000, maxWaitMs: 10_000 };
 
 interface Batch {
 	tags: Set<string>;
@@ -83,7 +86,12 @@ async function flush(run: ScheduledRun, batch: Batch): Promise<void> {
 	if (batches.get(run) === batch) batches.delete(run); // Tags queued from here on start a new batch.
 	const tags = [...batch.tags];
 	try {
-		for (let i = 0; i < tags.length; i += TAGS_PER_PURGE) await purgeOutcome({ tags: tags.slice(i, i + TAGS_PER_PURGE) });
+		for (let i = 0; i < tags.length; i += TAGS_PER_PURGE) {
+			const chunk = tags.slice(i, i + TAGS_PER_PURGE);
+			const outcome = await purgeOutcome({ tags: chunk });
+			// Refused (the account's purge limit) or failed: said here too, where the scheduled run's logs show it.
+			if (outcome === "refused") console.error(`coywolf-pack: EmDash's page cache purge from the scheduled run was refused (${chunk.length} tags); those pages stay cached until they expire`);
+		}
 	} finally {
 		batch.done();
 	}
@@ -117,7 +125,13 @@ const coywolfCloudflareCache: CacheProviderFactory = (config) => {
 			if (!run) return provider.invalidate(options);
 			// The tags Astro's provider would purge (its path tag included), on a copy: collectInvalidationTags adds to the array it's given.
 			const tags = collectInvalidationTags({ ...options, tags: Array.isArray(options.tags) ? [...options.tags] : options.tags }).filter(Boolean);
-			if (tags.length) queue(run, tags);
+			if (!tags.length) return;
+			// A run whose ctx can't be held open (no waitUntil: never on Workers) purges now, as nothing would keep a later purge alive.
+			if (typeof (run.ctx as { waitUntil?: unknown } | undefined)?.waitUntil !== "function") {
+				for (let i = 0; i < tags.length; i += TAGS_PER_PURGE) await purgeOutcome({ tags: tags.slice(i, i + TAGS_PER_PURGE) });
+				return;
+			}
+			queue(run, tags);
 		},
 	};
 };

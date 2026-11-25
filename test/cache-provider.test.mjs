@@ -30,9 +30,9 @@ export const exports = new Proxy({}, { get: (_, k) => globalThis.__moduleExports
 });
 
 const { default: coywolfCloudflareCache, batching } = await import("../src/cache-provider.ts");
-// Short waits, so the tests don't sit through the real 1.5 s (with room for a slow CI machine).
-batching.quietMs = 20;
-batching.maxWaitMs = 2_000;
+// Short waits, so the tests don't sit through the real 5 s (with room for a slow CI machine's pauses).
+batching.quietMs = 100;
+batching.maxWaitMs = 5_000;
 const { PURGE_PROP } = await import("../src/core/scheduled-purge.ts");
 const { stripTrackingParams } = await import("../src/worker.ts");
 
@@ -149,10 +149,19 @@ test("in a scheduled run: no tags, no call; over 100 tags, one call per 100 (dup
 	assert.equal(none.loopbacks.length, 0);
 
 	reset();
+	// At 100 tags the batch goes at once, without waiting for quiet.
+	const quiet = batching.quietMs;
+	batching.quietMs = 5_000;
 	const many = ["posts", ...Array.from({ length: 100 }, (_, i) => `id-${i}`), "posts"];
 	const big = site(() => provider.invalidate({ tags: many }));
-	await big.wrapped.scheduled({}, {}, big.ctx);
-	await big.drain();
+	const started = Date.now();
+	try {
+		await big.wrapped.scheduled({}, {}, big.ctx);
+		await big.drain();
+	} finally {
+		batching.quietMs = quiet;
+	}
+	assert.ok(Date.now() - started < 1_000, `purged after ${Date.now() - started} ms`);
 	assert.deepEqual(
 		big.loopbacks.map((l) => l.props[PURGE_PROP].tags.length),
 		[100, 1],
@@ -239,7 +248,7 @@ test("in a scheduled run: EmDash's purges are gathered into one (glossary.io's d
 test("in a scheduled run: a batch is purged at most maxWaitMs after its first tags, even while more keep coming; a string tag counts", async (t) => {
 	reset();
 	const saved = batching.maxWaitMs;
-	batching.maxWaitMs = 60;
+	batching.maxWaitMs = 300;
 	t.after(() => (batching.maxWaitMs = saved));
 	const provider = coywolfCloudflareCache(undefined);
 	const { wrapped, ctx, loopbacks, drain } = site(async () => {
@@ -256,6 +265,39 @@ test("in a scheduled run: a batch is purged at most maxWaitMs after its first ta
 	const all = loopbacks.flatMap((l) => l.props[PURGE_PROP].tags);
 	assert.equal(new Set(all).size, all.length, "each tag once");
 	assert.equal(all[0], "one-0");
+});
+
+test("in a scheduled run: two runs at once (two isolates' worth in one) keep their own batches", async () => {
+	reset();
+	const provider = coywolfCloudflareCache(undefined);
+	const a = site(async () => {
+		await provider.invalidate({ tags: ["A1"] });
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		await provider.invalidate({ tags: ["A2"] });
+	});
+	const b = site(async () => {
+		await provider.invalidate({ tags: ["B1"] });
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		await provider.invalidate({ tags: ["B2"] });
+	});
+	await Promise.all([a.wrapped.scheduled({}, {}, a.ctx), b.wrapped.scheduled({}, {}, b.ctx)]);
+	await Promise.all([a.drain(), b.drain()]);
+	assert.deepEqual(a.loopbacks.map((l) => l.props[PURGE_PROP].tags), [["A1", "A2"]]);
+	assert.deepEqual(b.loopbacks.map((l) => l.props[PURGE_PROP].tags), [["B1", "B2"]]);
+});
+
+test("in a scheduled run whose ctx has no waitUntil, the purge is made before invalidate() returns", async () => {
+	reset();
+	const provider = coywolfCloudflareCache(undefined);
+	let seen = -1;
+	const { wrapped, ctx, loopbacks } = site(async () => {
+		await provider.invalidate({ tags: ["posts"] });
+		seen = loopbacks.length;
+	});
+	const { waitUntil: _held, ...unheld } = ctx;
+	await wrapped.scheduled({}, {}, unheld);
+	assert.equal(seen, 1);
+	assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts"] }, inFetch: true }]);
 });
 
 test("package.json exports it, and @astrojs/cloudflare is an optional peer (only this file needs it)", () => {
