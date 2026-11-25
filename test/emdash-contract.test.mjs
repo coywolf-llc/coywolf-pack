@@ -1130,6 +1130,67 @@ test("EmDash's routes the pack calls, links to or watches exist, with those meth
 	}
 });
 
+// ── EmDash behavior the pack's docs describe (1.5 and 1.6) ─────
+
+/** A class method's source, `async name(…) { … }`, from a bundle. */
+function methodSource(src, name) {
+	const at = src.indexOf(`async ${name}(`);
+	assert.ok(at !== -1, `method ${name} isn't in the bundle`);
+	const open = src.indexOf("{", src.indexOf(")", at));
+	return src.slice(at, walk(src, open + 1, true, []) + 1);
+}
+
+test("not-found pages: EmDash 1.6+ keeps a 404 in the route cache for at most 60 seconds, 1.5 never (docs/performance.md)", () => {
+	const redirect = [...emdashDist.entries()].find(([file]) => file.endsWith(join("middleware", "redirect.mjs")))?.[1];
+	assert.ok(redirect, `EmDash ${emdashVersion} has no astro/middleware/redirect.mjs`);
+	const never = /response\.status === 404\) routeCache\?\.set\(false\)/.test(redirect);
+	const capped = /response\.status === 404 && routeCacheStores\(routeCache\)\) routeCache\?\.set\(\{\s*maxAge: Math\.min\(routeCache\.options\.maxAge \?\? 60, 60\),\s*swr: 0\s*\}\)/.test(redirect);
+	assert.ok(never || capped, `EmDash ${emdashVersion} caches not-found pages differently: update "not-found pages" in docs/performance.md`);
+	if (!/^1\.5\./.test(emdashVersion)) assert.ok(capped, `EmDash ${emdashVersion} no longer caps a cached 404 at 60 seconds: update docs/performance.md`);
+});
+
+test("replacing a media file: EmDash 1.6+ runs media:afterUpload with the item's id and type (the pack's image sizes and AI image text listen); the pack's PUT …/replace watch still forces new sizes (src/images/pack.ts)", () => {
+	const runtime = [...emdashDist.values()].find((src) => src.includes("async handleMediaReplaceMetadata("));
+	assert.ok(runtime, `EmDash ${emdashVersion} has no handleMediaReplaceMetadata`);
+	const replace = methodSource(runtime, "handleMediaReplaceMetadata");
+	const fires = /this\.hooks\.hasHooks\("media:afterUpload"\)[\s\S]*?id: item\.id,[\s\S]*?mimeType: item\.mimeType,[\s\S]*?this\.runMediaAfterUploadHook\(mediaItem\)/.test(replace);
+	if (/^1\.5\./.test(emdashVersion)) return assert.doesNotMatch(replace, /media:afterUpload/);
+	assert.ok(fires, `EmDash ${emdashVersion} no longer runs media:afterUpload after a replaced file: update the replace notes in src/images/pack.ts, docs/images.md and docs/ai.md`);
+});
+
+test("editor extensions: EmDash still serves none to a configured plugin with an admin entry, as the pack is (docs/internals.md)", () => {
+	const runtime = [...emdashDist.values()].find((src) => src.includes("getPluginEditorExtension("));
+	assert.ok(runtime, `EmDash ${emdashVersion} has no getPluginEditorExtension`);
+	assert.match(
+		runtime,
+		/getPluginEditorExtension\([^)]*\) \{[\s\S]{0,600}?if \(configured\) \{\s*if \(configured\.admin\.entry\) return null;/,
+		`EmDash ${emdashVersion} now serves editor actions to a plugin with an admin entry: the pack's editor features could use them (docs/internals.md)`,
+	);
+});
+
+test("scheduled run: EmDash leaves its cache purges to the host's scheduled handler, and @emdash-cms/cloudflare's makes them with the Astro cache provider's invalidate({ tags }) (what src/cache-provider.ts reroutes)", (t) => {
+	const changed = `EmDash ${emdashVersion} changed how its scheduled run purges the cache: check whether the pack's cache provider (src/cache-provider.ts) is still needed (docs/performance.md)`;
+	// EmDash's runtime takes both purges as callbacks: scheduled publishing's and plugin content actions'.
+	const runtime = [...emdashDist.values()].find((src) => src.includes("async runScheduledTasks("));
+	assert.ok(runtime, `EmDash ${emdashVersion} has no runtime runScheduledTasks`);
+	// 1.6.0 moved the body into runScheduledTasksWithStats (runScheduledTasks calls it).
+	const run = methodSource(runtime, runtime.includes("async runScheduledTasksWithStats(") ? "runScheduledTasksWithStats" : "runScheduledTasks");
+	assert.match(run, /if \(options\.invalidateContentCache\) this\.pluginContentCacheInvalidator = options\.invalidateContentCache;/, changed);
+	// 1.5.0 hands the whole options object to the publish sweep; 1.6.0 passes onPublished on by name.
+	assert.match(run, /options\.onPublished|runScheduledMaintenanceTick\(options,/, changed);
+	// The sites' worker (@emdash-cms/cloudflare): CI unpacks the matching release (no install: its exact peers would
+	// pin one EmDash and bring Wrangler) and names the folder in EMDASH_CLOUDFLARE_DIR.
+	const dir = process.env.EMDASH_CLOUDFLARE_DIR;
+	if (!dir) return t.skip("EMDASH_CLOUDFLARE_DIR isn't set (CI unpacks @emdash-cms/cloudflare there)");
+	assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version, emdashVersion, "EMDASH_CLOUDFLARE_DIR holds another release than the installed EmDash");
+	const worker = readFileSync(join(dir, "dist", "worker.mjs"), "utf8");
+	assert.match(worker, /app\.manifest\.cacheProvider\?\.\(\)/, changed);
+	for (const name of ["invalidatePublishedTags", "invalidateContentTags"]) assert.match(functionSource(worker, name), /await provider\.invalidate\(\{ tags \}\);/, changed);
+	assert.match(worker, /runScheduledTasks\(\{\s*onPublished: invalidatePublishedTags,\s*invalidateContentCache: invalidateContentTags[,\s]/, changed);
+	// 1.6.0: each run also waits up to 70 s for entries due within that window; the purges still run inside it.
+	if (!/^1\.5\./.test(emdashVersion)) assert.match(worker, /publishUpcomingWithinMs: PUBLISH_UPCOMING_WITHIN_MS/, changed);
+});
+
 test("sign-in email limits: the pack counts in EmDash's _emdash_rate_limits the way checkRateLimit does, finds EmDash's users, and holds with an address EmDash accepts (src/core/signin-limit.ts)", async () => {
 	const limit = await import("../src/core/signin-limit.ts");
 	const path = "/_emdash/api/auth/magic-link/send";
