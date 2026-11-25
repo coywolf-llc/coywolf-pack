@@ -238,6 +238,33 @@ test("focus the person moved elsewhere meanwhile is left where it is", async () 
 	other.remove();
 });
 
+test("focus that was nowhere (a mouse click in Safari focuses no button) is never pulled to the panel: that would scroll the sidebar", async () => {
+	route({ toast: { type: "info", message: "Nothing to add." } });
+	const panel = await render(fakeDraft().draft);
+	window.document.activeElement?.blur?.();
+	// (Compared as booleans: a failed comparison of DOM nodes takes minutes to print.)
+	assert.ok(window.document.activeElement === window.document.body);
+	await act(async () => panel.button("AI Enrich").click());
+	await settle();
+	assert.equal(panel.status().textContent, "Nothing to add.");
+	assert.ok(window.document.activeElement === window.document.body, "focus stayed where it was");
+});
+
+test("from the status line, focus moves without scrolling the page", async () => {
+	route({ toast: { type: "info", message: "Nothing to add." } });
+	const panel = await render(fakeDraft().draft);
+	const button = panel.button("AI Enrich");
+	const focused = [];
+	const focus = button.focus.bind(button);
+	button.focus = (options) => {
+		focused.push(options);
+		focus(options);
+	};
+	await panel.click("AI Enrich");
+	assert.ok(window.document.activeElement === button);
+	assert.deepEqual(focused.at(-1), { preventScroll: true });
+});
+
 test("a review that outlived its draft (the entry was left and opened again, or edited while the settings were hidden) never opens: stale, with Run again", async () => {
 	const first = fakeDraft("a");
 	route(patched("rev:a:0"));

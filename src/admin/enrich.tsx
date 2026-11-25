@@ -70,6 +70,7 @@ export function EnrichButton(props: { collection: string; entryId: string; draft
 	}, [key, props.updatedAt]);
 	// Focus follows the run for a keyboard user: start() puts it on the status line (the button it was on is disabled
 	// or gone meanwhile); when the run or its review ends and it's still there, it goes to Run again, or back to the button.
+	// Only from there, and without scrolling: focus that was nowhere (a mouse click in Safari) isn't pulled to the panel.
 	const before = React.useRef(phase);
 	React.useEffect(() => {
 		const was = before.current;
@@ -77,8 +78,8 @@ export function EnrichButton(props: { collection: string; entryId: string; draft
 		if ((was !== "running" && was !== "review") || phase === "running" || phase === "review") return;
 		const move = () => {
 			const active = document.activeElement;
-			if (active && active !== status.current && active !== document.body) return;
-			(phase === "stale" ? again.current : button.current)?.focus();
+			if (active !== status.current) return;
+			(phase === "stale" ? again.current : button.current)?.focus({ preventScroll: true });
 		};
 		if (was === "running") return move();
 		// After a review, once the dialog has given focus back.
