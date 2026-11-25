@@ -179,6 +179,17 @@ test("a click: the status line is a status region that says it's working, then t
 	assert.equal(panel.applied.length, 1, "the panel reloads its suggestions");
 });
 
+test("images only left as they are: the section has no zero count, just the note", async () => {
+	const { draft } = fakeDraft();
+	route({ ...patched("rev:a:0"), review: { ...REVIEW, images: [], leftAlone: 1 } });
+	const panel = await render(draft);
+	await panel.click("AI Enrich");
+	const dialog = panel.dialog();
+	assert.ok(dialog);
+	assert.doesNotMatch(dialog.textContent, /Images \(0\)/);
+	assert.match(dialog.textContent, /Images1 image is left as it is/);
+});
+
 test("Cancel closes the review and applies nothing", async () => {
 	const { draft, state } = fakeDraft();
 	route(patched("rev:a:0"));

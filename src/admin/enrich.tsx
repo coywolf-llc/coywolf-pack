@@ -160,7 +160,7 @@ function EnrichReview(props: { state: Extract<RunState, { phase: "review" }>; on
 						</Section>
 					)}
 					{(review.images.length > 0 || review.leftAlone > 0) && (
-						<Section title={`Images (${review.images.length})`}>
+						<Section title={review.images.length > 0 ? `Images (${review.images.length})` : "Images"}>
 							{review.images.length > 0 && (
 								<ul role="list" className="space-y-2 text-sm">
 									{review.images.map((image, i) => (
