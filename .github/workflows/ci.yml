@@ -97,7 +97,14 @@ jobs:
             npm install --no-save --no-audit --no-fund "emdash@$version" "@cloudflare/kumo@$KUMO"
           fi
           git diff --exit-code -- package.json package-lock.json
-          echo "Testing EmDash $(installed emdash) (admin $(installed @emdash-cms/admin)) with Kumo $(installed @cloudflare/kumo)."
+          # The sites' worker package, @emdash-cms/cloudflare, of the same release: unpacked for the contract tests to
+          # read, not installed (its exact peers would pin one EmDash and bring Wrangler).
+          worker="$RUNNER_TEMP/emdash-cloudflare"
+          mkdir -p "$worker"
+          tarball="$(npm pack --silent --ignore-scripts --pack-destination "$RUNNER_TEMP" "@emdash-cms/cloudflare@$version")"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$worker" --strip-components=1
+          echo "EMDASH_CLOUDFLARE_DIR=$worker" >> "$GITHUB_ENV"
+          echo "Testing EmDash $(installed emdash) (admin $(installed @emdash-cms/admin)) with Kumo $(installed @cloudflare/kumo); worker package @emdash-cms/cloudflare $version."
           echo "run=true" >> "$GITHUB_OUTPUT"
 
       - if: steps.versions.outputs.run == 'true'
