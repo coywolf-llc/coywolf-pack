@@ -39,7 +39,44 @@ Ported from Coywolf SEO's AI features, with the same prompts and validation:
 
 Apart from glossary.io definitions, they're all off by default, under the **AI Enrichment** switch on the **Features** page (**Coywolf Pack → Features** in the sidebar).
 
-**In the entry editor.** While AI Enrichment is on, a saved entry's sidebar has an **AI suggestions** section (admins only): the suggested meta description with **Copy** and **Dismiss**, the entities found (main subjects highlighted), and **Analyze again**, which queues the entry. It doesn't write the description itself: paste it into the SEO section, or apply it on the AI page, so it can't clash with the editor's own save. It says so when the entry's collection isn't one AI Enrichment analyzes.
+**In the entry editor.** While AI Enrichment is on, a saved entry's sidebar has an **AI suggestions** section (admins only): the suggested meta description with **Copy** and **Dismiss**, the entities found (main subjects highlighted), and **Analyze again**, which queues the entry. It doesn't write the description itself: paste it into the SEO section, or apply it on the AI page, so it can't clash with the editor's own save. It says so when the entry's collection isn't one AI Enrichment analyzes. An entry the **AI Enrich** button analyzed shows "Analyzed in the editor, waiting for publish" there until it's published.
+
+
+## AI Enrich button
+
+Since 0.52.0, the entry editor's toolbar can have an **AI Enrich** button (admins only), so an entry gets its glossary.io links and image text before it goes live, and you see them first. It's a small second plugin next to Coywolf Pack, because EmDash 1.5 shows editor buttons only for plugins without their own admin pages, and the pack has them. Add it after `coywolfPlugin()` in `astro.config.mjs`:
+
+```js
+import { coywolfPlugin } from "@coywolf/emdash";
+import { coywolfEditorPlugin } from "@coywolf/emdash/editor";
+
+emdash({
+	plugins: [
+		coywolfPlugin({ /* … */ }),
+		coywolfEditorPlugin({ read: ["title", "content", "excerpt", "featured_image"], patch: ["content", "featured_image"] }),
+	],
+});
+```
+
+`read` names the fields the button reads from the editor and `patch` the ones it may change; without them it uses the collection's translatable fields, and fields a collection doesn't have are ignored. It needs `coywolfPack()` in the site's middleware: the button hands the editor's draft to the pack inside the same Worker, through EmDash's own route dispatcher (`src/core/bridge.ts`), not over HTTP. It shows while AI Enrichment is on with **glossary.io links** (and **Entities for schema**) or **Image text**; in a collection AI Enrichment doesn't work on, a click says so.
+
+**What a click does.** It works on what's in the editor now, saved or not (the entry has to be saved once), drafts that were never published included:
+
+- **glossary.io links** (when the part is on): the entities are found the way an analysis finds them (or taken from the entry's analysis, or an earlier click's, when the title and text are the same), and the links are planned by the same rules as after publishing, possessives included. A link you removed by hand earlier isn't added back. Entries on the `skip` list get no links.
+- **Image text** (when the part is on): every image in the fields it may change (image blocks, galleries, and image fields such as a featured image) that has no alt text or no caption gets it. The text comes from the media library item first, then from a suggestion the pack already has for that image, and only then from the model, which also gets the draft's title and the text around the image. Text a person wrote is never replaced, an image whose suggestion you dismissed is left alone, and SVGs, images added by URL and images from another media provider are skipped. Captions are filled whatever **Also write captions** says; that setting and the image text mode still decide what's written to the media library itself, as on upload.
+- **Meta descriptions** (when the part is on, the entry has none and its collection has an SEO panel): a suggestion is written with the analysis. The button can't fill EmDash's SEO panel; after publishing it's on the AI page, or applied with **Fill empty descriptions automatically**.
+
+The answer is one patch, shown in EmDash's **Review proposed changes** dialog. **Apply** puts it in the form as an unsaved change; then save or publish as usual. The dialog's preview shows only the first 160 characters of text, so a change that only adds links looks the same there: the message says what was added ("Added 3 glossary.io links (Google, Fastmail, Cloudflare). Wrote alt text for 2 and captions for 3 of 3 images. Review the changes, then save."). When something stops it (today's call limit, Wikidata asking to slow down, an AI service error, no copy of the glossary.io index yet), the message says so, and the patch still has whatever could be done.
+
+**Limits.**
+
+- Each model call gives up after 40 seconds and none starts after 50, so a click ends within about 75 seconds. Up to 8 images are described per click: click again for the rest. Every call counts against the daily limit and is in the usage log.
+- Nothing is paid for twice: what a click paid for (the entities, a description, each image's text) is kept, so a second click reuses it, and costs nothing unless the text changed.
+- EmDash limits what a button can send and get back: 64 KB per field, 2,000 values and 256 KB for the whole answer. A patch that would be larger loses captions first, then alt text, then a field's links ("The text is too large to add everything"). A field that's already over 64 KB can't be sent at all, and EmDash shows its own "Plugin action failed"; the links are then made after publishing, as without the button.
+- Typing (or an autosave) while it runs makes its answer stale, and EmDash says so. Click again: the second click takes seconds.
+- The draft's text and images go to the AI provider when you click, before the entry is published.
+
+**At publish.** The button's analysis is kept apart (`aiDrafts`) until the entry is published, so the live page's JSON-LD keeps the published entry's entities meanwhile. When the published title and text are the ones the button analyzed (with its patch or without it), the publish uses that analysis: nothing is queued and no model is called. Otherwise (the text changed since, or the click stopped early) the entry is analyzed as usual. The links the button proposed never count as linked when you click, only as planned. At the publish, when the published text has any of them (or the button proposed none), they count as linked, so one you removed before publishing stays removed; then the scheduled run checks the entry's links once, a few minutes later, without a model call, and adds only what's missing (so a patch you didn't apply is linked then, with `keepDates` if it's on). An analysis that's never published is deleted after 30 days, and with its entry.
 
 ## How it runs
 
