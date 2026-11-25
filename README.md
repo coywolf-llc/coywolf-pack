@@ -41,7 +41,7 @@ Every module starts off on a new site. Turn on only the ones you want on the **F
 | [Videos](docs/videos.md) | Cloudflare Stream library, a video block with a light embed, video schema and sitemap, plays and likes |
 | [Reviews](docs/reviews.md) | A review block (rating, pros and cons) with Review schema |
 | [Custom Blocks](docs/custom-blocks.md) | Note, Details, Affiliate disclosure, Quote, Testimonial and Podcast links blocks |
-| [AI Enrichment](docs/ai.md) | Wikidata-grounded entities for schema (linked to their glossary.io definitions, also in the text if you like, with links to deleted terms taken out), meta descriptions and image alt text, and an AI Enrich button in the entry editor that adds the links, alt text and captions before you publish |
+| [AI Enrichment](docs/ai.md) | Wikidata-grounded entities for schema (linked to their glossary.io definitions, also in the text if you like, with links to deleted terms taken out), meta descriptions and image alt text, and an AI Enrich button in the entry editor that adds the links, alt text, captions and an empty meta description, for review, before you publish |
 | [WordPress Migration](docs/wordpress-import.md) | Finishes a move from WordPress after EmDash's own Import: blocks, authors, category parents, media URLs and redirects |
 
 ## Getting started
@@ -50,7 +50,7 @@ Coywolf Pack is a native (trusted) EmDash plugin: you add it to your site's code
 
 ### What you need
 
-- An EmDash site (1.5 or later) on Cloudflare Workers, using EmDash's Cloudflare adapter with a D1 database bound as `DB` and an R2 media bucket bound as `MEDIA`. That's the setup EmDash's own Cloudflare starter creates.
+- An EmDash site (1.6 or later; 1.5 up to Coywolf Pack 0.51) on Cloudflare Workers, using EmDash's Cloudflare adapter with a D1 database bound as `DB` and an R2 media bucket bound as `MEDIA`. That's the setup EmDash's own Cloudflare starter creates.
 - The site's code in a folder (or Git repository) you can edit and deploy, with Node.js and Wrangler.
 
 ### 1. Install the package
