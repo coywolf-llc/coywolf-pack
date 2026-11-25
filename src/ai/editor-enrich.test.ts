@@ -1151,39 +1151,51 @@ test("must pass: after Apply and the editor's autosave, the saved draft's text h
 	forgetOwn();
 });
 
-test("an image whose file is read only after the deadline gets no model call: it waits for the next round, and no other file is read", async () => {
+test("an image whose file is read only after the deadline gets no model call: it waits for the next round, and no other file is read; the panel asks again on its own only when the round got something new", async () => {
+	const realNow = Date.now;
+	/** A click whose `slowAt`-th file read takes the request's time (the workers behind it had passed the deadline check). */
+	const round = async (site: Site, slowAt: number) => {
+		let skew = 0;
+		let reads = 0;
+		Date.now = () => realNow() + skew;
+		const media = (site.ctx as { media: { readBytes: (id: string) => Promise<unknown> } }).media;
+		const read = media.readBytes;
+		media.readBytes = async (id: string) => {
+			if (++reads === slowAt) skew = enrich.START_BY_MS + 1;
+			return read(id);
+		};
+		try {
+			return { answer: await site.click(), reads };
+		} finally {
+			Date.now = realNow;
+			media.readBytes = read;
+		}
+	};
 	reset();
 	const m = model();
 	const site = fakeSite({ features: { ai: true, "ai.imageText": true } });
-	const realNow = Date.now;
-	let skew = 0;
-	Date.now = () => realNow() + skew;
-	let reads = 0;
-	const media = (site.ctx as { media: { readBytes: (id: string) => Promise<unknown> } }).media;
-	const read = media.readBytes;
-	media.readBytes = async (id: string) => {
-		reads++;
-		// The read took the request's time (three workers had passed the deadline check before it).
-		skew = enrich.START_BY_MS + 1;
-		return read(id);
-	};
-	let first: Answer;
-	try {
-		first = await site.click();
-	} finally {
-		Date.now = realNow;
-	}
+	const first = await round(site, 1);
 	assert.equal(visionCalls(m), 0, "no call starts after the deadline");
-	assert.equal(reads, 1, "the files queued behind it aren't read");
-	assert.equal(first.more, true, "only time stopped it");
-	assert.equal(first.review?.remaining, 2, "the image uses that still have nothing (the featured image has the library's alt text)");
-	assert.match(first.toast.message, /Click AI Enrich again for the rest\./);
-	assert.equal(first.toast.type, "success");
-	// The next round does them.
+	assert.equal(first.reads, 1, "the files queued behind it aren't read");
+	assert.equal(first.answer.more, undefined, "nothing new: another round would only read that file again");
+	assert.equal(first.answer.review?.remaining, 2, "the image uses that still have nothing (the featured image has the library's alt text)");
+	assert.match(first.answer.toast.message, /Click AI Enrich again for the rest\./);
+	assert.equal(first.answer.toast.type, "success");
+	// The next click does them.
 	const second = await site.click();
 	assert.equal(visionCalls(m), 3);
 	assert.equal(second.more, undefined);
 	assert.equal(second.review?.remaining, 0);
+
+	// One image got its text before a file's read took the time: only time stopped the rest, so the panel asks again.
+	reset();
+	const n = model();
+	const other = fakeSite({ features: { ai: true, "ai.imageText": true } });
+	const partly = await round(other, 2);
+	assert.equal(visionCalls(n), 1);
+	assert.equal(partly.reads, 2);
+	assert.equal(partly.answer.more, true);
+	assert.equal(partly.answer.review?.remaining, 2);
 });
 
 test("a round stopped by time during the Wikidata lookups keeps what it found: the next round looks up only the rest, and a round with nothing new doesn't ask for another", async () => {

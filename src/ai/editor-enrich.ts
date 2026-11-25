@@ -723,8 +723,10 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	const what = parts.join(" ");
 	const issue: Issue | undefined = issues.entity ?? issues.description ?? issues.image ?? issues.links;
 	// Only time, or images past this request's cap, stopped it: the panel asks again, and that round starts where this one stopped.
-	// A round that timed out with nothing new (Wikidata too slow for even one lookup) would only repeat itself.
-	const more = issue?.kind === "time" ? progressed || JSON.stringify(cache) !== cacheBefore : !issue && left > 0;
+	// A round that got nothing new (Wikidata too slow for even one lookup, a file that takes the whole request to read)
+	// would only repeat itself: the toast says to click again instead.
+	const gotNew = progressed || JSON.stringify(cache) !== cacheBefore;
+	const more = (issue?.kind === "time" || (!issue && left > 0)) && gotNew;
 	const review: EnrichReview = {
 		links: termFields.map(({ c, field }) => ({ name: c.entity, slug: c.slug, url: c.href, field, action: c.action === "add" ? ("add" as const) : ("switch" as const) })),
 		possessives: fixes.length,
