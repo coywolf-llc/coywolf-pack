@@ -347,7 +347,8 @@ const WP_MEDIA_IMPORT = "/_emdash/api/import/wordpress/media";
  * Keep stored sizes in step with media-library writes the hooks don't cover,
  * after a successful response (null when the request isn't one):
  * - a deleted image: its copies and record go (whether or not the feature is on);
- * - a replaced file (PUT …/replace, same key): its sizes are made again;
+ * - a replaced file (PUT …/replace, same key): its sizes are made again, forced. EmDash 1.6.0+ also runs
+ *   media:afterUpload for it, but the hook's variantsForUpload leaves an image that has sizes alone;
  * - a WordPress media import (EmDash's importer doesn't notify plugins): a new backfill run starts (its chain
  *   of steps, see startBackfillChain), only when the site turned on stored sizes for existing images (an
  *   import can be thousands of images). `origin` is the site's, for the chain's steps.
@@ -371,7 +372,9 @@ export function variantsAfterMediaWrite(method: string, pathname: string, featur
 			forgetInfo(id);
 		})();
 	}
-	// PUT /media/<id>/replace keeps the key but changes the file: EmDash runs no upload hook for it.
+	// PUT /media/<id>/replace keeps the key but changes the file. EmDash 1.5 runs no upload hook for it; 1.6.0+ runs
+	// media:afterUpload, whose path skips an image that has sizes, so only this forces new ones. On 1.6 both may
+	// run: the same keys, made from the new file.
 	if (method === "PUT" && action === "replace" && featureOn) {
 		return (async () => {
 			const deps = await variantDeps();
@@ -401,7 +404,8 @@ export function imagesPack(options: ImagesOptions = {}): PackModule {
 		adminPages: [{ path: "/images", label: "Clean Image URLs", icon: "image" }],
 		storage: { [VARIANTS_COLLECTION]: { indexes: [] } },
 		hooks: {
-			// Every new upload (EmDash 1.2.0+ runs it for direct uploads too, after POST …/confirm). EmDash
+			// Every new upload (EmDash 1.2.0+ runs it for direct uploads too, after POST …/confirm), and since
+			// EmDash 1.6.0 a replaced file (whose forced remake is variantsAfterMediaWrite's). EmDash
 			// doesn't wait for this hook, so compose.ts runs it under waitUntil, after the upload's response;
 			// an image whose sizes already exist is left alone (processMedia).
 			"media:afterUpload": (event: { media: { id: string; mimeType?: string } }) => variantsForUpload(event.media),
