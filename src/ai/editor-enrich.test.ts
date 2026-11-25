@@ -2129,6 +2129,75 @@ test("a collection without revisions (a save is the publish): the SEO save of th
 	}
 });
 
+/** The form once a links-only click's patch is applied: its glossary.io links are in the text, so a later click plans none. */
+async function linkedFields(): Promise<Record<string, unknown>> {
+	reset();
+	model();
+	return applied(draftFields(), await fakeSite({ features: LINKS_ONLY }).click());
+}
+
+test("a collection without revisions, the links already in the text: the SEO save of the text before the patch waits for the staged analysis alone (no planned links), so the save of the patched text pays for nothing", async () => {
+	const linked = await linkedFields();
+	reset();
+	worker.resetSchemaCacheForTests();
+	try {
+		const m = model();
+		const site = fakeSite({ status: "published", features: ALL_ON, supports: [] });
+		Object.assign(site.item, { data: structuredClone(linked), liveRevisionId: null, draftRevisionId: null });
+		const answer = await site.click(structuredClone(linked));
+		assert.deepEqual(answer.review?.links, [], "no link to add");
+		const staged = structuredClone(site.storage.aiDrafts.value<DraftRecord>("posts:E1"))!;
+		assert.equal(staged.textHashes.length, 2, "the captions change the text");
+		assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1")?.planned?.slugs ?? [], [], "no planned link holds the save back");
+		const paid = m.calls.length;
+
+		await seoSave(site, valueOf(answer, "seo.description"));
+		assert.deepEqual(site.storage.aiDrafts.value<DraftRecord>("posts:E1"), staged, "the staged analysis waits for the patched text");
+		assert.equal(site.storage.aiEntries.rows.size, 0, "nothing promoted on the text before the patch");
+		assert.equal(jobOf(site)?.source, "save");
+		site.storage.aiQueue.rows.clear();
+
+		// The editor's autosave of the patched form: this collection's publish.
+		site.items.set("posts:E1", { ...site.entry(), data: applied(linked, answer) });
+		await site.hook("content:afterSave", site.entry());
+		assert.equal(site.storage.aiDrafts.rows.size, 0, "promoted");
+		assert.equal(site.storage.aiQueue.rows.size, 0, "nothing left to pay for");
+		assert.equal(m.calls.length, paid);
+		const record = site.storage.aiEntries.value<EntryRecord>("posts:E1")!;
+		assert.equal(record.textHash, (await textOf(site, applied(linked, answer))).textHash);
+		assert.equal(record.descriptionStatus, "applied");
+	} finally {
+		worker.resetSchemaCacheForTests();
+		forgetOwn();
+	}
+});
+
+test("a collection with revisions: a save is never the publish, also when the staged analysis is of the live text alone and no link is planned (Apply filled only the description)", async () => {
+	const linked = await linkedFields();
+	reset();
+	worker.resetSchemaCacheForTests();
+	const m = model();
+	const site = fakeSite({ status: "published", features: { ...LINKS_ONLY, "ai.descriptions": true } });
+	Object.assign(site.item, { data: structuredClone(linked), liveRevisionId: "R1", draftRevisionId: "R1" });
+	const answer = await site.click(structuredClone(linked));
+	assert.deepEqual(answer.patch?.operations.map((o) => o.field), ["seo.description"]);
+	const staged = structuredClone(site.storage.aiDrafts.value<DraftRecord>("posts:E1"))!;
+	assert.equal(staged.textHashes.length, 1, "one text: nothing in it waits for a patch");
+	assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1")?.planned?.slugs ?? [], []);
+	const paid = m.calls.length;
+
+	await seoSave(site, valueOf(answer, "seo.description"));
+	assert.equal(site.storage.aiEntries.rows.size, 0, "nothing promoted by a save");
+	assert.deepEqual(site.storage.aiDrafts.value<DraftRecord>("posts:E1"), staged);
+	assert.equal(jobOf(site)?.source, "save", "queued like any save of an entry that has no analysis");
+	// Its job takes what the click paid for, and the staged row (of this text alone) has had its use.
+	assert.equal(await runJob(site), "done");
+	assert.equal(m.calls.length, paid);
+	assert.equal(site.storage.aiEntries.value<EntryRecord>("posts:E1")!.descriptionStatus, "applied");
+	assert.equal(site.storage.aiDrafts.rows.size, 0);
+	forgetOwn();
+});
+
 // ── Helpers that need EmDash's dist ──────────────────────────────
 
 /** A function EmDash's dist exports from a hashed chunk, found by name (as test/emdash-contract.test.mjs does). */
