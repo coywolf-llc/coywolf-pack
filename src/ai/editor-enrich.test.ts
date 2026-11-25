@@ -1,8 +1,11 @@
 /**
- * Unit tests for AI Enrich, the entry editor's button (src/ai/editor-enrich.ts),
- * and the publish that follows it (src/ai/pack.ts): the toasts, one patch with
- * links and image text, nothing paid for twice, the analysis staged (never in
- * aiEntries) and promoted by the publish, and the planned links settled then.
+ * Unit tests for AI Enrich, the button in the entry editor's AI suggestions
+ * panel (src/ai/editor-enrich.ts), and the publish that follows it
+ * (src/ai/pack.ts): the draft the panel sends (checked by type, host keys
+ * apart, never written), the toasts, one patch with links, image text and an
+ * empty meta description, the review and the rounds, nothing paid for twice,
+ * the analysis staged (never in aiEntries) and promoted by the publish, and
+ * the planned links settled then.
  * Run: node --import ./test/ts-resolve.mjs --test src/ai/editor-enrich.test.ts
  */
 import assert from "node:assert/strict";
@@ -180,7 +183,14 @@ interface Item {
 	draftRevisionId: string | null;
 }
 
-function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<string, unknown>; index?: boolean; status?: string; skip?: string[] } = {}) {
+/** The draft revision every test click sends (editorDraft.get()'s): answers echo it. */
+const REV = "draft-1:0";
+/** The schema types of the fake collection's fields and of the editor's host keys (the snapshot's fieldDefinitions). */
+const DRAFT_TYPES: Record<string, string> = { title: "string", content: "portableText", excerpt: "text", featured_image: "image", featured: "boolean", subtitle: "string", slug: "slug", "seo.title": "string", "seo.description": "text" };
+/** The keys of the editor's draft that aren't collection fields. */
+const HOST_KEYS = new Set(["slug", "seo.title", "seo.description"]);
+
+function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<string, unknown>; index?: boolean; status?: string; skip?: string[]; extraFields?: Array<{ slug: string; type: string }> } = {}) {
 	const settings = new Map<string, unknown>([
 		["features", opts.features ?? { ai: true, "ai.entities": true, "ai.glossaryLinks": true, "ai.imageText": true }],
 		["aiProvider", "anthropic"],
@@ -251,6 +261,7 @@ function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<
 								{ slug: "content", type: "portableText", sortOrder: 1, translatable: true },
 								{ slug: "excerpt", type: "text", sortOrder: 2, translatable: true },
 								{ slug: "featured_image", type: "image", sortOrder: 3, translatable: true },
+								...(opts.extraFields ?? []).map((f, i) => ({ ...f, sortOrder: 4 + i, translatable: false })),
 							],
 						}
 					: null,
@@ -301,6 +312,7 @@ function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<
 		},
 	};
 	const options = { glossaryLinks: { skip: opts.skip ?? [] } };
+	const send = (input: unknown) => routes.aiRoutes(options)["ai/editor-enrich"].handler({ ...ctx, input } as never) as Promise<Answer>;
 	return {
 		ctx: ctx as never,
 		options,
@@ -317,9 +329,23 @@ function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<
 		entry: () => items.get("posts:E1")!,
 		hook: (name: "content:afterPublish" | "content:afterSave", content: unknown) => (pack.aiPack(options).hooks![name] as unknown as (event: unknown, ctx: unknown) => Promise<void>)({ content: structuredClone(content), collection: "posts" }, ctx),
 		calls: () => store.callsToday(ctx as never),
-		/** A click with the editor's draft (EmDash's snapshot, as the companion plugin hands it on). */
-		click: (fields: Record<string, unknown> = { title: "Email I like", content: CONTENT(), excerpt: "", featured_image: FEATURED() }, patch: { fields?: string[]; translatable?: true } = { translatable: true }, entryId = "E1") =>
-			routes.aiRoutes(options)["ai/editor-enrich"].handler({ ...ctx, input: { draft: { collection: "posts", entryId, locale: null, baseRevision: "rev-1", invocationId: "inv-0123456789abcdef", fields, fieldDefinitions: [] }, patch } } as never) as Promise<Answer>,
+		/**
+		 * A click: the body the panel sends, with editorDraft.get()'s snapshot of `fields` and the host keys as the
+		 * editor holds them (the slug, no SEO title, the SEO description saved now), `host` changing those (undefined
+		 * leaves a key out).
+		 */
+		click: (fields: Record<string, unknown> = draftFields(), host: Record<string, unknown> = {}, entryId = "E1", round = 1) => {
+			const now = items.get("posts:E1");
+			const snapshot: Record<string, unknown> = { ...fields, slug: now?.slug ?? null, "seo.title": null, "seo.description": now?.seo?.description ?? null };
+			for (const [key, value] of Object.entries(host)) {
+				if (value === undefined) delete snapshot[key];
+				else snapshot[key] = value;
+			}
+			const fieldDefinitions = Object.keys(snapshot).map((slug) => ({ slug, type: DRAFT_TYPES[slug] ?? "json", label: slug, required: false, translatable: true }));
+			return send({ collection: "posts", entryId, draft: { revision: REV, fields: snapshot, fieldDefinitions }, round });
+		},
+		/** Any request body, as the route gets it. */
+		send: (input: unknown) => send(input),
 		/** The entry published with these fields (EmDash's afterPublish content). */
 		publish: async (data: Record<string, unknown>, more: Partial<Item> = {}) => {
 			const live: Item = { ...item, ...more, status: "published", data, liveRevisionId: "R2", draftRevisionId: "R2" };
@@ -332,9 +358,13 @@ function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<
 type Site = ReturnType<typeof fakeSite>;
 
 const valueOf = (answer: Answer, field: string) => answer.patch?.operations.find((o) => o.field === field)?.value;
-/** The patched draft, as the editor holds it once the person applies the patch. */
-const applied = (fields: Record<string, unknown>, answer: Answer) => ({ ...fields, ...Object.fromEntries((answer.patch?.operations ?? []).map((o) => [o.field, o.value])) });
-const draftFields = () => ({ title: "Email I like", content: CONTENT(), excerpt: "", featured_image: FEATURED() });
+/** The patched draft's collection fields, as the editor holds them once the person applies the patch (the SEO panel holds seo.description). */
+const applied = (fields: Record<string, unknown>, answer: Answer) => ({ ...fields, ...Object.fromEntries((answer.patch?.operations ?? []).filter((o) => !HOST_KEYS.has(o.field)).map((o) => [o.field, o.value])) });
+function draftFields(): Record<string, unknown> {
+	return { title: "Email I like", content: CONTENT(), excerpt: "", featured_image: FEATURED() };
+}
+/** An answer of a toast alone, for the test clicks' draft revision. */
+const told = (type: "success" | "error" | "info", message: string, more: Record<string, unknown> = {}) => ({ toast: { type, message }, revision: REV, ...more });
 const node = (content: unknown, ...path: Array<string | number>) => path.reduce<unknown>((v, step) => (v as Record<string | number, unknown>)[step], content) as Record<string, unknown>;
 
 function linksOf(content: unknown): Array<[string, string]> {
@@ -402,7 +432,40 @@ test("a click: one patch with the glossary.io links (possessive inside) and the 
 	assert.equal(site.library.get("M1")!.caption, "");
 	assert.equal(site.library.get("M4")!.alt, "Library alt for the featured image.", "a library's own alt text is never replaced");
 	assert.equal(site.kv.has("state:ai:editor:posts:E1"), false, "the entry's lock is released");
+
+	// The answer for the panel: its draft's revision, nothing more to do, and a review of exactly what the patch adds.
+	assert.equal(answer.revision, REV);
+	assert.equal(answer.more, undefined);
+	assert.deepEqual(answer.progress, { imagesDone: 4, imagesTotal: 4 });
+	const review = answer.review!;
+	assert.deepEqual(review.links.map((l) => [l.name, l.url, l.field]).sort(), [["Fastmail", "https://glossary.io/fastmail/", "content"], ["Google", "https://glossary.io/google/", "content"]]);
+	assert.deepEqual(review.links.map((l) => l.slug).sort(), ["fastmail", "google"]);
+	assert.equal(review.possessives, 0, "a new link takes its possessive in (\"Google's\"): nothing to move");
+	assert.deepEqual([review.leftAlone, review.remaining, review.description], [0, 0, undefined]);
+	assert.deepEqual(
+		review.images.map((i) => [i.field, i.mediaId, i.filename, Boolean(i.alt), Boolean(i.caption)]),
+		[["featured_image", "M4", "four.png", true, true], ["content", "M1", "one.png", true, true], ["content", "M2", "two.png", false, true], ["content", "M3", "three.png", true, true]],
+		"only what's added: M2's alt text is a person's",
+	);
+	assert.equal(review.images[0].alt, "Library alt for the featured image.");
+	assert.equal(review.images[3].caption, "Stored caption for three.");
+	// Every value has the shape EmDash's editor takes for its field (content-editor-draft.ts FIELD_TYPES).
+	assertDraftShapes(answer);
+	// Nothing from the draft is written to the entry: the route only answers.
+	assert.deepEqual(site.writes, []);
 });
+
+/** Each operation's value has the shape EmDash 1.6's editorDraft.patch() takes for its field's type. */
+function assertDraftShapes(answer: Answer) {
+	for (const o of answer.patch?.operations ?? []) {
+		assert.equal(o.op, "set");
+		const type = DRAFT_TYPES[o.field];
+		if (type === "portableText") assert.ok(Array.isArray(o.value) && o.value.every((b) => b && typeof b === "object" && typeof (b as { _type?: unknown })._type === "string"), o.field);
+		else if (type === "image") assert.ok(o.value && typeof o.value === "object" && !Array.isArray(o.value), o.field);
+		else if (o.field === "seo.description") assert.ok(typeof o.value === "string" && o.value.length <= 500, o.field);
+		else assert.fail(`no operation should set ${o.field}`);
+	}
+}
 
 test("a second click pays for nothing: the staged analysis and the stored image text are reused", async () => {
 	reset();
@@ -422,7 +485,7 @@ test("a second click pays for nothing: the staged analysis and the stored image 
 	// The patched draft: nothing left to add.
 	const done = await site.click(applied(draftFields(), first));
 	assert.equal(m.calls.length, paid);
-	assert.deepEqual(done, { toast: { type: "info", message: enrich.TOASTS.nothingToAdd } });
+	assert.deepEqual(done, told("info", enrich.TOASTS.nothingToAdd));
 	assert.equal(site.storage.aiEntries.rows.size, 0);
 	assert.deepEqual(site.storage.aiLinks.value<import("./glossary-linker.js").LinkMemo>("posts:E1")!.planned?.qids, ["Q1", "Q95"], "links already in the draft stay planned");
 });
@@ -433,32 +496,56 @@ test("the toasts for what stops a click before any work", async () => {
 	const draftless = fakeSite();
 	const raw = await routes.aiRoutes({})["ai/editor-enrich"].handler({ ...(draftless.ctx as object), input: {} } as never);
 	assert.deepEqual(raw, { toast: { type: "error", message: enrich.TOASTS.noDraft } });
+	for (const input of [null, "text", { collection: "posts", entryId: "E1" }, { collection: "posts", entryId: "", draft: { fields: {} } }, { collection: 1, entryId: "E1", draft: { fields: {} } }, { collection: "posts", entryId: "E1", draft: { fields: [] } }]) {
+		assert.deepEqual(await draftless.send(input), { toast: { type: "error", message: enrich.TOASTS.noDraft } }, JSON.stringify(input));
+	}
 
 	const off = fakeSite({ features: { ai: true, "ai.entities": true, "ai.descriptions": true } });
-	assert.deepEqual(await off.click(), { toast: { type: "info", message: enrich.TOASTS.off } });
+	assert.deepEqual(await off.click(), told("info", enrich.TOASTS.off));
 
 	const keyless = fakeSite({ settings: { aiApiKey: "" } });
-	assert.deepEqual(await keyless.click(), { toast: { type: "error", message: enrich.TOASTS.noKey } });
+	assert.deepEqual(await keyless.click(), told("error", enrich.TOASTS.noKey));
 
 	const workersAi = fakeSite({ settings: { aiProvider: "workers-ai" } });
-	assert.deepEqual(await workersAi.click(), { toast: { type: "error", message: enrich.TOASTS.noKey } }, "Workers AI without its binding");
+	assert.deepEqual(await workersAi.click(), told("error", enrich.TOASTS.noKey), "Workers AI without its binding");
 
 	const uncovered = fakeSite({ settings: { aiCollections: "pages" } });
-	assert.deepEqual(await uncovered.click(), { toast: { type: "info", message: enrich.TOASTS.notCovered } });
+	assert.deepEqual(await uncovered.click(), told("info", enrich.TOASTS.notCovered));
 
 	const gone = fakeSite();
 	(gone.ctx as { content: { get: unknown } }).content.get = async () => null;
-	assert.deepEqual(await gone.click(), { toast: { type: "error", message: enrich.TOASTS.unreadable } });
+	assert.deepEqual(await gone.click(), told("error", enrich.TOASTS.unreadable));
 
 	const busy = fakeSite();
 	busy.kv.set("state:ai:editor:posts:E1", { value: { until: Date.now() + 60_000, token: "another click" }, revision: "1" });
-	assert.deepEqual(await busy.click(), { toast: { type: "info", message: enrich.TOASTS.running } });
+	assert.deepEqual(await busy.click(), told("info", enrich.TOASTS.running, { running: true }), "the panel waits and asks again");
 
 	const empty = fakeSite();
-	assert.deepEqual(await empty.click({ title: "", content: [], excerpt: "", featured_image: null }), { toast: { type: "info", message: enrich.TOASTS.nothingThere } });
+	assert.deepEqual(await empty.click({ title: "", content: [], excerpt: "", featured_image: null }), told("info", enrich.TOASTS.nothingThere));
 
 	const skipped = fakeSite({ skip: ["post"], features: { ai: true, "ai.entities": true, "ai.glossaryLinks": true } });
-	assert.deepEqual(await skipped.click(), { toast: { type: "info", message: "Nothing to add: this entry is on the glossary.io links skip list." } });
+	assert.deepEqual(await skipped.click(), told("info", "Nothing to add: this entry is on the glossary.io links skip list."));
+});
+
+test("a body over 2 MiB is refused before anything is read; a 103 KB field is patched whole (no size limits on a panel's patch)", async () => {
+	reset();
+	const m = model({ mentions: [] });
+	const site = fakeSite({ features: { ai: true, "ai.imageText": true } });
+	const huge = await site.click({ ...draftFields(), excerpt: "x".repeat(enrich.MAX_BODY_BYTES) });
+	assert.deepEqual(huge, { toast: { type: "error", message: enrich.TOASTS.tooLarge } });
+	assert.equal(m.calls.length, 0);
+
+	// @ts-ignore -- as above.
+	const { jsonBytes } = (await import("./editor-images.ts")) as typeof import("./editor-images.js");
+	const content = [para("b1", "x".repeat(103_000)), img("i1", "M1")];
+	const answer = await site.click({ title: "Big", content, excerpt: "", featured_image: FEATURED() });
+	assert.equal(answer.toast.type, "success");
+	assert.deepEqual(answer.patch?.operations.map((o) => o.field), ["content", "featured_image"]);
+	const value = valueOf(answer, "content");
+	assert.ok(jsonBytes(value) > 103_000);
+	assert.match(String(node(value, 1).alt), /^Model alt \d\.$/);
+	assert.match(String(node(value, 1).caption), /^Model caption \d\.$/);
+	assert.equal((node(value, 0).children as Span[])[0].text.length, 103_000, "the text whole");
 });
 
 test("the daily limit: no model call, and what could still be done is in the patch", async () => {
@@ -475,6 +562,7 @@ test("the daily limit: no model call, and what could still be done is in the pat
 	assert.equal(node(content, 3, "images", 0).alt, "Stored alt for three.");
 	assert.equal((valueOf(answer, "featured_image") as Record<string, unknown>).alt, "Library alt for the featured image.");
 	assert.equal(site.storage.aiDrafts.value<{ partial?: true }>("posts:E1")?.partial, true);
+	assert.equal(answer.more, undefined, "the limit needs a person: no automatic round");
 });
 
 test("Wikidata asking to slow down keeps what the click paid for: the next click doesn't pay for it again", async () => {
@@ -487,6 +575,7 @@ test("Wikidata asking to slow down keeps what the click paid for: the next click
 	assert.equal(first.toast.type, "info");
 	assert.equal(first.toast.message, "Wikidata asked to slow down. Try again in 2 minutes.");
 	assert.equal(first.patch, undefined);
+	assert.equal(first.more, undefined, "a busy Wikidata needs a wait: no automatic round");
 	assert.equal(textCalls(m), 1, "the extraction was paid for");
 	const staged = site.storage.aiDrafts.value<import("./store.js").DraftRecord>("posts:E1")!;
 	assert.equal(staged.partial, true);
@@ -512,6 +601,7 @@ test("a model error: a toast, the image text that worked, nothing staged as comp
 	assert.equal(site.storage.aiDrafts.value<{ partial?: true }>("posts:E1")?.partial, true);
 	assert.equal(site.storage.aiEntries.rows.size, 0);
 	assert.equal(site.storage.aiLinks.rows.size, 0, "no links planned");
+	assert.equal(answer.more, undefined, "a model error needs a person: no automatic round");
 });
 
 test("no glossary.io index yet: no links, the images still get their text", async () => {
@@ -548,63 +638,52 @@ test("images: at most 8 described per click, the rest on the next; dismissed and
 	assert.equal(visionCalls(m), 8);
 	assert.equal(first.toast.type, "success");
 	assert.equal(first.toast.message, "Wrote image text for 8 of 12 images. Click AI Enrich again for the rest. Review the changes, then save.");
+	assert.equal(first.more, true, "only the per-request cap stopped it: the panel asks again");
+	assert.deepEqual(first.progress, { imagesDone: 8, imagesTotal: 10 });
+	assert.deepEqual([first.review?.remaining, first.review?.leftAlone], [2, 2], "two still to do; the dismissed one and the SVG are left as they are");
 	const patched = valueOf(first, "content") as unknown[];
 	assert.equal(node(patched, 1).alt, "", "a dismissed suggestion isn't used, and the image isn't described again");
 	assert.equal(node(patched, 2).alt, "", "SVGs get no image text");
 	const second = await site.click({ title: "Pictures", content: patched, excerpt: "", featured_image: null });
 	assert.equal(visionCalls(m), 10, "the last two");
 	assert.equal(second.toast.message, "Wrote alt text for 2 and captions for 2 of 4 images. Review the changes, then save.");
+	assert.equal(second.more, undefined);
 });
 
-test("over EmDash's 64 KB for a field: captions go first, then alt text, then the field; other fields still go", async () => {
-	reset();
-	model({ mentions: [] });
-	const site = fakeSite({ features: { ai: true, "ai.imageText": true } });
-	// @ts-ignore -- as above.
-	const { jsonBytes, withImageText } = (await import("./editor-images.ts")) as typeof import("./editor-images.js");
-	const base = (pad: number) => [para("b1", "x".repeat(pad)), img("i1", "M1")];
-	// Room for the alt text the model writes, not for the caption too.
-	let pad = 65_536 - jsonBytes(withImageText(base(0), [{ path: [1], alt: "Model alt 1." }])) - 5;
-	const answer = await site.click({ title: "Big", content: base(pad), excerpt: "", featured_image: FEATURED() });
-	assert.equal(answer.toast.type, "info");
-	assert.equal(answer.toast.message, `${enrich.TOASTS.tooBig} Wrote alt text for 2 and captions for 1 of 2 images. Review the changes, then save.`);
-	const value = valueOf(answer, "content");
-	assert.ok(jsonBytes(value) <= 65_536);
-	assert.match(String(node(value, 1).alt), /^Model alt \d\.$/);
-	assert.equal(node(value, 1).caption, undefined);
-	assert.ok(valueOf(answer, "featured_image"));
-
-	// A field already too big for anything: no patch for it.
-	pad = 70_000;
-	const big = await site.click({ title: "Big", content: base(pad), excerpt: "", featured_image: FEATURED() });
-	assert.equal(valueOf(big, "content"), undefined);
-	assert.deepEqual(big.patch?.operations.map((o) => o.field), ["featured_image"]);
-	assert.ok(big.toast.message.startsWith(enrich.TOASTS.tooBig));
-});
-
-test("EmDash accepts the answer: its action response check and its patch check for each field", async () => {
+test("the patch sets only rich text and image fields the draft sent, with a value of their type; anything else in the draft counts as absent", async () => {
 	reset();
 	model();
 	const site = fakeSite();
-	const answer = await site.click();
-	const { validateContentEditorActionResponse } = await import("@emdash-cms/blocks/server");
-	const check = validateContentEditorActionResponse(answer, { pluginPagePaths: [], allowedImageHosts: [] });
-	assert.deepEqual([...check.errors], []);
-	assert.equal(check.valid, true);
-	const validateEditorDraftPatch = await emdashDistFunction("validateEditorDraftPatch");
-	const collection = { slug: "posts", fields: [{ slug: "content", type: "portableText", required: false }, { slug: "featured_image", type: "image", required: false }] };
-	const result = validateEditorDraftPatch({ patch: answer.patch, collection, allowedFields: new Set(["content", "featured_image"]) }) as { code?: string };
-	assert.equal(result.code, undefined);
-});
-
-test("only the fields the button may patch, and only ones the draft sent", async () => {
-	reset();
-	model();
-	const site = fakeSite();
-	const answer = await site.click(undefined, { fields: ["content"] });
-	assert.deepEqual(answer.patch!.operations.map((o) => o.field), ["content"]);
-	const unsent = await site.click({ title: "Email I like", featured_image: FEATURED() }, { fields: ["content", "featured_image"] });
+	const unsent = await site.click({ title: "Email I like", featured_image: FEATURED() });
 	assert.deepEqual(unsent.patch?.operations.map((o) => o.field), ["featured_image"], "content wasn't in the draft: patching it would overwrite unsaved edits");
+
+	// Rich text that isn't an array of blocks, an image that isn't an object, a field the collection doesn't have: the
+	// saved values are used for the analysis, and none of them is patched.
+	const odd = await site.click({ title: "Email I like", content: "I use Fastmail.", excerpt: 5, featured_image: ["M4"], nonsense: CONTENT() });
+	assert.equal(valueOf(odd, "content"), undefined);
+	assert.equal(valueOf(odd, "featured_image"), undefined);
+	assert.equal(valueOf(odd, "nonsense"), undefined);
+	const staged = site.storage.aiDrafts.value<DraftRecord>("posts:E1")!;
+	assert.ok(staged.textHashes.includes((await textOf(site, { ...site.item.data, title: "Email I like" })).textHash), "the saved text, under the draft's title");
+	const blocks = await site.click({ title: "Email I like", content: [{ _key: "no type" }], excerpt: "", featured_image: null });
+	assert.equal(valueOf(blocks, "content"), undefined, "a block without a string _type");
+	assert.deepEqual(site.writes, []);
+});
+
+test("the host keys (slug, SEO title, SEO description) never reach the entry's data or its text hash, and only an empty description is ever patched", async () => {
+	reset();
+	model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	const answer = await site.click(draftFields(), { slug: "another-slug", "seo.title": "An SEO title", "seo.description": "A description typed, not saved yet." });
+	assert.deepEqual(answer.patch?.operations.map((o) => o.field), ["content"]);
+	const staged = site.storage.aiDrafts.value<DraftRecord>("posts:E1")!;
+	assert.ok(staged.textHashes.includes((await textOf(site, draftFields())).textHash));
+	assert.deepEqual(site.writes, []);
+	assert.equal(site.entry().slug, "post");
+	assert.equal(site.entry().seo?.description, null);
+	// A key with a dot that isn't one of EmDash's host keys: left out.
+	const dotted = await site.click({ ...draftFields(), "seo.image": { id: "M1" } });
+	assert.equal(valueOf(dotted, "seo.image"), undefined);
 });
 
 test("a published entry with a pending draft: the fields the draft didn't send come from that draft revision, so the publish matches", async () => {
@@ -614,7 +693,7 @@ test("a published entry with a pending draft: the fields the draft didn't send c
 	Object.assign(site.item, { status: "published", liveRevisionId: "R1", draftRevisionId: "R5", data: { title: "Live title", content: [para("b0", "Live text.")], excerpt: "Live excerpt.", featured_image: null } });
 	const revision = { title: "Draft title", content: [para("b0", "Draft text.")], excerpt: "Draft excerpt.", featured_image: null, _slug: "post" };
 	(site.ctx as { content: { getRevision: unknown } }).content.getRevision = async (_c: string, _id: string, rev: string) => (rev === "R5" ? { data: structuredClone(revision) } : null);
-	const answer = await site.click({ content: CONTENT() }, { fields: ["content"] });
+	const answer = await site.click({ content: CONTENT() });
 	assert.match(answer.toast.message, /^Added 2 glossary\.io links/);
 	await site.publish({ ...revision, ...applied({ content: CONTENT() }, answer) }, { liveRevisionId: "R5", draftRevisionId: "R5" });
 	assert.equal(site.storage.aiQueue.rows.size, 0, "promoted: the title and excerpt came from the draft revision");
@@ -692,19 +771,76 @@ test("publishing text that changed after the click queues an analysis as before;
 	assert.equal(linker.shouldLink(memo, null, "any new text hash"), true);
 });
 
-test("Meta descriptions: the click writes one when the entry has none; the publish puts it with the analysis", async () => {
+test("Meta descriptions: the click fills an empty one (the review lists it); the publish marks it applied, suggested or dismissed by what's live", async () => {
 	reset();
 	const m = model();
-	const site = fakeSite({ features: { ai: true, "ai.entities": true, "ai.glossaryLinks": true, "ai.descriptions": true } });
+	const DESCRIBED = { ai: true, "ai.entities": true, "ai.glossaryLinks": true, "ai.descriptions": true };
+	const site = fakeSite({ features: DESCRIBED });
 	const answer = await site.click();
 	assert.equal(textCalls(m), 2, "extraction and description, at once");
 	assert.equal(site.storage.aiDrafts.value<{ description: string }>("posts:E1")?.description, "A summary of the post.");
-	assert.equal(answer.patch?.operations.some((o) => o.field === "seo"), false, "the SEO panel isn't a field");
-	await site.publish(applied(draftFields(), answer));
-	const record = site.storage.aiEntries.value<import("./store.js").EntryRecord>("posts:E1")!;
-	assert.equal(record.description, "A summary of the post.");
-	assert.equal(record.descriptionStatus, "suggested");
+	assert.deepEqual(answer.patch?.operations.at(-1), { op: "set", field: "seo.description", value: "A summary of the post." }, "last, after the fields");
+	assert.equal(answer.review?.description, "A summary of the post.");
+	assert.match(answer.toast.message, /Wrote a meta description\./);
+	assertDraftShapes(answer);
+	// Applied: EmDash's SEO panel saves it at once, then the publish.
+	await site.publish(applied(draftFields(), answer), { seo: { description: "A summary of the post." } });
+	let record = site.storage.aiEntries.value<EntryRecord>("posts:E1")!;
+	assert.deepEqual([record.description, record.descriptionStatus], ["A summary of the post.", "applied"]);
 	assert.equal(site.storage.aiQueue.rows.size, 0);
+
+	// The box off: nothing in the SEO panel, so the publish keeps it as a suggestion.
+	reset();
+	const off = fakeSite({ features: DESCRIBED });
+	const kept = await off.click();
+	await off.publish(applied(draftFields(), kept));
+	record = off.storage.aiEntries.value<EntryRecord>("posts:E1")!;
+	assert.deepEqual([record.description, record.descriptionStatus], ["A summary of the post.", "suggested"]);
+
+	// A person wrote another before publishing: theirs stays, and the click's is dismissed.
+	reset();
+	const own = fakeSite({ features: DESCRIBED });
+	const theirs = await own.click();
+	await own.publish(applied(draftFields(), theirs), { seo: { description: "My own words." } });
+	record = own.storage.aiEntries.value<EntryRecord>("posts:E1")!;
+	assert.deepEqual([record.description, record.descriptionStatus], ["A summary of the post.", "dismissed"]);
+	assert.equal(own.entry().seo?.description, "My own words.");
+	assert.deepEqual(own.writes, [], "nothing written over the person's");
+});
+
+test("the description is filled only into an empty one the editor holds (its unsaved text counts, not the saved one), in a collection with SEO, with Meta descriptions on", async () => {
+	reset();
+	const m = model();
+	const DESCRIBED = { ...LINKS_ONLY, "ai.descriptions": true };
+	const fills = (answer: Answer) => answer.patch?.operations.some((o) => o.field === "seo.description") ?? false;
+
+	// Typed in the SEO panel, not saved yet: no description call, no operation.
+	const typed = fakeSite({ features: DESCRIBED });
+	assert.equal(fills(await typed.click(draftFields(), { "seo.description": "Typed, not saved." })), false);
+	assert.equal(textCalls(m), 1, "the extraction alone");
+
+	// Saved, then cleared in the editor: the editor's empty one counts.
+	const cleared = fakeSite({ features: DESCRIBED });
+	cleared.item.seo = { description: "Saved before." };
+	assert.equal(fills(await cleared.click(draftFields(), { "seo.description": null })), true);
+
+	// The editor takes no SEO text (the draft doesn't list it): never an operation the editor would refuse.
+	const noSeo = fakeSite({ features: DESCRIBED });
+	assert.equal(fills(await noSeo.click(draftFields(), { "seo.description": undefined, "seo.title": undefined })), false);
+
+	// Meta descriptions off: none.
+	const off = fakeSite({ features: LINKS_ONLY });
+	assert.equal(fills(await off.click()), false);
+
+	// A live analysis whose description was dismissed, or applied and since removed: never proposed again.
+	for (const status of ["dismissed", "applied", "suggested"] as const) {
+		const site = fakeSite({ status: "published", features: DESCRIBED });
+		Object.assign(site.item, { liveRevisionId: "R1", draftRevisionId: null });
+		const t = await textOf(site, draftFields());
+		const live: EntryRecord = { collection: "posts", entryId: "E1", title: t.title, hash: t.hash, textHash: t.textHash, status: "ok", error: "", entities: [], description: "The live one.", descriptionStatus: status, updated: "" };
+		site.storage.aiEntries.rows.set("posts:E1", { data: live, revision: 0 });
+		assert.equal(valueOf(await site.click(), "seo.description"), status === "suggested" ? "The live one." : undefined, status);
+	}
 });
 
 test("a staged analysis without descriptions isn't promoted once Meta descriptions is on; deleting the entry forgets it; old ones are pruned", async () => {
@@ -786,7 +922,7 @@ test("the entry's own id keys everything, whatever the request called it (a dire
 	model();
 	const site = fakeSite();
 	site.kv.set(LOCK, { value: { until: Date.now() + 60_000, token: "another click" }, revision: "1" });
-	assert.deepEqual(await site.click(undefined, undefined, "post"), { toast: { type: "info", message: enrich.TOASTS.running } }, "the same lock as a click by id");
+	assert.deepEqual(await site.click(undefined, undefined, "post"), told("info", enrich.TOASTS.running, { running: true }), "the same lock as a click by id");
 	site.kv.delete(LOCK);
 	const answer = await site.click(undefined, undefined, "post");
 	assert.match(answer.toast.message, /^Added 2 glossary\.io links/);
@@ -909,8 +1045,8 @@ test("past the click's deadline: no new stage starts, what's paid is staged, and
 	Date.now = () => realNow() + skew;
 	chat.__aiChat = async (req) => {
 		const out = await answer(req);
-		// The extraction took most of the click's time.
-		if (req.system.startsWith("You extract")) skew = 51_000;
+		// The extraction took the request's time: no stage starts 25 seconds in.
+		if (req.system.startsWith("You extract")) skew = enrich.START_BY_MS + 1;
 		return out;
 	};
 	const site = fakeSite({ features: LINKS_ONLY });
@@ -920,7 +1056,7 @@ test("past the click's deadline: no new stage starts, what's paid is staged, and
 	} finally {
 		Date.now = realNow;
 	}
-	assert.deepEqual(first, { toast: { type: "info", message: enrich.TOASTS.outOfTime } });
+	assert.deepEqual(first, told("info", enrich.TOASTS.outOfTime, { more: true }), "only time stopped it: the panel asks again");
 	assert.equal(site.wd.searches, 0, "Wikidata wasn't asked");
 	const staged = site.storage.aiDrafts.value<DraftRecord>("posts:E1")!;
 	assert.equal(staged.partial, true);
@@ -934,6 +1070,66 @@ test("past the click's deadline: no new stage starts, what's paid is staged, and
 	assert.equal(await runJob(site), "done");
 	assert.equal(textCalls(m), paid, "the extraction isn't paid for again");
 	assert.deepEqual(site.storage.aiEntries.value<EntryRecord>("posts:E1")!.entities.map((e) => e.qid), ["Q1", "Q95"]);
+	forgetOwn();
+});
+
+test("no stage starts 25 seconds into a request: just before, the click goes on", async () => {
+	reset();
+	model();
+	const answer = chat.__aiChat!;
+	const realNow = Date.now;
+	let skew = 0;
+	Date.now = () => realNow() + skew;
+	chat.__aiChat = async (req) => {
+		const out = await answer(req);
+		if (req.system.startsWith("You extract")) skew = enrich.START_BY_MS - 1_000;
+		return out;
+	};
+	const site = fakeSite({ features: LINKS_ONLY });
+	let done: Answer;
+	try {
+		done = await site.click();
+	} finally {
+		Date.now = realNow;
+	}
+	assert.match(done.toast.message, /^Added 2 glossary\.io links/, "the type check and the links ran");
+	assert.equal(site.storage.aiDrafts.value<DraftRecord>("posts:E1")?.partial, undefined);
+	assert.equal(done.more, undefined);
+	assert.equal(enrich.START_BY_MS, 25_000);
+	assert.equal(enrich.LOCK_MAX_MS, 110_000);
+});
+
+test("must pass: after Apply and the editor's autosave, the saved draft's text hash is one the click staged (nulls, 0 and 1 as the form holds them), so the publish pays for nothing", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ features: { ai: true, "ai.entities": true, "ai.glossaryLinks": true, "ai.imageText": true, "ai.descriptions": true }, extraFields: [{ slug: "featured", type: "boolean" }, { slug: "subtitle", type: "string" }] });
+	// Saved as EmDash stores it (a boolean as 1, no subtitle), and the form as the editor holds it: the boolean still 1,
+	// the missing subtitle null, the excerpt cleared to null, the text and images changed and not saved yet.
+	site.item.data = { title: "Email I like", content: [para("b0", "Saved text.")], excerpt: "Saved excerpt.", featured_image: null, featured: 1, subtitle: null };
+	const form: Record<string, unknown> = { title: "Email I like", content: CONTENT(), excerpt: null, featured_image: FEATURED(), featured: 1, subtitle: null };
+	const answer = await site.click(form);
+	assert.ok(answer.patch && answer.review);
+	const staged = site.storage.aiDrafts.value<DraftRecord>("posts:E1")!;
+	const paid = m.calls.length;
+
+	// Apply: the form takes the fields (the editor marks it dirty), the SEO panel saves the description itself, and the
+	// autosave writes the form's values to the draft revision.
+	const content = site.ctx as unknown as { content: { update(c: string, id: string, patch: Record<string, unknown>): Promise<unknown>; getRevision(c: string, id: string, rev: string): Promise<{ data: Record<string, unknown> } | null> } };
+	await content.content.update("posts", "E1", { seo: { description: valueOf(answer, "seo.description") } });
+	await content.content.update("posts", "E1", applied(form, answer));
+	const saved = (await content.content.getRevision("posts", "E1", site.entry().draftRevisionId!))!.data;
+	assert.ok(staged.textHashes.includes((await textOf(site, saved)).textHash), "the saved draft hashes as one the click staged");
+	assert.equal(saved.excerpt, null);
+	assert.equal(saved.featured, 1);
+
+	// The publish of that draft (with the SEO text EmDash saved): the click's analysis is the entry's, nothing queued, no model call.
+	await site.publish(saved, { seo: site.entry().seo });
+	assert.equal(m.calls.length, paid);
+	assert.deepEqual([...site.storage.aiQueue.rows.values()].map((r) => r.data), []);
+	assert.equal(site.storage.aiDrafts.rows.size, 0);
+	const record = site.storage.aiEntries.value<EntryRecord>("posts:E1")!;
+	assert.deepEqual([record.textHash, record.descriptionStatus], [(await textOf(site, saved)).textHash, "applied"]);
+	assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1")!.linked, ["Q1", "Q95"], "the applied links count as linked");
 	forgetOwn();
 });
 
@@ -978,7 +1174,7 @@ test("a second click after a link was taken out by hand doesn't propose it again
 	const edited = { ...applied(fields, first), content: withoutLink(valueOf(first, "content"), "google") };
 	const second = await site.click(edited);
 	assert.equal(textCalls(m), 1);
-	assert.deepEqual(second, { toast: { type: "info", message: enrich.TOASTS.nothingToAdd } });
+	assert.deepEqual(second, told("info", enrich.TOASTS.nothingToAdd));
 	assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1")!.planned?.slugs, ["fastmail", "google"], "the first proposal's links still tell it was applied");
 	await site.publish(edited);
 	assert.equal(site.storage.aiQueue.rows.size, 0, "promoted");
@@ -1092,6 +1288,30 @@ test("the toast tells links switched to glossary.io from links added", async () 
 	assert.match(answer.toast.message, /^Added 1 glossary\.io link and switched 1 link to glossary\.io \((Fastmail, Google|Google, Fastmail)\)\. Review the changes, then save\.$/);
 });
 
+test("the review counts possessives moved inside a glossary.io link the text already had", async () => {
+	reset();
+	model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	const content = [
+		{
+			_type: "block",
+			_key: "b1",
+			style: "normal",
+			markDefs: [{ _key: "g", _type: "link", href: "https://glossary.io/google/" }],
+			children: [
+				{ _type: "span", _key: "s1", text: "I use Fastmail, and ", marks: [] },
+				{ _type: "span", _key: "s2", text: "Google", marks: ["g"] },
+				{ _type: "span", _key: "s3", text: "'s search too.", marks: [] },
+			],
+		},
+	];
+	const answer = await site.click({ title: "Email I like", content, excerpt: "", featured_image: null });
+	assert.equal(answer.review?.possessives, 1);
+	assert.deepEqual(answer.review?.links.map((l) => l.name), ["Fastmail"]);
+	assert.deepEqual(linksOf(valueOf(answer, "content")), [["Fastmail", "https://glossary.io/fastmail/"], ["Google's", "https://glossary.io/google/"]]);
+	assert.match(answer.toast.message, /Put 1 possessive inside glossary\.io links\./);
+});
+
 test("only an image whose suggestion was dismissed misses text: nothing to add, and the toast says why", async () => {
 	reset();
 	const m = model();
@@ -1099,20 +1319,19 @@ test("only an image whose suggestion was dismissed misses text: nothing to add, 
 	site.storage.aiMedia.rows.set("M1", { data: { mediaId: "M1", filename: "one.png", url: "", suggestion: { alt: "Dismissed.", caption: "Dismissed.", title: "" }, status: "dismissed", written: [], error: "", updated: "" }, revision: 0 });
 	const answer = await site.click({ title: "Pictures", content: [para("b1", "Pictures."), img("d", "M1")], excerpt: "", featured_image: null });
 	assert.equal(visionCalls(m), 0);
-	assert.deepEqual(answer, { toast: { type: "info", message: enrich.leftAlone(1) } });
+	assert.deepEqual(answer, told("info", enrich.leftAlone(1)));
 });
 
-test("an answer over EmDash's 2,000 nodes: the field that can't fit is left out, and the featured image keeps all its text", async () => {
+test("a long field (185 paragraphs, over the 2,000 values an editor action could answer) is patched whole, with its image text", async () => {
 	reset();
 	model();
 	const site = fakeSite({ features: { ai: true, "ai.imageText": true } });
 	const content = [...Array.from({ length: 185 }, (_, i) => para(`p${i}`, "x")), img("i1", "M1")];
 	const answer = await site.click({ title: "Long", content, excerpt: "", featured_image: FEATURED() });
-	assert.deepEqual(answer.patch?.operations.map((o) => o.field), ["featured_image"]);
-	const featured = valueOf(answer, "featured_image") as Record<string, unknown>;
-	assert.equal(featured.alt, "Library alt for the featured image.");
-	assert.match(String(featured.caption), /^Model caption \d\.$/);
-	assert.ok(answer.toast.message.startsWith(enrich.TOASTS.tooBig));
+	assert.deepEqual(answer.patch?.operations.map((o) => o.field), ["content", "featured_image"]);
+	assert.match(String(node(valueOf(answer, "content"), 185).alt), /^Model alt \d\.$/);
+	assert.equal((valueOf(answer, "content") as unknown[]).length, 186);
+	assert.equal(answer.toast.type, "success");
 });
 
 // ── The publish, its job, and the retry pass ─────────────────────

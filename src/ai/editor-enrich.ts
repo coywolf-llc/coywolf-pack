@@ -1,12 +1,19 @@
 /**
- * AI Enrich (since 0.52.0): the entry editor's toolbar button, through the
- * companion plugin (src/editor.ts) and the bridge (src/core/bridge.ts). It
- * works on the editor's current draft, saved or not, never-published entries
- * too, and answers with one patch the editor shows for review:
+ * AI Enrich (since 0.52.0): the button in the entry editor's AI suggestions
+ * panel (src/admin/enrich.tsx). The panel sends the editor's draft as EmDash
+ * 1.6's editorDraft.get() reads it, saved or not, never-published entries too,
+ * and this route answers with one patch the panel shows for review, then
+ * applies with editorDraft.patch():
  * - glossary.io links by the same rules as after publishing (planEntryLinks),
  *   possessives moved inside them;
  * - alt text and captions for the images that have none, in the entry's own
- *   image blocks and image fields. Text a person wrote is never replaced.
+ *   image blocks and image fields. Text a person wrote is never replaced;
+ * - the meta description (seo.description), only when the draft has none.
+ *
+ * The draft comes from an admin's browser, not from EmDash: every value is
+ * checked by its field's type (anything else counts as absent, and the saved
+ * value is used), and nothing from it is ever written to the entry. The route
+ * only returns operations for the panel to apply.
  *
  * The analysis is staged (aiDrafts, DraftRecord), never written to aiEntries:
  * the publish whose title and text it analyzed uses it without paying for it
@@ -20,7 +27,7 @@ import type { CollectionSchemaInfo, PluginContext, StorageCollection } from "emd
 
 import { type FeatureMap, ctxFeatures, isOn } from "../core/features.js";
 import { afterResponse } from "../shared.js";
-import { ACTION_LIMITS, type FieldPatch, type ImageFill, type ImageSlot, fitPatch, imageSlots, jsonBytes, responseFits } from "./editor-images.js";
+import { type ImageFill, type ImageSlot, LEFT_ALONE_REASON, imageSlots, jsonBytes, withImageText } from "./editor-images.js";
 import { glossaryFor, isGlossarySite } from "./glossary.js";
 import { type EntryLinkPlan, type LinkMemo, linkConfig, linkMemos, livePlanned, planEntryLinks, plannedApplied, unseenMemo } from "./glossary-linker.js";
 import { glossarySlug, glossarySlugsIn } from "./glossary-links.js";
@@ -61,33 +68,63 @@ import {
 type Settings = AiSettings & { apiKey: string };
 type Toast = { message: string; type: "success" | "error" | "info" };
 
+/** What the panel applies: whole-value sets, in the editor's field order, then seo.description. */
+export type EnrichOperation = { op: "set"; field: string; value: unknown };
+
+/** What the panel's review lists: exactly what the patch adds. */
+export interface EnrichReview {
+	/** Each term linked, with the field it's in (one per entity). */
+	links: Array<{ name: string; slug: string; url: string; field: string }>;
+	/** Possessives moved inside their glossary.io link. */
+	possessives: number;
+	/** Each image use given text: only what's added. */
+	images: Array<{ field: string; mediaId: string | null; filename: string; alt?: string; caption?: string }>;
+	/** The meta description the patch fills (an empty one only). */
+	description?: string;
+	/** Image uses without text that AI Enrich leaves as they are (LEFT_ALONE_REASON). */
+	leftAlone: number;
+	/** Image uses still to describe (the per-request cap, or time): the next round does them. */
+	remaining: number;
+}
+
 export interface EnrichAnswer {
 	toast: Toast;
-	patch?: { type: "editor-draft-patch"; operations: Array<{ op: "set"; field: string; value: unknown }> };
+	patch?: { type: "editor-draft-patch"; operations: EnrichOperation[] };
+	/** The draft revision the answer is for (the request's), so the panel can tell a late answer. */
+	revision?: string;
+	/** Only time or the per-request image cap stopped it: the panel asks again at once (a new round), which reuses everything paid for. */
+	more?: true;
+	/** Another request holds the entry's lock: the panel waits and asks again. */
+	running?: true;
+	review?: EnrichReview;
+	progress?: { imagesDone: number; imagesTotal: number };
 }
 
 /**
- * A model call gives up after this long, and none starts after START_BY_MS: a click usually ends in 20 to 40 seconds,
- * and in about two minutes at worst (a call started at the last moment, Wikidata's answer after it, and the wait for
- * the scheduled run's lock before the state is written).
+ * A model call gives up after this long, and none starts after START_BY_MS, so a request answers in about 85
+ * seconds at worst (a call started at the last moment, Wikidata's answer after it, and the wait for the scheduled
+ * run's lock before the state is written), inside the 100 seconds after which the zone's proxy answers 524. A
+ * request usually ends in 20 to 40 seconds; one stopped by time answers `more`, and the panel asks again.
  */
 const CALL_TIMEOUT_MS = 40_000;
-const START_BY_MS = 50_000;
+export const START_BY_MS = 25_000;
 /**
- * The per-entry lock is held LOCK_MS at a time and renewed every LOCK_BEAT_MS while the click runs (never past
- * LOCK_MAX_MS), so a click whose request was cancelled (the browser went away) frees its entry LOCK_MS after its
- * last renewal: about 50 seconds, with the 30 the work may go on after the response (afterResponse). A run still
- * going past LOCK_MAX_MS plus LOCK_MS (none should: no model call starts after START_BY_MS) no longer keeps a
- * second click out; it writes no state once that click has the lock (`held`).
+ * The per-entry lock is held LOCK_MS at a time and renewed every LOCK_BEAT_MS while the request runs (never past
+ * LOCK_MAX_MS), so a request that was cancelled (the browser went away) frees its entry LOCK_MS after its last
+ * renewal: about 50 seconds, with the 30 the work may go on after the response (afterResponse). A run still going
+ * past LOCK_MAX_MS plus LOCK_MS (none should: no model call starts after START_BY_MS) no longer keeps another
+ * request out; it writes no state once that one has the lock (`held`).
  */
 export const LOCK_MS = 20_000;
 const LOCK_BEAT_MS = 5_000;
-const LOCK_MAX_MS = 150_000;
-/** Images described per click, at most, and how many model calls for them run at once (their files are read one at a time). */
+export const LOCK_MAX_MS = 110_000;
+/** Images described per request, at most, and how many model calls for them run at once (their files are read one at a time). */
 const MAX_VISION = 8;
 const VISION_AT_ONCE = 3;
-/** The toast's room in the answer's size checks. */
-const TOAST_ROOM = { message: "x".repeat(1200), type: "success" };
+/** A request body over this is refused: a sanity cap (EmDash puts none on a plugin route), far above any real entry. */
+export const MAX_BODY_BYTES = 2 * 1024 * 1024;
+/** EmDash's limit on seo.description (the editor refuses a longer one); the pack's own are 155 characters. */
+const SEO_DESCRIPTION_MAX = 500;
 
 /** Waits between tries for the AI lock, and the lock's renewal timer (tests replace them). */
 export const enrichIo = {
@@ -105,7 +142,8 @@ const reasonOf = (error: unknown) =>
 	error instanceof OutOfTimeError ? "it took too long" : String((error as Error)?.message ?? error).replace(/\s+/g, " ").replace(/[.\s]+$/, "").slice(0, 160) || "unknown error";
 
 export const TOASTS = {
-	noDraft: "Save the entry once, then click AI Enrich again.",
+	noDraft: "AI Enrich couldn't read the editor's draft. Reload the page and try again.",
+	tooLarge: "This entry is too large for AI Enrich (over 2 MB).",
 	off: "AI Enrichment is off for this site. Turn on glossary.io links or Image text under Coywolf Pack → Features.",
 	noKey: "AI Enrichment has no API key. Add one on the AI Enrichment page.",
 	notCovered: "AI Enrichment doesn't cover this collection.",
@@ -114,7 +152,6 @@ export const TOASTS = {
 	nothingThere: "There's no text or image to work on yet.",
 	limit: "Today's AI call limit is reached. Raise it on the AI Enrichment page, or try again tomorrow (UTC).",
 	noIndex: "The glossary.io index isn't loaded yet. Open any page on the site, then click again.",
-	tooBig: "The text is too large to add everything.",
 	review: "Review the changes, then save.",
 	nothingToAdd: "Nothing to add: the links and image text are already in place.",
 	noEntities: "No entities found in this text, so there are no glossary.io links to add.",
@@ -125,38 +162,94 @@ export const TOASTS = {
 
 /** Nothing to add, though images miss text: ones the button leaves alone. */
 export const leftAlone = (n: number) =>
-	`Nothing to add. ${n === 1 ? "1 image without alt text or a caption is left as it is" : `${n} images without alt text or a caption are left as they are`}: AI Enrich skips images whose suggestion was dismissed or marked decorative, SVGs, and images it can't read from the media library.`;
+	`Nothing to add. ${n === 1 ? "1 image without alt text or a caption is left as it is" : `${n} images without alt text or a caption are left as they are`}: ${LEFT_ALONE_REASON}`;
 
 /** `error`: a model call failed; `trouble`: something of the site's own did (`what` says which part). */
 type Issue = { kind: "limit" } | { kind: "busy"; until: number } | { kind: "time" } | { kind: "error"; reason: string } | { kind: "trouble"; what: string; reason: string } | { kind: "no-index" };
 
-interface Selector {
-	fields?: string[];
-	translatable?: true;
-}
-
+/**
+ * The editor's draft as the panel sends it (`{ collection, entryId, draft: { revision, fields, fieldDefinitions },
+ * round }`): editorDraft.get()'s snapshot. `fields` keeps the collection's fields; the keys that aren't fields
+ * (`slug`, `seo.title`, `seo.description`) are in `host`.
+ */
 interface Draft {
 	collection: string;
 	entryId: string;
+	revision: string;
 	fields: Record<string, unknown>;
+	host: { slug?: unknown; seoTitle?: unknown; seoDescription?: unknown };
+	/** The keys the editor takes in a patch (fieldDefinitions' slugs). */
+	defined: Set<string>;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const isText = (v: unknown) => typeof v === "string";
+const arrayOf = (item: (v: unknown) => boolean) => (v: unknown) => Array.isArray(v) && v.every(item);
 
-function parse(input: unknown): { draft: Draft | null; patch?: Selector } {
+/**
+ * A value's shape for its field's type, as EmDash's draft checks it (content-editor-draft.ts FIELD_TYPES). A value of
+ * another shape (or a field of a type not listed) counts as absent: the saved value is used.
+ */
+const FIELD_SHAPES: Readonly<Record<string, (v: unknown) => boolean>> = {
+	string: isText,
+	slug: isText,
+	text: isText,
+	url: isText,
+	datetime: isText,
+	select: isText,
+	reference: isText,
+	number: (v) => typeof v === "number" && Number.isFinite(v),
+	integer: (v) => Number.isInteger(v),
+	boolean: (v) => v === true || v === false || v === 0 || v === 1,
+	multiSelect: arrayOf(isText),
+	portableText: arrayOf((b) => isRecord(b) && typeof b._type === "string"),
+	repeater: arrayOf(isRecord),
+	blocks: arrayOf(isRecord),
+	image: isRecord,
+	file: isRecord,
+	json: () => true,
+};
+
+function parse(input: unknown): Draft | null {
 	const body = isRecord(input) ? input : {};
-	const d = body.draft;
-	const draft = isRecord(d) && typeof d.collection === "string" && d.collection && typeof d.entryId === "string" && d.entryId && isRecord(d.fields) ? { collection: d.collection, entryId: d.entryId, fields: d.fields } : null;
-	const p = body.patch;
-	const patch = isRecord(p) ? { ...(Array.isArray(p.fields) ? { fields: p.fields.filter((f): f is string => typeof f === "string") } : {}), ...(p.translatable === true ? { translatable: true as const } : {}) } : undefined;
-	return { draft, patch };
+	const { collection, entryId, draft } = body;
+	if (typeof collection !== "string" || !collection || typeof entryId !== "string" || !entryId || !isRecord(draft) || !isRecord(draft.fields)) return null;
+	const fields: Record<string, unknown> = {};
+	const host: Draft["host"] = {};
+	// The keys that aren't collection fields go first: EmDash reserves `slug`, and field slugs can't contain a dot.
+	for (const [key, value] of Object.entries(draft.fields)) {
+		if (key === "slug") host.slug = value;
+		else if (key === "seo.title") host.seoTitle = value;
+		else if (key === "seo.description") host.seoDescription = value;
+		else if (!key.includes(".")) fields[key] = value;
+	}
+	const defined = new Set(Array.isArray(draft.fieldDefinitions) ? draft.fieldDefinitions.flatMap((d) => (isRecord(d) && typeof d.slug === "string" ? [d.slug] : [])) : []);
+	return { collection, entryId, revision: typeof draft.revision === "string" ? draft.revision.slice(0, 200) : "", fields, host, defined };
 }
 
-/** The fields the patch may set: the button's patch selector (as EmDash reads it), and only ones the draft sent, so no unsaved edit is overwritten. */
-function patchableFields(info: CollectionSchemaInfo, selector: Selector | undefined, supplied: Record<string, unknown>): Set<string> {
-	const known = new Set(info.fields.map((f) => f.slug));
-	const wanted = selector ? new Set([...(selector.fields ?? []), ...(selector.translatable ? info.fields.filter((f) => f.translatable).map((f) => f.slug) : [])]) : new Set(Object.keys(supplied));
-	return new Set([...wanted].filter((slug) => known.has(slug) && Object.hasOwn(supplied, slug)));
+/**
+ * The draft's values for the collection's own fields, each checked by its type: a field the collection doesn't have,
+ * or a value of another shape, is left out (the saved value is used). A null where nothing is saved is left out too,
+ * so the overlay adds no keys; booleans stay 0 or 1 as the form holds them. What's left hashes as the publish will
+ * once the editor saves it (entryText reads only the title, rich text, blocks and text fields).
+ */
+function checkedFields(info: CollectionSchemaInfo, supplied: Record<string, unknown>, saved: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const field of info.fields) {
+		if (!Object.hasOwn(supplied, field.slug)) continue;
+		const value = supplied[field.slug];
+		if (value === null) {
+			if (saved[field.slug] !== null && saved[field.slug] !== undefined) out[field.slug] = null;
+			continue;
+		}
+		if (FIELD_SHAPES[field.type]?.(value)) out[field.slug] = value;
+	}
+	return out;
+}
+
+/** The fields the patch may set: the collection's rich text and image fields that the draft sent (checked), so no unsaved edit is overwritten. */
+function patchableFields(info: CollectionSchemaInfo, checked: Record<string, unknown>): Set<string> {
+	return new Set(info.fields.filter((f) => (f.type === "portableText" || f.type === "image") && Object.hasOwn(checked, f.slug) && checked[f.slug] !== null).map((f) => f.slug));
 }
 
 /** The saved entry the draft is on: its pending draft revision when it has one, so text outside the draft hashes as the publish will. */
@@ -226,19 +319,22 @@ async function withEntryLock<T>(ctx: PluginContext, key: string, work: (held: ()
 	}
 }
 
-/** Run AI Enrich for one editor draft (the ai/editor-enrich route). */
+/** Run AI Enrich for one editor draft (the ai/editor-enrich route). Every answer echoes the draft's revision. */
 export async function editorEnrich(ctx: PluginContext, options: AiOptions, input: unknown): Promise<EnrichAnswer> {
+	let revision = "";
 	try {
-		return await enrich(ctx, options, input);
+		if (jsonBytes(input) > MAX_BODY_BYTES) return toast("error", TOASTS.tooLarge);
+		const draft = parse(input);
+		if (!draft) return toast("error", TOASTS.noDraft);
+		revision = draft.revision;
+		return { ...(await enrich(ctx, options, draft)), revision };
 	} catch (error) {
 		ctx.log.error("AI Enrich failed", { error: String(error).slice(0, 300) });
-		return toast("error", `AI Enrich didn't work: ${reasonOf(error)}. Click again to retry.`);
+		return { ...toast("error", `AI Enrich didn't work: ${reasonOf(error)}. Click again to retry.`), ...(revision ? { revision } : {}) };
 	}
 }
 
-async function enrich(ctx: PluginContext, options: AiOptions, input: unknown): Promise<EnrichAnswer> {
-	const { draft, patch: selector } = parse(input);
-	if (!draft) return toast("error", TOASTS.noDraft);
+async function enrich(ctx: PluginContext, options: AiOptions, draft: Draft): Promise<EnrichAnswer> {
 	const [features, s] = await Promise.all([ctxFeatures(ctx), readSettings(ctx, options)]);
 	let links = isOn(features, "ai.entities") && isOn(features, "ai.glossaryLinks");
 	const images = isOn(features, "ai.imageText");
@@ -260,17 +356,16 @@ async function enrich(ctx: PluginContext, options: AiOptions, input: unknown): P
 	if (linksOff) links = false;
 	if (!links && !images) return toast("info", `Nothing to add: ${linksOff}.`);
 
-	const work = withEntryLock(ctx, editorLockKey(collection, id), (held) => enrichEntry(ctx, options, s, features, { draft, id, selector, item, info, links, images, config, held }));
+	const work = withEntryLock(ctx, editorLockKey(collection, id), (held) => enrichEntry(ctx, options, s, features, { draft, id, item, info, links, images, config, held }));
 	// Kept alive a little past a request the browser gave up on, so a call in flight still ends and is saved.
 	afterResponse(work.catch(() => undefined));
-	return (await work) ?? toast("info", TOASTS.running);
+	return (await work) ?? { ...toast("info", TOASTS.running), running: true };
 }
 
 interface Run {
 	draft: Draft;
 	/** The entry's own id. */
 	id: string;
-	selector?: Selector;
 	item: NonNullable<Awaited<ReturnType<NonNullable<PluginContext["content"]>["get"]>>>;
 	info: CollectionSchemaInfo;
 	links: boolean;
@@ -295,8 +390,14 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	const started = Date.now();
 	const bySort = [...info.fields].sort((a, b) => a.sortOrder - b.sortOrder);
 	const ptFields = bySort.filter((f) => f.type === "portableText").map((f) => f.slug);
-	const patchable = patchableFields(info, run.selector, draft.fields);
-	const data = { ...(await savedData(ctx, collection, item)), ...draft.fields };
+	const saved = await savedData(ctx, collection, item);
+	const checked = checkedFields(info, draft.fields, saved);
+	const patchable = patchableFields(info, checked);
+	const data = { ...saved, ...checked };
+	// The meta description the editor holds now (its SEO panel's, typed or saved); the saved one when the draft has no SEO keys.
+	const { seoDescription } = draft.host;
+	const heldDescription = typeof seoDescription === "string" ? seoDescription : seoDescription === null ? "" : (item.seo?.description ?? "");
+	const noDescription = !heldDescription.trim();
 
 	const t0 = await entryText(ctx, collection, data, s, features);
 	const links = run.links && Boolean(t0);
@@ -345,7 +446,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	// A complete earlier analysis stays whole in whatever is saved on the way (a description still to write).
 	if (reusable && !cache.entities) cache.entities = reusable.entities;
 	const describe = isOn(features, "ai.descriptions");
-	if (!live && describe && !described && !(t0?.info.hasSeo && !item.seo?.description?.trim())) described = true;
+	if (!live && describe && !described && !(t0?.info.hasSeo && noDescription)) described = true;
 	const wantDescription = links && describe && !described;
 
 	// Set by the tasks below (an object, so the checks after them aren't narrowed away).
@@ -405,6 +506,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	// ── Images ──
 	const filled = new Map<ImageSlot, { alt?: string; caption?: string }>();
 	const pendingIds = new Set<string>();
+	const filenames = new Map<string, string>();
 	const imageTask = async () => {
 		if (!slots.length || !ctx.media) return;
 		const ids = [...new Set(slots.map((slot) => slot.mediaId).filter((v): v is string => Boolean(v)))];
@@ -412,6 +514,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 		const mediaRecords = col<MediaRecord>(ctx, "aiMedia");
 		const [items, stored] = await Promise.all([Promise.all(ids.map((mid) => ctx.media!.get(mid).catch(() => null))), mediaRecords.getMany(ids)]);
 		const media = new Map(ids.map((mid, i) => [mid, items[i]] as const));
+		for (const [mid, m] of media) if (m?.filename) filenames.set(mid, m.filename);
 		const fresh = new Map<string, ImageText>();
 		const suggestionOf = (mid: string) => fresh.get(mid) ?? (stored.get(mid)?.status === "dismissed" ? null : (stored.get(mid)?.suggestion ?? null));
 		const raster = (mid: string) => {
@@ -520,33 +623,25 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 		}
 	}
 
-	// ── One patch: links and possessives, then image text, trimmed to EmDash's limits ──
+	// ── One patch: per field, its links and possessives, then its image text, in one set; then the meta description ──
 	const order = new Map(bySort.map((f, i) => [f.slug, i]));
-	const operations = (map: ReadonlyMap<string, unknown>) => [...map].sort(([a], [b]) => (order.get(a) ?? 0) - (order.get(b) ?? 0)).map(([field, value]) => ({ op: "set" as const, field, value }));
-	const fits = (map: ReadonlyMap<string, unknown>) => {
-		if ([...map.values()].some((value) => jsonBytes(value) > ACTION_LIMITS.fieldBytes)) return false;
-		const patch = { type: "editor-draft-patch", operations: operations(map) };
-		return patch.operations.length <= ACTION_LIMITS.operations && jsonBytes(patch) <= ACTION_LIMITS.patchBytes && responseFits({ toast: TOAST_ROOM, patch });
-	};
-	const allFills: Fill[] = slots.filter((slot) => filled.has(slot)).map((slot) => ({ slot, path: slot.path, ...filled.get(slot) }));
+	const fills: Fill[] = slots.filter((slot) => filled.has(slot)).map((slot) => ({ slot, path: slot.path, ...filled.get(slot) }));
 	const linkValues = new Map(Object.entries(plan?.patch ?? {}).filter(([field]) => patchable.has(field)));
-	const fieldParts: Array<FieldPatch<Fill>> = [...new Set([...linkValues.keys(), ...allFills.map((f) => f.slot.field)])]
-		.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
-		.map((field) => ({ field, base: data[field], ...(linkValues.has(field) ? { linked: linkValues.get(field) } : {}), fills: allFills.filter((f) => f.slot.field === field) }));
-	let fitted: ReturnType<typeof fitPatch<Fill>>;
-	try {
-		fitted = fitPatch(fieldParts, fits);
-	} catch (error) {
-		ctx.log.warn("AI Enrich: the patch couldn't be built", { entry: key, error: String(error).slice(0, 300) });
-		issues.links ??= { kind: "trouble", what: "The changes couldn't be put together", reason: reasonOf(error) };
-		fitted = { values: new Map(), fills: new Map(), linked: new Set(), trimmed: false };
-	}
-	const current = fitted.values;
-	const fills = [...fitted.fills.values()].flat();
-	const trimmed = fitted.trimmed;
-	const ops = operations(current);
-	const terms = plan ? plan.terms.filter((_, i) => fitted.linked.has(plan!.termFields[i])) : [];
-	const fixes = plan ? plan.fixes.filter((_, i) => fitted.linked.has(plan!.fixFields[i])) : [];
+	const current = new Map(
+		[...new Set([...linkValues.keys(), ...fills.map((f) => f.slot.field)])]
+			.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
+			.map((field) => [field, withImageText(linkValues.has(field) ? linkValues.get(field) : data[field], fills.filter((f) => f.slot.field === field))] as const),
+	);
+	const ops: EnrichOperation[] = [...current].map(([field, value]) => ({ op: "set", field, value }));
+	const termFields = plan ? plan.terms.map((c, i) => ({ c, field: plan!.termFields[i] })).filter((t) => linkValues.has(t.field)) : [];
+	const terms = termFields.map((t) => t.c);
+	const fixes = plan ? plan.fixes.filter((_, i) => linkValues.has(plan!.fixFields[i])) : [];
+	// The meta description, only into an empty one, in a collection with SEO whose editor takes it (the draft lists it),
+	// and never one the person dismissed, or removed after it was applied.
+	const liveTold = live && (live.descriptionStatus === "dismissed" || live.descriptionStatus === "applied");
+	const fillDescription = describe && Boolean(t0?.info.hasSeo) && draft.defined.has("seo.description") && noDescription && !liveTold ? description.trim() : "";
+	if (fillDescription && fillDescription.length <= SEO_DESCRIPTION_MAX) ops.push({ op: "set", field: "seo.description", value: fillDescription });
+	const describedNow = ops.some((o) => o.field === "seo.description");
 
 	// ── Staged for the publish ──
 	const t1 = t0 ? await entryText(ctx, collection, { ...data, ...Object.fromEntries(current) }, s, features).catch(() => t0) : null;
@@ -582,7 +677,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 		);
 	}
 
-	// ── The toast ──
+	// ── The toast and the review ──
 	const imageTotal = slots.length;
 	const alts = fills.filter((f) => f.alt).length;
 	const captions = fills.filter((f) => f.caption).length;
@@ -597,6 +692,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 		parts.push(`${what} ${named}.`);
 	}
 	if (fixes.length) parts.push(`Put ${plural(fixes.length, "possessive")} inside glossary.io links.`);
+	if (describedNow) parts.push("Wrote a meta description.");
 	if (fills.length || left) {
 		parts.push(
 			left
@@ -606,18 +702,30 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	}
 	if (ops.length) parts.push(TOASTS.review);
 	const what = parts.join(" ");
+	const issue: Issue | undefined = issues.entity ?? issues.description ?? issues.image ?? issues.links;
+	// Only time, or images past this request's cap, stopped it: the panel asks again, and that round starts where this one stopped.
+	const more = issue?.kind === "time" || (!issue && left > 0);
+	const review: EnrichReview = {
+		links: termFields.map(({ c, field }) => ({ name: c.entity, slug: c.slug, url: c.href, field })),
+		possessives: fixes.length,
+		images: fills.map((f) => ({ field: f.slot.field, mediaId: f.slot.mediaId, filename: (f.slot.mediaId && filenames.get(f.slot.mediaId)) || "", ...(f.alt ? { alt: f.alt } : {}), ...(f.caption ? { caption: f.caption } : {}) })),
+		...(describedNow ? { description: fillDescription } : {}),
+		// With an image issue (the limit, an error) the message says why the rest have none.
+		leftAlone: issues.image ? 0 : slots.filter((slot) => !filled.has(slot) && !(slot.mediaId && pendingIds.has(slot.mediaId))).length,
+		remaining: left,
+	};
 	const answer = (type: Toast["type"], lead: string): EnrichAnswer => ({
 		toast: { type, message: [lead, what].filter(Boolean).join(" ") },
-		...(ops.length ? { patch: { type: "editor-draft-patch" as const, operations: ops } } : {}),
+		...(ops.length ? { patch: { type: "editor-draft-patch" as const, operations: ops }, review } : {}),
+		...(more ? { more: true as const } : {}),
+		...(imageTotal ? { progress: { imagesDone: fills.length, imagesTotal: fills.length + left } } : {}),
 	});
-	const issue: Issue | undefined = issues.entity ?? issues.description ?? issues.image ?? issues.links;
 	if (issue?.kind === "limit") return answer("error", TOASTS.limit);
 	if (issue?.kind === "busy") return answer("info", `Wikidata asked to slow down. Try again in ${plural(Math.max(1, Math.ceil((issue.until - Date.now()) / 60_000)), "minute")}.`);
 	if (issue?.kind === "time") return answer("info", TOASTS.outOfTime);
 	if (issue?.kind === "error") return answer("error", `The AI service didn't answer: ${issue.reason}. ${TOASTS.retry}`);
 	if (issue?.kind === "trouble") return answer("error", `${issue.what}: ${issue.reason}. ${TOASTS.retry}`);
 	if (issue?.kind === "no-index") return answer("info", TOASTS.noIndex);
-	if (trimmed) return answer("info", TOASTS.tooBig);
 	if (links && found && !found.length) return answer("info", TOASTS.noEntities);
 	if (ops.length) return answer("success", "");
 	if (what) return answer("info", "");

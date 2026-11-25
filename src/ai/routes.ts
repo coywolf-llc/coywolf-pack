@@ -264,25 +264,43 @@ export function aiRoutes(options: AiOptions) {
 				const ctx = asCtx(raw);
 				await requireFeature(ctx, "ai");
 				const { collection, id } = parseInput(entryRef, (raw as { input: unknown }).input);
-				const [record, staged, features, collections] = await Promise.all([
+				const [record, staged, features, settings] = await Promise.all([
 					col<EntryRecord>(ctx, "aiEntries").get(entryKey(collection, id)),
 					Promise.resolve(optionalCol<DraftRecord>(ctx, "aiDrafts")?.get(entryKey(collection, id)) ?? null).catch(() => null),
 					ctxFeatures(ctx),
-					readSettings(ctx, options).then((s) => targetCollections(ctx, s)).catch(() => null),
+					readSettings(ctx, options).then(async (s) => ({ provider: s.provider, collections: await targetCollections(ctx, s) })).catch(() => null),
 				]);
+				const covered = !settings || settings.collections.includes(collection);
+				const links = isOn(features, "ai.entities") && isOn(features, "ai.glossaryLinks");
+				const images = isOn(features, "ai.imageText");
 				return {
 					record: record ?? null,
 					/** AI Enrich's analysis of the entry's unpublished text, waiting for its publish (null when there's none, or it stopped early). */
 					staged: staged && !staged.partial ? { entities: staged.entities, description: staged.description, updated: staged.updated } : null,
-					covered: !collections || collections.includes(collection),
+					covered,
 					features: { entities: isOn(features, "ai.entities"), descriptions: isOn(features, "ai.descriptions") },
+					/**
+					 * The panel's AI Enrich button (since 0.52.0): shown only when a click could do something (`available`: the
+					 * collection is covered and glossary.io links or Image text is on), with what it adds and where the entry's
+					 * text and images go (the provider's name). A missing API key still shows it: a click says so.
+					 */
+					enrich: {
+						available: Boolean(settings) && covered && (links || images),
+						links,
+						images,
+						describe: links && isOn(features, "ai.descriptions"),
+						provider: PROVIDERS.find((p) => p.id === settings?.provider)?.label ?? "the AI provider",
+					},
 				};
 			},
 		})),
 
 		/**
-		 * AI Enrich, the entry editor's button (src/ai/editor-enrich.ts): `{ draft, patch }` from the companion
-		 * plugin (src/editor.ts, through src/core/bridge.ts). Answers `{ toast, patch? }` for EmDash's editor; never fails.
+		 * AI Enrich, the button in the entry editor's AI suggestions panel (src/ai/editor-enrich.ts, src/admin/enrich.tsx):
+		 * `{ collection, entryId, draft: { revision, fields, fieldDefinitions }, round }`, the editor's draft as EmDash's
+		 * editorDraft.get() reads it. Answers `{ toast, patch?, review?, revision, more?, running?, progress? }`; never
+		 * fails, and never writes to the entry (the panel applies the patch after a review). Not a settings change
+		 * (NO_SETTINGS_CHANGE in src/pageCache/lib.ts).
 		 */
 		"ai/editor-enrich": definePluginRoute({
 			permission: "plugins:manage",

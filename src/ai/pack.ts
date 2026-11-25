@@ -171,9 +171,21 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		if (!complete) return null;
 		let description = prev?.description ?? "";
 		let descriptionStatus: EntryRecord["descriptionStatus"] = hasDescription && prev?.descriptionStatus !== "applied" ? "none" : (prev?.descriptionStatus ?? "none");
-		if (wantDescription && staged.description && !(sameText && description)) {
-			description = staged.description;
-			descriptionStatus = "suggested";
+		// The click's description, by what's live now (the panel may have filled the empty one, which EmDash saves at
+		// once): the same text was applied; another text is the person's, which stays, and the click's is dismissed;
+		// none is a suggestion, as from an analysis (written by the queued job above in "apply" mode).
+		const live = hasDescription ? (seoDescription as string).trim() : "";
+		if (isOn(features, "ai.descriptions") && t.info.hasSeo && staged.description) {
+			if (live && live === staged.description.trim()) {
+				description = staged.description;
+				descriptionStatus = "applied";
+			} else if (live) {
+				description = staged.description;
+				descriptionStatus = "dismissed";
+			} else if (!(sameText && description)) {
+				description = staged.description;
+				descriptionStatus = "suggested";
+			}
 		}
 		const record: EntryRecord = { collection, entryId: id, title: t.title, hash: t.hash, textHash: t.textHash, status: "ok", error: "", entities: staged.entities, description, descriptionStatus, updated: new Date().toISOString() };
 		await col<EntryRecord>(ctx, "aiEntries").put(key, record);
