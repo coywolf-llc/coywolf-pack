@@ -286,6 +286,36 @@ test("no failed read: a cacheable page keeps its lifetime, and an uncached route
 	assert.equal(await settlePage({ enabled: false, set: () => assert.fail("set") }, untouched, { failed: () => assert.fail("asked") }), untouched);
 });
 
+test("a not-found page: at most a minute at the edge, no stale period, tags kept, at any path (EmDash 1.6 caps 404s only where the path has no file extension)", async () => {
+	const { NOT_FOUND_MAX_AGE } = await import("./lib.ts");
+	assert.equal(NOT_FOUND_MAX_AGE, 60);
+	// A provider that shows the stale period and the tags too.
+	const seen = [];
+	const cache = new AstroCache({ setHeaders: (options) => (seen.push(options), new Headers()) });
+	cache.set({ maxAge: 604800, swr: 86400, tags: ["posts"] });
+	const notFound = html("missing", { status: 404 });
+	const out = await settlePage(cache, notFound, { failed: () => false });
+	assert.equal(out, notFound, "returned as is, still streaming");
+	assert.equal(notFound.bodyUsed, false);
+	applyCacheHeaders(cache, new Response(null), new Request("https://example.com/wp-login.php"));
+	assert.deepEqual(seen.map(({ maxAge, swr, tags }) => ({ maxAge, swr, tags })), [{ maxAge: 60, swr: 0, tags: ["posts"] }]);
+	// A shorter lifetime is left as it is.
+	const short = routeCache(30);
+	await settlePage(short, html("x", { status: 404 }), { failed: () => false });
+	assert.deepEqual(short.sets, []);
+	// After a failed read, not cached at all; a route without a lifetime is never turned on.
+	const failed = astroCache();
+	await settlePage(failed, html("x", { status: 404 }), { failed: () => true });
+	assert.equal(isCacheActive(failed), false);
+	const none = routeCache(undefined);
+	await settlePage(none, html("x", { status: 404 }), { failed: () => false });
+	assert.deepEqual(none.sets, []);
+	// Other statuses keep their lifetime (a 410 from the Redirect Manager sets its own).
+	const gone = routeCache(604800);
+	await settlePage(gone, html("x", { status: 410 }), { failed: () => false });
+	assert.deepEqual(gone.sets, []);
+});
+
 const { registerReadOnlyRoutes, isReadOnlyRoutePath, purgeScope } = await import("./lib.ts");
 const { readOnlyRoute, isReadOnlyRoute, readOnlyRouteNames } = await import("../core/routes.ts");
 

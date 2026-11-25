@@ -1140,13 +1140,17 @@ function methodSource(src, name) {
 	return src.slice(at, walk(src, open + 1, true, []) + 1);
 }
 
-test("not-found pages: EmDash 1.6+ keeps a 404 in the route cache for at most 60 seconds, 1.5 never (docs/performance.md)", () => {
+test("not-found pages: EmDash 1.6+ keeps a 404 in the route cache for at most 60 seconds where the path has no file extension, 1.5 never (docs/performance.md)", async () => {
 	const redirect = [...emdashDist.entries()].find(([file]) => file.endsWith(join("middleware", "redirect.mjs")))?.[1];
 	assert.ok(redirect, `EmDash ${emdashVersion} has no astro/middleware/redirect.mjs`);
-	const never = /response\.status === 404\) routeCache\?\.set\(false\)/.test(redirect);
-	const capped = /response\.status === 404 && routeCacheStores\(routeCache\)\) routeCache\?\.set\(\{\s*maxAge: Math\.min\(routeCache\.options\.maxAge \?\? 60, 60\),\s*swr: 0\s*\}\)/.test(redirect);
-	assert.ok(never || capped, `EmDash ${emdashVersion} caches not-found pages differently: update "not-found pages" in docs/performance.md`);
-	if (!/^1\.5\./.test(emdashVersion)) assert.ok(capped, `EmDash ${emdashVersion} no longer caps a cached 404 at 60 seconds: update docs/performance.md`);
+	const never = /if \(response\.status === 404\) routeCache\?\.set\(false\);/.test(redirect);
+	// 1.6: only where the path has no file extension; at /wp-login.php a 404 keeps the route's lifetime, so the pack's
+	// settlePage caps every 404 itself (NOT_FOUND_MAX_AGE in src/pageCache/lib.ts).
+	const capped = /if \(!isFilePath && response\.status === 404 && routeCacheStores\(routeCache\)\) routeCache\?\.set\(\{\s*maxAge: Math\.min\(routeCache\.options\.maxAge \?\? 60, 60\),\s*swr: 0\s*\}\)/.test(redirect);
+	assert.ok(never || capped, `EmDash ${emdashVersion} caches not-found pages differently: check the pack's 404 cap (settlePage) and "Not-found pages" in docs/performance.md`);
+	if (!/^1\.5\./.test(emdashVersion)) assert.ok(capped, `EmDash ${emdashVersion} changed its 404 cap (now also at file paths, or another lifetime): check the pack's own cap (settlePage) and docs/performance.md`);
+	const { NOT_FOUND_MAX_AGE } = await import("../src/pageCache/lib.ts");
+	assert.equal(NOT_FOUND_MAX_AGE, 60, "the pack's cap matches EmDash's");
 });
 
 test("replacing a media file: EmDash 1.6+ runs media:afterUpload with the item's id and type (the pack's image sizes and AI image text listen); the pack's PUT …/replace watch still forces new sizes (src/images/pack.ts)", () => {
@@ -1159,8 +1163,9 @@ test("replacing a media file: EmDash 1.6+ runs media:afterUpload with the item's
 });
 
 test("editor extensions: EmDash still serves none to a configured plugin with an admin entry, as the pack is (docs/internals.md)", () => {
-	const runtime = [...emdashDist.values()].find((src) => src.includes("getPluginEditorExtension("));
-	assert.ok(runtime, `EmDash ${emdashVersion} has no getPluginEditorExtension`);
+	// The runtime chunk defines it (another chunk only calls it): pick the definition, not the first chunk listed.
+	const runtime = [...emdashDist.values()].find((src) => /\n\tgetPluginEditorExtension\(pluginId/.test(src));
+	assert.ok(runtime, `EmDash ${emdashVersion} has no getPluginEditorExtension method`);
 	assert.match(
 		runtime,
 		/getPluginEditorExtension\([^)]*\) \{[\s\S]{0,600}?if \(configured\) \{\s*if \(configured\.admin\.entry\) return null;/,
@@ -1173,8 +1178,9 @@ test("scheduled run: EmDash leaves its cache purges to the host's scheduled hand
 	// EmDash's runtime takes both purges as callbacks: scheduled publishing's and plugin content actions'.
 	const runtime = [...emdashDist.values()].find((src) => src.includes("async runScheduledTasks("));
 	assert.ok(runtime, `EmDash ${emdashVersion} has no runtime runScheduledTasks`);
-	// 1.6.0 moved the body into runScheduledTasksWithStats (runScheduledTasks calls it).
-	const run = methodSource(runtime, runtime.includes("async runScheduledTasksWithStats(") ? "runScheduledTasksWithStats" : "runScheduledTasks");
+	// runScheduledTasks calls runScheduledTasksWithStats, which does the work (1.5 and 1.6).
+	assert.match(methodSource(runtime, "runScheduledTasks"), /this\.runScheduledTasksWithStats\(options\)/, changed);
+	const run = methodSource(runtime, "runScheduledTasksWithStats");
 	assert.match(run, /if \(options\.invalidateContentCache\) this\.pluginContentCacheInvalidator = options\.invalidateContentCache;/, changed);
 	// 1.5.0 hands the whole options object to the publish sweep; 1.6.0 passes onPublished on by name.
 	assert.match(run, /options\.onPublished|runScheduledMaintenanceTick\(options,/, changed);

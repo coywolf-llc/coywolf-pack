@@ -55,7 +55,7 @@ function context(media: Media) {
 				writes.push(patch);
 				Object.assign(item, patch);
 			},
-			getUploadUrl: () => assert.fail("the image was fetched"),
+			readBytes: () => assert.fail("the image was read"),
 		},
 		storage: { aiMedia: collection("aiMedia"), aiQueue: collection("aiQueue") },
 		kv: { get: async () => null, set: async () => undefined },
