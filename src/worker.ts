@@ -3,6 +3,13 @@
  * "@coywolf/emdash/worker". Kept small and free of EmDash imports: the
  * Worker entry loads it before anything else.
  *
+ * stripTrackingParams also makes the pack's page cache purges work during the
+ * Worker's scheduled run (the Cron Trigger), where Workers Cache purges report
+ * success and clear nothing: it runs the site's scheduled handler inside a
+ * store the pack's purges look for, and answers their call to the Worker's
+ * own fetch, made with a ctx.props value only the Worker can set (see
+ * "Scheduled runs" below, and src/core/scheduled-purge.ts).
+ *
  * stripTrackingParams: pages linked with utm_…, fbclid, gclid and similar
  * parameters are served from Workers Cache as if the parameters weren't
  * there, instead of being built again for every campaign or click ID. Wrap
@@ -60,7 +67,24 @@
  * Cloudflare's docs say zone rules that change the request before the cache
  * (URL Rewrite Rules) don't apply to Workers Cache, which is why this is code
  * in the Worker and not a setting (src/core/tracking-params.ts).
+ *
+ * Scheduled runs: when the handler has a scheduled() (EmDash's
+ * createScheduledHandler, which runs plugins' scheduled tasks and scheduled
+ * publishing), the wrapper runs it inside the pack's scheduled-run store.
+ * A page cache purge the pack makes during that run (glossary.io links with
+ * keepDates, Social Images, slug-change redirects, child pages, discovery
+ * files, video captions…) is then sent to this same Worker as a fetch call
+ * through ctx.exports.default, which this wrapper answers by purging, before
+ * the site's handler and before any of the above. Each such purge costs one
+ * call to the Worker, with almost no CPU time. It needs ctx.exports (a
+ * compatibility date of 2025-11-17 or later); without it those purges are
+ * logged and reported as refused. EmDash's own purges from the scheduled run
+ * take the same way when the site uses the pack's cache provider
+ * (src/cache-provider.ts).
  */
+import { AsyncLocalStorage } from "node:async_hooks";
+
+import { type ScheduledRun, answerInternalPurge, installScheduledRuns, internalPurge } from "./core/scheduled-purge.js";
 import {
 	TRACKING_HEADER,
 	TRACKING_PARAMS,
@@ -73,6 +97,8 @@ import {
 	trackingFreeUrl,
 	withTrackingParams,
 } from "./core/tracking-params.js";
+
+import { purgeDirect } from "./pageCache/lib.js";
 
 export { TRACKING_PARAMS, TRACKING_PREFIXES };
 export type { TrackingOptions };
@@ -155,12 +181,15 @@ function stateRecorder(database: string) {
 }
 
 type FetchHandler = (request: Request, env: never, ctx: never) => Response | Promise<Response>;
+type ScheduledHandler = (controller: unknown, env: unknown, ctx: unknown) => unknown;
 
 /**
  * The site's Worker handler, with requests that carry tracking parameters
  * served from the cache entry of the same URL without them. Everything else
  * (other methods, EmDash's admin and API, URLs without tracking parameters)
- * goes to the handler unchanged.
+ * goes to the handler unchanged. Its scheduled() (if it has one) runs inside
+ * the pack's scheduled-run store, and the pack's own purge calls are answered
+ * here (see "Scheduled runs" above).
  */
 export function stripTrackingParams<H extends object>(handler: H & { fetch?: unknown }, options: StripTrackingOptions = {}): H {
 	const inner = handler.fetch as FetchHandler | undefined;
@@ -168,9 +197,22 @@ export function stripTrackingParams<H extends object>(handler: H & { fetch?: unk
 	const loopback = options.loopback ?? defaultLoopback;
 	const record = stateRecorder(options.database ?? "DB");
 	markTrackingWrapper({ params: (options.params ?? TRACKING_PARAMS).length, prefixes: (options.prefixes ?? TRACKING_PREFIXES).length });
+	const runs = installScheduledRuns(() => new AsyncLocalStorage<ScheduledRun>());
+	const innerScheduled = (handler as { scheduled?: unknown }).scheduled;
 	return {
 		...handler,
+		...(typeof innerScheduled === "function"
+			? {
+					scheduled(controller: unknown, env: unknown, ctx: unknown): unknown {
+						// Returned as it comes, so the runtime still waits for an async handler.
+						return runs.run({ ctx, env }, () => (innerScheduled as ScheduledHandler).call(handler, controller, env, ctx));
+					},
+				}
+			: {}),
 		async fetch(request: Request, env: never, ctx: never): Promise<Response> {
+			// The pack's purge from a scheduled run (only the Worker's own code can set ctx.props): purged here, in a fetch invocation.
+			const internal = internalPurge(ctx);
+			if (internal) return answerInternalPurge(request, internal.scope, purgeDirect);
 			const url = new URL(request.url);
 			const clean = trackingFreeUrl(url, request.method, options);
 			if (!clean) return inner.call(handler, request, env, ctx);
