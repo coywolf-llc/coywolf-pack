@@ -60,6 +60,9 @@ test("the panels and the column: valid for EmDash (ids, titles, finite order and
 	assert.match(panels, /pageLinks\(props\.collection, ids\)/);
 	assert.match(panels, /pageParents\(props\.collection, ids\)/);
 	assert.doesNotMatch(panels, /@tanstack\/react-query/, "a second React Query copy in dev has no client");
+	// The AI panel's AI Enrich button: only with EmDash 1.6's editorDraft (absent on older hosts), and only when a click could do something.
+	assert.match(panels, /editorDraft\?: EditorDraft;/);
+	assert.match(panels, /const showEnrich = Boolean\(draft\) && \(Boolean\(data\?\.enrich\?\.available\) \|\| runState\(runKey\(collection, entry\.id\)\)\.phase !== "idle"\);/);
 });
 
 test("Child Pages' panel and Parent column show only in collections with the Parent page field (a reference field in the manifest)", () => {

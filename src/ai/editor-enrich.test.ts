@@ -867,9 +867,18 @@ test("the editor's AI panel sees the staged analysis (ai/entry)", async () => {
 	model();
 	const site = fakeSite();
 	await site.click();
-	const read = (await routes.aiRoutes({})["ai/entry"].handler({ ...(site.ctx as object), input: { collection: "posts", id: "E1" } } as never)) as { record: unknown; staged: { entities: unknown[] } | null };
+	type Read = { record: unknown; staged: { entities: unknown[] } | null; enrich: { available: boolean; links: boolean; images: boolean; describe: boolean; provider: string } };
+	const entryOf = (s: Site, collection = "posts") => routes.aiRoutes({})["ai/entry"].handler({ ...(s.ctx as object), input: { collection, id: "E1" } } as never) as Promise<Read>;
+	const read = await entryOf(site);
 	assert.equal(read.record, null);
 	assert.equal(read.staged?.entities.length, 2);
+	// The panel's AI Enrich button: shown when a click could do something, saying what it adds and where the content goes.
+	assert.deepEqual(read.enrich, { available: true, links: true, images: true, describe: false, provider: "Anthropic" });
+	assert.deepEqual((await entryOf(fakeSite({ features: { ai: true, "ai.imageText": true, "ai.descriptions": true } }))).enrich, { available: true, links: false, images: true, describe: false, provider: "Anthropic" });
+	assert.deepEqual((await entryOf(fakeSite({ features: { ...LINKS_ONLY, "ai.descriptions": true } }))).enrich, { available: true, links: true, images: false, describe: true, provider: "Anthropic" });
+	assert.equal((await entryOf(fakeSite({ features: { ai: true, "ai.entities": true, "ai.descriptions": true } }))).enrich.available, false, "neither glossary.io links nor Image text");
+	assert.equal((await entryOf(fakeSite({ settings: { aiCollections: "pages" } }))).enrich.available, false, "a collection AI Enrichment doesn't cover");
+	assert.equal((await entryOf(fakeSite({ settings: { aiApiKey: "" } }))).enrich.available, true, "no API key: a click says so");
 });
 
 // ── Paid work, locks and cancelled clicks ────────────────────────
