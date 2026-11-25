@@ -61,7 +61,7 @@ import {
 	takeCall,
 	withLock,
 } from "./store.js";
-import { WikidataBusyError, entityDetails, searchCandidates } from "./wikidata.js";
+import { WikidataBusyError, entityDetails, findCandidates } from "./wikidata.js";
 import { BUSY_MS, changeCounts, linkEntry, linkMemos, markOwnPublish, retryDue, shouldLink, withRetry, withoutPendingNew } from "./glossary-linker.js";
 import { checkGoneTerms, removeGoneOn } from "./glossary-gone.js";
 import { VERSION } from "../version.js";
@@ -236,8 +236,8 @@ export async function groundEntities(ctx: PluginContext, options: AiOptions, s: 
 	const f = fetcher(ctx, budget);
 	const ua = userAgent(VERSION, ctx.site?.url);
 	// Stage 2: real candidates, one lookup at a time (Wikimedia's API etiquette).
-	// With a deadline (AI Enrich), what was found is kept in the cache: the next round goes on after it. A lookup that
-	// found nothing isn't (Wikidata may not have answered), so it's tried again.
+	// With a deadline (AI Enrich), what Wikidata answered is kept in the cache, "no results" too: the next round goes
+	// on after it. A lookup it didn't answer isn't, so it's tried again.
 	const known = limits?.deadline !== undefined ? (cache.candidates ??= {}) : null;
 	const candidates = [];
 	for (const m of mentions) {
@@ -246,9 +246,9 @@ export async function groundEntities(ctx: PluginContext, options: AiOptions, s: 
 			continue;
 		}
 		inTime(limits);
-		const found = await searchCandidates(f, m.name, lang, ua);
-		if (known && found.length) known[m.name] = found;
-		candidates.push(found);
+		const found = await findCandidates(f, m.name, lang, ua);
+		if (known && found) known[m.name] = found;
+		candidates.push(found ?? []);
 	}
 	let { mentions: grounded, ambiguous } = attachCandidates(mentions, candidates);
 	// Stage 3: the model chooses among real candidates only.

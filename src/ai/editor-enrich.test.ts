@@ -1243,6 +1243,71 @@ test("a round stopped by time during the Wikidata lookups keeps what it found: t
 	}
 });
 
+test("a name Wikidata has no item for is kept as looked up too: the next round doesn't ask again, while a lookup that got no answer is tried again", async () => {
+	reset();
+	wikidataApi.resetSearchCacheForTests();
+	const m = model({ mentions: [{ surface: "Nobody", name: "Nobody Known", type: "Person", description: "", primary: false }, ...ENTITIES] });
+	const site = fakeSite({ features: LINKS_ONLY });
+	const http = (site.ctx as { http: { fetch: (url: string) => Promise<Response> } }).http;
+	const fetchWikidata = http.fetch;
+	const realNow = Date.now;
+	let skew = 0;
+	Date.now = () => realNow() + skew;
+	const asked: string[] = [];
+	http.fetch = async (url) => {
+		const name = new URL(url).searchParams.get("search");
+		if (name) asked.push(name);
+		// Fastmail's lookup gets no answer, and took the rest of the request's time.
+		if (name === "Fastmail") {
+			skew = enrich.START_BY_MS + 1;
+			return new Response("down", { status: 502 });
+		}
+		return fetchWikidata(url);
+	};
+	try {
+		assert.deepEqual(await site.click(), told("info", enrich.TOASTS.outOfTime, { more: true }));
+	} finally {
+		Date.now = realNow;
+	}
+	assert.deepEqual(asked, ["Nobody Known", "Fastmail"]);
+	assert.deepEqual(site.storage.aiDrafts.value<DraftRecord>("posts:E1")!.cache?.candidates, { "Nobody Known": [] }, "no results is an answer; no answer isn't");
+	// Another isolate answers the next round.
+	wikidataApi.resetSearchCacheForTests();
+	http.fetch = async (url) => {
+		const name = new URL(url).searchParams.get("search");
+		if (name) asked.push(name);
+		return fetchWikidata(url);
+	};
+	assert.match((await site.click(draftFields(), {}, "E1", 2)).toast.message, /^Added 2 glossary\.io links/);
+	assert.deepEqual(asked.slice(2), ["Fastmail", "Google"]);
+	assert.equal(textCalls(m), 1);
+	wikidataApi.resetSearchCacheForTests();
+});
+
+test("Wikidata's candidates are kept only for a caller with a deadline: the scheduled run's stage cache never has them", async () => {
+	reset();
+	wikidataApi.resetSearchCacheForTests();
+	model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	const t = await textOf(site, draftFields());
+	const s = await settingsOf(site);
+	const run = async (limits?: { deadline: number }) => {
+		const cache: import("./logic.js").StageCache = { hash: t.hash };
+		automatic = true;
+		try {
+			await worker.groundEntities(site.ctx, site.options, s, t, "posts:E1", cache, { used: 0, max: worker.SUBREQUEST_BUDGET }, limits);
+		} finally {
+			automatic = false;
+		}
+		return cache;
+	};
+	const scheduled = await run();
+	assert.equal(scheduled.entities?.length, 2);
+	assert.equal("candidates" in scheduled, false);
+	assert.deepEqual(Object.keys((await run({ deadline: Date.now() + 60_000 })).candidates ?? {}), ["Fastmail", "Google"]);
+	wikidataApi.resetSearchCacheForTests();
+});
+
 test("a made-up request with hundreds of images: at most 200 media items are looked up; a title kept with the analysis is cut to 500 characters", async () => {
 	reset();
 	model();
