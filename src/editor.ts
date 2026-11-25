@@ -14,24 +14,29 @@
  * route (src/ai/editor-enrich.ts) through EmDash's own dispatcher (src/core/bridge.ts,
  * which needs coywolfPack() in the site's middleware) and returns the pack's
  * answer: a toast, and a patch the editor shows for review. Admins only, like the
- * pack's other routes. It's listed while AI Enrichment is on with glossary.io
- * links (and entities) or Image text.
+ * pack's other routes: EmDash shows the button to everyone who can edit the
+ * entry, and answers anyone else's click with its own "Plugin action failed".
+ * It's always listed: with AI Enrichment or its parts off, a click says so. (A
+ * list that followed the switches went by each isolate's last read of them, up
+ * to five minutes old, and EmDash answers a click on an action that isn't
+ * listed with a 404.)
  *
  * Fields: by default the button reads and patches the collection's translatable
  * fields; `read` and `patch` name them instead (fields a collection lacks are
- * ignored). The patch only sets fields the draft sent.
+ * ignored). The patch only sets fields the draft sent, so every `patch` field
+ * is read too, named in `read` or not.
  */
 import type { PluginDescriptor } from "emdash";
 import { definePlugin, definePluginRoute } from "emdash";
 
 import { packDispatch } from "./core/bridge.js";
-import { PLUGIN_ID, isOn, knownFeatures } from "./core/features.js";
+import { PLUGIN_ID } from "./core/features.js";
 import { VERSION } from "./version.js";
 
 export interface EditorOptions {
 	/** Fields the button reads from the editor's draft. Default: the collection's translatable fields. */
 	read?: string[];
-	/** Fields its patch may set (Portable Text for links and image blocks, image fields). Default: the translatable fields. */
+	/** Fields its patch may set (Portable Text for links and image blocks, image fields); they're read too. Default: the translatable fields. */
 	patch?: string[];
 }
 
@@ -43,10 +48,11 @@ const CAPABILITIES = ["admin.editor-draft:read", "admin.editor-draft:patch"] as 
 
 const selector = (fields: string[] | undefined) => (fields?.length ? { fields: [...fields] } : { translatable: true as const });
 
-/** Whether the button has anything to do: AI Enrichment with glossary.io links (and entities) or Image text. Listed until the switches are known. */
-export function enrichShows(features = knownFeatures()): boolean {
-	if (!features) return true;
-	return (isOn(features, "ai.entities") && isOn(features, "ai.glossaryLinks")) || isOn(features, "ai.imageText");
+/** What the button reads: `read` (or the translatable fields), and always the fields it may patch (a field that isn't read is never patched). */
+function readSelector(options: EditorOptions): { fields?: string[]; translatable?: true } {
+	const patch = options.patch ?? [];
+	if (options.read?.length) return { fields: [...new Set([...options.read, ...patch])] };
+	return patch.length ? { translatable: true, fields: [...patch] } : { translatable: true };
 }
 
 /** The companion plugin, for astro.config.mjs (see the file comment). */
@@ -70,15 +76,13 @@ export function createPlugin(options: EditorOptions = {}) {
 		label: "AI Enrich",
 		route: "enrich",
 		placement: "toolbar" as const,
-		draft: { read: selector(options.read), patch },
+		draft: { read: readSelector(options), patch },
 	};
-	// Read on every manifest build and click (definePlugin keeps admin as it is): the button goes when its parts are off.
-	const admin = Object.defineProperty({}, "editorActions", { enumerable: true, get: () => (enrichShows() ? [action] : []) }) as { editorActions: (typeof action)[] };
 	return definePlugin({
 		id: EDITOR_PLUGIN_ID,
 		version: VERSION,
 		capabilities: [...CAPABILITIES],
-		admin,
+		admin: { editorActions: [action] },
 		routes: {
 			enrich: definePluginRoute({
 				permission: "plugins:manage",

@@ -1620,7 +1620,7 @@ test("AI Enrich is a companion plugin: EmDash serves an editor action only for a
 	// When this fails, EmDash may allow actions for plugins with an admin entry: the button can then move into the pack (docs/ai.md).
 	assert.match(runtime, /getPluginEditorExtension\(pluginId, kind, extensionId, collection\) \{[\s\S]{0,400}?if \(configured\) \{\s*if \(configured\.admin\.entry\) return null;\s*panels = configured\.admin\.editorPanels;\s*actions = configured\.admin\.editorActions;/);
 	assert.match(runtime, /if \(hasAdminEntry\) adminMode = "react";\s*else if \(hasAdminPages \|\| hasWidgets \|\| hasEditorExtensions\) adminMode = "blocks";/);
-	assert.match(runtime, /editorActions: plugin\.admin\?\.editorActions/, "the manifest reads the plugin's actions on each build (the button's live getter)");
+	assert.match(runtime, /editorActions: plugin\.admin\?\.editorActions/, "the manifest lists the plugin's actions as the plugin declares them");
 	assert.match(functionSource(admin, "resolveSandboxedEditorActions"), /plugin\.adminMode !== "blocks"/);
 	// The action's route gets `{ type: "editor_action", draft }`, the draft validated first.
 	const dispatch = [...emdashDist.values()].find((src) => src.includes("function dispatchPluginEditorExtensionApiRequest("));
@@ -1660,11 +1660,13 @@ test("AI Enrich's limits are EmDash's: a draft field, the patch, and an editor a
 	assert.equal(blocks.validateContentEditorActionResponse({ toast: { type: "info", message: "x" }, notice: "x" }, policy).valid, false);
 });
 
-test("AI Enrich: definePlugin keeps the companion's admin.editorActions as a getter and checks its route", async () => {
+test("AI Enrich: definePlugin keeps the companion's one action (its selectors may name fields and translatable together) and checks its route", async () => {
 	const { createPlugin } = await import("../src/editor.ts");
-	const resolved = createPlugin();
-	assert.equal(typeof Object.getOwnPropertyDescriptor(resolved.admin, "editorActions")?.get, "function", "definePlugin copied editorActions instead of keeping the getter");
+	const resolved = createPlugin({ patch: ["content"] });
+	assert.deepEqual(resolved.admin.editorActions.map((a) => [a.id, a.route, a.draft.read]), [["ai-enrich", "enrich", { translatable: true, fields: ["content"] }]]);
 	assert.equal(resolved.admin.entry, undefined);
+	// EmDash's manifest schema takes a selector with both (src/plugins/manifest-schema.ts).
+	assert.match(readFileSync(join(emdashDir, "src/plugins/manifest-schema.ts"), "utf8"), /translatable: z\.literal\(true\)\.optional\(\),[\s\S]{0,200}?selector\.fields\?\.length \?\? 0\) > 0 \|\| selector\.translatable === true/);
 	const { definePlugin } = await import("emdash");
 	assert.throws(() => definePlugin({ id: "contract-editor-action", version: "0.0.0", admin: { editorActions: [{ id: "a", label: "A", route: "missing", placement: "toolbar" }] }, routes: {} }), /unknown route/);
 });

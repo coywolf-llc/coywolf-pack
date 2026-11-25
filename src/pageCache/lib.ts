@@ -47,9 +47,12 @@ const PACK_API = "/_emdash/api/plugins/coywolf-pack/";
  *   Stream webhook does (src/videos/module.ts clearVideoPages). Video details
  *   are read from D1 on every render, so no isolate holds an old copy and
  *   nothing needs a settling purge.
+ * - ai/editor-enrich: the entry editor's AI Enrich button (normally reached
+ *   in process, through the companion plugin's own URL). It changes no page:
+ *   its answer is a patch for the editor's unsaved draft.
  */
 const NO_SETTINGS_CHANGE =
-	/^\/_emdash\/api\/plugins\/coywolf-pack\/(updates\/|videos\/(upload|upload-chunk|update|delete|captions\/(upload|generate|delete|refresh))$|files\/upload-(start|part|complete|abort)$)/;
+	/^\/_emdash\/api\/plugins\/coywolf-pack\/(updates\/|videos\/(upload|upload-chunk|update|delete|captions\/(upload|generate|delete|refresh))$|files\/upload-(start|part|complete|abort)$|ai\/editor-enrich$)/;
 
 /**
  * Routes declared read-only where they're defined (readOnlyRoute in

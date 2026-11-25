@@ -1,7 +1,7 @@
 // Run: node --test test/editor-action.test.mjs
 //
 // The AI Enrich button's companion plugin (src/editor.ts): its descriptor, the
-// action EmDash lists (and drops while its parts are off), its private POST JSON
+// action EmDash lists (always: with its parts off, a click says so), its private POST JSON
 // route, and the bridge to the pack's ai/editor-enrich route (src/core/bridge.ts),
 // which the pack's middleware feeds with EmDash's dispatcher.
 import assert from "node:assert/strict";
@@ -44,7 +44,7 @@ test("the descriptor: a native plugin at @coywolf/emdash/editor, no React admin 
 	assert.equal(typeof editor.createPlugin, "function", "EmDash imports { createPlugin } from a native plugin's entrypoint");
 });
 
-test("the action: AI Enrich in the toolbar, its route private POST JSON for admins; listed before the switches are read, dropped while its parts are off", async () => {
+test("the action: AI Enrich in the toolbar, its route private POST JSON for admins; always listed, whatever the switches say; the fields it may patch are read too", async () => {
 	const plugin = editor.createPlugin({ read: ["title", "content", "excerpt", "featured_image"], patch: ["content", "featured_image"] });
 	assert.equal(features.knownFeatures(), null);
 	const [action] = plugin.admin.editorActions;
@@ -67,16 +67,17 @@ test("the action: AI Enrich in the toolbar, its route private POST JSON for admi
 	// The defaults: the collection's translatable fields.
 	assert.deepEqual(editor.createPlugin().admin.editorActions[0].draft, { read: { translatable: true }, patch: { translatable: true } });
 
-	// The getter follows the switches this isolate last read.
+	// A field the patch may set is read too: one that isn't in the draft is never patched.
+	assert.deepEqual(editor.createPlugin({ read: ["title"], patch: ["content"] }).admin.editorActions[0].draft, { read: { fields: ["title", "content"] }, patch: { fields: ["content"] } });
+	assert.deepEqual(editor.createPlugin({ patch: ["content"] }).admin.editorActions[0].draft, { read: { translatable: true, fields: ["content"] }, patch: { fields: ["content"] } });
+
+	// Listed whatever the switches this isolate last read say (a click answers "off"): a list that followed them could
+	// lag a change by minutes, and EmDash answers a click on an unlisted action with a 404.
 	await features.ctxFeatures(ctxWith({ ai: false, "ai.entities": true, "ai.glossaryLinks": true, "ai.imageText": true }));
-	assert.deepEqual(plugin.admin.editorActions, [], "AI Enrichment off");
+	assert.equal(plugin.admin.editorActions.length, 1, "AI Enrichment off");
 	await features.ctxFeatures(ctxWith({ ai: true, "ai.entities": true }));
-	assert.deepEqual(plugin.admin.editorActions, [], "entities without glossary.io links, and no image text");
-	await features.ctxFeatures(ctxWith({ ai: true, "ai.imageText": true }));
-	assert.equal(plugin.admin.editorActions.length, 1);
-	await features.ctxFeatures(ctxWith({ ai: true, "ai.entities": true, "ai.glossaryLinks": true }));
-	assert.equal(plugin.admin.editorActions.length, 1);
-	assert.equal(editor.enrichShows(null), true);
+	assert.equal(plugin.admin.editorActions.length, 1, "entities without glossary.io links, and no image text");
+	assert.equal(Object.getOwnPropertyDescriptor(plugin.admin, "editorActions")?.get, undefined, "a plain list");
 });
 
 test("the route hands the draft to the pack's ai/editor-enrich through EmDash's dispatcher, with the caller and the patch selector, and returns its answer", async () => {
@@ -116,4 +117,12 @@ test("the pack's middleware remembers EmDash's dispatcher first, on every reques
 	// A request without EmDash's locals changes nothing.
 	await coywolfPack()({ ...context, locals: {} }, async () => new Response(""));
 	assert.equal(bridge.packDispatch(), dispatch);
+});
+
+test("a direct POST to the pack's ai/editor-enrich clears no cached page and records no settings change: its answer is a patch for the editor's draft", async () => {
+	const { purgesAfter } = await import("../src/pageCache/lib.ts");
+	const pack = "/_emdash/api/plugins/coywolf-pack/";
+	assert.equal(purgesAfter("POST", `${pack}ai/editor-enrich`), false);
+	assert.equal(purgesAfter("POST", `${pack}ai/editor-enrich/more`), true, "only that route");
+	assert.equal(purgesAfter("POST", `${pack}features/save`), true, "other pack saves still do");
 });
