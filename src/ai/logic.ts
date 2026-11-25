@@ -531,6 +531,8 @@ export interface StageCache {
 	hash: string;
 	mentions?: Mention[];
 	choices?: Record<string, string | null>;
+	/** The grounded, verified entities (the end of groundEntities), so nothing is looked up or paid for again. */
+	entities?: Entity[];
 	description?: string;
 }
 
@@ -620,13 +622,15 @@ export function retryAt(job: QueueJob, now: number): number | null {
 /**
  * Merge a re-enqueue into an existing job: push the debounce later, keep attempts reset, keep force if either asked.
  * It stays a save's job (source "save") only when both are: a save merged into a bulk run's job (or the reverse)
- * keeps the bulk run's check, so new settings still re-analyze it.
+ * keeps the bulk run's check, so new settings still re-analyze it. Outputs already paid for (`cache`) stay with the
+ * job unless the new one brings its own or is forced (Analyze again): they're only used for the hash they were made for.
  */
 export function mergeJob(existing: QueueJob | null, next: QueueJob): QueueJob {
 	if (!existing) return next;
 	const { source: _s, ...rest } = next;
 	const saves = existing.source === "save" && next.source === "save";
-	return { ...rest, ...(saves ? { source: "save" as const } : {}), force: Boolean(existing.force || next.force), enqueuedAt: Math.min(existing.enqueuedAt, next.enqueuedAt), attempts: 0 };
+	const cache = next.cache ?? (next.force ? undefined : existing.cache);
+	return { ...rest, ...(saves ? { source: "save" as const } : {}), ...(cache ? { cache } : {}), force: Boolean(existing.force || next.force), enqueuedAt: Math.min(existing.enqueuedAt, next.enqueuedAt), attempts: 0 };
 }
 
 /** UTC day key for the daily call counter. */

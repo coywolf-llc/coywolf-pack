@@ -41,8 +41,16 @@ const enrich = (await import("./editor-enrich.ts")) as typeof import("./editor-e
 const store = (await import("./store.ts")) as typeof import("./store.js");
 // @ts-ignore -- as above.
 const linker = (await import("./glossary-linker.ts")) as typeof import("./glossary-linker.js");
+// @ts-ignore -- as above.
+const worker = (await import("./worker.ts")) as typeof import("./worker.js");
 
 enrich.enrichIo.wait = async () => {};
+/** The entry lock's renewals, run by hand: a click here ends long before a real one would renew. */
+const beats: Array<() => void> = [];
+enrich.enrichIo.every = (_ms, beat) => {
+	beats.push(beat);
+	return () => void beats.splice(beats.indexOf(beat), 1);
+};
 
 type Answer = import("./editor-enrich.js").EnrichAnswer;
 type ChatRequest = { system: string; user: string; image?: unknown; maxTokens: number; timeoutMs?: number };
@@ -54,6 +62,9 @@ const ENTITIES = [
 	{ surface: "Google", name: "Google", type: "Organization", description: "A technology company.", primary: false },
 ];
 const QIDS: Record<string, string> = { Fastmail: "Q1", Google: "Q95", "Fastmail Inc.": "Q1", "Google LLC": "Q95" };
+
+/** While an entry's queued job runs (the scheduled path: its calls have the providers' own timeouts). */
+let automatic = false;
 
 interface Model {
 	calls: ChatRequest[];
@@ -67,7 +78,7 @@ function model(more: Partial<Model> = {}): Model {
 		m.calls.push(req);
 		const error = m.fail?.(req);
 		if (error) throw error;
-		assert.equal(req.timeoutMs, 40_000, "every call the button makes has its timeout");
+		if (!automatic) assert.equal(req.timeoutMs, 40_000, "every call the button makes has its timeout");
 		if (req.image) {
 			const n = m.calls.filter((c) => c.image).length;
 			return { text: JSON.stringify({ alt_text: `Model alt ${n}.`, title: `Title ${n}`, caption: `Model caption ${n}.` }), inputTokens: 1, outputTokens: 1 };
@@ -201,6 +212,10 @@ function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<
 	const wd = { searches: 0, busy: false };
 	const item: Item = { id: "E1", slug: "post", status: opts.status ?? "draft", data: { title: "Email I like", content: [para("b0", "Saved text.")], excerpt: "", featured_image: null }, seo: { description: null }, version: 1, updatedAt: "2026-11-20T00:00:00.000Z", liveRevisionId: null, draftRevisionId: null };
 	const items = new Map<string, Item>([["posts:E1", item]]);
+	const revisions = new Map<string, Record<string, unknown>>();
+	let revisionSeq = 0;
+	/** The content writes made through the plugin's own content API (the pack's edits). */
+	const writes: string[] = [];
 	const log: string[] = [];
 	const logged = (level: string) => (message: string, data?: unknown) => void log.push(`${level} ${message}${data ? ` ${JSON.stringify(data)}` : ""}`);
 	const ctx = {
@@ -220,6 +235,7 @@ function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<
 				if (kv.get(k)?.revision === rev) kv.delete(k);
 				return true;
 			},
+			list: async (prefix = "") => [...kv].filter(([k]) => k.startsWith(prefix)).map(([key, v]) => ({ key, value: structuredClone(v.value) })),
 		},
 		log: { info: logged("info"), warn: logged("warn"), error: logged("error"), debug: logged("debug") },
 		schema: {
@@ -243,8 +259,37 @@ function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<
 		storage,
 		http: { fetch: wikidata(wd) },
 		content: {
-			get: async (c: string, id: string) => structuredClone(items.get(`${c}:${id}`) ?? null),
-			getRevision: async () => null,
+			// By id, or by slug as EmDash's own lookups allow.
+			get: async (c: string, id: string) => structuredClone(items.get(`${c}:${id}`) ?? [...items.values()].find((i) => c === "posts" && i.slug === id) ?? null),
+			getRevision: async (_c: string, _id: string, rev: string) => (revisions.has(rev) ? { data: structuredClone(revisions.get(rev)) } : null),
+			// EmDash's plugin content writes, for a collection with revisions: an update makes a draft revision one version on
+			// (an SEO-only one writes the SEO panel), and a publish makes it live and runs the content hooks.
+			update: async (c: string, id: string, patch: Record<string, unknown>) => {
+				const cur = items.get(`${c}:${id}`)!;
+				writes.push(`update ${Object.keys(patch).join(",")}`);
+				if (Object.keys(patch).every((k) => k === "seo")) {
+					items.set(`${c}:${id}`, { ...cur, seo: { ...cur.seo, ...(patch.seo as { description: string }) }, version: cur.version + 1 });
+					return structuredClone(items.get(`${c}:${id}`));
+				}
+				const rev = `D${++revisionSeq}`;
+				revisions.set(rev, { ...cur.data, ...patch });
+				items.set(`${c}:${id}`, { ...cur, version: cur.version + 1, draftRevisionId: rev, updatedAt: new Date().toISOString() });
+				return structuredClone(items.get(`${c}:${id}`));
+			},
+			getVersioned: async (c: string, id: string) => {
+				const cur = items.get(`${c}:${id}`);
+				return cur ? { item: structuredClone(cur), _rev: `rev-${cur.version}` } : null;
+			},
+			publish: async (c: string, id: string, o: { _rev: string }) => {
+				const cur = items.get(`${c}:${id}`)!;
+				if (o._rev !== `rev-${cur.version}`) throw Object.assign(new Error("Content has been modified"), { code: "CONFLICT" });
+				writes.push("publish");
+				const live: Item = { ...cur, data: revisions.get(cur.draftRevisionId!) ?? cur.data, liveRevisionId: cur.draftRevisionId, draftRevisionId: null, version: cur.version + 1, updatedAt: new Date().toISOString() };
+				items.set(`${c}:${id}`, live);
+				const published = { item: structuredClone(live), _rev: `rev-${live.version}` };
+				await (pack.aiPack(options).hooks!["content:afterPublish"] as unknown as (event: unknown, ctx: unknown) => Promise<void>)({ content: structuredClone(live), collection: c }, ctx);
+				return published;
+			},
 		},
 		media: {
 			get: async (id: string) => structuredClone(library.get(id) ?? null),
@@ -264,12 +309,17 @@ function fakeSite(opts: { features?: Record<string, boolean>; settings?: Record<
 		storage,
 		library,
 		item,
+		items,
+		writes,
 		log,
 		wd,
+		/** The entry as it is now. */
+		entry: () => items.get("posts:E1")!,
+		hook: (name: "content:afterPublish" | "content:afterSave", content: unknown) => (pack.aiPack(options).hooks![name] as unknown as (event: unknown, ctx: unknown) => Promise<void>)({ content: structuredClone(content), collection: "posts" }, ctx),
 		calls: () => store.callsToday(ctx as never),
 		/** A click with the editor's draft (EmDash's snapshot, as the companion plugin hands it on). */
-		click: (fields: Record<string, unknown> = { title: "Email I like", content: CONTENT(), excerpt: "", featured_image: FEATURED() }, patch: { fields?: string[]; translatable?: true } = { translatable: true }) =>
-			routes.aiRoutes(options)["ai/editor-enrich"].handler({ ...ctx, input: { draft: { collection: "posts", entryId: "E1", locale: null, baseRevision: "rev-1", invocationId: "inv-0123456789abcdef", fields, fieldDefinitions: [] }, patch } } as never) as Promise<Answer>,
+		click: (fields: Record<string, unknown> = { title: "Email I like", content: CONTENT(), excerpt: "", featured_image: FEATURED() }, patch: { fields?: string[]; translatable?: true } = { translatable: true }, entryId = "E1") =>
+			routes.aiRoutes(options)["ai/editor-enrich"].handler({ ...ctx, input: { draft: { collection: "posts", entryId, locale: null, baseRevision: "rev-1", invocationId: "inv-0123456789abcdef", fields, fieldDefinitions: [] }, patch } } as never) as Promise<Answer>,
 		/** The entry published with these fields (EmDash's afterPublish content). */
 		publish: async (data: Record<string, unknown>, more: Partial<Item> = {}) => {
 			const live: Item = { ...item, ...more, status: "published", data, liveRevisionId: "R2", draftRevisionId: "R2" };
@@ -458,7 +508,7 @@ test("a model error: a toast, the image text that worked, nothing staged as comp
 	const site = fakeSite();
 	const answer = await site.click();
 	assert.equal(answer.toast.type, "error");
-	assert.match(answer.toast.message, /^The AI service didn't answer: Anthropic returned HTTP 529: Overloaded\. Nothing was charged twice; click again to retry\. Wrote alt text for 3 and captions for 4 of 4 images\. Review the changes, then save\.$/);
+	assert.match(answer.toast.message, /^The AI service didn't answer: Anthropic returned HTTP 529: Overloaded\. Click again to retry: what was already paid for is kept\. Wrote alt text for 3 and captions for 4 of 4 images\. Review the changes, then save\.$/);
 	assert.equal(site.storage.aiDrafts.value<{ partial?: true }>("posts:E1")?.partial, true);
 	assert.equal(site.storage.aiEntries.rows.size, 0);
 	assert.equal(site.storage.aiLinks.rows.size, 0, "no links planned");
@@ -684,6 +734,571 @@ test("the editor's AI panel sees the staged analysis (ai/entry)", async () => {
 	const read = (await routes.aiRoutes({})["ai/entry"].handler({ ...(site.ctx as object), input: { collection: "posts", id: "E1" } } as never)) as { record: unknown; staged: { entities: unknown[] } | null };
 	assert.equal(read.record, null);
 	assert.equal(read.staged?.entities.length, 2);
+});
+
+// ── Paid work, locks and cancelled clicks ────────────────────────
+
+type DraftRecord = import("./store.js").DraftRecord;
+type EntryRecord = import("./store.js").EntryRecord;
+type LinkMemo = import("./glossary-linker.js").LinkMemo;
+type QueueJob = import("./logic.js").QueueJob;
+type Chat = (req: ChatRequest) => Promise<unknown>;
+const chat = globalThis as { __aiChat?: Chat };
+
+/** Until `done` holds (the work in flight got that far). */
+async function until(done: () => boolean): Promise<void> {
+	for (let i = 0; i < 5000 && !done(); i++) await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(done(), "never got there");
+}
+
+/** The content without its links to `host` (taken out by hand). */
+function withoutLink(content: unknown, host: string): unknown[] {
+	const out = structuredClone(content) as Array<{ markDefs?: Array<{ _key: string; href: string }>; children?: Span[] }>;
+	for (const b of out) {
+		const gone = (b.markDefs ?? []).filter((d) => d.href.includes(host)).map((d) => d._key);
+		if (!gone.length) continue;
+		b.markDefs = b.markDefs!.filter((d) => !gone.includes(d._key));
+		for (const c of b.children ?? []) c.marks = c.marks.filter((k) => !gone.includes(k));
+	}
+	return out;
+}
+
+const featuresOf = (site: Site) => site.settings.get("features") as Record<string, boolean>;
+const settingsOf = (site: Site) => store.readSettings(site.ctx, site.options);
+const textOf = async (site: Site, data: Record<string, unknown>, features = featuresOf(site)) => (await worker.entryText(site.ctx, "posts", data, await settingsOf(site), features))!;
+const jobOf = (site: Site) => [...site.storage.aiQueue.rows.values()][0]?.data as QueueJob | undefined;
+/** The entry's queued job, run as the scheduled run runs it. */
+async function runJob(site: Site) {
+	automatic = true;
+	try {
+		return await worker.analyzeEntry(site.ctx, site.options, await settingsOf(site), featuresOf(site), jobOf(site)!, { used: 0, max: worker.SUBREQUEST_BUDGET });
+	} finally {
+		automatic = false;
+	}
+}
+const LOCK = "state:ai:editor:posts:E1";
+const LINKS_ONLY = { ai: true, "ai.entities": true, "ai.glossaryLinks": true };
+/** Forget the pack's own publishes marked in this isolate (a test's linkEntry), so the next test's publishes are a person's. */
+const forgetOwn = () => linker.markOwnPublish("posts:E1", null, Date.now() - 3_600_000);
+
+test("the entry's own id keys everything, whatever the request called it (a direct call with its slug)", async () => {
+	reset();
+	model();
+	const site = fakeSite();
+	site.kv.set(LOCK, { value: { until: Date.now() + 60_000, token: "another click" }, revision: "1" });
+	assert.deepEqual(await site.click(undefined, undefined, "post"), { toast: { type: "info", message: enrich.TOASTS.running } }, "the same lock as a click by id");
+	site.kv.delete(LOCK);
+	const answer = await site.click(undefined, undefined, "post");
+	assert.match(answer.toast.message, /^Added 2 glossary\.io links/);
+	assert.deepEqual([...site.storage.aiDrafts.rows.keys()], ["posts:E1"]);
+	assert.deepEqual([...site.storage.aiLinks.rows.keys()], ["posts:E1"]);
+	assert.equal(site.storage.aiDrafts.value<DraftRecord>("posts:E1")!.entryId, "E1");
+	assert.equal(site.storage.aiLinks.value<LinkMemo>("posts:E1")!.entryId, "E1");
+});
+
+test("a click cancelled halfway (the browser left): what it paid for is saved as it's paid, and its short lock lapses, so the next click pays for none of it", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	// Wikidata's type check never answers the first click: nothing after it runs, its `finally` included.
+	const http = (site.ctx as { http: { fetch: (url: string) => Promise<Response> } }).http;
+	const real = http.fetch;
+	let asked = false;
+	let release!: () => void;
+	const hung = new Promise<void>((resolve) => (release = resolve));
+	http.fetch = async (url: string) => {
+		if (url.includes("query.wikidata.org") && !asked) {
+			asked = true;
+			await hung;
+		}
+		return real(url);
+	};
+	const first = site.click();
+	await until(() => asked);
+	assert.equal(textCalls(m), 1);
+	const saved = site.storage.aiDrafts.value<DraftRecord>("posts:E1")!;
+	assert.equal(saved.partial, true, "saved before the click ends");
+	assert.equal(saved.cache?.mentions?.length, 2);
+	const lock = site.kv.get(LOCK)!.value as { until: number; token: string };
+	assert.ok(lock.until <= Date.now() + enrich.LOCK_MS, "a short lock, renewed only while the click runs");
+	// The request is gone: nothing renews the lock, and it lapses.
+	site.kv.set(LOCK, { value: { ...lock, until: Date.now() - 1 }, revision: "lapsed" });
+	const second = await site.click();
+	assert.equal(textCalls(m), 1, "the extraction came from what the first click saved");
+	assert.match(second.toast.message, /^Added 2 glossary\.io links/);
+	assert.equal(site.kv.has(LOCK), false);
+	release();
+	await first;
+	assert.equal(site.kv.has(LOCK), false);
+});
+
+test("the entry's lock is renewed while a click runs, never once another click has it, and the renewals stop when it ends", async () => {
+	reset();
+	model();
+	const answer = chat.__aiChat!;
+	let waiting = false;
+	let release!: () => void;
+	const hung = new Promise<void>((resolve) => (release = resolve));
+	chat.__aiChat = async (req) => {
+		waiting = true;
+		await hung;
+		return answer(req);
+	};
+	const site = fakeSite({ features: LINKS_ONLY });
+	const click = site.click();
+	await until(() => waiting && beats.length === 1);
+	const held = site.kv.get(LOCK)!.value as { until: number; token: string };
+	// Close to lapsing: a renewal puts it LOCK_MS ahead again.
+	site.kv.set(LOCK, { value: { ...held, until: Date.now() + 1 }, revision: "close" });
+	beats[0]();
+	await until(() => (site.kv.get(LOCK)!.value as { until: number }).until > Date.now() + enrich.LOCK_MS / 2);
+	// Its lock lapsed anyway and another click took it: this one never renews or releases that.
+	const other = { until: Date.now() + 1_000, token: "another click" };
+	site.kv.set(LOCK, { value: other, revision: "other" });
+	beats[0]();
+	release();
+	await click;
+	assert.deepEqual(site.kv.get(LOCK)?.value, other);
+	assert.equal(beats.length, 0, "the renewals stop");
+});
+
+test("a failure outside one image's work (the image records can't be read): the links still go, and the toast says what went wrong", async () => {
+	reset();
+	model();
+	const site = fakeSite();
+	site.storage.aiMedia.getMany = async () => {
+		throw new Error("D1 is down");
+	};
+	const answer = await site.click();
+	assert.equal(answer.toast.type, "error");
+	assert.match(answer.toast.message, /^The images couldn't be worked on: D1 is down\. Click again to retry: what was already paid for is kept\. Added 2 glossary\.io links \(.+\)\. Review the changes, then save\.$/);
+	assert.equal(linksOf(valueOf(answer, "content")).length, 2);
+	assert.equal(site.storage.aiDrafts.value<DraftRecord>("posts:E1")?.partial, undefined, "the analysis is staged");
+	assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1")?.planned?.slugs, ["fastmail", "google"]);
+});
+
+test("staging fails at the end: the click still answers, and what it saved on the way means the next click pays for nothing", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	const put = site.storage.aiDrafts.put;
+	site.storage.aiDrafts.put = async (id: string, data: unknown) => {
+		if (!(data as DraftRecord).partial) throw new Error("D1 is down");
+		return put(id, data);
+	};
+	const first = await site.click();
+	assert.match(first.toast.message, /^Added 2 glossary\.io links/);
+	assert.ok(site.log.some((line) => line.startsWith("warn AI Enrich: couldn't stage the analysis")));
+	const saved = site.storage.aiDrafts.value<DraftRecord>("posts:E1")!;
+	assert.equal(saved.partial, true);
+	assert.deepEqual(saved.cache?.entities?.map((e) => e.qid), ["Q1", "Q95"], "the entities, saved as soon as they were found");
+	site.storage.aiDrafts.put = put;
+	const paid = m.calls.length;
+	const second = await site.click();
+	assert.equal(m.calls.length, paid);
+	assert.equal(second.toast.message, first.toast.message);
+	assert.equal(site.storage.aiDrafts.value<DraftRecord>("posts:E1")?.partial, undefined);
+});
+
+test("past the click's deadline: no new stage starts, what's paid is staged, and the publish hands it to the entry's job", async () => {
+	reset();
+	const m = model();
+	const answer = chat.__aiChat!;
+	const realNow = Date.now;
+	let skew = 0;
+	Date.now = () => realNow() + skew;
+	chat.__aiChat = async (req) => {
+		const out = await answer(req);
+		// The extraction took most of the click's time.
+		if (req.system.startsWith("You extract")) skew = 51_000;
+		return out;
+	};
+	const site = fakeSite({ features: LINKS_ONLY });
+	let first: Answer;
+	try {
+		first = await site.click();
+	} finally {
+		Date.now = realNow;
+	}
+	assert.deepEqual(first, { toast: { type: "info", message: enrich.TOASTS.outOfTime } });
+	assert.equal(site.wd.searches, 0, "Wikidata wasn't asked");
+	const staged = site.storage.aiDrafts.value<DraftRecord>("posts:E1")!;
+	assert.equal(staged.partial, true);
+	assert.equal(staged.cache?.mentions?.length, 2);
+	await site.publish(draftFields());
+	assert.equal(site.storage.aiDrafts.rows.size, 0);
+	const job = jobOf(site)!;
+	assert.equal(job.cache?.mentions?.length, 2);
+	assert.equal(job.cache?.hash, (await textOf(site, draftFields())).hash);
+	const paid = textCalls(m);
+	assert.equal(await runJob(site), "done");
+	assert.equal(textCalls(m), paid, "the extraction isn't paid for again");
+	assert.deepEqual(site.storage.aiEntries.value<EntryRecord>("posts:E1")!.entities.map((e) => e.qid), ["Q1", "Q95"]);
+	forgetOwn();
+});
+
+test("images: their files are read one at a time (large ones together could exhaust the Worker's memory), while the model calls overlap", async () => {
+	reset();
+	model();
+	const answer = chat.__aiChat!;
+	let calling = 0;
+	let mostCalling = 0;
+	chat.__aiChat = async (req) => {
+		if (!req.image) return answer(req);
+		mostCalling = Math.max(mostCalling, ++calling);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		calling--;
+		return answer(req);
+	};
+	const site = fakeSite({ features: { ai: true, "ai.imageText": true } });
+	let reading = 0;
+	let mostReading = 0;
+	const media = (site.ctx as { media: { readBytes: (id: string) => Promise<unknown> } }).media;
+	const read = media.readBytes;
+	media.readBytes = async (id: string) => {
+		mostReading = Math.max(mostReading, ++reading);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		reading--;
+		return read(id);
+	};
+	const done = await site.click();
+	assert.match(done.toast.message, /^Wrote alt text for 3 and captions for 4 of 4 images/);
+	assert.equal(mostReading, 1);
+	assert.ok(mostCalling > 1, "the calls themselves still run three at a time");
+});
+
+// ── Second clicks, live analyses and planned links ───────────────
+
+test("a second click after a link was taken out by hand doesn't propose it again, and the publish keeps it out", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	const fields = draftFields();
+	const first = await site.click(fields);
+	const edited = { ...applied(fields, first), content: withoutLink(valueOf(first, "content"), "google") };
+	const second = await site.click(edited);
+	assert.equal(textCalls(m), 1);
+	assert.deepEqual(second, { toast: { type: "info", message: enrich.TOASTS.nothingToAdd } });
+	assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1")!.planned?.slugs, ["fastmail", "google"], "the first proposal's links still tell it was applied");
+	await site.publish(edited);
+	assert.equal(site.storage.aiQueue.rows.size, 0, "promoted");
+	assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1")!.linked, ["Q1", "Q95"], "Google counts as handled");
+
+	// Not applied (the dialog was cancelled): a second click proposes everything again.
+	reset();
+	const other = fakeSite({ features: LINKS_ONLY });
+	await other.click(fields);
+	assert.equal(linksOf(valueOf(await other.click(fields), "content")).length, 2);
+});
+
+test("planned links older than PLANNED_MS count for nothing: not as a second click's exclusions, not at the publish", async () => {
+	reset();
+	model();
+	const age = (site: Site) => {
+		const memo = site.storage.aiLinks.value<LinkMemo>("posts:E1")!;
+		site.storage.aiLinks.rows.set("posts:E1", { data: { ...memo, planned: { ...memo.planned!, at: Date.now() - linker.PLANNED_MS - 1 } }, revision: 500 });
+	};
+	const site = fakeSite({ features: LINKS_ONLY });
+	const first = await site.click();
+	const edited = { ...applied(draftFields(), first), content: withoutLink(valueOf(first, "content"), "google") };
+	age(site);
+	assert.deepEqual(linksOf(valueOf(await site.click(edited), "content")).map(([, href]) => href), ["https://glossary.io/fastmail/", "https://glossary.io/google/"]);
+
+	reset();
+	const other = fakeSite({ features: LINKS_ONLY });
+	const answer = await other.click();
+	age(other);
+	await other.publish({ ...applied(draftFields(), answer), content: withoutLink(valueOf(answer, "content"), "google") });
+	const memo = other.storage.aiLinks.value<LinkMemo>("posts:E1")!;
+	assert.equal(memo.planned, undefined);
+	assert.deepEqual(memo.linked, [], "nothing counts as handled");
+	assert.equal(typeof memo.retryAt, "number", "the retry pass links what's missing");
+});
+
+test("a published entry: its live analysis is reused only when it's of this text under today's settings; aiEntries is never written; a memo the click makes counts as nothing remembered", async () => {
+	reset();
+	const m = model();
+	const entity = { name: "Fastmail", type: "Organization" as const, description: "An email service.", qid: "Q1", wikipedia: "", website: "", primary: true };
+	const published = async (features: Record<string, boolean>, liveFeatures = features) => {
+		const site = fakeSite({ status: "published", features });
+		Object.assign(site.item, { liveRevisionId: "R1", draftRevisionId: null });
+		const t = await textOf(site, draftFields(), liveFeatures);
+		const live: EntryRecord = { collection: "posts", entryId: "E1", title: t.title, hash: t.hash, textHash: t.textHash, status: "ok", error: "", entities: liveFeatures["ai.entities"] ? [entity] : [], description: "", descriptionStatus: "none", updated: "2026-11-01T00:00:00.000Z" };
+		site.storage.aiEntries.rows.set("posts:E1", { data: live, revision: 0 });
+		return { site, live };
+	};
+
+	// Of this text, under today's settings: no model call for the text. The captions it adds change the text, so it's staged for that.
+	const { site, live } = await published({ ai: true, "ai.entities": true, "ai.glossaryLinks": true, "ai.imageText": true });
+	const answer = await site.click();
+	assert.equal(textCalls(m), 0);
+	assert.deepEqual(linksOf(valueOf(answer, "content")), [["Fastmail", "https://glossary.io/fastmail/"]]);
+	assert.deepEqual(site.storage.aiEntries.value("posts:E1"), live, "untouched");
+	const staged = site.storage.aiDrafts.value<DraftRecord>("posts:E1")!;
+	assert.deepEqual(staged.entities, [entity]);
+	assert.equal(staged.textHashes.length, 2);
+	const memo = site.storage.aiLinks.value<LinkMemo>("posts:E1")!;
+	assert.equal(memo.pendingNew, true);
+	assert.equal(linker.shouldLink(memo, live, "another text hash"), false, "a later analysis of the live entry (a settings-only one too) doesn't link it");
+	assert.equal(linker.shouldLink(memo, null, "another text hash"), true, "a first analysis still links");
+
+	// Nothing to stage (no captions to add): an earlier click's analysis of another text goes.
+	const plain = await published(LINKS_ONLY);
+	plain.site.storage.aiDrafts.rows.set("posts:E1", { data: { textHashes: ["another text"], partial: true }, revision: 0 });
+	await plain.site.click();
+	assert.equal(textCalls(m), 0);
+	assert.equal(plain.site.storage.aiDrafts.rows.size, 0);
+
+	// Made while Entities was off: same text, none of what it finds. The click pays for it, and the publish makes it the entry's.
+	const old = await published(LINKS_ONLY, { ...LINKS_ONLY, "ai.entities": false });
+	const fresh = await old.site.click();
+	assert.equal(textCalls(m), 1);
+	assert.equal(linksOf(valueOf(fresh, "content")).length, 2);
+	await old.site.publish(applied(draftFields(), fresh), { liveRevisionId: "R2" });
+	const record = old.site.storage.aiEntries.value<EntryRecord>("posts:E1")!;
+	assert.deepEqual(record.entities.map((e) => e.qid), ["Q1", "Q95"]);
+	assert.equal(record.hash, (await textOf(old.site, draftFields())).hash, "so a bulk run doesn't analyze it again");
+	assert.equal(old.site.storage.aiQueue.rows.size, 0);
+});
+
+test("the toast tells links switched to glossary.io from links added", async () => {
+	reset();
+	model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	// Wikidata knows Fastmail's official website: a link to its home page is an identity link, switched.
+	const http = (site.ctx as { http: { fetch: (url: string) => Promise<Response> } }).http;
+	const real = http.fetch;
+	http.fetch = async (url: string) => {
+		const res = await real(url);
+		if (!url.includes("query.wikidata.org")) return res;
+		const body = (await res.json()) as { results: { bindings: Array<Record<string, { value: string }>> } };
+		for (const row of body.results.bindings) if (row.item.value.endsWith("/Q1")) row.website = { value: "https://www.fastmail.com/" };
+		return Response.json(body);
+	};
+	const content = [
+		{
+			_type: "block",
+			_key: "b1",
+			style: "normal",
+			markDefs: [{ _key: "w", _type: "link", href: "https://www.fastmail.com/" }],
+			children: [
+				{ _type: "span", _key: "s1", text: "I use ", marks: [] },
+				{ _type: "span", _key: "s2", text: "Fastmail", marks: ["w"] },
+				{ _type: "span", _key: "s3", text: " for email, and Google's search too.", marks: [] },
+			],
+		},
+	];
+	const answer = await site.click({ title: "Email I like", content, excerpt: "", featured_image: null });
+	assert.match(answer.toast.message, /^Added 1 glossary\.io link and switched 1 link to glossary\.io \((Fastmail, Google|Google, Fastmail)\)\. Review the changes, then save\.$/);
+});
+
+test("only an image whose suggestion was dismissed misses text: nothing to add, and the toast says why", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ features: { ai: true, "ai.imageText": true } });
+	site.storage.aiMedia.rows.set("M1", { data: { mediaId: "M1", filename: "one.png", url: "", suggestion: { alt: "Dismissed.", caption: "Dismissed.", title: "" }, status: "dismissed", written: [], error: "", updated: "" }, revision: 0 });
+	const answer = await site.click({ title: "Pictures", content: [para("b1", "Pictures."), img("d", "M1")], excerpt: "", featured_image: null });
+	assert.equal(visionCalls(m), 0);
+	assert.deepEqual(answer, { toast: { type: "info", message: enrich.leftAlone(1) } });
+});
+
+test("an answer over EmDash's 2,000 nodes: the field that can't fit is left out, and the featured image keeps all its text", async () => {
+	reset();
+	model();
+	const site = fakeSite({ features: { ai: true, "ai.imageText": true } });
+	const content = [...Array.from({ length: 185 }, (_, i) => para(`p${i}`, "x")), img("i1", "M1")];
+	const answer = await site.click({ title: "Long", content, excerpt: "", featured_image: FEATURED() });
+	assert.deepEqual(answer.patch?.operations.map((o) => o.field), ["featured_image"]);
+	const featured = valueOf(answer, "featured_image") as Record<string, unknown>;
+	assert.equal(featured.alt, "Library alt for the featured image.");
+	assert.match(String(featured.caption), /^Model caption \d\.$/);
+	assert.ok(answer.toast.message.startsWith(enrich.TOASTS.tooBig));
+});
+
+// ── The publish, its job, and the retry pass ─────────────────────
+
+test("a description that failed: the publish queues the entry with the entities the click paid for, and its job pays only for the description", async () => {
+	reset();
+	const m = model({ fail: (req) => (req.system.startsWith("You write the meta description") ? new Error("Anthropic returned HTTP 529: Overloaded") : null) });
+	const site = fakeSite({ features: { ...LINKS_ONLY, "ai.descriptions": true } });
+	const answer = await site.click();
+	assert.equal(answer.toast.type, "error");
+	assert.match(answer.toast.message, /^The AI service didn't answer: Anthropic returned HTTP 529: Overloaded\. Click again to retry: what was already paid for is kept\. Added 2 glossary\.io links/);
+	const staged = site.storage.aiDrafts.value<DraftRecord>("posts:E1")!;
+	assert.equal(staged.described, false);
+	assert.equal(staged.partial, undefined);
+	const published = applied(draftFields(), answer);
+	await site.publish(published);
+	assert.equal(site.storage.aiEntries.rows.size, 0);
+	assert.equal(site.storage.aiDrafts.rows.size, 0, "handed to the job");
+	assert.deepEqual(jobOf(site)!.cache?.entities?.map((e) => e.qid), ["Q1", "Q95"]);
+	assert.equal(jobOf(site)!.cache?.hash, (await textOf(site, published)).hash, "keyed to the published text");
+	// The same publish's hook again: the job keeps them.
+	await site.hook("content:afterPublish", site.entry());
+	assert.equal(jobOf(site)!.cache?.entities?.length, 2);
+	m.fail = undefined;
+	const paid = textCalls(m);
+	assert.equal(await runJob(site), "done");
+	assert.equal(textCalls(m), paid + 1);
+	assert.ok(m.calls.at(-1)!.system.startsWith("You write the meta description"), "the description, and nothing else");
+	const record = site.storage.aiEntries.value<EntryRecord>("posts:E1")!;
+	assert.deepEqual(record.entities.map((e) => e.qid), ["Q1", "Q95"]);
+	assert.equal(record.description, "A summary of the post.");
+	forgetOwn();
+});
+
+test("the same for a staged analysis made before Meta descriptions was switched on: its job pays only for the description", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	const answer = await site.click();
+	site.settings.set("features", { ...LINKS_ONLY, "ai.descriptions": true });
+	await site.publish(applied(draftFields(), answer));
+	assert.equal(jobOf(site)!.cache?.entities?.length, 2);
+	assert.equal(jobOf(site)!.cache?.description, undefined);
+	const paid = textCalls(m);
+	await runJob(site);
+	assert.equal(textCalls(m), paid + 1);
+	forgetOwn();
+});
+
+test("Fill empty descriptions automatically: the publish writes nothing to the entry; the scheduled run applies the click's description without a model call", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ features: { ...LINKS_ONLY, "ai.descriptions": true }, settings: { aiDescriptionsMode: "apply" } });
+	const answer = await site.click();
+	const paid = m.calls.length;
+	await site.publish(applied(draftFields(), answer));
+	assert.deepEqual(site.writes, [], "no write seconds after the publish, while the editor may still be open");
+	assert.equal(site.storage.aiEntries.rows.size, 0);
+	assert.ok(jobOf(site)!.due > Date.now(), "past the debounce");
+	assert.equal(jobOf(site)!.cache?.description, "A summary of the post.");
+	assert.equal(await runJob(site), "done");
+	assert.equal(m.calls.length, paid, "no model call");
+	assert.deepEqual(site.writes, ["update seo"]);
+	assert.equal(site.entry().seo?.description, "A summary of the post.");
+	assert.equal(site.storage.aiEntries.value<EntryRecord>("posts:E1")!.descriptionStatus, "applied");
+	forgetOwn();
+});
+
+test("published while a click was still running: the publish found nothing staged, and its job uses what the click paid for", async () => {
+	reset();
+	const m = model();
+	const site = fakeSite({ features: LINKS_ONLY });
+	await site.publish(draftFields());
+	assert.equal(jobOf(site)!.cache, undefined);
+	await site.click(draftFields());
+	const paid = m.calls.length;
+	assert.equal(await runJob(site), "done");
+	assert.equal(m.calls.length, paid, "no model call");
+	assert.deepEqual(site.storage.aiEntries.value<EntryRecord>("posts:E1")!.entities.map((e) => e.qid), ["Q1", "Q95"]);
+	forgetOwn();
+});
+
+test("the publish settles the planned links with compareAndSet: a memo write that lands meanwhile (a site's re-check asking for a retry) is kept", async () => {
+	reset();
+	model();
+	const site = fakeSite();
+	const answer = await site.click();
+	const changed = applied(draftFields(), answer);
+	(changed.content as unknown[]).push(para("b9", "A new paragraph."));
+	const cas = site.storage.aiLinks.compareAndSet;
+	let raced = false;
+	site.storage.aiLinks.compareAndSet = async (id: string, expected: string | null, data: unknown) => {
+		if (!raced) {
+			raced = true;
+			await site.storage.aiLinks.put(id, { ...site.storage.aiLinks.value<LinkMemo>(id)!, retryAt: 12_345, tries: 0 });
+		}
+		return cas(id, expected, data);
+	};
+	await site.publish(changed);
+	assert.ok(raced);
+	const memo = site.storage.aiLinks.value<LinkMemo>("posts:E1")!;
+	assert.equal(memo.planned, undefined);
+	assert.deepEqual(memo.linked, ["Q1", "Q95"]);
+	assert.equal(memo.retryAt, 12_345, "the re-check's ask is kept");
+});
+
+test("the pack's own publishes (a link edit, a removal) settle nothing a person's click planned or staged", async () => {
+	reset();
+	model();
+	const site = fakeSite();
+	const answer = await site.click();
+	const memo = structuredClone(site.storage.aiLinks.value<LinkMemo>("posts:E1"));
+	linker.markOwnPublish("posts:E1", "R2");
+	try {
+		await site.publish(applied(draftFields(), answer));
+		assert.deepEqual(site.storage.aiLinks.value<LinkMemo>("posts:E1"), memo, "the planned links wait for the person's publish");
+		assert.equal(site.storage.aiDrafts.rows.size, 1, "so does the staged analysis");
+		assert.equal(linker.isOwnPublish("posts:E1", "R3"), false, "another revision's publish is a person's");
+		assert.equal(linker.isOwnPublish("posts:E1", "R2", Date.now() + 61_000), false, "and so is one after a minute");
+	} finally {
+		forgetOwn();
+	}
+});
+
+test("after a promoted publish the retry pass checks the links once, with no model call; without the patch it links (and only once)", async () => {
+	reset();
+	const m = model();
+	const due = (site: Site) => {
+		const memo = site.storage.aiLinks.value<LinkMemo>("posts:E1")!;
+		site.storage.aiLinks.rows.set("posts:E1", { data: { ...memo, retryAt: Date.now() - 1 }, revision: 900 });
+	};
+	const site = fakeSite();
+	const answer = await site.click();
+	await site.publish(applied(draftFields(), answer));
+	const paid = m.calls.length;
+	const updatedAt = site.entry().updatedAt;
+	due(site);
+	assert.equal(await linker.retryDue(site.ctx, site.options, 3), 1);
+	assert.equal(m.calls.length, paid);
+	assert.deepEqual(site.writes, [], "the links are all there: no edit, no publish");
+	assert.equal(site.entry().updatedAt, updatedAt);
+	assert.equal(site.storage.aiLinks.value<LinkMemo>("posts:E1")!.retryAt, undefined);
+
+	// Published without the patch: the retry pass makes the links, the possessive inside, and its own publish settles nothing.
+	reset();
+	const other = fakeSite();
+	await other.click();
+	await other.publish(draftFields());
+	due(other);
+	await linker.retryDue(other.ctx, other.options, 3);
+	assert.deepEqual(other.writes, ["update content", "publish"]);
+	assert.deepEqual(linksOf(other.entry().data.content), [["Fastmail", "https://glossary.io/fastmail/"], ["Google's", "https://glossary.io/google/"]]);
+	const memo = other.storage.aiLinks.value<LinkMemo>("posts:E1")!;
+	assert.deepEqual(memo.linked, ["Q1", "Q95"]);
+	assert.equal(memo.retryAt, undefined);
+	assert.equal(await linker.retryDue(other.ctx, other.options, 3), 0, "nothing more to do");
+	assert.equal(m.calls.length, paid * 2);
+	forgetOwn();
+});
+
+// ── The store ────────────────────────────────────────────────────
+
+test("takeCall: callers at once (a click's five, a scheduled run's, another entry's click) all get their call, and the cap still holds", async () => {
+	const site = fakeSite();
+	const kv = (site.ctx as { kv: { compareAndSet: (k: string, rev: string | null, value: unknown) => Promise<unknown> } }).kv;
+	const cas = kv.compareAndSet;
+	// Every write waits a turn after its read, so each round they all read the same count and all but one lose.
+	kv.compareAndSet = async (k: string, rev: string | null, value: unknown) => {
+		await new Promise((resolve) => setImmediate(resolve));
+		return cas(k, rev, value);
+	};
+	assert.deepEqual(await Promise.all(Array.from({ length: 11 }, () => store.takeCall(site.ctx, 100))), Array(11).fill(true));
+	assert.equal(await site.calls(), 11);
+	const capped = await Promise.all(Array.from({ length: 3 }, () => store.takeCall(site.ctx, 12)));
+	assert.deepEqual(capped.sort(), [false, false, true]);
+	assert.equal(await site.calls(), 12);
+});
+
+test("locks a cancelled click never released are deleted an hour past their time; others stay", async () => {
+	const site = fakeSite();
+	site.kv.set("state:ai:editor:posts:OLD", { value: { until: Date.now() - 2 * 3_600_000, token: "a" }, revision: "1" });
+	site.kv.set("state:ai:editor:posts:RECENT", { value: { until: Date.now() - 60_000, token: "b" }, revision: "2" });
+	site.kv.set("state:ai:editor:posts:HELD", { value: { until: Date.now() + 10_000, token: "c" }, revision: "3" });
+	site.kv.set("state:ai:lock", { value: { until: 0, token: "d" }, revision: "4" });
+	await store.pruneEditorLocks(site.ctx);
+	assert.deepEqual([...site.kv.keys()].sort(), ["state:ai:editor:posts:HELD", "state:ai:editor:posts:RECENT", "state:ai:lock"]);
 });
 
 // ── Helpers that need EmDash's dist ──────────────────────────────

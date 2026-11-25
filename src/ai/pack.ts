@@ -8,18 +8,17 @@ import type { PluginContext } from "emdash";
 
 import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn, registerFeatures } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
-import { afterResponse } from "../shared.js";
 import { getEntryEntities } from "./entities.js";
 import { GLOSSARY_HOST } from "./glossary.js";
 import { REMOVE_GONE_FEATURE } from "./glossary-gone.js";
-import { LINK_CHECK_MS, linkMemos, settlePlanned, shouldLink, withoutPendingNew } from "./glossary-linker.js";
+import { LINK_CHECK_MS, type LinkMemo, isOwnPublish, linkMemos, livePlanned, settlePlanned, shouldLink, withoutPendingNew, withoutPlanned } from "./glossary-linker.js";
 import { glossarySlugsIn } from "./glossary-links.js";
 import { PROVIDER_HOSTS } from "./providers.js";
 import { aiRoutes } from "./routes.js";
-import { type AiOptions, type DraftRecord, STORAGE, col, enqueue, entryKey, optionalCol, readSettings, type EntryRecord } from "./store.js";
+import { type AiOptions, type DraftRecord, STORAGE, col, enqueue, entryKey, optionalCol, readSettings, stagedCache, type EntryRecord } from "./store.js";
 import { WIKIDATA_HOST, WIKIDATA_QUERY_HOST } from "./wikidata.js";
-import { queueId } from "./logic.js";
-import { type EntryText, applyDescription, entryText, targetCollections, tick } from "./worker.js";
+import { type StageCache, queueId } from "./logic.js";
+import { type EntryText, entryText, targetCollections, tick } from "./worker.js";
 
 export type { AiOptions } from "./store.js";
 export { getEntryEntities, type EntryEntities } from "./entities.js";
@@ -78,8 +77,9 @@ export function aiPack(options: AiOptions = {}): PackModule {
 	 * Queue an entry when its title or text changed since the last analysis (debounced). Never makes a model call.
 	 * New settings alone (another model, a part switched on) don't re-analyze on a save: a bulk run applies them.
 	 * An analysis made before 0.51.0 has no text hash yet, so its hash (text and settings) decides, as before.
-	 * An analysis the editor's AI Enrich button staged for this title and text is promoted instead (promote), and
-	 * the links it planned are settled (settleLinks).
+	 * An analysis the editor's AI Enrich button staged for this title and text is used instead (useStaged), and the
+	 * links it planned are settled (settleLinks). Not on this part's own publishes (a link edit, a removal): those
+	 * change no text, and what a person's click staged or planned isn't theirs to settle.
 	 */
 	async function onContent(event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) {
 		const content = event.content;
@@ -96,82 +96,111 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		const t = await entryText(ctx, event.collection, data, s, features);
 		if (!t) return;
 		const key = entryKey(event.collection, id);
+		const own = isOwnPublish(key, content.liveRevisionId);
 		const prev = await col<EntryRecord>(ctx, "aiEntries").get(key);
-		const current = prev?.status === "ok" && (prev.hash === t.hash || prev.textHash === t.textHash);
-		const promoted = current ? null : await promote(ctx, event.collection, id, content, t, prev, features, s);
-		if (isOn(features, "ai.glossaryLinks")) {
-			await settleLinks(ctx, event.collection, id, data, t, prev, current ? "current" : (promoted ?? "queued")).catch((error: unknown) =>
+		const exact = prev?.status === "ok" && prev.hash === t.hash;
+		const current = prev?.status === "ok" && (exact || prev.textHash === t.textHash);
+		// An analysis of this text under today's settings needs nothing from a click; one under other settings can take a click's newer one.
+		const staged = own || exact ? null : await useStaged(ctx, event.collection, id, content, t, current ? prev : null, prev, features, s);
+		if (isOn(features, "ai.glossaryLinks") && !own) {
+			await settleLinks(ctx, event.collection, id, data, t, prev, staged?.record ?? (current ? "current" : "queued")).catch((error: unknown) =>
 				ctx.log.warn("glossary.io links: couldn't settle AI Enrich's planned links", { entry: key, error: String(error) }),
 			);
 		}
-		if (current || promoted) return;
-		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000, source: "save" });
+		if (current || staged?.record) return;
+		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000, source: "save", ...(staged?.cache ? { cache: staged.cache } : {}) });
 	}
 
 	/**
-	 * The analysis AI Enrich staged (aiDrafts) becomes the entry's, when it's of this title and text (before or after
-	 * its patch), complete, and made with the parts that are on now; null otherwise (the entry is queued as usual).
-	 * No model call. The description is handled as an analysis would (src/ai/worker.ts analyzeEntry).
+	 * What the analysis AI Enrich staged (aiDrafts) gives a person's publish, with no model call; null when there's none
+	 * for it. When it's of this title and text (before or after its patch):
+	 * - `record`: complete, and nothing is left to write or fill in: it becomes the entry's analysis (promoted) and
+	 *   nothing is queued. The description is handled as an analysis would (src/ai/worker.ts analyzeEntry).
+	 * - `cache`: what it paid for goes to the queued job instead (rekeyed to the published text's hash; captions the
+	 *   patch added don't change the entities), so the scheduled run pays only for what's missing: a click that stopped
+	 *   early, a description that failed or wasn't asked for then, or one to fill in automatically (the run writes it
+	 *   past the debounce, not seconds after a publish while the editor is open).
+	 * `sameText` (the entry's analysis is of this text, under other settings): nothing is queued for it either way, so
+	 * only a complete staged analysis is used, and no description is filled in.
+	 * A staged analysis of another text is deleted: its publish has happened.
 	 */
-	async function promote(ctx: PluginContext, collection: string, id: string, content: Record<string, unknown>, t: EntryText, prev: EntryRecord | null, features: FeatureMap, s: Awaited<ReturnType<typeof readSettings>>): Promise<EntryRecord | null> {
+	async function useStaged(
+		ctx: PluginContext,
+		collection: string,
+		id: string,
+		content: Record<string, unknown>,
+		t: EntryText,
+		sameText: EntryRecord | null,
+		prev: EntryRecord | null,
+		features: FeatureMap,
+		s: Awaited<ReturnType<typeof readSettings>>,
+	): Promise<{ record?: EntryRecord; cache?: StageCache } | null> {
 		const drafts = optionalCol<DraftRecord>(ctx, "aiDrafts");
 		const key = entryKey(collection, id);
 		const staged = drafts ? await drafts.get(key).catch(() => null) : null;
-		if (!staged || staged.partial || !staged.textHashes.includes(t.textHash) || !isOn(features, "ai.entities")) return null;
-		const describe = isOn(features, "ai.descriptions");
-		if (describe && !staged.described) return null;
+		if (!staged || !isOn(features, "ai.entities")) return null;
+		const forget = () => drafts!.delete(key).then(() => undefined, () => undefined);
+		if (!staged.textHashes.includes(t.textHash)) {
+			await forget();
+			return null;
+		}
 		const seoDescription = (content.seo as { description?: unknown } | null | undefined)?.description;
 		const hasDescription = typeof seoDescription === "string" && seoDescription.trim().length > 0;
+		const wantDescription = isOn(features, "ai.descriptions") && t.info.hasSeo && !hasDescription;
+		const complete = !staged.partial;
+		if (!sameText && (!complete || (wantDescription && (!staged.described || (Boolean(staged.description) && s.descriptionsMode === "apply"))))) {
+			await forget();
+			return { cache: stagedCache(staged, t.hash) };
+		}
+		if (!complete) return null;
 		let description = prev?.description ?? "";
 		let descriptionStatus: EntryRecord["descriptionStatus"] = hasDescription && prev?.descriptionStatus !== "applied" ? "none" : (prev?.descriptionStatus ?? "none");
-		const wantDescription = describe && t.info.hasSeo && !hasDescription && Boolean(staged.description);
-		if (wantDescription) {
+		if (wantDescription && staged.description && !(sameText && description)) {
 			description = staged.description;
 			descriptionStatus = "suggested";
 		}
 		const record: EntryRecord = { collection, entryId: id, title: t.title, hash: t.hash, textHash: t.textHash, status: "ok", error: "", entities: staged.entities, description, descriptionStatus, updated: new Date().toISOString() };
-		const records = col<EntryRecord>(ctx, "aiEntries");
-		await records.put(key, record);
-		await drafts!.delete(key).catch(() => undefined);
+		await col<EntryRecord>(ctx, "aiEntries").put(key, record);
+		await forget();
 		ctx.log.info("AI: the analysis AI Enrich made in the editor is the published entry's now", { entry: key });
-		if (wantDescription && s.descriptionsMode === "apply") {
-			afterResponse(
-				applyDescription(ctx, collection, id, description, false)
-					.then(async (applied) => {
-						if (applied) await records.put(key, { ...record, descriptionStatus: "applied", updated: new Date().toISOString() });
-					})
-					.catch((error: unknown) => ctx.log.warn("AI: couldn't apply the meta description", { entry: key, error: String(error) })),
-			);
-		}
-		return record;
+		return { record };
 	}
 
 	/**
-	 * glossary.io links on a publish, with no model call. Links AI Enrich planned (memo.planned) are settled
+	 * glossary.io links on a person's publish, with no model call. Links AI Enrich planned (memo.planned) are settled
 	 * (settlePlanned), checked a few minutes later by the retry pass when the entry's analysis is of this text
 	 * (`current`, or a promoted one). After a promoted analysis with nothing planned, the links are decided as after
 	 * an analysis (afterAnalysis in src/ai/worker.ts), and made by the retry pass. When the entry is queued for a new
-	 * analysis instead, only `planned` goes: that analysis links.
+	 * analysis instead, only `planned` goes: that analysis links. Planned links that are out of date just go.
+	 * Written with compareAndSet on the memo as it's stored then: a scheduled run or a site's own re-check may be
+	 * writing it too (an edit in progress, links to take out, a retry).
 	 */
 	async function settleLinks(ctx: PluginContext, collection: string, id: string, data: Record<string, unknown>, t: EntryText, prev: EntryRecord | null, analysis: "current" | "queued" | EntryRecord): Promise<void> {
 		const key = entryKey(collection, id);
 		const memos = linkMemos(ctx);
-		const memo = await memos.get(key);
-		const now = Date.now();
-		const updated = new Date().toISOString();
-		if (memo?.planned) {
-			const fields = t.info.fields.filter((f) => f.type === "portableText").map((f) => f.slug);
-			const published = new Set(fields.flatMap((f) => [...glossarySlugsIn(data[f])]));
-			await memos.put(key, { ...settlePlanned(memo, published, analysis === "queued" ? null : { textHash: t.textHash, now }), updated });
-			return;
+		const settle = (memo: LinkMemo | null, now: number): LinkMemo | null => {
+			if (memo?.planned) {
+				if (!livePlanned(memo, now)) return typeof analysis === "string" ? withoutPlanned(memo) : decide(withoutPlanned(memo), now);
+				const fields = t.info.fields.filter((f) => f.type === "portableText").map((f) => f.slug);
+				const published = new Set(fields.flatMap((f) => [...glossarySlugsIn(data[f])]));
+				return settlePlanned(memo, published, analysis === "queued" ? null : { textHash: t.textHash, now });
+			}
+			return typeof analysis === "string" ? null : decide(memo, now);
+		};
+		/** After a promoted analysis: as afterAnalysis decides. Null: nothing to write. */
+		const decide = (memo: LinkMemo | null, now: number): LinkMemo | null => {
+			if (typeof analysis === "string") return null;
+			const base = withoutPendingNew(memo ?? { collection, entryId: id, linked: [], updated: "" });
+			if (!analysis.entities.length || !shouldLink(memo, prev, t.textHash)) return memo?.textHash !== t.textHash || memo?.pendingNew ? { ...base, textHash: t.textHash } : null;
+			return { ...base, textHash: t.textHash, retryAt: now + LINK_CHECK_MS, tries: 0 };
+		};
+		for (let i = 0; i < 4; i++) {
+			const stored = await memos.getVersioned(key);
+			const next = settle(stored?.value ?? null, Date.now());
+			if (!next) return;
+			if ((await memos.compareAndSet(key, stored?.revision ?? null, { ...next, updated: new Date().toISOString() })).applied) return;
 		}
-		if (typeof analysis === "string") return;
-		const base = withoutPendingNew(memo ?? { collection, entryId: id, linked: [], updated: "" });
-		if (!analysis.entities.length || !shouldLink(memo, prev, t.textHash)) {
-			if (memo?.textHash !== t.textHash || memo?.pendingNew) await memos.put(key, { ...base, textHash: t.textHash, updated });
-			return;
-		}
-		await memos.put(key, { ...base, textHash: t.textHash, retryAt: now + LINK_CHECK_MS, tries: 0, updated });
+		throw new Error("the entry's memo kept changing");
 	}
 
 	return {

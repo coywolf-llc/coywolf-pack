@@ -74,6 +74,17 @@ test("mergeJob keeps a save's mark only when both jobs are saves'", () => {
 	assert.deepEqual(logic.mergeJob(null, saved), saved);
 });
 
+test("mergeJob keeps the outputs a job already paid for, unless the new one brings its own or is forced (Analyze again)", () => {
+	const paid = { hash: "h1", mentions: [], entities: [] };
+	const queued: Job = { kind: "entry", collection: "posts", entryId: "1", due: 100, attempts: 1, enqueuedAt: 50, source: "save", cache: paid };
+	const save: Job = { kind: "entry", collection: "posts", entryId: "1", due: 500, attempts: 0, enqueuedAt: 400, source: "save" };
+	assert.deepEqual(logic.mergeJob(queued, save).cache, paid, "a second publish hook for the same save, or a later save");
+	const own = { hash: "h2", description: "d" };
+	assert.deepEqual(logic.mergeJob(queued, { ...save, cache: own }).cache, own);
+	assert.equal("cache" in logic.mergeJob(queued, { ...save, force: true }), false);
+	assert.equal("cache" in logic.mergeJob({ ...queued, cache: undefined }, save), false);
+});
+
 test("queueId and dayKey", () => {
 	assert.equal(logic.queueId({ kind: "entry", collection: "posts", entryId: "x" }), "entry:posts:x");
 	assert.equal(logic.queueId({ kind: "media", mediaId: "m" }), "media:m");

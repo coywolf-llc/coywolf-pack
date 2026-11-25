@@ -36,6 +36,7 @@ import {
 	type AiSettings,
 	type BulkState,
 	DailyLimitError,
+	type DraftRecord,
 	type EntryRecord,
 	type MediaRecord,
 	TEXT_HASHES_KEY,
@@ -49,10 +50,13 @@ import {
 	enqueue,
 	entryKey,
 	logUsage,
+	optionalCol,
 	providerConfig,
 	pruneDrafts,
+	pruneEditorLocks,
 	pruneUsage,
 	readSettings,
+	stagedCache,
 	takeCall,
 	withLock,
 } from "./store.js";
@@ -172,10 +176,17 @@ async function callModel(
 
 // ── Entries ──────────────────────────────────────────────────────
 
-/** For a person waiting on the result (the editor's AI Enrich button): each model call's timeout, and no new stage after `deadline` (epoch ms). */
+/**
+ * For a person waiting on the result (the editor's AI Enrich button): each model call's timeout, and no new stage
+ * after `deadline` (epoch ms). `paid`: called once a model call's output is in the cache, so the caller can save it
+ * right away (a failure there is the caller's to handle; it never fails the stage). `oneAtATime`: runs an image's
+ * read and resize, so images described at once don't hold several large files in memory together.
+ */
 export interface CallLimits {
 	timeoutMs?: number;
 	deadline?: number;
+	paid?: () => Promise<void> | void;
+	oneAtATime?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 /** A stage wasn't started because the caller's deadline had passed (CallLimits). Outputs already paid for are in the cache. */
@@ -190,13 +201,26 @@ const inTime = (limits: CallLimits | undefined) => {
 	if (limits?.deadline !== undefined && Date.now() >= limits.deadline) throw new OutOfTimeError();
 };
 
+const paid = async (limits: CallLimits | undefined) => {
+	try {
+		await limits?.paid?.();
+	} catch {
+		// Saving early is the caller's extra: the stage goes on.
+	}
+};
+
 export async function groundEntities(ctx: PluginContext, options: AiOptions, s: Settings, t: EntryText, ref: string, cache: StageCache, budget: Budget, limits?: CallLimits): Promise<Entity[]> {
+	// The whole result, from an earlier attempt that got this far (or AI Enrich's, handed to the job at the publish).
+	if (cache.entities) return cache.entities;
 	// Stage 1 (cached on the job, so a retry doesn't pay for it twice).
-	cache.mentions ??= parseMentions(
-		await callModel(ctx, options, s, "entities", { system: EXTRACT_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 2000, timeoutMs: limits?.timeoutMs }, ref, budget),
-	);
+	if (!cache.mentions) {
+		cache.mentions = parseMentions(
+			await callModel(ctx, options, s, "entities", { system: EXTRACT_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 2000, timeoutMs: limits?.timeoutMs }, ref, budget),
+		);
+		await paid(limits);
+	}
 	const mentions = cache.mentions;
-	if (!mentions.length) return [];
+	if (!mentions.length) return (cache.entities = []);
 	const lang = language(ctx);
 	const f = fetcher(ctx, budget);
 	const ua = userAgent(VERSION, ctx.site?.url);
@@ -210,19 +234,22 @@ export async function groundEntities(ctx: PluginContext, options: AiOptions, s: 
 	// Stage 3: the model chooses among real candidates only.
 	if (ambiguous.length) {
 		const subset: GroundedMention[] = ambiguous.map((i) => grounded[i]);
-		if (!cache.choices) inTime(limits);
-		cache.choices ??= parseChoices(
-			await callModel(ctx, options, s, "entities", { system: DISAMBIGUATE_SYSTEM, user: disambiguatePrompt(subset, t.title, t.text), maxTokens: 1000, timeoutMs: limits?.timeoutMs }, ref, budget),
-		);
+		if (!cache.choices) {
+			inTime(limits);
+			cache.choices = parseChoices(
+				await callModel(ctx, options, s, "entities", { system: DISAMBIGUATE_SYSTEM, user: disambiguatePrompt(subset, t.title, t.text), maxTokens: 1000, timeoutMs: limits?.timeoutMs }, ref, budget),
+			);
+			await paid(limits);
+		}
 		grounded = applyChoices(grounded, ambiguous, cache.choices);
 	}
 	// Stage 4: type verification against P31.
 	const resolved = grounded.filter((m) => m.qid);
-	if (!resolved.length) return [];
+	if (!resolved.length) return (cache.entities = []);
 	inTime(limits);
 	const details = await entityDetails(f, resolved.map((m) => m.qid), lang, ua);
 	if (!details) throw new Error("Wikidata didn't answer, so the entities couldn't be verified. Retrying later.");
-	return verifyEntities(resolved, details);
+	return (cache.entities = verifyEntities(resolved, details));
 }
 
 export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Settings, features: FeatureMap, job: QueueJob, budget: Budget): Promise<"done" | "skipped"> {
@@ -244,8 +271,9 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 	}
 
 	const ref = key;
-	// Outputs from an earlier failed attempt on the same text are reused (the job is saved with them on failure).
-	if (job.cache?.hash !== t.hash) job.cache = { hash: t.hash };
+	// Outputs from an earlier failed attempt on the same text are reused (the job is saved with them on failure), and
+	// for a save's job what AI Enrich paid for this text (a click that was still running when the entry was published).
+	if (job.cache?.hash !== t.hash) job.cache = (job.source === "save" ? await stagedFor(ctx, key, t) : null) ?? { hash: t.hash };
 	const cache = job.cache;
 	const wantEntities = isOn(features, "ai.entities");
 	const hasDescription = Boolean(item.seo?.description?.trim());
@@ -281,11 +309,20 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 	return "done";
 }
 
+/** What AI Enrich staged for this title and text (src/ai/editor-enrich.ts), as a stage cache; null when there's none. */
+async function stagedFor(ctx: PluginContext, key: string, t: EntryText): Promise<StageCache | null> {
+	const staged = await optionalCol<DraftRecord>(ctx, "aiDrafts")?.get(key).catch(() => null);
+	return staged?.textHashes.includes(t.textHash) ? stagedCache(staged, t.hash) : null;
+}
+
 /** A meta description for the entry's text (cached with the other stage outputs, so a retry doesn't pay for it twice). */
 export async function suggestDescription(ctx: PluginContext, options: AiOptions, s: Settings, t: EntryText, ref: string, cache: StageCache, budget: Budget, limits?: CallLimits): Promise<string> {
-	cache.description ??= cleanDescription(
-		await callModel(ctx, options, s, "descriptions", { system: DESCRIBE_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 300, timeoutMs: limits?.timeoutMs }, ref, budget),
-	);
+	if (cache.description === undefined) {
+		cache.description = cleanDescription(
+			await callModel(ctx, options, s, "descriptions", { system: DESCRIBE_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 300, timeoutMs: limits?.timeoutMs }, ref, budget),
+		);
+		await paid(limits);
+	}
 	return cache.description;
 }
 
@@ -407,7 +444,7 @@ export async function describeImage(
 	budget: Budget,
 	limits?: CallLimits,
 ): Promise<ImageText> {
-	const payload = await imagePayload(ctx, options, media);
+	const payload = await (limits?.oneAtATime ? limits.oneAtATime(() => imagePayload(ctx, options, media)) : imagePayload(ctx, options, media));
 	const raw = await callModel(
 		ctx,
 		options,
@@ -748,8 +785,9 @@ export interface TickResult {
 	busy?: boolean;
 }
 
+/** A job's model calls at most. Outputs it already has (job.cache: an earlier attempt's, or AI Enrich's) aren't paid for again. */
 const callsPerJob = (features: FeatureMap) => (job: QueueJob) =>
-	job.kind === "media" ? 1 : (isOn(features, "ai.entities") ? 2 : 0) + (isOn(features, "ai.descriptions") ? 1 : 0) || 1;
+	job.kind === "media" ? 1 : (isOn(features, "ai.entities") && !job.cache?.entities ? 2 : 0) + (isOn(features, "ai.descriptions") && job.cache?.description === undefined ? 1 : 0) || 1;
 
 /** Process due jobs. `maxJobs` overrides the per-tick setting (the admin's Run now uses 1). */
 export async function tick(ctx: PluginContext, options: AiOptions, opts: { maxJobs?: number; budgetMs: number }): Promise<TickResult> {
@@ -845,6 +883,7 @@ export async function tick(ctx: PluginContext, options: AiOptions, opts: { maxJo
 		if (entriesOn) await fillTextHashesTick(ctx, options, budget, started + opts.budgetMs).catch((error) => ctx.log.warn("AI: recording text hashes failed", { error: String(error) }));
 		await pruneUsage(ctx).catch(() => undefined);
 		await pruneDrafts(ctx).catch(() => undefined);
+		await pruneEditorLocks(ctx).catch(() => undefined);
 		return out;
 	});
 	return result ?? { processed: 0, skipped: 0, failed: 0, stoppedForLimit: false, busy: true };

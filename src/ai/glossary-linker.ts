@@ -166,8 +166,11 @@ export interface LinkMemo {
 	retryAt?: number;
 	tries?: number;
 	/**
-	 * Links the editor's AI Enrich button proposed (src/ai/editor-enrich.ts), until the entry's next publish settles
-	 * them (settlePlanned). Never counted as linked before that: the proposal may not be applied.
+	 * Links the editor's AI Enrich button proposed (src/ai/editor-enrich.ts), until the entry's next publish by a
+	 * person settles them (settlePlanned). Never counted as linked before that: the proposal may not be applied.
+	 * `qids`: the entities it linked or found linked; `slugs`: the links it added; `at`: when. Ignored after
+	 * PLANNED_MS (livePlanned), and dropped when this part publishes its own links (a later publish would find
+	 * those and take the proposal for applied).
 	 */
 	planned?: { qids: string[]; slugs: string[]; at: number };
 	updated: string;
@@ -293,17 +296,59 @@ export function withoutPendingNew(memo: LinkMemo): LinkMemo {
 	return rest;
 }
 
+/** How long AI Enrich's planned links wait for the entry's publish: as long as its staged analysis is kept (pruneDrafts in src/ai/store.ts). */
+export const PLANNED_MS = 30 * 86_400_000;
+
+/** A memo's planned links while they still count (PLANNED_MS); null otherwise. */
+export function livePlanned(memo: Pick<LinkMemo, "planned"> | null | undefined, now = Date.now()): NonNullable<LinkMemo["planned"]> | null {
+	const planned = memo?.planned;
+	return planned && now - planned.at < PLANNED_MS ? planned : null;
+}
+
+/** The memo without AI Enrich's planned links. */
+export function withoutPlanned(memo: LinkMemo): LinkMemo {
+	const { planned: _p, ...rest } = memo;
+	return rest;
+}
+
 /**
- * The memo after a publish of an entry AI Enrich planned links for (memo.planned). When the published text has any
- * planned link, or the plan added none, the proposal was applied: its QIDs count as handled, so a planned link taken
- * out by hand before the publish stays out. Otherwise only `planned` goes. `check` (the entry's analysis is of the
- * published text): the text hash is recorded and the links are checked once by the retry pass (LINK_CHECK_MS),
- * which links only what's missing, without a model call.
+ * Whether AI Enrich's proposal was applied to this text: it has any of the links the proposal added, or the proposal
+ * added none. So a planned link that's missing was taken out by hand, and stays out.
+ */
+export const plannedApplied = (planned: NonNullable<LinkMemo["planned"]>, slugs: ReadonlySet<string>): boolean => !planned.slugs.length || planned.slugs.some((slug) => slugs.has(slug));
+
+/**
+ * This part's own publishes (a link edit, a removal, a possessive fix), by entry, for a little while: EmDash runs
+ * the content hooks for them too (in this isolate, after the write), and those must not take one for a person's
+ * publish (src/ai/pack.ts: nothing AI Enrich staged or planned is settled by it). `rev`: the draft revision the
+ * publish makes live; null when the collection has no revisions.
+ */
+const OWN_PUBLISH_MS = 60_000;
+const ownPublishes = new Map<string, { rev: string | null; until: number }>();
+
+export function markOwnPublish(key: string, rev: string | null, now = Date.now()): void {
+	for (const [k, v] of ownPublishes) if (v.until <= now) ownPublishes.delete(k);
+	ownPublishes.set(key, { rev, until: now + OWN_PUBLISH_MS });
+}
+
+/** Whether the publish a content hook reports (the entry's live revision now) is this part's own. */
+export function isOwnPublish(key: string, liveRevisionId: unknown, now = Date.now()): boolean {
+	const own = ownPublishes.get(key);
+	if (!own || own.until <= now) return false;
+	return own.rev === null || own.rev === liveRevisionId;
+}
+
+/**
+ * The memo after a person's publish of an entry AI Enrich planned links for (memo.planned). When the proposal was
+ * applied (plannedApplied), its QIDs count as handled, so a planned link taken out by hand before the publish stays
+ * out. Otherwise only `planned` goes. `check` (the entry's analysis is of the published text): the text hash is
+ * recorded and the links are checked once by the retry pass (LINK_CHECK_MS), which links only what's missing,
+ * without a model call.
  */
 export function settlePlanned(memo: LinkMemo, publishedSlugs: ReadonlySet<string>, check: { textHash: string; now: number } | null): LinkMemo {
 	const { planned, ...rest } = memo;
 	if (!planned) return memo;
-	const applied = !planned.slugs.length || planned.slugs.some((slug) => publishedSlugs.has(slug));
+	const applied = plannedApplied(planned, publishedSlugs);
 	const linked = applied ? [...new Set([...rest.linked, ...planned.qids])].sort() : rest.linked;
 	if (!check) return { ...rest, linked };
 	return { ...withoutPendingNew({ ...rest, linked }), textHash: check.textHash, retryAt: check.now + LINK_CHECK_MS, tries: 0 };
@@ -547,6 +592,7 @@ async function waitOrFinish(
 			const versioned = await content.getVersioned!(collection, id);
 			if (versioned && versioned.item.draftRevisionId === item.draftRevisionId) {
 				let published: unknown;
+				markOwnPublish(entryKey(collection, id), item.draftRevisionId ?? null);
 				try {
 					published = await content.publish!(collection, id, { _rev: versioned._rev });
 				} catch (error) {
@@ -595,6 +641,8 @@ async function publishOwnEdit(
 	if (!fresh || versionOf(fresh) !== versionOf(item)) return { status: "conflict" };
 	// The marker goes in first, so an edit whose publish never happens is recognized (and published) next time.
 	await st.save({ ...st.memo, pending: fresh.version ?? 0, ...edit.marker, ...(keep ? { keepUpdatedAt: fresh.updatedAt } : {}) });
+	// Without revisions the update is the publish (its save hook sees a published entry).
+	if (!edit.info.supports.includes("revisions")) markOwnPublish(entryKey(collection, id), null);
 	let updated: unknown;
 	try {
 		updated = await content.update!(collection, id, edit.patch);
@@ -627,6 +675,7 @@ async function publishOwnEdit(
 	const draft = versioned.item.draftRevisionId;
 	await st.save({ ...st.memo, draft });
 	let published: unknown;
+	markOwnPublish(entryKey(collection, id), draft);
 	try {
 		published = await content.publish!(collection, id, { _rev: versioned._rev });
 	} catch (error) {
@@ -774,7 +823,10 @@ export async function linkEntry(ctx: PluginContext, options: AiOptions, collecti
 			// (forgetNew). Otherwise (a retry, which has no text hash) it keeps counting as nothing remembered, also after an edit of this run's
 			// (publishOwnEdit took the flag off while it ran): a memo without a text hash and without the flag would make the next analysis link.
 			const ordinary = Boolean(opts.textHash) || opts.forgetNew === true || !unseen;
-			const base = ordinary ? withoutPendingNew(st.memo) : { ...st.memo, pendingNew: true as const };
+			const flagged = ordinary ? withoutPendingNew(st.memo) : { ...st.memo, pendingNew: true as const };
+			// Links this run published make AI Enrich's older proposal moot: its links would be found at the next publish
+			// and read as applied by a person. One that's out of date goes too.
+			const base = status === "linked" || !livePlanned(flagged, now) ? withoutPlanned(flagged) : flagged;
 			await st.save(linkServed(withRetry({ ...base, ...(opts.textHash ? { textHash: opts.textHash } : {}) }, status, now)));
 		}
 		else await endOnly();

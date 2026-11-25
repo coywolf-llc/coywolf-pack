@@ -224,6 +224,22 @@ export interface DraftRecord {
 	updated: string;
 }
 
+/**
+ * What a staged analysis paid for, as an entry job's stage cache for `hash` (the published text's), so the job pays
+ * only for what's missing: a complete one's entities and description (when it wrote or didn't need one), a partial
+ * one's outputs so far. The captions its patch added don't change the entities.
+ */
+export function stagedCache(staged: DraftRecord, hash: string): StageCache {
+	const paid: Partial<StageCache> = staged.cache ?? {};
+	return {
+		hash,
+		...(paid.mentions ? { mentions: paid.mentions } : {}),
+		...(paid.choices ? { choices: paid.choices } : {}),
+		...(!staged.partial ? { entities: staged.entities } : paid.entities ? { entities: paid.entities } : {}),
+		...(staged.described ? { description: staged.description } : paid.description !== undefined ? { description: paid.description } : {}),
+	};
+}
+
 export interface MediaRecord {
 	mediaId: string;
 	filename: string;
@@ -281,10 +297,14 @@ export async function callsToday(ctx: Pick<PluginContext, "kv">): Promise<number
 	return (await ctx.kv.get<number>(callsKey())) ?? 0;
 }
 
-/** Count one model call against today's cap. Returns false (and counts nothing) when the cap is reached. */
+/**
+ * Count one model call against today's cap. Returns false (and counts nothing) when the cap is reached. Each lost
+ * try means another caller counted one: the tries outnumber the callers there can be at once (AI Enrich's five and
+ * a scheduled run's one), so losing them all never reads as the cap.
+ */
 export async function takeCall(ctx: Pick<PluginContext, "kv">, max: number): Promise<boolean> {
 	const key = callsKey();
-	for (let i = 0; i < 5; i++) {
+	for (let i = 0; i < 12; i++) {
 		const current = await ctx.kv.getVersioned<number>(key);
 		const used = current?.value ?? 0;
 		if (used >= max) return false;
@@ -384,4 +404,13 @@ export const TEXT_HASHES_KEY = "state:ai:textHashes";
 /** Epoch ms until which Wikidata asked to slow down (shared by every entry job, so one Retry-After throttles them all). */
 export const WIKIDATA_BUSY_KEY = "state:ai:wikidataBusyUntil";
 /** AI Enrich's lock for one entry, so two clicks don't pay for the same work. */
-export const editorLockKey = (collection: string, id: string) => `state:ai:editor:${collection}:${id}`;
+const EDITOR_LOCK_PREFIX = "state:ai:editor:";
+export const editorLockKey = (collection: string, id: string) => `${EDITOR_LOCK_PREFIX}${collection}:${id}`;
+
+/** Delete the locks of AI Enrich clicks that never released theirs (a cancelled request), once they're an hour past their time. */
+export async function pruneEditorLocks(ctx: Pick<PluginContext, "kv">): Promise<void> {
+	const cutoff = Date.now() - 3_600_000;
+	for (const { key, value } of await ctx.kv.list(EDITOR_LOCK_PREFIX)) {
+		if (((value as { until?: number } | null)?.until ?? 0) < cutoff) await ctx.kv.delete(key);
+	}
+}

@@ -9,18 +9,21 @@
  *   image blocks and image fields. Text a person wrote is never replaced.
  *
  * The analysis is staged (aiDrafts, DraftRecord), never written to aiEntries:
- * the publish whose title and text it analyzed promotes it without a model
- * call (src/ai/pack.ts), and a second click reuses everything paid for. The
- * links it proposed wait in the entry's memo (planned) until that publish;
- * none count as linked before then. Every failure is a toast: it never throws.
+ * the publish whose title and text it analyzed uses it without paying for it
+ * again (src/ai/pack.ts), and a second click reuses everything paid for. Each
+ * model output is saved as soon as it's paid (a partial stage with its cache),
+ * so a click that's cancelled or fails halfway loses none of it. The links it
+ * proposed wait in the entry's memo (planned) until that publish; none count
+ * as linked before then. Every failure is a toast: it never throws.
  */
 import type { CollectionSchemaInfo, PluginContext, StorageCollection } from "emdash";
 
 import { type FeatureMap, ctxFeatures, isOn } from "../core/features.js";
-import { ACTION_LIMITS, type ImageFill, type ImageSlot, imageSlots, jsonBytes, responseFits, withImageText } from "./editor-images.js";
+import { afterResponse } from "../shared.js";
+import { ACTION_LIMITS, type FieldPatch, type ImageFill, type ImageSlot, fitPatch, imageSlots, jsonBytes, responseFits } from "./editor-images.js";
 import { glossaryFor, isGlossarySite } from "./glossary.js";
-import { type EntryLinkPlan, type LinkMemo, linkConfig, linkMemos, planEntryLinks } from "./glossary-linker.js";
-import { glossarySlug } from "./glossary-links.js";
+import { type EntryLinkPlan, type LinkMemo, linkConfig, linkMemos, livePlanned, planEntryLinks, plannedApplied, unseenMemo } from "./glossary-linker.js";
+import { glossarySlug, glossarySlugsIn } from "./glossary-links.js";
 import { buildImageContext } from "./image-context.js";
 import { type Entity, type ImageText, type QueueJob, type StageCache, queueId } from "./logic.js";
 import {
@@ -62,19 +65,35 @@ export interface EnrichAnswer {
 	patch?: { type: "editor-draft-patch"; operations: Array<{ op: "set"; field: string; value: unknown }> };
 }
 
-/** A model call gives up after this long; no new one starts after START_BY_MS, so a click ends in about 75 seconds at most. */
+/**
+ * A model call gives up after this long, and none starts after START_BY_MS: a click usually ends in 20 to 40 seconds,
+ * and in about 100 at worst (a call started at the last moment, Wikidata's answer after it, and the wait for the
+ * scheduled run's lock before the state is written).
+ */
 const CALL_TIMEOUT_MS = 40_000;
 const START_BY_MS = 50_000;
-/** The per-entry lock outlasts any click. */
-const LOCK_MS = 120_000;
-/** Images described per click, at most (and as many at once). */
+/**
+ * The per-entry lock is held LOCK_MS at a time and renewed every LOCK_BEAT_MS while the click runs (never past
+ * LOCK_MAX_MS), so a click whose request was cancelled (the browser went away) frees its entry within LOCK_MS.
+ */
+export const LOCK_MS = 20_000;
+const LOCK_BEAT_MS = 5_000;
+const LOCK_MAX_MS = 150_000;
+/** Images described per click, at most, and how many model calls for them run at once (their files are read one at a time). */
 const MAX_VISION = 8;
 const VISION_AT_ONCE = 3;
 /** The toast's room in the answer's size checks. */
 const TOAST_ROOM = { message: "x".repeat(1200), type: "success" };
 
-/** Waits between tries for the AI lock (tests replace it). */
-export const enrichIo = { wait: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) };
+/** Waits between tries for the AI lock, and the lock's renewal timer (tests replace them). */
+export const enrichIo = {
+	wait: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+	/** Run `beat` every `ms` until the returned function is called. */
+	every: (ms: number, beat: () => void): (() => void) => {
+		const timer = setInterval(beat, ms);
+		return () => clearInterval(timer);
+	},
+};
 
 const toast = (type: Toast["type"], message: string): EnrichAnswer => ({ toast: { type, message } });
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -95,9 +114,17 @@ export const TOASTS = {
 	review: "Review the changes, then save.",
 	nothingToAdd: "Nothing to add: the links and image text are already in place.",
 	noEntities: "No entities found in this text, so there are no glossary.io links to add.",
+	outOfTime: "AI Enrich ran out of time before it was done. Click again to finish: what was already paid for is kept.",
+	/** What a failed call's toast ends with: the outputs paid for before it are kept (the failed call itself may be billed). */
+	retry: "Click again to retry: what was already paid for is kept.",
 } as const;
 
-type Issue = { kind: "limit" } | { kind: "busy"; until: number } | { kind: "error"; reason: string } | { kind: "no-index" };
+/** Nothing to add, though images miss text: ones the button leaves alone. */
+export const leftAlone = (n: number) =>
+	`Nothing to add. ${n === 1 ? "1 image without alt text or a caption is left as it is" : `${n} images without alt text or a caption are left as they are`}: AI Enrich skips images whose suggestion was dismissed or marked decorative, SVGs, and images it can't read from the media library.`;
+
+/** `error`: a model call failed; `trouble`: something of the site's own did (`what` says which part). */
+type Issue = { kind: "limit" } | { kind: "busy"; until: number } | { kind: "time" } | { kind: "error"; reason: string } | { kind: "trouble"; what: string; reason: string } | { kind: "no-index" };
 
 interface Selector {
 	fields?: string[];
@@ -141,6 +168,8 @@ async function savedData(ctx: PluginContext, collection: string, item: { id: str
 
 function classify(error: unknown): Issue {
 	if (error instanceof DailyLimitError) return { kind: "limit" };
+	// Past the click's deadline (START_BY_MS): no call was made for that stage.
+	if (error instanceof OutOfTimeError) return { kind: "time" };
 	return { kind: "error", reason: reasonOf(error) };
 }
 
@@ -149,6 +178,37 @@ async function pool<T>(items: readonly T[], size: number, work: (item: T) => Pro
 	await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => {
 		while (next < items.length) await work(items[next++]);
 	}));
+}
+
+/**
+ * Run `work` holding one entry's lock (see LOCK_MS); null when another click holds it. The lock is this click's own
+ * (its token): one that outlived its lock never renews or releases a later click's.
+ */
+async function withEntryLock<T>(ctx: PluginContext, key: string, work: () => Promise<T>): Promise<T | null> {
+	const started = Date.now();
+	const current = await ctx.kv.getVersioned<{ until: number; token: string }>(key);
+	if (current?.value && current.value.until > started) return null;
+	const token = crypto.randomUUID();
+	if (!(await ctx.kv.compareAndSet(key, current?.revision ?? null, { until: started + LOCK_MS, token })).applied) return null;
+	let renewing: Promise<unknown> = Promise.resolve();
+	const stop = enrichIo.every(LOCK_BEAT_MS, () => {
+		if (Date.now() - started > LOCK_MAX_MS) return;
+		renewing = renewing
+			.then(async () => {
+				const mine = await ctx.kv.getVersioned<{ token: string }>(key);
+				if (mine?.value?.token === token) await ctx.kv.compareAndSet(key, mine.revision, { until: Date.now() + LOCK_MS, token });
+			})
+			.catch(() => undefined);
+	});
+	try {
+		return await work();
+	} finally {
+		stop();
+		// A renewal still on its way would otherwise land after the release.
+		await renewing;
+		const mine = await ctx.kv.getVersioned<{ token: string }>(key).catch(() => null);
+		if (mine?.value?.token === token) await ctx.kv.compareAndDelete(key, mine.revision).catch(() => undefined);
+	}
 }
 
 /** Run AI Enrich for one editor draft (the ai/editor-enrich route). */
@@ -169,11 +229,13 @@ async function enrich(ctx: PluginContext, options: AiOptions, input: unknown): P
 	const images = isOn(features, "ai.imageText");
 	if (!links && !images) return toast("info", TOASTS.off);
 	if (s.provider === "workers-ai" ? !s.bindingAvailable : !s.apiKey) return toast("error", TOASTS.noKey);
-	const { collection, entryId: id } = draft;
+	const { collection } = draft;
 	if (!(await targetCollections(ctx, s)).includes(collection)) return toast("info", TOASTS.notCovered);
-	const item = ctx.content?.get ? await ctx.content.get(collection, id).catch(() => null) : null;
+	const item = ctx.content?.get ? await ctx.content.get(collection, draft.entryId).catch(() => null) : null;
 	const info = item ? await ctx.schema?.getCollection(collection) : null;
 	if (!item || !info) return toast("error", TOASTS.unreadable);
+	// Everything is kept under the entry's own id, whatever the request called it.
+	const id = typeof item.id === "string" && item.id ? item.id : draft.entryId;
 
 	const config = linkConfig(options, ctx.site?.url);
 	let linksOff = "";
@@ -183,12 +245,16 @@ async function enrich(ctx: PluginContext, options: AiOptions, input: unknown): P
 	if (linksOff) links = false;
 	if (!links && !images) return toast("info", `Nothing to add: ${linksOff}.`);
 
-	const done = await withLock(ctx, LOCK_MS, () => enrichEntry(ctx, options, s, features, { draft, selector, item, info, links, images, config }), editorLockKey(collection, id));
-	return done ?? toast("info", TOASTS.running);
+	const work = withEntryLock(ctx, editorLockKey(collection, id), () => enrichEntry(ctx, options, s, features, { draft, id, selector, item, info, links, images, config }));
+	// Kept alive a little past a request the browser gave up on, so a call in flight still ends and is saved.
+	afterResponse(work.catch(() => undefined));
+	return (await work) ?? toast("info", TOASTS.running);
 }
 
 interface Run {
 	draft: Draft;
+	/** The entry's own id. */
+	id: string;
 	selector?: Selector;
 	item: NonNullable<Awaited<ReturnType<NonNullable<PluginContext["content"]>["get"]>>>;
 	info: CollectionSchemaInfo;
@@ -197,17 +263,19 @@ interface Run {
 	config: ReturnType<typeof linkConfig>;
 }
 
-/** One image use's text, and where it came from. */
+/** One image use's text. */
 interface Fill extends ImageFill {
 	slot: ImageSlot;
 }
 
+/** Whether a stage cache holds anything a model call or Wikidata gave. */
+const hasOutputs = (cache: StageCache) => Boolean(cache.mentions || cache.choices || cache.entities || cache.description !== undefined);
+
 async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, features: FeatureMap, run: Run): Promise<EnrichAnswer> {
-	const { draft, item, info } = run;
-	const { collection, entryId: id } = draft;
+	const { draft, item, info, id } = run;
+	const { collection } = draft;
 	const key = entryKey(collection, id);
 	const started = Date.now();
-	const limits: CallLimits = { timeoutMs: CALL_TIMEOUT_MS, deadline: started + START_BY_MS };
 	const bySort = [...info.fields].sort((a, b) => a.sortOrder - b.sortOrder);
 	const ptFields = bySort.filter((f) => f.type === "portableText").map((f) => f.slug);
 	const patchable = patchableFields(info, run.selector, draft.fields);
@@ -239,8 +307,12 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	let entities: Entity[] | null = null;
 	let description = "";
 	let described = false;
-	const live = t0 && record?.status === "ok" && (record.textHash === t0.textHash || record.hash === t0.hash) ? record : null;
-	const reusable = t0 && staged && !staged.partial && staged.textHashes.includes(t0.textHash) ? staged : null;
+	// The live entry's analysis only when it's of this text under today's settings (its hash): one made with Entities
+	// or Meta descriptions off has the same text hash and none of what they find.
+	const live = t0 && record?.status === "ok" && record.hash === t0.hash ? record : null;
+	// An earlier click's, of this text before or after its patch (the captions it added don't change the entities).
+	const earlier = t0 && staged?.textHashes.includes(t0.textHash) ? staged : null;
+	const reusable = earlier && !earlier.partial ? earlier : null;
 	if (live) {
 		entities = live.entities;
 		description = live.description;
@@ -250,7 +322,9 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 		description = reusable.description;
 		described = reusable.described;
 	}
-	const cache: StageCache = t0 && staged?.cache?.hash === t0.hash ? structuredClone(staged.cache) : { hash: t0?.hash ?? "" };
+	const cache: StageCache = t0 && staged?.cache && (staged.cache.hash === t0.hash || earlier) ? { ...structuredClone(staged.cache), hash: t0.hash } : { hash: t0?.hash ?? "" };
+	// A complete earlier analysis stays whole in whatever is saved on the way (a description still to write).
+	if (reusable && !cache.entities) cache.entities = reusable.entities;
 	const describe = isOn(features, "ai.descriptions");
 	if (!live && describe && !described && !(t0?.info.hasSeo && !item.seo?.description?.trim())) described = true;
 	const wantDescription = links && describe && !described;
@@ -258,12 +332,38 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	// Set by the tasks below (an object, so the checks after them aren't narrowed away).
 	const issues: { entity?: Issue; description?: Issue; image?: Issue; links?: Issue } = {};
 
+	// ── Saved as soon as it's paid: a partial stage with the outputs so far, one write after another ──
+	const hashesSoFar = [...new Set([...(earlier?.textHashes ?? []), ...(t0 ? [t0.textHash] : [])])];
+	const partialStage = (textHashes: string[]): DraftRecord => ({ collection, entryId: id, title: t0!.title, hash: t0!.hash, textHashes, entities: [], description: cache.description ?? "", described: false, partial: true, cache: structuredClone(cache), updated: new Date().toISOString() });
+	let checkpointed = false;
+	let saving: Promise<void> = Promise.resolve();
+	const checkpoint = (): Promise<void> => {
+		if (!t0) return saving;
+		saving = saving
+			.then(async () => {
+				await drafts.put(key, partialStage(hashesSoFar));
+				checkpointed = true;
+			})
+			.catch((error: unknown) => ctx.log.warn("AI Enrich: couldn't save what it has so far", { entry: key, error: String(error).slice(0, 300) }));
+		return saving;
+	};
+	// An image's file is read (and resized) one at a time: three large ones at once could exhaust the Worker's memory.
+	let reading: Promise<unknown> = Promise.resolve();
+	const oneAtATime = <T>(work: () => Promise<T>): Promise<T> => {
+		const mine = reading.then(work);
+		reading = mine.catch(() => undefined);
+		return mine;
+	};
+	const limits: CallLimits = { timeoutMs: CALL_TIMEOUT_MS, deadline: started + START_BY_MS, paid: checkpoint, oneAtATime };
+
 	const entityTask = async () => {
 		if (!links || entities || !t0) return;
-		if (callsLeft <= 0) return void (issues.entity = { kind: "limit" });
-		if ((busyUntil ?? 0) > Date.now()) return void (issues.entity = { kind: "busy", until: busyUntil! });
+		if (callsLeft <= 0 && !cache.entities) return void (issues.entity = { kind: "limit" });
+		if ((busyUntil ?? 0) > Date.now() && !cache.entities) return void (issues.entity = { kind: "busy", until: busyUntil! });
 		try {
+			const had = Boolean(cache.entities);
 			entities = await groundEntities(ctx, options, s, t0, key, cache, budget, limits);
+			if (!had) await checkpoint();
 		} catch (error) {
 			if (error instanceof WikidataBusyError) {
 				const until = Date.now() + error.retryAfterMs;
@@ -274,7 +374,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	};
 	const descriptionTask = async () => {
 		if (!wantDescription || !t0) return;
-		if (callsLeft <= 0) return void (issues.description = { kind: "limit" });
+		if (callsLeft <= 0 && cache.description === undefined) return void (issues.description = { kind: "limit" });
 		try {
 			description = await suggestDescription(ctx, options, s, t0, key, cache, budget, limits);
 			described = true;
@@ -299,156 +399,166 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 			const m = media.get(mid);
 			return Boolean(m && m.mimeType.startsWith("image/") && m.mimeType !== "image/svg+xml" && stored.get(mid)?.status !== "skipped");
 		};
-		// A vision call only when neither the library item nor a stored suggestion has what a use of the image lacks.
-		const wanted = ids.filter((mid) => {
-			const record = stored.get(mid);
-			if (!raster(mid) || record?.status === "dismissed" || record?.suggestion) return false;
-			const m = media.get(mid)!;
-			return slots.some((slot) => slot.mediaId === mid && ((slot.needsAlt && !m.alt?.trim()) || (slot.needsCaption && !m.caption?.trim())));
-		});
-		// The entity and description calls come first out of what's left of today's calls.
-		const perClick = Math.min(MAX_VISION, Math.floor((SUBREQUEST_BUDGET - WORST_CASE_SUBREQUESTS.entry - budget.used) / 2));
-		const today = callsLeft - (links && !entities ? 2 : 0) - (wantDescription ? 1 : 0);
-		const room = Math.max(0, Math.min(perClick, today));
-		if (wanted.length > room && today < perClick) issues.image ??= { kind: "limit" };
-		else for (const mid of wanted.slice(room)) pendingIds.add(mid);
-		const title = typeof data[info.titleField ?? "title"] === "string" ? (data[info.titleField ?? "title"] as string) : "";
-		const fields = ptFields.map((f) => data[f]);
-		let stop = false;
-		await pool(wanted.slice(0, room), VISION_AT_ONCE, async (mid) => {
-			if (stop) return;
-			if (Date.now() >= limits.deadline!) return void pendingIds.add(mid);
-			const m = media.get(mid)!;
-			try {
-				const suggestion = await describeImage(ctx, options, s, m, buildImageContext(title, fields, mid, null), `media:${mid}`, budget, limits);
-				fresh.set(mid, suggestion);
-				let written: string[] = [];
-				if (s.imageMode === "apply") {
-					written = await applyImageText(ctx, mid, suggestion, { caption: s.imageCaption, overwrite: false }).catch((error: unknown) => {
-						ctx.log.warn("AI Enrich: couldn't write image text to the media library", { media: mid, error: String(error).slice(0, 200) });
-						return [];
-					});
-				}
-				const base = { mediaId: mid, filename: m.filename, url: m.url, updated: new Date().toISOString() };
-				await mediaRecords.put(mid, { ...base, suggestion, status: written.length ? "applied" : "suggested", written, error: "" });
-				// Its upload's job would pay for the same image again.
-				const queue = col<QueueJob>(ctx, "aiQueue");
-				const job = await queue.get(queueId({ kind: "media", mediaId: mid }));
-				if (job && !job.force) await queue.delete(queueId({ kind: "media", mediaId: mid }));
-			} catch (error) {
-				if (error instanceof SkipError) {
-					await mediaRecords.put(mid, { mediaId: mid, filename: m.filename, url: m.url, updated: new Date().toISOString(), suggestion: null, status: "skipped", written: [], error: error.message }).catch(() => undefined);
-					return;
-				}
-				issues.image ??= classify(error);
-				if (error instanceof DailyLimitError) stop = true;
+		const fill = () => {
+			for (const slot of slots) {
+				if (!slot.mediaId) continue;
+				const m = media.get(slot.mediaId);
+				const suggestion = suggestionOf(slot.mediaId);
+				const alt = slot.needsAlt ? m?.alt?.trim() || suggestion?.alt?.trim() || "" : "";
+				const caption = slot.needsCaption ? m?.caption?.trim() || suggestion?.caption?.trim() || "" : "";
+				if (alt || caption) filled.set(slot, { ...(alt ? { alt } : {}), ...(caption ? { caption } : {}) });
 			}
-		});
-		for (const slot of slots) {
-			if (!slot.mediaId) continue;
-			const m = media.get(slot.mediaId);
-			const suggestion = suggestionOf(slot.mediaId);
-			const alt = slot.needsAlt ? m?.alt?.trim() || suggestion?.alt?.trim() || "" : "";
-			const caption = slot.needsCaption ? m?.caption?.trim() || suggestion?.caption?.trim() || "" : "";
-			if (alt || caption) filled.set(slot, { ...(alt ? { alt } : {}), ...(caption ? { caption } : {}) });
+		};
+		try {
+			// A vision call only when neither the library item nor a stored suggestion has what a use of the image lacks.
+			const wanted = ids.filter((mid) => {
+				const record = stored.get(mid);
+				if (!raster(mid) || record?.status === "dismissed" || record?.suggestion) return false;
+				const m = media.get(mid)!;
+				return slots.some((slot) => slot.mediaId === mid && ((slot.needsAlt && !m.alt?.trim()) || (slot.needsCaption && !m.caption?.trim())));
+			});
+			// The entity and description calls come first out of what's left of today's calls.
+			const perClick = Math.min(MAX_VISION, Math.floor((SUBREQUEST_BUDGET - WORST_CASE_SUBREQUESTS.entry - budget.used) / 2));
+			const today = callsLeft - (links && !entities && !cache.entities ? 2 : 0) - (wantDescription && cache.description === undefined ? 1 : 0);
+			const room = Math.max(0, Math.min(perClick, today));
+			// Out of calls for today: say so. Otherwise the rest wait for the next click.
+			if (wanted.length > room && today <= 0) issues.image ??= { kind: "limit" };
+			else for (const mid of wanted.slice(room)) pendingIds.add(mid);
+			const title = typeof data[info.titleField ?? "title"] === "string" ? (data[info.titleField ?? "title"] as string) : "";
+			const fields = ptFields.map((f) => data[f]);
+			let stop = false;
+			await pool(wanted.slice(0, room), VISION_AT_ONCE, async (mid) => {
+				if (stop) return;
+				if (Date.now() >= limits.deadline!) return void pendingIds.add(mid);
+				const m = media.get(mid)!;
+				try {
+					const suggestion = await describeImage(ctx, options, s, m, buildImageContext(title, fields, mid, null), `media:${mid}`, budget, limits);
+					fresh.set(mid, suggestion);
+					let written: string[] = [];
+					if (s.imageMode === "apply") {
+						written = await applyImageText(ctx, mid, suggestion, { caption: s.imageCaption, overwrite: false }).catch((error: unknown) => {
+							ctx.log.warn("AI Enrich: couldn't write image text to the media library", { media: mid, error: String(error).slice(0, 200) });
+							return [];
+						});
+					}
+					const base = { mediaId: mid, filename: m.filename, url: m.url, updated: new Date().toISOString() };
+					await mediaRecords.put(mid, { ...base, suggestion, status: written.length ? "applied" : "suggested", written, error: "" });
+					// Its upload's job would pay for the same image again.
+					const queue = col<QueueJob>(ctx, "aiQueue");
+					const job = await queue.get(queueId({ kind: "media", mediaId: mid }));
+					if (job && !job.force) await queue.delete(queueId({ kind: "media", mediaId: mid }));
+				} catch (error) {
+					if (error instanceof SkipError) {
+						await mediaRecords.put(mid, { mediaId: mid, filename: m.filename, url: m.url, updated: new Date().toISOString(), suggestion: null, status: "skipped", written: [], error: error.message }).catch(() => undefined);
+						return;
+					}
+					issues.image ??= classify(error);
+					if (error instanceof DailyLimitError) stop = true;
+				}
+			});
+		} finally {
+			// Whatever went wrong above, the text that's there (the library's, stored suggestions, what was just paid for) is used.
+			fill();
 		}
 	};
+	/** A failure outside the per-image handling (the media library or its records couldn't be read) is the images' issue, never the click's. */
+	const guardedImageTask = () =>
+		imageTask().catch((error: unknown) => {
+			ctx.log.warn("AI Enrich: the images couldn't be worked on", { entry: key, error: String(error).slice(0, 300) });
+			issues.image ??= { kind: "trouble", what: "The images couldn't be worked on", reason: reasonOf(error) };
+		});
 
-	await Promise.all([entityTask(), descriptionTask(), imageTask()]);
+	await Promise.all([entityTask(), descriptionTask(), guardedImageTask()]);
+	await saving;
 
 	// ── Links ──
 	let plan: EntryLinkPlan | null = null;
 	const found = entities as Entity[] | null;
+	// A proposal of an earlier click that was applied to this draft (it has one of its links): what it handled stays
+	// handled, so a link taken out by hand since isn't proposed again.
+	const before = livePlanned(memo, started);
+	const draftSlugs = before ? new Set(ptFields.flatMap((f) => [...glossarySlugsIn(data[f])])) : null;
+	const applied = before && draftSlugs && plannedApplied(before, draftSlugs) ? before : null;
 	if (links && found) {
-		const index = await glossaryFor(ctx, ctx.site?.url, { anySwitch: true });
-		if (found.length && !index) issues.links = { kind: "no-index" };
-		else {
-			const lookup = (qid: string) => {
-				const term = index ? index(qid) : undefined;
-				const slug = term ? glossarySlug(term.url) : null;
-				return term && slug ? { slug, names: term.names ?? [] } : null;
-			};
-			plan = planEntryLinks(data, ptFields, found, lookup, run.config, memo?.linked ?? [], {
-				onFixError: (field, error) => ctx.log.warn("AI Enrich: couldn't check a field's possessives; they stay as they are", { entry: key, field, error: String(error) }),
-			});
+		try {
+			const index = await glossaryFor(ctx, ctx.site?.url, { anySwitch: true });
+			if (found.length && !index) issues.links = { kind: "no-index" };
+			else {
+				const lookup = (qid: string) => {
+					const term = index ? index(qid) : undefined;
+					const slug = term ? glossarySlug(term.url) : null;
+					return term && slug ? { slug, names: term.names ?? [] } : null;
+				};
+				plan = planEntryLinks(data, ptFields, found, lookup, run.config, [...new Set([...(memo?.linked ?? []), ...(applied?.qids ?? [])])], {
+					onFixError: (field, error) => ctx.log.warn("AI Enrich: couldn't check a field's possessives; they stay as they are", { entry: key, field, error: String(error) }),
+				});
+			}
+		} catch (error) {
+			// The analysis is paid for and staged below either way.
+			ctx.log.warn("AI Enrich: the links couldn't be planned", { entry: key, error: String(error).slice(0, 300) });
+			issues.links = { kind: "trouble", what: "The links couldn't be planned", reason: reasonOf(error) };
+			plan = null;
 		}
 	}
 
 	// ── One patch: links and possessives, then image text, trimmed to EmDash's limits ──
-	const excluded = new Set<string>();
-	const linkValues = new Map(Object.entries(plan?.patch ?? {}).filter(([field]) => patchable.has(field)));
-	let fills: Fill[] = slots.filter((slot) => filled.has(slot)).map((slot) => ({ slot, path: slot.path, ...filled.get(slot) }));
-	let trimmed = false;
-	const values = () => {
-		const out = new Map([...linkValues].filter(([field]) => !excluded.has(field)));
-		for (const field of new Set(fills.map((f) => f.slot.field))) {
-			if (excluded.has(field)) continue;
-			out.set(field, withImageText(out.has(field) ? out.get(field) : data[field], fills.filter((f) => f.slot.field === field)));
-		}
-		return out;
-	};
-	/** Drop the last caption (in `field`, or anywhere), else the last alt text. False when there's none. */
-	const dropOne = (field?: string) => {
-		for (const prop of ["caption", "alt"] as const) {
-			for (let i = fills.length - 1; i >= 0; i--) {
-				const f = fills[i];
-				if ((field && f.slot.field !== field) || !f[prop]) continue;
-				const copy: Fill = { ...f };
-				delete copy[prop];
-				fills = copy.alt || copy.caption ? fills.map((x, j) => (j === i ? copy : x)) : fills.filter((_, j) => j !== i);
-				trimmed = true;
-				return true;
-			}
-		}
-		return false;
-	};
 	const order = new Map(bySort.map((f, i) => [f.slug, i]));
-	const operations = (map: Map<string, unknown>) => [...map].sort(([a], [b]) => (order.get(a) ?? 0) - (order.get(b) ?? 0)).map(([field, value]) => ({ op: "set" as const, field, value }));
-	let current = values();
-	for (let guard = 0; guard < 5_000; guard++) {
-		const big = [...current].find(([, value]) => jsonBytes(value) > ACTION_LIMITS.fieldBytes);
-		if (big) {
-			if (!dropOne(big[0])) {
-				excluded.add(big[0]);
-				trimmed = true;
-			}
-			current = values();
-			continue;
-		}
-		const ops = operations(current);
-		const patch = { type: "editor-draft-patch", operations: ops };
-		if (!ops.length || (ops.length <= ACTION_LIMITS.operations && jsonBytes(patch) <= ACTION_LIMITS.patchBytes && responseFits({ toast: TOAST_ROOM, patch }))) break;
-		if (!dropOne()) {
-			const largest = [...current].sort(([, a], [, b]) => jsonBytes(b) - jsonBytes(a))[0];
-			if (!largest) break;
-			excluded.add(largest[0]);
-			trimmed = true;
-		}
-		current = values();
+	const operations = (map: ReadonlyMap<string, unknown>) => [...map].sort(([a], [b]) => (order.get(a) ?? 0) - (order.get(b) ?? 0)).map(([field, value]) => ({ op: "set" as const, field, value }));
+	const fits = (map: ReadonlyMap<string, unknown>) => {
+		if ([...map.values()].some((value) => jsonBytes(value) > ACTION_LIMITS.fieldBytes)) return false;
+		const patch = { type: "editor-draft-patch", operations: operations(map) };
+		return patch.operations.length <= ACTION_LIMITS.operations && jsonBytes(patch) <= ACTION_LIMITS.patchBytes && responseFits({ toast: TOAST_ROOM, patch });
+	};
+	const allFills: Fill[] = slots.filter((slot) => filled.has(slot)).map((slot) => ({ slot, path: slot.path, ...filled.get(slot) }));
+	const linkValues = new Map(Object.entries(plan?.patch ?? {}).filter(([field]) => patchable.has(field)));
+	const fieldParts: Array<FieldPatch<Fill>> = [...new Set([...linkValues.keys(), ...allFills.map((f) => f.slot.field)])]
+		.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
+		.map((field) => ({ field, base: data[field], ...(linkValues.has(field) ? { linked: linkValues.get(field) } : {}), fills: allFills.filter((f) => f.slot.field === field) }));
+	let fitted: ReturnType<typeof fitPatch<Fill>>;
+	try {
+		fitted = fitPatch(fieldParts, fits);
+	} catch (error) {
+		ctx.log.warn("AI Enrich: the patch couldn't be built", { entry: key, error: String(error).slice(0, 300) });
+		issues.links ??= { kind: "trouble", what: "The changes couldn't be put together", reason: reasonOf(error) };
+		fitted = { values: new Map(), fills: new Map(), linked: new Set(), trimmed: false };
 	}
+	const current = fitted.values;
+	const fills = [...fitted.fills.values()].flat();
+	const trimmed = fitted.trimmed;
 	const ops = operations(current);
-	const kept = (field: string) => current.has(field) && linkValues.has(field);
-	const terms = plan ? plan.terms.filter((_, i) => kept(plan!.termFields[i])) : [];
-	const fixes = plan ? plan.fixes.filter((_, i) => kept(plan!.fixFields[i])) : [];
+	const terms = plan ? plan.terms.filter((_, i) => fitted.linked.has(plan!.termFields[i])) : [];
+	const fixes = plan ? plan.fixes.filter((_, i) => fitted.linked.has(plan!.fixFields[i])) : [];
 
 	// ── Staged for the publish ──
-	const t1 = t0 ? await entryText(ctx, collection, { ...data, ...Object.fromEntries(current) }, s, features) : null;
+	const t1 = t0 ? await entryText(ctx, collection, { ...data, ...Object.fromEntries(current) }, s, features).catch(() => t0) : null;
 	const now = new Date().toISOString();
 	let stage: DraftRecord | null = null;
 	if (links && t0 && issues.entity) {
-		// Stopped early: what it paid for is kept for the next click, and the publish analyzes the entry as usual.
-		stage = { collection, entryId: id, title: t0.title, hash: t0.hash, textHashes: [t0.textHash], entities: [], description: cache.description ?? "", described: false, partial: true, cache, updated: now };
+		// Stopped early: what it paid for is kept for the next click and for the publish (src/ai/pack.ts hands it to the
+		// entry's job). A click that paid for nothing leaves an earlier click's complete analysis of another version alone.
+		if (hasOutputs(cache) || !staged || staged.partial) stage = partialStage([...new Set([...hashesSoFar, ...(t1 ? [t1.textHash] : [])])]);
 	} else if (links && t0 && t1 && found && (!live || t1.textHash !== t0.textHash)) {
-		// A description that failed leaves `described` false: the next click writes it; the publish analyzes the entry if none does.
-		stage = { collection, entryId: id, title: t1.title, hash: t1.hash, textHashes: [...new Set([t0.textHash, t1.textHash])], entities: found, description, described, updated: now };
+		// A description that failed leaves `described` false: the next click writes it, or the publish's job does (only that).
+		// The texts an earlier click's analysis (reused here) was of stay in it.
+		stage = { collection, entryId: id, title: t1.title, hash: t1.hash, textHashes: [...new Set([...hashesSoFar, t1.textHash])], entities: found, description, described, updated: now };
 	}
-	const forget = !stage && links && Boolean(found) && Boolean(staged);
+	const forget = !stage && links && Boolean(found) && (Boolean(staged) || checkpointed);
 	// The QIDs it adds, and the ones already linked in the draft (handled, not remembered yet): at the publish they
-	// count as handled when the proposal was applied, so a link taken out by hand before then stays out.
+	// count as handled when the proposal was applied, so a link taken out by hand before then stays out. An applied
+	// earlier proposal's links stay in it, so that still shows once this one adds none.
 	const remembered = new Set(memo?.linked ?? []);
-	const planned = plan ? { qids: [...new Set([...terms.map((c) => c.qid), ...[...plan.handled].filter((q) => !remembered.has(q))])].sort(), slugs: [...new Set(terms.map((c) => c.slug))].sort(), at: Date.now() } : null;
+	let planned: NonNullable<LinkMemo["planned"]> | null = plan
+		? {
+				qids: [...new Set([...terms.map((c) => c.qid), ...[...plan.handled].filter((q) => !remembered.has(q))])].sort(),
+				slugs: [...new Set([...terms.map((c) => c.slug), ...(applied?.slugs ?? [])])].sort(),
+				at: Date.now(),
+			}
+		: null;
+	if (planned && !planned.qids.length && !planned.slugs.length && !memo?.planned) planned = null;
 	if (stage || forget || planned) {
-		await saveState(ctx, { key, collection, id, drafts, stage, forget, planned }).catch((error: unknown) => ctx.log.warn("AI Enrich: couldn't stage the analysis; the publish analyzes the entry again", { entry: key, error: String(error).slice(0, 300) }));
+		await saveState(ctx, { key, collection, id, drafts, stage, forget, planned }).catch((error: unknown) =>
+			ctx.log.warn("AI Enrich: couldn't stage the analysis; the next click or the publish uses what was saved on the way", { entry: key, error: String(error).slice(0, 300) }),
+		);
 	}
 
 	// ── The toast ──
@@ -457,10 +567,16 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	const captions = fills.filter((f) => f.caption).length;
 	const left = slots.filter((slot) => slot.mediaId && pendingIds.has(slot.mediaId) && !fills.some((f) => f.slot === slot)).length;
 	const names = [...new Set(terms.map((c) => c.entity))];
+	const added = terms.filter((c) => c.action === "add").length;
+	const switched = terms.length - added;
 	const parts: string[] = [];
-	if (terms.length) parts.push(`Added ${plural(terms.length, "glossary.io link")} (${names.slice(0, 6).join(", ")}${names.length > 6 ? `, and ${names.length - 6} more` : ""}).`);
+	if (terms.length) {
+		const named = `(${names.slice(0, 6).join(", ")}${names.length > 6 ? `, and ${names.length - 6} more` : ""})`;
+		const what = !switched ? `Added ${plural(added, "glossary.io link")}` : !added ? `Switched ${plural(switched, "link")} to glossary.io` : `Added ${plural(added, "glossary.io link")} and switched ${plural(switched, "link")} to glossary.io`;
+		parts.push(`${what} ${named}.`);
+	}
 	if (fixes.length) parts.push(`Put ${plural(fixes.length, "possessive")} inside glossary.io links.`);
-	if (imageTotal) {
+	if (fills.length || left) {
 		parts.push(
 			left
 				? `Wrote image text for ${fills.length} of ${plural(imageTotal, "image")}. Click AI Enrich again for the rest.`
@@ -476,13 +592,15 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	const issue: Issue | undefined = issues.entity ?? issues.description ?? issues.image ?? issues.links;
 	if (issue?.kind === "limit") return answer("error", TOASTS.limit);
 	if (issue?.kind === "busy") return answer("info", `Wikidata asked to slow down. Try again in ${plural(Math.max(1, Math.ceil((issue.until - Date.now()) / 60_000)), "minute")}.`);
-	if (issue?.kind === "error") return answer("error", `The AI service didn't answer: ${issue.reason}. Nothing was charged twice; click again to retry.`);
+	if (issue?.kind === "time") return answer("info", TOASTS.outOfTime);
+	if (issue?.kind === "error") return answer("error", `The AI service didn't answer: ${issue.reason}. ${TOASTS.retry}`);
+	if (issue?.kind === "trouble") return answer("error", `${issue.what}: ${issue.reason}. ${TOASTS.retry}`);
 	if (issue?.kind === "no-index") return answer("info", TOASTS.noIndex);
 	if (trimmed) return answer("info", TOASTS.tooBig);
 	if (links && found && !found.length) return answer("info", TOASTS.noEntities);
 	if (ops.length) return answer("success", "");
 	if (what) return answer("info", "");
-	return toast("info", TOASTS.nothingToAdd);
+	return toast("info", imageTotal ? leftAlone(imageTotal) : TOASTS.nothingToAdd);
 }
 
 /**
@@ -506,12 +624,17 @@ async function saveState(
 	await write();
 }
 
-/** Only `planned` changes in the stored memo (compareAndSet, three tries). A new memo is an ordinary one. */
+/**
+ * Only `planned` changes in the stored memo (compareAndSet, three tries). A memo made here counts as nothing
+ * remembered (unseenMemo), like a possessives-only run's: without a text hash, an ordinary one would read as a text
+ * change, and the next analysis (a settings-only one too) would link the live entry. The publish that settles the
+ * plan with a check makes it an ordinary one (settlePlanned); a first analysis still links.
+ */
 async function savePlanned(ctx: PluginContext, key: string, collection: string, id: string, planned: NonNullable<LinkMemo["planned"]>): Promise<boolean> {
 	const memos = linkMemos(ctx);
 	for (let i = 0; i < 3; i++) {
 		const current = await memos.getVersioned(key);
-		const memo: LinkMemo = { ...(current?.value ?? { collection, entryId: id, linked: [] }), planned, updated: new Date().toISOString() };
+		const memo: LinkMemo = { ...(current?.value ?? unseenMemo(collection, id)), planned, updated: new Date().toISOString() };
 		if ((await memos.compareAndSet(key, current?.revision ?? null, memo)).applied) return true;
 	}
 	return false;
