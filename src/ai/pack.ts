@@ -15,10 +15,10 @@ import { LINK_CHECK_MS, type LinkMemo, isOwnPublish, linkMemos, livePlanned, set
 import { glossarySlugsIn } from "./glossary-links.js";
 import { PROVIDER_HOSTS } from "./providers.js";
 import { aiRoutes } from "./routes.js";
-import { type AiOptions, type DraftRecord, STORAGE, col, enqueue, entryKey, optionalCol, readSettings, stagedCache, type EntryRecord } from "./store.js";
+import { type AiOptions, type DraftRecord, STORAGE, col, enqueue, entryKey, optionalCol, readSettings, stagedCache, stagedSpent, type EntryRecord } from "./store.js";
 import { WIKIDATA_HOST, WIKIDATA_QUERY_HOST } from "./wikidata.js";
 import { type StageCache, queueId } from "./logic.js";
-import { type EntryText, entryText, targetCollections, tick } from "./worker.js";
+import { type EntryText, entryText, modelSignature, targetCollections, tick } from "./worker.js";
 
 export type { AiOptions } from "./store.js";
 export { getEntryEntities, type EntryEntities } from "./entities.js";
@@ -100,15 +100,30 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		const prev = await col<EntryRecord>(ctx, "aiEntries").get(key);
 		const exact = prev?.status === "ok" && prev.hash === t.hash;
 		const current = prev?.status === "ok" && (exact || prev.textHash === t.textHash);
-		// An analysis of this text under today's settings needs nothing from a click; one under other settings can take a click's newer one.
-		const staged = own || exact ? null : await useStaged(ctx, event.collection, id, content, t, current ? prev : null, prev, features, s);
+		// An analysis of this text under today's settings needs nothing from a click (what one staged for this text is
+		// moot, and goes); one under other settings can take a click's newer one.
+		const staged = own ? null : exact ? await forgetStaged(ctx, key, t) : await useStaged(ctx, event.collection, id, content, t, current ? prev : null, prev, features, s);
 		if (isOn(features, "ai.glossaryLinks") && !own) {
 			await settleLinks(ctx, event.collection, id, data, t, prev, staged?.record ?? (current ? "current" : "queued")).catch((error: unknown) =>
 				ctx.log.warn("glossary.io links: couldn't settle AI Enrich's planned links", { entry: key, error: String(error) }),
 			);
 		}
 		if (current || staged?.record) return;
-		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000, source: "save", ...(staged?.cache ? { cache: staged.cache } : {}) });
+		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000, source: "save", ...(staged?.cache ? { cache: staged.cache } : {}) }, t.hash);
+		// Only once the job has it: a failed enqueue leaves what the click paid for where the next publish finds it.
+		await staged?.handed?.();
+	}
+
+	/**
+	 * An entry whose analysis is of the published text under today's settings: what AI Enrich staged for that text
+	 * alone is deleted (the editor's panel would say it waits for a publish). One that also waits for its patch's
+	 * text stays (stagedSpent).
+	 */
+	async function forgetStaged(ctx: PluginContext, key: string, t: EntryText): Promise<null> {
+		const drafts = optionalCol<DraftRecord>(ctx, "aiDrafts");
+		const staged = drafts ? await drafts.get(key).catch(() => null) : null;
+		if (staged && stagedSpent(staged, t)) await drafts!.delete(key).catch(() => undefined);
+		return null;
 	}
 
 	/**
@@ -119,10 +134,12 @@ export function aiPack(options: AiOptions = {}): PackModule {
 	 * - `cache`: what it paid for goes to the queued job instead (rekeyed to the published text's hash; captions the
 	 *   patch added don't change the entities), so the scheduled run pays only for what's missing: a click that stopped
 	 *   early, a description that failed or wasn't asked for then, or one to fill in automatically (the run writes it
-	 *   past the debounce, not seconds after a publish while the editor is open).
+	 *   past the debounce, not seconds after a publish while the editor is open). `handed` deletes the staged row,
+	 *   once the job is queued.
 	 * `sameText` (the entry's analysis is of this text, under other settings): nothing is queued for it either way, so
 	 * only a complete staged analysis is used, and no description is filled in.
-	 * A staged analysis of another text is deleted: its publish has happened.
+	 * A staged analysis of another text, or made with another provider or model (a bulk run would skip an entry
+	 * promoted under today's hash), is deleted: its publish has happened.
 	 */
 	async function useStaged(
 		ctx: PluginContext,
@@ -134,13 +151,13 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		prev: EntryRecord | null,
 		features: FeatureMap,
 		s: Awaited<ReturnType<typeof readSettings>>,
-	): Promise<{ record?: EntryRecord; cache?: StageCache } | null> {
+	): Promise<{ record?: EntryRecord; cache?: StageCache; handed?: () => Promise<void> } | null> {
 		const drafts = optionalCol<DraftRecord>(ctx, "aiDrafts");
 		const key = entryKey(collection, id);
 		const staged = drafts ? await drafts.get(key).catch(() => null) : null;
 		if (!staged || !isOn(features, "ai.entities")) return null;
 		const forget = () => drafts!.delete(key).then(() => undefined, () => undefined);
-		if (!staged.textHashes.includes(t.textHash)) {
+		if (!staged.textHashes.includes(t.textHash) || staged.model !== modelSignature(s)) {
 			await forget();
 			return null;
 		}
@@ -149,8 +166,7 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		const wantDescription = isOn(features, "ai.descriptions") && t.info.hasSeo && !hasDescription;
 		const complete = !staged.partial;
 		if (!sameText && (!complete || (wantDescription && (!staged.described || (Boolean(staged.description) && s.descriptionsMode === "apply"))))) {
-			await forget();
-			return { cache: stagedCache(staged, t.hash) };
+			return { cache: stagedCache(staged, t.hash), handed: forget };
 		}
 		if (!complete) return null;
 		let description = prev?.description ?? "";
@@ -180,7 +196,8 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		const memos = linkMemos(ctx);
 		const settle = (memo: LinkMemo | null, now: number): LinkMemo | null => {
 			if (memo?.planned) {
-				if (!livePlanned(memo, now)) return typeof analysis === "string" ? withoutPlanned(memo) : decide(withoutPlanned(memo), now);
+				// Out of date: they go, whatever else is decided.
+				if (!livePlanned(memo, now)) return typeof analysis === "string" ? withoutPlanned(memo) : (decide(withoutPlanned(memo), now) ?? withoutPlanned(memo));
 				const fields = t.info.fields.filter((f) => f.type === "portableText").map((f) => f.slug);
 				const published = new Set(fields.flatMap((f) => [...glossarySlugsIn(data[f])]));
 				return settlePlanned(memo, published, analysis === "queued" ? null : { textHash: t.textHash, now });

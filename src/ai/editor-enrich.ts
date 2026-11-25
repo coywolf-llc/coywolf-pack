@@ -53,6 +53,7 @@ import {
 	describeImage,
 	entryText,
 	groundEntities,
+	modelSignature,
 	suggestDescription,
 	targetCollections,
 } from "./worker.js";
@@ -67,14 +68,17 @@ export interface EnrichAnswer {
 
 /**
  * A model call gives up after this long, and none starts after START_BY_MS: a click usually ends in 20 to 40 seconds,
- * and in about 100 at worst (a call started at the last moment, Wikidata's answer after it, and the wait for the
- * scheduled run's lock before the state is written).
+ * and in about two minutes at worst (a call started at the last moment, Wikidata's answer after it, and the wait for
+ * the scheduled run's lock before the state is written).
  */
 const CALL_TIMEOUT_MS = 40_000;
 const START_BY_MS = 50_000;
 /**
  * The per-entry lock is held LOCK_MS at a time and renewed every LOCK_BEAT_MS while the click runs (never past
- * LOCK_MAX_MS), so a click whose request was cancelled (the browser went away) frees its entry within LOCK_MS.
+ * LOCK_MAX_MS), so a click whose request was cancelled (the browser went away) frees its entry LOCK_MS after its
+ * last renewal: about 50 seconds, with the 30 the work may go on after the response (afterResponse). A run still
+ * going past LOCK_MAX_MS plus LOCK_MS (none should: no model call starts after START_BY_MS) no longer keeps a
+ * second click out; it writes no state once that click has the lock (`held`).
  */
 export const LOCK_MS = 20_000;
 const LOCK_BEAT_MS = 5_000;
@@ -182,17 +186,24 @@ async function pool<T>(items: readonly T[], size: number, work: (item: T) => Pro
 
 /**
  * Run `work` holding one entry's lock (see LOCK_MS); null when another click holds it. The lock is this click's own
- * (its token): one that outlived its lock never renews or releases a later click's.
+ * (its token): one that outlived its lock never renews or releases a later click's. `held` (for the work): whether
+ * no other click has taken the lock since.
  */
-async function withEntryLock<T>(ctx: PluginContext, key: string, work: () => Promise<T>): Promise<T | null> {
+async function withEntryLock<T>(ctx: PluginContext, key: string, work: (held: () => Promise<boolean>) => Promise<T>): Promise<T | null> {
 	const started = Date.now();
 	const current = await ctx.kv.getVersioned<{ until: number; token: string }>(key);
 	if (current?.value && current.value.until > started) return null;
 	const token = crypto.randomUUID();
 	if (!(await ctx.kv.compareAndSet(key, current?.revision ?? null, { until: started + LOCK_MS, token })).applied) return null;
 	let renewing: Promise<unknown> = Promise.resolve();
-	const stop = enrichIo.every(LOCK_BEAT_MS, () => {
-		if (Date.now() - started > LOCK_MAX_MS) return;
+	let cancel: (() => void) | undefined;
+	const stop = () => {
+		cancel?.();
+		cancel = undefined;
+	};
+	cancel = enrichIo.every(LOCK_BEAT_MS, () => {
+		// Past its time the timer goes too: nothing renews the lock again.
+		if (Date.now() - started > LOCK_MAX_MS) return stop();
 		renewing = renewing
 			.then(async () => {
 				const mine = await ctx.kv.getVersioned<{ token: string }>(key);
@@ -200,8 +211,12 @@ async function withEntryLock<T>(ctx: PluginContext, key: string, work: () => Pro
 			})
 			.catch(() => undefined);
 	});
+	const held = async () => {
+		const now = await ctx.kv.get<{ token?: string }>(key).catch(() => null);
+		return !now || now.token === token;
+	};
 	try {
-		return await work();
+		return await work(held);
 	} finally {
 		stop();
 		// A renewal still on its way would otherwise land after the release.
@@ -245,7 +260,7 @@ async function enrich(ctx: PluginContext, options: AiOptions, input: unknown): P
 	if (linksOff) links = false;
 	if (!links && !images) return toast("info", `Nothing to add: ${linksOff}.`);
 
-	const work = withEntryLock(ctx, editorLockKey(collection, id), () => enrichEntry(ctx, options, s, features, { draft, id, selector, item, info, links, images, config }));
+	const work = withEntryLock(ctx, editorLockKey(collection, id), (held) => enrichEntry(ctx, options, s, features, { draft, id, selector, item, info, links, images, config, held }));
 	// Kept alive a little past a request the browser gave up on, so a call in flight still ends and is saved.
 	afterResponse(work.catch(() => undefined));
 	return (await work) ?? toast("info", TOASTS.running);
@@ -261,6 +276,8 @@ interface Run {
 	links: boolean;
 	images: boolean;
 	config: ReturnType<typeof linkConfig>;
+	/** Whether no other click has taken the entry's lock since this one did. */
+	held: () => Promise<boolean>;
 }
 
 /** One image use's text. */
@@ -310,8 +327,10 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	// The live entry's analysis only when it's of this text under today's settings (its hash): one made with Entities
 	// or Meta descriptions off has the same text hash and none of what they find.
 	const live = t0 && record?.status === "ok" && record.hash === t0.hash ? record : null;
-	// An earlier click's, of this text before or after its patch (the captions it added don't change the entities).
-	const earlier = t0 && staged?.textHashes.includes(t0.textHash) ? staged : null;
+	// An earlier click's, of this text before or after its patch (the captions it added don't change the entities),
+	// made with today's provider and model: another's isn't passed on as today's.
+	const model = modelSignature(s);
+	const earlier = t0 && staged?.textHashes.includes(t0.textHash) && staged.model === model ? staged : null;
 	const reusable = earlier && !earlier.partial ? earlier : null;
 	if (live) {
 		entities = live.entities;
@@ -334,7 +353,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 
 	// ── Saved as soon as it's paid: a partial stage with the outputs so far, one write after another ──
 	const hashesSoFar = [...new Set([...(earlier?.textHashes ?? []), ...(t0 ? [t0.textHash] : [])])];
-	const partialStage = (textHashes: string[]): DraftRecord => ({ collection, entryId: id, title: t0!.title, hash: t0!.hash, textHashes, entities: [], description: cache.description ?? "", described: false, partial: true, cache: structuredClone(cache), updated: new Date().toISOString() });
+	const partialStage = (textHashes: string[]): DraftRecord => ({ collection, entryId: id, title: t0!.title, hash: t0!.hash, textHashes, entities: [], description: cache.description ?? "", described: false, partial: true, cache: structuredClone(cache), model, updated: new Date().toISOString() });
 	let checkpointed = false;
 	let saving: Promise<void> = Promise.resolve();
 	const checkpoint = (): Promise<void> => {
@@ -540,7 +559,7 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 	} else if (links && t0 && t1 && found && (!live || t1.textHash !== t0.textHash)) {
 		// A description that failed leaves `described` false: the next click writes it, or the publish's job does (only that).
 		// The texts an earlier click's analysis (reused here) was of stay in it.
-		stage = { collection, entryId: id, title: t1.title, hash: t1.hash, textHashes: [...new Set([...hashesSoFar, t1.textHash])], entities: found, description, described, updated: now };
+		stage = { collection, entryId: id, title: t1.title, hash: t1.hash, textHashes: [...new Set([...hashesSoFar, t1.textHash])], entities: found, description, described, model, updated: now };
 	}
 	const forget = !stage && links && Boolean(found) && (Boolean(staged) || checkpointed);
 	// The QIDs it adds, and the ones already linked in the draft (handled, not remembered yet): at the publish they
@@ -555,7 +574,9 @@ async function enrichEntry(ctx: PluginContext, options: AiOptions, s: Settings, 
 			}
 		: null;
 	if (planned && !planned.qids.length && !planned.slugs.length && !memo?.planned) planned = null;
-	if (stage || forget || planned) {
+	// A run that outlived its lock (see LOCK_MAX_MS) leaves the state to the click that has it now.
+	if ((stage || forget || planned) && !(await run.held())) ctx.log.warn("AI Enrich: another click took over this entry; this one's analysis isn't staged", { entry: key });
+	else if (stage || forget || planned) {
 		await saveState(ctx, { key, collection, id, drafts, stage, forget, planned }).catch((error: unknown) =>
 			ctx.log.warn("AI Enrich: couldn't stage the analysis; the next click or the publish uses what was saved on the way", { entry: key, error: String(error).slice(0, 300) }),
 		);

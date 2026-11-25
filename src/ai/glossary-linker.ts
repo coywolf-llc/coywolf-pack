@@ -414,9 +414,12 @@ const onlyMerge = (stored: LinkMemo | null, mine: LinkMemo): LinkMemo => ({ ...s
 /** Whether two memos are the same, their `updated` time aside. */
 const sameMemo = (a: LinkMemo, b: LinkMemo): boolean => stable({ ...a, updated: "" }) === stable({ ...b, updated: "" });
 
-/** Whether a memo holds nothing at all: made for an entry with nothing remembered, and no text, edit in progress, handled term, removal or retry in it. As good as no memo. */
+/**
+ * Whether a memo holds nothing at all: made for an entry with nothing remembered, and no text, edit in progress, handled term, removal,
+ * retry or links AI Enrich planned (while they count) in it. As good as no memo.
+ */
 const emptyMemo = (memo: LinkMemo): boolean =>
-	onlyMarker(memo) && !Object.keys(markerOf(memo)).length && !memo.linked.length && !memo.unlink?.length && memo.retryAt === undefined && memo.unlinkAt === undefined && memo.relink === undefined;
+	onlyMarker(memo) && !Object.keys(markerOf(memo)).length && !memo.linked.length && !memo.unlink?.length && memo.retryAt === undefined && memo.unlinkAt === undefined && memo.relink === undefined && !livePlanned(memo);
 
 /** The memo once its edit in progress is live: what a link edit linked is remembered; a removal's terms are forgotten and leave `unlink`. */
 function finished(memo: LinkMemo): LinkMemo {

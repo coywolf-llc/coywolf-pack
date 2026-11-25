@@ -221,6 +221,8 @@ export interface DraftRecord {
 	described: boolean;
 	partial?: true;
 	cache?: StageCache;
+	/** The provider and text model that made it (modelSignature in src/ai/worker.ts): under another it's never reused. */
+	model?: string;
 	updated: string;
 }
 
@@ -239,6 +241,14 @@ export function stagedCache(staged: DraftRecord, hash: string): StageCache {
 		...(staged.described ? { description: staged.description } : paid.description !== undefined ? { description: paid.description } : {}),
 	};
 }
+
+/**
+ * Whether a staged analysis waits for no publish any more, now that the entry's analysis is of this published text:
+ * it's of this text alone, or this is the text its patch made. One made for the live text and a patch not published
+ * yet (captions) still waits for that.
+ */
+export const stagedSpent = (staged: DraftRecord, t: { hash: string; textHash: string }): boolean =>
+	Array.isArray(staged.textHashes) && (staged.textHashes.every((h) => h === t.textHash) || (!staged.partial && staged.hash === t.hash));
 
 export interface MediaRecord {
 	mediaId: string;
@@ -276,11 +286,17 @@ export const entryKey = (collection: string, id: string) => `${collection}:${id}
 
 // ── Queue ────────────────────────────────────────────────────────
 
-export async function enqueue(ctx: Pick<PluginContext, "storage">, job: Omit<QueueJob, "attempts" | "enqueuedAt"> & Partial<QueueJob>): Promise<void> {
+/**
+ * Queue a job, merged into the one already queued for it (mergeJob). `hash` (a save's: the entry's EntryText.hash
+ * now): outputs the queued job paid for another text are dropped, so the scheduled run counts its calls in full.
+ */
+export async function enqueue(ctx: Pick<PluginContext, "storage">, job: Omit<QueueJob, "attempts" | "enqueuedAt"> & Partial<QueueJob>, hash?: string): Promise<void> {
 	const queue = col<QueueJob>(ctx, "aiQueue");
 	const id = queueId(job);
 	const next: QueueJob = { attempts: 0, enqueuedAt: Date.now(), ...job };
-	await queue.put(id, mergeJob(await queue.get(id), next));
+	const queued = await queue.get(id);
+	if (queued?.cache && hash !== undefined && queued.cache.hash !== hash) delete queued.cache;
+	await queue.put(id, mergeJob(queued, next));
 }
 
 export async function queueCounts(ctx: Pick<PluginContext, "storage">) {
@@ -407,10 +423,16 @@ export const WIKIDATA_BUSY_KEY = "state:ai:wikidataBusyUntil";
 const EDITOR_LOCK_PREFIX = "state:ai:editor:";
 export const editorLockKey = (collection: string, id: string) => `${EDITOR_LOCK_PREFIX}${collection}:${id}`;
 
-/** Delete the locks of AI Enrich clicks that never released theirs (a cancelled request), once they're an hour past their time. */
+/**
+ * Delete the locks of AI Enrich clicks that never released theirs (a cancelled request), once they're an hour past
+ * their time. Each is read again and deleted only as read: a click that took it meanwhile keeps its lock.
+ */
 export async function pruneEditorLocks(ctx: Pick<PluginContext, "kv">): Promise<void> {
 	const cutoff = Date.now() - 3_600_000;
+	const stale = (value: unknown) => ((value as { until?: number } | null)?.until ?? 0) < cutoff;
 	for (const { key, value } of await ctx.kv.list(EDITOR_LOCK_PREFIX)) {
-		if (((value as { until?: number } | null)?.until ?? 0) < cutoff) await ctx.kv.delete(key);
+		if (!stale(value)) continue;
+		const current = await ctx.kv.getVersioned<{ until?: number }>(key);
+		if (current && stale(current.value)) await ctx.kv.compareAndDelete(key, current.revision);
 	}
 }

@@ -5,7 +5,7 @@
  */
 import { siteName } from "../core/site.js";
 import { workerEnv } from "../shared.js";
-import type { CollectionSchemaInfo, PluginContext } from "emdash";
+import type { CollectionSchemaInfo, PluginContext, StorageCollection } from "emdash";
 
 import { type FeatureMap, ctxFeatures, isOn } from "../core/features.js";
 import {
@@ -57,11 +57,12 @@ import {
 	pruneUsage,
 	readSettings,
 	stagedCache,
+	stagedSpent,
 	takeCall,
 	withLock,
 } from "./store.js";
 import { WikidataBusyError, entityDetails, searchCandidates } from "./wikidata.js";
-import { BUSY_MS, changeCounts, linkEntry, linkMemos, retryDue, shouldLink, withRetry, withoutPendingNew } from "./glossary-linker.js";
+import { BUSY_MS, changeCounts, linkEntry, linkMemos, markOwnPublish, retryDue, shouldLink, withRetry, withoutPendingNew } from "./glossary-linker.js";
 import { checkGoneTerms, removeGoneOn } from "./glossary-gone.js";
 import { VERSION } from "../version.js";
 
@@ -98,8 +99,11 @@ async function sha256(text: string): Promise<string> {
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** The provider and text model an analysis is made with: what AI Enrich staged under another is never reused (DraftRecord.model). */
+export const modelSignature = (s: Pick<Settings, "provider" | "textModel">): string => `p:${s.provider}|m:${s.textModel}`;
+
 function signature(s: Settings, features: FeatureMap): string {
-	return `p:${s.provider}|m:${s.textModel}|ent:${isOn(features, "ai.entities") ? 1 : 0}|desc:${isOn(features, "ai.descriptions") ? 1 : 0}`;
+	return `${modelSignature(s)}|ent:${isOn(features, "ai.entities") ? 1 : 0}|desc:${isOn(features, "ai.descriptions") ? 1 : 0}`;
 }
 
 export interface EntryText {
@@ -214,6 +218,7 @@ export async function groundEntities(ctx: PluginContext, options: AiOptions, s: 
 	if (cache.entities) return cache.entities;
 	// Stage 1 (cached on the job, so a retry doesn't pay for it twice).
 	if (!cache.mentions) {
+		inTime(limits);
 		cache.mentions = parseMentions(
 			await callModel(ctx, options, s, "entities", { system: EXTRACT_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 2000, timeoutMs: limits?.timeoutMs }, ref, budget),
 		);
@@ -272,8 +277,13 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 
 	const ref = key;
 	// Outputs from an earlier failed attempt on the same text are reused (the job is saved with them on failure), and
-	// for a save's job what AI Enrich paid for this text (a click that was still running when the entry was published).
-	if (job.cache?.hash !== t.hash) job.cache = (job.source === "save" ? await stagedFor(ctx, key, t) : null) ?? { hash: t.hash };
+	// for a save's job what AI Enrich paid for this text: also what a click still running at the publish finished
+	// after the job got the rest (it fills only what the job lacks). Never for a forced job: that pays for a fresh one.
+	const drafts = optionalCol<DraftRecord>(ctx, "aiDrafts");
+	const staged = await stagedFor(drafts, key, t);
+	const paidFor = staged && job.source === "save" && !job.force && staged.model === modelSignature(s) ? stagedCache(staged, t.hash) : null;
+	if (job.cache?.hash !== t.hash) job.cache = paidFor ?? { hash: t.hash };
+	else if (paidFor) job.cache = { ...paidFor, ...job.cache };
 	const cache = job.cache;
 	const wantEntities = isOn(features, "ai.entities");
 	const hasDescription = Boolean(item.seo?.description?.trim());
@@ -305,19 +315,22 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 		updated: new Date().toISOString(),
 	};
 	await records.put(key, record);
+	// What was staged for this text alone has had its publish, and the entry its analysis: the editor's panel stops saying it waits.
+	if (staged && stagedSpent(staged, t)) await drafts!.delete(key).catch(() => undefined);
 	if (wantEntities && isOn(features, "ai.glossaryLinks")) await afterAnalysis(ctx, options, record, previous, t.textHash, budget);
 	return "done";
 }
 
-/** What AI Enrich staged for this title and text (src/ai/editor-enrich.ts), as a stage cache; null when there's none. */
-async function stagedFor(ctx: PluginContext, key: string, t: EntryText): Promise<StageCache | null> {
-	const staged = await optionalCol<DraftRecord>(ctx, "aiDrafts")?.get(key).catch(() => null);
-	return staged?.textHashes.includes(t.textHash) ? stagedCache(staged, t.hash) : null;
+/** What AI Enrich staged for this title and text (src/ai/editor-enrich.ts); null when there's none. */
+async function stagedFor(drafts: StorageCollection<DraftRecord> | undefined, key: string, t: EntryText): Promise<DraftRecord | null> {
+	const staged = drafts ? await drafts.get(key).catch(() => null) : null;
+	return staged?.textHashes?.includes(t.textHash) ? staged : null;
 }
 
 /** A meta description for the entry's text (cached with the other stage outputs, so a retry doesn't pay for it twice). */
 export async function suggestDescription(ctx: PluginContext, options: AiOptions, s: Settings, t: EntryText, ref: string, cache: StageCache, budget: Budget, limits?: CallLimits): Promise<string> {
 	if (cache.description === undefined) {
+		inTime(limits);
 		cache.description = cleanDescription(
 			await callModel(ctx, options, s, "descriptions", { system: DESCRIBE_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 300, timeoutMs: limits?.timeoutMs }, ref, budget),
 		);
@@ -364,7 +377,9 @@ export async function afterAnalysis(ctx: PluginContext, options: AiOptions, reco
 /**
  * Write a meta description into EmDash's SEO panel (a SEO-only update touches
  * nothing else). Unless `replace`, only when the entry still has none, so a
- * description an editor wrote meanwhile is never overwritten.
+ * description an editor wrote meanwhile is never overwritten. The write is the
+ * pack's own (markOwnPublish): its save hook settles nothing AI Enrich staged
+ * or planned for a draft the entry's live revision doesn't have yet.
  */
 export async function applyDescription(ctx: PluginContext, collection: string, id: string, description: string, replace: boolean): Promise<boolean> {
 	const content = ctx.content;
@@ -372,6 +387,7 @@ export async function applyDescription(ctx: PluginContext, collection: string, i
 	const fresh = await content.get(collection, id);
 	if (!fresh || fresh.seo === undefined) return false;
 	if (!replace && fresh.seo.description?.trim()) return false;
+	markOwnPublish(entryKey(collection, id), (fresh as { liveRevisionId?: string | null }).liveRevisionId ?? null);
 	await content.update(collection, id, { seo: { description } });
 	return true;
 }
@@ -785,7 +801,11 @@ export interface TickResult {
 	busy?: boolean;
 }
 
-/** A job's model calls at most. Outputs it already has (job.cache: an earlier attempt's, or AI Enrich's) aren't paid for again. */
+/**
+ * A job's model calls at most. Outputs it already has (job.cache: an earlier attempt's, or AI Enrich's) aren't paid
+ * for again. A save drops a queued job's outputs for another text (enqueue's `hash`), so they're of the entry's text;
+ * after a change of model alone the count can be low, and takeCall still holds the day's limit.
+ */
 const callsPerJob = (features: FeatureMap) => (job: QueueJob) =>
 	job.kind === "media" ? 1 : (isOn(features, "ai.entities") && !job.cache?.entities ? 2 : 0) + (isOn(features, "ai.descriptions") && job.cache?.description === undefined ? 1 : 0) || 1;
 
