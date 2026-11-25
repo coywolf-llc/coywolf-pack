@@ -21,7 +21,9 @@
  *   own default export through ctx.exports, with the scope in ctx.props
  *   (purgeThroughFetch);
  * - the wrapper's fetch answers that call by purging, before the site's handler
- *   runs (internalPurge, answerInternalPurge).
+ *   runs (internalPurge, answerInternalPurge);
+ * - the pack's cache provider (src/cache-provider.ts) sends EmDash's own purges
+ *   from the scheduled run through purgeOutcome too.
  * Only the Worker's own code can set ctx.props (requests from the internet
  * always have {}), so nothing outside the Worker can make it purge. ctx.props
  * doesn't partition the cache either: a purge made with it clears visitors'

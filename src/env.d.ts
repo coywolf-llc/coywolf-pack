@@ -8,3 +8,9 @@ declare module "@emdash-cms/plugin-forms" {
 	// any: EmDash's ResolvedPlugin; wrapFormsPlugin reads it loosely.
 	export function createPlugin(options?: Record<string, unknown>): any;
 }
+
+/** Optional peer (src/cache-provider.ts only): the site's Astro Cloudflare adapter. */
+declare module "@astrojs/cloudflare/cache/provider" {
+	const factory: import("astro").CacheProviderFactory;
+	export default factory;
+}

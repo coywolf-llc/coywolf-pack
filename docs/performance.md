@@ -23,16 +23,17 @@ See [Page cache](#page-cache) for setup. The [Cloudflare Checkup](cloudflare-che
 
 ## Page cache
 
-For sites that put Cloudflare's [Workers Cache](https://developers.cloudflare.com/workers/cache/) in front of the Worker, which serves cached pages without running the Worker. That's what makes first visits fast: a cold Worker spends a second or more starting up and querying D1. Turn it on in the site, as in EmDash's Cloudflare guide:
+For sites that put Cloudflare's [Workers Cache](https://developers.cloudflare.com/workers/cache/) in front of the Worker, which serves cached pages without running the Worker. That's what makes first visits fast: a cold Worker spends a second or more starting up and querying D1. Turn it on in the site, as in EmDash's Cloudflare guide, with the pack's cache provider in place of Astro's `cacheCloudflare()`:
 
 ```js
 // astro.config.mjs
-import { cacheCloudflare } from "@astrojs/cloudflare/cache";
 export default defineConfig({
-	cache: { provider: cacheCloudflare() },
+	cache: { provider: { name: "cloudflare", entrypoint: "@coywolf/emdash/cache-provider" } },
 	routeRules: { "/": { maxAge: 3600, swr: 86400 }, "/[...path]": { maxAge: 3600, swr: 86400 } },
 });
 ```
+
+The pack's provider (since 0.51.1) is Astro's Cloudflare provider with two changes: EmDash's purges from the scheduled run clear pages (see [Purges from scheduled runs](#purges-from-scheduled-runs)), and saves don't fail on a Worker with Workers Cache turned off (a staging Worker), where Astro's provider throws. Keep `name: "cloudflare"`: Astro's Cloudflare adapter turns Workers Cache on only for a provider with that name. `cacheCloudflare()` still works, without those two changes.
 
 and add `"version_metadata": { "binding": "CF_VERSION_METADATA" }` to `wrangler.jsonc`.
 
@@ -90,14 +91,14 @@ Crawlers ask for `/robots.txt` constantly, and each answer used to run the Worke
 
 A Workers Cache purge made while the Worker runs its scheduled handler (the Cron Trigger) reports success and clears nothing. Tested on November 25, 2026 with a throwaway Worker: purges by tag, by path prefix and by both left the pages cached, while the same purges made in a fetch invocation cleared them at once. EmDash runs the pack's scheduled tasks and its own scheduled publishing (which runs the pack's content hooks) from that handler, so until 0.51.1 the purges they made did nothing. On coywolf.com, a post the hourly run had linked to glossary.io kept serving its cached copy from before the run.
 
-Since 0.51.1 the pack sends those purges to the Worker itself as a fetch call, where they work, with the same tags and paths. This covers glossary.io links with `keepDates`, Social Images, slug-change redirects, child pages, Discovery's files and the caption refresh.
+Since 0.51.1 the pack sends those purges to the Worker itself as a fetch call, where they work, with the same tags and paths. This covers glossary.io links with `keepDates`, Social Images, slug-change redirects, child pages, Discovery's files and the caption refresh. With the pack's cache provider (above), EmDash's own purges from the scheduled run go the same way: the `[collection, id]` tags when a scheduled entry is published, and after a plugin edits an entry from a scheduled task (glossary.io links without `keepDates`, for example). Those go in calls of up to 100 tags, Cloudflare's limit per purge.
 
 - **What it needs:** the `stripTrackingParams` wrapper in `src/worker.ts`, with the site's `scheduled` handler inside the wrapped export as on all eight sites (see [Tracking parameters](cloudflare-checkup.md#tracking-parameters)), `ctx.exports` (a compatibility date of 2025-11-17 or later), and `nodejs_compat` (the wrapper uses `node:async_hooks`; EmDash needs the flag anyway). The `SELF` binding isn't enough: the call carries the purge in `ctx.props`, which only the Worker's own code can set, so nothing from the internet can make it purge.
 - **When it can't purge:** if the call fails or takes over 8 seconds, the purge is logged (`page cache purge from the scheduled run failed`) and counted as refused. A Worker that can't call itself (no `ctx.exports`) logs that once per isolate and refuses every such purge. A refused purge from the caption refresh is kept for the settling purge (see [Purge budget](#purge-budget)); the others are only logged, as when the rate limit refuses them in a request. (A call that answers after the 8 seconds has still purged; it's only counted as refused.)
 - **When the wrapper is missing:** if a pack task runs outside the wrapper's scheduled run on a Worker with Workers Cache, the Worker logs that once per isolate.
-- **What it doesn't cover:** EmDash's own purges from that handler (the `[collection, id]` tags when a scheduled entry is published, and after a plugin edits an entry from a scheduled task) go straight through Astro's cache provider, so they still clear nothing. So does a purge from any other invocation that isn't a request, such as co-editing room saves (a separate entrypoint; co-editing is off on the Coywolf sites), which hasn't been tested.
+- **What it doesn't cover:** EmDash's own purges from that handler on a site still using `cacheCloudflare()`, which still clear nothing. Nor a purge from any other invocation that isn't a request, such as co-editing room saves (a separate entrypoint; co-editing is off on the Coywolf sites), which hasn't been tested.
 
-Code: `src/core/scheduled-purge.ts`.
+Code: `src/core/scheduled-purge.ts`, `src/cache-provider.ts`.
 
 ### Purge budget
 
@@ -108,7 +109,7 @@ Workers Cache purges always use Cloudflare's Free-tier limits: 5 purge requests 
 - a video change, a Stream webhook call, or the hourly caption refresh: one (its pages and the video sitemap together);
 - a deploy: none (a rollback, or a gradual deployment's version flip at most every 10 minutes, one).
 
-A purge made during a scheduled run is still one purge, plus one call from the Worker to itself (see [Purges from scheduled runs](#purges-from-scheduled-runs)).
+A purge made during a scheduled run is still one purge, plus one call from the Worker to itself (see [Purges from scheduled runs](#purges-from-scheduled-runs)). With the pack's cache provider, EmDash's purges from the scheduled run (a scheduled entry going live, a plugin's scheduled edit) clear pages now, so they count like any other: one per entry a scheduled task edits.
 
 A refused purge from a settings save, a video change, robots.txt or a rollback is kept for the settling purge (see **After Coywolf Pack settings change**); other refused purges are logged.
 

@@ -78,7 +78,9 @@
  * the site's handler and before any of the above. Each such purge costs one
  * call to the Worker, with almost no CPU time. It needs ctx.exports (a
  * compatibility date of 2025-11-17 or later); without it those purges are
- * logged and reported as refused.
+ * logged and reported as refused. EmDash's own purges from the scheduled run
+ * take the same way when the site uses the pack's cache provider
+ * (src/cache-provider.ts).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
