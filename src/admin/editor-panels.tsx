@@ -185,15 +185,13 @@ export function AiPanel(props: PanelProps) {
 	// panel, so a review shows again when the panel mounts, even before the panel's data is back).
 	const draft = props.editorDraft;
 	const showEnrich = Boolean(draft) && (Boolean(data?.enrich?.available) || runState(runKey(collection, entry.id)).phase !== "idle");
-	const enrich = showEnrich && draft ? <EnrichButton collection={collection} entryId={entry.id} draft={draft} info={data?.enrich} onApplied={reload} /> : null;
-	const body = <AiSuggestions {...props} data={data} error={error} loading={loading} reload={reload} />;
-	return enrich ? (
+	const enrich = showEnrich && draft ? <EnrichButton collection={collection} entryId={entry.id} draft={draft} info={data?.enrich} updatedAt={entry.updatedAt} onApplied={reload} /> : null;
+	// One wrapper with or without the button, so the suggestions below keep their state when it appears.
+	return (
 		<div className="space-y-3">
 			{enrich}
-			{body}
+			<AiSuggestions {...props} data={data} error={error} loading={loading} reload={reload} />
 		</div>
-	) : (
-		body
 	);
 }
 

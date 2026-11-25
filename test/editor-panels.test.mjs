@@ -63,6 +63,11 @@ test("the panels and the column: valid for EmDash (ids, titles, finite order and
 	// The AI panel's AI Enrich button: only with EmDash 1.6's editorDraft (absent on older hosts), and only when a click could do something.
 	assert.match(panels, /editorDraft\?: EditorDraft;/);
 	assert.match(panels, /const showEnrich = Boolean\(draft\) && \(Boolean\(data\?\.enrich\?\.available\) \|\| runState\(runKey\(collection, entry\.id\)\)\.phase !== "idle"\);/);
+	// One wrapper with or without the button: the suggestions below never remount when it appears.
+	assert.doesNotMatch(panels, /enrich \? \(/);
+	assert.match(panels, /<div className="space-y-3">\s*\{enrich\}\s*<AiSuggestions /);
+	// The review isn't closed by a click on the backdrop (behavior: test/enrich-panel.test.mjs).
+	assert.match(readFileSync(new URL("../src/admin/enrich.tsx", import.meta.url), "utf8"), /<PackDialog\.Root open disablePointerDismissal /);
 });
 
 test("Child Pages' panel and Parent column show only in collections with the Parent page field (a reference field in the manifest)", () => {

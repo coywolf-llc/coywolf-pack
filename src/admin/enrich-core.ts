@@ -8,15 +8,20 @@
  *   ai/editor-enrich route (src/ai/editor-enrich.ts), asks again on its own
  *   while the answer says `more` (at most MAX_ROUNDS, and only while the draft
  *   is unchanged), waits for another request that holds the entry, retries a
- *   lost answer once, and ends in a review, or a message. Nothing changes in
- *   the editor until the person applies the review: then one patch() with the
- *   revision the click read, so an edit made meanwhile refuses it (stale).
+ *   lost answer once, and ends in a review, or a message. An answer the site
+ *   refuses (signed out, no permission) ends it at once, and a draft that
+ *   changed during a wait ends it stale before anything more is sent. Nothing
+ *   changes in the editor until the person applies the review: then one
+ *   patch() with the revision the click read, so an edit made meanwhile
+ *   refuses it (stale).
  * - The run store: one run per entry (`collection:entryId`) at module level,
  *   so hiding the settings sidebar (which unmounts the panel) or a re-render
  *   doesn't lose it: the panel shows the run or its review when it mounts again.
  */
-import { LEFT_ALONE_REASON } from "../ai/editor-images.js";
-import { PACK_API, apiPost } from "./api.js";
+import { apiFetch, getErrorMessage } from "emdash/plugin-utils";
+
+import { LEFT_ALONE_REASON, REVIEW_HINT } from "../ai/editor-images.js";
+import { PACK_API } from "./api.js";
 
 export { LEFT_ALONE_REASON };
 
@@ -43,7 +48,8 @@ export interface EditorDraft {
 // ── The route's answer (src/ai/editor-enrich.ts) and ai/entry's enrich ──
 
 export interface EnrichReview {
-	links: Array<{ name: string; slug: string; url: string; field: string }>;
+	/** `action`: a new link ("add"), or an existing link switched to glossary.io ("switch"; absent from a 0.52.0 pre-release server: a new link). */
+	links: Array<{ name: string; slug: string; url: string; field: string; action?: "add" | "switch" }>;
 	possessives: number;
 	images: Array<{ field: string; mediaId: string | null; filename: string; alt?: string; caption?: string }>;
 	description?: string;
@@ -83,6 +89,10 @@ export const RETRY_WAIT_MS = 5_000;
 export const ANSWER_TIMEOUT_MS = 95_000;
 /** The route's body cap (src/ai/editor-enrich.ts MAX_BODY_BYTES): a larger draft isn't sent at all. */
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;
+/** No request starts this long after the click, whatever the rounds, waits and retries added up to. */
+export const MAX_RUN_MS = 10 * 60_000;
+/** On a save, an ended run's message goes once it's this old (the autosave right after Apply leaves it). */
+export const ENDED_KEEP_MS = 10_000;
 
 export const MESSAGES = {
 	working: "Working… (about half a minute)",
@@ -116,7 +126,16 @@ export function buildBody(collection: string, entryId: string, snap: Snapshot, r
 export function explain(info: Pick<EnrichInfo, "links" | "images" | "describe" | "provider">): string {
 	const adds = [info.links ? "glossary.io links" : "", info.images ? "alt text and captions for images that have none" : "", info.describe ? "a meta description if there isn't one" : ""].filter(Boolean);
 	const list = adds.length > 2 || adds.some((a) => a.includes(" and ")) ? `${adds.slice(0, -1).join(", ")}, and ${adds.at(-1)}` : adds.join(" and ");
-	return `Adds ${adds.length > 1 ? list : adds[0] ?? "nothing"}. Sends this entry's ${info.images ? "text and images" : "text"} to ${info.provider}.`;
+	const switches = info.links ? " A link you already have to a term's home page, Wikipedia article or profile is switched to glossary.io." : "";
+	return `Adds ${adds.length > 1 ? list : adds[0] ?? "nothing"}.${switches} Sends this entry's ${info.images ? "text and images" : "text"} to ${info.provider}.`;
+}
+
+/** The review's Links heading: how many are new and how many are existing links switched. */
+export function linksTitle(links: EnrichReview["links"]): string {
+	const switched = links.filter((l) => l.action === "switch").length;
+	const added = links.length - switched;
+	if (!switched) return `Links (${links.length})`;
+	return added ? `Links (${added} added, ${switched} switched)` : `Links (${switched} switched)`;
 }
 
 /** While a later round runs: the server's progress, when it has images. */
@@ -130,9 +149,9 @@ export function operationsToApply(answer: EnrichAnswer, includeDescription: bool
 	return (answer.patch?.operations ?? []).filter((o) => includeDescription || o.field !== "seo.description");
 }
 
-/** The server's message in the review, when there's more to say than the lists (a limit, a busy Wikidata, images still to do). */
+/** The server's message in the review, when there's more to say than the lists (a limit, a busy Wikidata, images still to do), without its "review the changes" ending. */
 export function reviewNote(answer: EnrichAnswer): string | null {
-	if (answer.toast.type !== "success") return answer.toast.message;
+	if (answer.toast.type !== "success") return answer.toast.message.endsWith(REVIEW_HINT) ? answer.toast.message.slice(0, -REVIEW_HINT.length).trim() || null : answer.toast.message;
 	const remaining = answer.review?.remaining ?? 0;
 	return remaining ? `${plural(remaining, "image")} still to do: click AI Enrich again.` : null;
 }
@@ -156,10 +175,13 @@ export type RunState =
 			/** EmDash refused the meta description: Apply without it is offered. */
 			withoutDescription?: boolean;
 	  }
-	| { phase: "applied"; message: string }
-	| { phase: "stale"; message: string }
-	| { phase: "failed"; message: string }
-	| { phase: "done"; message: string };
+	| { phase: "applied"; message: string; at: number }
+	| { phase: "stale"; message: string; at: number }
+	| { phase: "failed"; message: string; at: number }
+	| { phase: "done"; message: string; at: number };
+
+type EndedPhase = "applied" | "stale" | "failed" | "done";
+const ENDED: ReadonlySet<string> = new Set<EndedPhase>(["applied", "stale", "failed", "done"]);
 
 const IDLE: RunState = { phase: "idle" };
 const runs = new Map<string, RunState>();
@@ -194,13 +216,64 @@ export function dismissRun(key: string): void {
 	if (runState(key).phase !== "running") setRun(key, IDLE);
 }
 
-/** How a run talks to the route and waits (tests replace them). */
+/**
+ * An ended run's message goes (never a running run or an open review): when the panel unmounts, and on a save
+ * (`olderThan`: only a message at least that old, so the autosave right after Apply leaves "Added" up).
+ */
+export function clearEnded(key: string, olderThan = 0): void {
+	const state = runState(key);
+	if (ENDED.has(state.phase) && enrichIo.now() - (state as { at: number }).at >= olderThan) setRun(key, IDLE);
+}
+
+/**
+ * A review is only for the draft the click read: when the panel mounts or shows one, a draft that changed since (an
+ * edit while the settings were hidden), or another draft object (the entry was left and opened again), ends it stale.
+ */
+export function checkReview(key: string, draft: EditorDraft): RunState {
+	const state = runState(key);
+	return state.phase === "review" && revisionNow(draft) !== state.revision ? end(key, "stale", MESSAGES.stale) : state;
+}
+
+/** An answer the site refused (HTTP 4xx): asking again can't help, and `message` is the site's own. */
+export class RefusedError extends Error {
+	readonly status: number;
+	constructor(status: number, message: string) {
+		super(message);
+		this.name = "RefusedError";
+		this.status = status;
+	}
+}
+
+/** How a run talks to the route, waits and tells the time (tests replace them). */
 export const enrichIo = {
-	send: (body: unknown, signal?: AbortSignal) => apiPost(`${PACK_API}/ai`)<EnrichAnswer>("editor-enrich", body, { fallback: "AI Enrich didn't answer", ...(signal ? { signal } : {}) }),
+	/**
+	 * The route's answer. Throws RefusedError for a 4xx other than 408 and 429 (signed out, no permission, the plugin
+	 * off, a body EmDash refuses), and any other error for an answer that's lost (the network, a 5xx, the zone's 524).
+	 */
+	send: async (body: unknown, signal?: AbortSignal): Promise<unknown> => {
+		const response = await apiFetch(`${PACK_API}/ai/editor-enrich`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), ...(signal ? { signal } : {}) });
+		if (response.ok) return ((await response.json()) as { data?: unknown }).data;
+		const message = await getErrorMessage(response, "AI Enrich didn't answer");
+		if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) throw new RefusedError(response.status, response.status === 413 ? MESSAGES.tooLarge : message);
+		throw new Error(`${message} (HTTP ${response.status})`);
+	},
 	wait: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
 	/** A request's deadline; a timeout rejects the fetch with a TimeoutError. */
 	deadline: (ms: number): AbortSignal | undefined => (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined),
+	now: () => Date.now(),
 };
+
+/** The run ends with a message. */
+function end(key: string, phase: EndedPhase, message: string): RunState {
+	return setRun(key, { phase, message, at: enrichIo.now() });
+}
+
+/** Whether a 200's data is an answer the run can read: a toast, and a patch of operations when it has one. */
+function isAnswer(value: unknown): value is EnrichAnswer {
+	const answer = value as EnrichAnswer | null | undefined;
+	if (!answer || typeof answer !== "object" || !answer.toast || typeof answer.toast.message !== "string" || !["success", "error", "info"].includes(answer.toast.type)) return false;
+	return answer.patch === undefined || (Boolean(answer.patch) && Array.isArray(answer.patch.operations));
+}
 
 /** A request body's size as JSON, in bytes (Infinity when it can't be serialized). */
 function bodyBytes(body: unknown): number {
@@ -227,54 +300,78 @@ function revisionNow(draft: EditorDraft): string {
 export async function startRun(collection: string, entryId: string, draft: EditorDraft): Promise<RunState> {
 	const key = runKey(collection, entryId);
 	if (runState(key).phase === "running") return runState(key);
+	try {
+		return await run(key, collection, entryId, draft);
+	} catch (error) {
+		// Nothing here should throw; whatever did, the run still ends (a running one can't be dismissed).
+		console.warn("AI Enrich: the run failed", error);
+		return end(key, "failed", MESSAGES.didntFinish);
+	}
+}
+
+async function run(key: string, collection: string, entryId: string, draft: EditorDraft): Promise<RunState> {
 	let snap: Snapshot;
 	try {
 		snap = draft.get();
 	} catch {
-		return setRun(key, { phase: "failed", message: MESSAGES.readOnly });
+		return end(key, "failed", MESSAGES.readOnly);
 	}
-	if (snap.readOnly || !snap.revision) return setRun(key, { phase: "failed", message: MESSAGES.readOnly });
-	if (bodyBytes(buildBody(collection, entryId, snap, MAX_ROUNDS)) > MAX_BODY_BYTES) return setRun(key, { phase: "failed", message: MESSAGES.tooLarge });
+	if (snap.readOnly || !snap.revision) return end(key, "failed", MESSAGES.readOnly);
+	if (bodyBytes(buildBody(collection, entryId, snap, MAX_ROUNDS)) > MAX_BODY_BYTES) return end(key, "failed", MESSAGES.tooLarge);
+	const started = enrichIo.now();
+	const stale = () => end(key, "stale", MESSAGES.stale);
+	/** After a wait: the draft is still the one the click read (a request for another could only be thrown away). */
+	const unchanged = () => revisionNow(draft) === snap.revision;
 	let round = 1;
 	let retried = false;
 	let waits = 0;
 	setRun(key, { phase: "running", round, note: MESSAGES.working });
 	for (;;) {
-		let answer: EnrichAnswer;
+		if (enrichIo.now() - started > MAX_RUN_MS) return end(key, "failed", MESSAGES.didntFinish);
+		let data: unknown;
 		try {
-			answer = await enrichIo.send(buildBody(collection, entryId, snap, round), enrichIo.deadline(ANSWER_TIMEOUT_MS));
+			data = await enrichIo.send(buildBody(collection, entryId, snap, round), enrichIo.deadline(ANSWER_TIMEOUT_MS));
 		} catch (error) {
-			// A lost answer (the network, the zone's 524, no answer in time): once more, and the lock's answer or what
-			// the lost request staged decides.
+			// Refused (signed out, no permission, the plugin off): asking again can't help, and the site says why.
+			if (error instanceof RefusedError) return end(key, "failed", error.message || MESSAGES.didntFinish);
+			// A lost answer (the network, a 5xx, the zone's 524, no answer in time): once more, and the lock's answer or
+			// what the lost request staged decides.
 			if (retried) {
 				console.warn("AI Enrich: no answer", error);
-				return setRun(key, { phase: "failed", message: MESSAGES.didntFinish });
+				return end(key, "failed", MESSAGES.didntFinish);
 			}
 			retried = true;
 			setRun(key, { phase: "running", round, note: MESSAGES.checking });
 			await enrichIo.wait(RETRY_WAIT_MS);
+			if (!unchanged()) return stale();
 			continue;
 		}
+		if (!isAnswer(data)) {
+			console.warn("AI Enrich: an answer it couldn't read", data);
+			return end(key, "failed", MESSAGES.didntFinish);
+		}
+		const answer = data;
 		retried = false;
 		if (answer.running) {
-			if (++waits > RUNNING_TRIES) return setRun(key, { phase: "failed", message: answer.toast.message });
+			if (++waits > RUNNING_TRIES) return end(key, "failed", answer.toast.message);
 			setRun(key, { phase: "running", round, note: MESSAGES.otherRunning });
 			await enrichIo.wait(RUNNING_WAIT_MS);
+			if (!unchanged()) return stale();
 			continue;
 		}
 		// An answer for another draft than the one sent, or a draft that changed since: nothing more is paid for it.
-		if (answer.revision !== undefined && answer.revision !== snap.revision) return setRun(key, { phase: "stale", message: MESSAGES.stale });
+		if (answer.revision !== undefined && answer.revision !== snap.revision) return stale();
 		if (answer.more && round < MAX_ROUNDS) {
-			if (revisionNow(draft) !== snap.revision) return setRun(key, { phase: "stale", message: MESSAGES.stale });
+			if (!unchanged()) return stale();
 			round++;
 			setRun(key, { phase: "running", round, note: progressNote(answer) });
 			continue;
 		}
 		if (answer.patch?.operations.length) {
-			if (revisionNow(draft) !== snap.revision) return setRun(key, { phase: "stale", message: MESSAGES.stale });
+			if (!unchanged()) return stale();
 			return setRun(key, { phase: "review", answer, revision: snap.revision, includeDescription: true });
 		}
-		return setRun(key, { phase: answer.toast.type === "error" ? "failed" : "done", message: answer.toast.message });
+		return end(key, answer.toast.type === "error" ? "failed" : "done", answer.toast.message);
 	}
 }
 
@@ -299,8 +396,8 @@ export function applyReview(key: string, draft: EditorDraft): RunState {
 	} catch (error) {
 		result = { ok: false, code: "EDITOR_DRAFT_INVALID", message: String((error as Error)?.message ?? error) };
 	}
-	if (result.ok) return setRun(key, { phase: "applied", message: MESSAGES.applied });
-	if (result.code === "EDITOR_DRAFT_STALE") return setRun(key, { phase: "stale", message: MESSAGES.stale });
+	if (result.ok) return end(key, "applied", MESSAGES.applied);
+	if (result.code === "EDITOR_DRAFT_STALE") return end(key, "stale", MESSAGES.stale);
 	if (result.code === "EDITOR_DRAFT_READ_ONLY") return setRun(key, { ...state, error: MESSAGES.readOnlyApply, withoutDescription: undefined });
 	console.warn("AI Enrich: EmDash refused the changes:", result.message);
 	return setRun(key, { ...state, error: MESSAGES.invalid, withoutDescription: state.includeDescription && /seo\.description/.test(result.message) ? true : undefined });

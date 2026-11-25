@@ -14,13 +14,17 @@ import * as React from "react";
 
 import { PackDialog } from "./dialog.js";
 import {
+	ENDED_KEEP_MS,
 	type EditorDraft,
 	type EnrichInfo,
 	type RunState,
 	applyReview,
+	checkReview,
+	clearEnded,
 	dismissRun,
 	explain,
 	leftAloneNote,
+	linksTitle,
 	operationsToApply,
 	plural,
 	reviewNote,
@@ -43,14 +47,46 @@ export function useRun(collection: string, entryId: string): [string, RunState] 
 	return [key, React.useSyncExternalStore(subscribe, read, read)];
 }
 
-export function EnrichButton(props: { collection: string; entryId: string; draft: EditorDraft; info?: EnrichInfo; onApplied: () => void }) {
+export function EnrichButton(props: { collection: string; entryId: string; draft: EditorDraft; info?: EnrichInfo; /** The saved entry's date: a save clears an old message. */ updatedAt?: string; onApplied: () => void }) {
 	const [key, state] = useRun(props.collection, props.entryId);
+	const root = React.useRef<HTMLDivElement>(null);
 	const button = React.useRef<HTMLButtonElement>(null);
+	const again = React.useRef<HTMLButtonElement>(null);
 	const status = React.useRef<HTMLDivElement>(null);
 	const running = state.phase === "running";
+	const phase = state.phase;
+	// A review is only for the draft its click read: checked when the panel mounts with one (the settings were hidden,
+	// or the entry was left and opened again) and whenever one shows, before the dialog is painted.
+	React.useLayoutEffect(() => {
+		if (phase === "review") checkReview(key, props.draft);
+	}, [key, phase, props.draft]);
+	// An ended run's message doesn't outlive the panel, or a later save.
+	React.useEffect(() => () => clearEnded(key), [key]);
+	const saved = React.useRef(props.updatedAt);
+	React.useEffect(() => {
+		if (saved.current === props.updatedAt) return;
+		saved.current = props.updatedAt;
+		clearEnded(key, ENDED_KEEP_MS);
+	}, [key, props.updatedAt]);
+	// Focus follows the run for a keyboard user: start() puts it on the status line (the button it was on is disabled
+	// or gone meanwhile); when the run or its review ends and it's still there, it goes to Run again, or back to the button.
+	const before = React.useRef(phase);
+	React.useEffect(() => {
+		const was = before.current;
+		before.current = phase;
+		if ((was !== "running" && was !== "review") || phase === "running" || phase === "review") return;
+		const move = () => {
+			const active = document.activeElement;
+			if (active && active !== status.current && active !== document.body) return;
+			(phase === "stale" ? again.current : button.current)?.focus();
+		};
+		if (was === "running") return move();
+		// After a review, once the dialog has given focus back.
+		const timer = setTimeout(move, 0);
+		return () => clearTimeout(timer);
+	}, [phase]);
 	const start = () => {
-		// The button is disabled while the run lasts: keep focus on the status line it announces in, not the page.
-		if (button.current && document.activeElement === button.current) status.current?.focus();
+		if (root.current?.contains(document.activeElement)) status.current?.focus();
 		void startRun(props.collection, props.entryId, props.draft);
 	};
 	const apply = () => {
@@ -58,16 +94,16 @@ export function EnrichButton(props: { collection: string; entryId: string; draft
 	};
 	const message = state.phase === "running" ? state.note : state.phase === "applied" || state.phase === "stale" || state.phase === "failed" || state.phase === "done" ? state.message : "";
 	return (
-		<div className="space-y-1.5">
+		<div ref={root} className="space-y-1.5">
 			<Button ref={button} type="button" size="sm" variant="secondary" icon={<Sparkle aria-hidden="true" />} loading={running} onClick={start}>
 				AI Enrich
 			</Button>
 			{props.info && <Muted>{explain(props.info)}</Muted>}
-			<div ref={status} tabIndex={-1} aria-live="polite" className="text-sm">
+			<div ref={status} tabIndex={-1} role="status" className="text-sm">
 				{message && <p className={state.phase === "failed" ? "text-kumo-danger" : undefined}>{message}</p>}
 			</div>
 			{state.phase === "stale" && (
-				<Button type="button" size="sm" variant="ghost" icon={<ArrowClockwise aria-hidden="true" />} onClick={start}>
+				<Button ref={again} type="button" size="sm" variant="ghost" icon={<ArrowClockwise aria-hidden="true" />} onClick={start}>
 					Run again
 				</Button>
 			)}
@@ -96,19 +132,21 @@ function EnrichReview(props: { state: Extract<RunState, { phase: "review" }>; on
 	const review = answer.review ?? { links: [], possessives: 0, images: [], leftAlone: 0, remaining: 0 };
 	const note = reviewNote(answer);
 	const ops = operationsToApply(answer, includeDescription);
+	const hint = React.useId();
+	// A click on the backdrop doesn't close it: the review is what a paid run ended in (Cancel and Escape still do).
 	return (
-		<PackDialog.Root open onOpenChange={(open) => !open && props.onCancel()}>
+		<PackDialog.Root open disablePointerDismissal onOpenChange={(open) => !open && props.onCancel()}>
 			<PackDialog.Content size="lg">
 				<PackDialog.Title>Review AI Enrich changes</PackDialog.Title>
 				<PackDialog.Description>Nothing in the entry changes until you choose Apply changes. Then save or publish as usual.</PackDialog.Description>
 				<PackDialog.Body>
 					{(review.links.length > 0 || review.possessives > 0) && (
-						<Section title={`Links (${review.links.length})`}>
+						<Section title={linksTitle(review.links)}>
 							{review.links.length > 0 && (
 								<ul role="list" className="space-y-1 text-sm">
-									{review.links.map((link) => (
-										<li key={`${link.field}:${link.slug}`} className="min-w-0">
-											{link.name}:{" "}
+									{review.links.map((link, i) => (
+										<li key={`${link.field}:${link.slug}:${i}`} className="min-w-0">
+											{link.name}: {link.action === "switch" ? "your link switched to " : ""}
 											<a href={link.url} target="_blank" rel="noreferrer noopener" className="break-all text-kumo-link underline">
 												{link.url}
 												<span className="sr-only"> (opens in a new tab)</span>
@@ -139,8 +177,12 @@ function EnrichReview(props: { state: Extract<RunState, { phase: "review" }>; on
 					{review.description && (
 						<Section title="Meta description">
 							<p className="text-sm">{review.description}</p>
-							<Checkbox label="Fill the meta description" checked={includeDescription} onCheckedChange={(on: boolean) => props.onDescription(on)} />
-							<Muted>Saved right away, also on a published entry.</Muted>
+							<div role="group" aria-label="Meta description" aria-describedby={hint} className="space-y-1.5">
+								<Checkbox label="Fill the meta description" checked={includeDescription} onCheckedChange={(on: boolean) => props.onDescription(on)} />
+								<p id={hint} className="text-xs leading-4 text-kumo-subtle">
+									Saved right away, also on a published entry.
+								</p>
+							</div>
 						</Section>
 					)}
 					{note && <p className="text-sm">{note}</p>}
