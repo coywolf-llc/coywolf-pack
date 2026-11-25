@@ -10,9 +10,11 @@ import { ctxFeatures, isOn, requireFeature } from "../core/features.js";
 import { parseInput } from "../shared.js";
 import { type QueueJob, cleanText, DESCRIPTION_MAX, ALT_MAX, CAPTION_MAX, queueId } from "./logic.js";
 import { type ModelOption, PROVIDERS, chat, listModels } from "./providers.js";
+import { editorEnrich } from "./editor-enrich.js";
 import {
 	type AiOptions,
 	type BulkState,
+	type DraftRecord,
 	type EntryRecord,
 	type MediaRecord,
 	type TextHashFillState,
@@ -26,6 +28,7 @@ import {
 	entryKey,
 	lockHeld,
 	logUsage,
+	optionalCol,
 	providerConfig,
 	publicSettings,
 	queueCounts,
@@ -261,18 +264,32 @@ export function aiRoutes(options: AiOptions) {
 				const ctx = asCtx(raw);
 				await requireFeature(ctx, "ai");
 				const { collection, id } = parseInput(entryRef, (raw as { input: unknown }).input);
-				const [record, features, collections] = await Promise.all([
+				const [record, staged, features, collections] = await Promise.all([
 					col<EntryRecord>(ctx, "aiEntries").get(entryKey(collection, id)),
+					Promise.resolve(optionalCol<DraftRecord>(ctx, "aiDrafts")?.get(entryKey(collection, id)) ?? null).catch(() => null),
 					ctxFeatures(ctx),
 					readSettings(ctx, options).then((s) => targetCollections(ctx, s)).catch(() => null),
 				]);
 				return {
 					record: record ?? null,
+					/** AI Enrich's analysis of the entry's unpublished text, waiting for its publish (null when there's none, or it stopped early). */
+					staged: staged && !staged.partial ? { entities: staged.entities, description: staged.description, updated: staged.updated } : null,
 					covered: !collections || collections.includes(collection),
 					features: { entities: isOn(features, "ai.entities"), descriptions: isOn(features, "ai.descriptions") },
 				};
 			},
 		})),
+
+		/**
+		 * AI Enrich, the entry editor's button (src/ai/editor-enrich.ts): `{ draft, patch }` from the companion
+		 * plugin (src/editor.ts, through src/core/bridge.ts). Answers `{ toast, patch? }` for EmDash's editor; never fails.
+		 */
+		"ai/editor-enrich": definePluginRoute({
+			permission: "plugins:manage",
+			methods: ["POST"],
+			request: { body: "json" },
+			handler: async (raw) => editorEnrich(asCtx(raw), options, (raw as { input: unknown }).input),
+		}),
 
 		"ai/entry/reanalyze": definePluginRoute({
 			permission: "plugins:manage",

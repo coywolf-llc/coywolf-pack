@@ -19,6 +19,7 @@
  */
 import type { MiddlewareHandler } from "astro";
 
+import { rememberDispatch } from "./core/bridge.js";
 import { invalidateFeatures, knownFeatures, registerSiteOption, rememberSiteOption, siteFeatures, siteOption, siteSetting, isOn } from "./core/features.js";
 import { SETTLE_RETRY_MS, claimSettle, currentGenerationTag, mergeScopes, recordSettingsChange, settleLater } from "./core/generation.js";
 import { lastReadFailure, noteReadFailure, readFailures } from "./core/read-failures.js";
@@ -99,6 +100,8 @@ const ADMIN_MANIFEST = "/_emdash/api/manifest";
 
 export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers: PackMiddleware[] = MIDDLEWARE): MiddlewareHandler {
 	return async (context, next) => {
+		// EmDash's route dispatcher, for the AI Enrich button's companion plugin (src/core/bridge.ts).
+		rememberDispatch((context.locals as { emdash?: { handlePluginApiRoute?: unknown } } | undefined)?.emdash?.handlePluginApiRoute);
 		if (PASS_THROUGH.test(context.url.pathname)) return next();
 		if (ADMIN_PAGE.test(context.url.pathname) && context.request.method === "GET") return injectAdminEnhancements(await next());
 		let workers: { env: Record<string, unknown>; waitUntil?: (p: Promise<unknown>) => void };

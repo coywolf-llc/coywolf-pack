@@ -6,17 +6,20 @@
  */
 import type { PluginContext } from "emdash";
 
-import { cachedCtxFeatures, ctxFeatures, isOn, registerFeatures } from "../core/features.js";
+import { type FeatureMap, cachedCtxFeatures, ctxFeatures, isOn, registerFeatures } from "../core/features.js";
 import type { PackModule } from "../core/module.js";
+import { afterResponse } from "../shared.js";
 import { getEntryEntities } from "./entities.js";
 import { GLOSSARY_HOST } from "./glossary.js";
 import { REMOVE_GONE_FEATURE } from "./glossary-gone.js";
+import { LINK_CHECK_MS, linkMemos, settlePlanned, shouldLink, withoutPendingNew } from "./glossary-linker.js";
+import { glossarySlugsIn } from "./glossary-links.js";
 import { PROVIDER_HOSTS } from "./providers.js";
 import { aiRoutes } from "./routes.js";
-import { type AiOptions, STORAGE, col, enqueue, entryKey, readSettings, type EntryRecord } from "./store.js";
+import { type AiOptions, type DraftRecord, STORAGE, col, enqueue, entryKey, optionalCol, readSettings, type EntryRecord } from "./store.js";
 import { WIKIDATA_HOST, WIKIDATA_QUERY_HOST } from "./wikidata.js";
 import { queueId } from "./logic.js";
-import { entryText, targetCollections, tick } from "./worker.js";
+import { type EntryText, applyDescription, entryText, targetCollections, tick } from "./worker.js";
 
 export type { AiOptions } from "./store.js";
 export { getEntryEntities, type EntryEntities } from "./entities.js";
@@ -75,6 +78,8 @@ export function aiPack(options: AiOptions = {}): PackModule {
 	 * Queue an entry when its title or text changed since the last analysis (debounced). Never makes a model call.
 	 * New settings alone (another model, a part switched on) don't re-analyze on a save: a bulk run applies them.
 	 * An analysis made before 0.51.0 has no text hash yet, so its hash (text and settings) decides, as before.
+	 * An analysis the editor's AI Enrich button staged for this title and text is promoted instead (promote), and
+	 * the links it planned are settled (settleLinks).
 	 */
 	async function onContent(event: { content: Record<string, unknown>; collection: string }, ctx: PluginContext) {
 		const content = event.content;
@@ -90,9 +95,83 @@ export function aiPack(options: AiOptions = {}): PackModule {
 		const data = (content.data && typeof content.data === "object" ? content.data : content) as Record<string, unknown>;
 		const t = await entryText(ctx, event.collection, data, s, features);
 		if (!t) return;
-		const prev = await col<EntryRecord>(ctx, "aiEntries").get(entryKey(event.collection, id));
-		if (prev?.status === "ok" && (prev.hash === t.hash || prev.textHash === t.textHash)) return;
+		const key = entryKey(event.collection, id);
+		const prev = await col<EntryRecord>(ctx, "aiEntries").get(key);
+		const current = prev?.status === "ok" && (prev.hash === t.hash || prev.textHash === t.textHash);
+		const promoted = current ? null : await promote(ctx, event.collection, id, content, t, prev, features, s);
+		if (isOn(features, "ai.glossaryLinks")) {
+			await settleLinks(ctx, event.collection, id, data, t, prev, current ? "current" : (promoted ?? "queued")).catch((error: unknown) =>
+				ctx.log.warn("glossary.io links: couldn't settle AI Enrich's planned links", { entry: key, error: String(error) }),
+			);
+		}
+		if (current || promoted) return;
 		await enqueue(ctx, { kind: "entry", collection: event.collection, entryId: id, due: Date.now() + s.debounceMinutes * 60_000, source: "save" });
+	}
+
+	/**
+	 * The analysis AI Enrich staged (aiDrafts) becomes the entry's, when it's of this title and text (before or after
+	 * its patch), complete, and made with the parts that are on now; null otherwise (the entry is queued as usual).
+	 * No model call. The description is handled as an analysis would (src/ai/worker.ts analyzeEntry).
+	 */
+	async function promote(ctx: PluginContext, collection: string, id: string, content: Record<string, unknown>, t: EntryText, prev: EntryRecord | null, features: FeatureMap, s: Awaited<ReturnType<typeof readSettings>>): Promise<EntryRecord | null> {
+		const drafts = optionalCol<DraftRecord>(ctx, "aiDrafts");
+		const key = entryKey(collection, id);
+		const staged = drafts ? await drafts.get(key).catch(() => null) : null;
+		if (!staged || staged.partial || !staged.textHashes.includes(t.textHash) || !isOn(features, "ai.entities")) return null;
+		const describe = isOn(features, "ai.descriptions");
+		if (describe && !staged.described) return null;
+		const seoDescription = (content.seo as { description?: unknown } | null | undefined)?.description;
+		const hasDescription = typeof seoDescription === "string" && seoDescription.trim().length > 0;
+		let description = prev?.description ?? "";
+		let descriptionStatus: EntryRecord["descriptionStatus"] = hasDescription && prev?.descriptionStatus !== "applied" ? "none" : (prev?.descriptionStatus ?? "none");
+		const wantDescription = describe && t.info.hasSeo && !hasDescription && Boolean(staged.description);
+		if (wantDescription) {
+			description = staged.description;
+			descriptionStatus = "suggested";
+		}
+		const record: EntryRecord = { collection, entryId: id, title: t.title, hash: t.hash, textHash: t.textHash, status: "ok", error: "", entities: staged.entities, description, descriptionStatus, updated: new Date().toISOString() };
+		const records = col<EntryRecord>(ctx, "aiEntries");
+		await records.put(key, record);
+		await drafts!.delete(key).catch(() => undefined);
+		ctx.log.info("AI: the analysis AI Enrich made in the editor is the published entry's now", { entry: key });
+		if (wantDescription && s.descriptionsMode === "apply") {
+			afterResponse(
+				applyDescription(ctx, collection, id, description, false)
+					.then(async (applied) => {
+						if (applied) await records.put(key, { ...record, descriptionStatus: "applied", updated: new Date().toISOString() });
+					})
+					.catch((error: unknown) => ctx.log.warn("AI: couldn't apply the meta description", { entry: key, error: String(error) })),
+			);
+		}
+		return record;
+	}
+
+	/**
+	 * glossary.io links on a publish, with no model call. Links AI Enrich planned (memo.planned) are settled
+	 * (settlePlanned), checked a few minutes later by the retry pass when the entry's analysis is of this text
+	 * (`current`, or a promoted one). After a promoted analysis with nothing planned, the links are decided as after
+	 * an analysis (afterAnalysis in src/ai/worker.ts), and made by the retry pass. When the entry is queued for a new
+	 * analysis instead, only `planned` goes: that analysis links.
+	 */
+	async function settleLinks(ctx: PluginContext, collection: string, id: string, data: Record<string, unknown>, t: EntryText, prev: EntryRecord | null, analysis: "current" | "queued" | EntryRecord): Promise<void> {
+		const key = entryKey(collection, id);
+		const memos = linkMemos(ctx);
+		const memo = await memos.get(key);
+		const now = Date.now();
+		const updated = new Date().toISOString();
+		if (memo?.planned) {
+			const fields = t.info.fields.filter((f) => f.type === "portableText").map((f) => f.slug);
+			const published = new Set(fields.flatMap((f) => [...glossarySlugsIn(data[f])]));
+			await memos.put(key, { ...settlePlanned(memo, published, analysis === "queued" ? null : { textHash: t.textHash, now }), updated });
+			return;
+		}
+		if (typeof analysis === "string") return;
+		const base = withoutPendingNew(memo ?? { collection, entryId: id, linked: [], updated: "" });
+		if (!analysis.entities.length || !shouldLink(memo, prev, t.textHash)) {
+			if (memo?.textHash !== t.textHash || memo?.pendingNew) await memos.put(key, { ...base, textHash: t.textHash, updated });
+			return;
+		}
+		await memos.put(key, { ...base, textHash: t.textHash, retryAt: now + LINK_CHECK_MS, tries: 0, updated });
 	}
 
 	return {
@@ -104,10 +183,11 @@ export function aiPack(options: AiOptions = {}): PackModule {
 			"content:afterSave": onContent,
 			"content:afterPublish": onContent,
 			"content:afterRestore": onContent,
-			/** Forget a deleted (or trashed) entry: its analysis and any queued job. A restore queues it again. */
+			/** Forget a deleted (or trashed) entry: its analysis, any queued job, and what AI Enrich staged. A restore queues it again. */
 			"content:afterDelete": async (event: { id: string; collection: string }, ctx: PluginContext) => {
 				await col<EntryRecord>(ctx, "aiEntries").delete(entryKey(event.collection, event.id));
 				await col(ctx, "aiQueue").delete(queueId({ kind: "entry", collection: event.collection, entryId: event.id }));
+				await optionalCol(ctx, "aiDrafts")?.delete(entryKey(event.collection, event.id));
 			},
 			"media:afterUpload": async (event: { media: { id: string; mimeType: string } }, ctx: PluginContext) => {
 				const { id, mimeType } = event.media;

@@ -7,7 +7,8 @@
  *   published, Slug changes off).
  * - Schema & Social: the entry's page and article types (its own or its
  *   collection's), main subject and custom markup, with a link to edit them.
- * - AI suggestions: the entry's AI description and entities (AI Enrichment).
+ * - AI suggestions: the entry's AI description and entities (AI Enrichment), and an
+ *   analysis AI Enrich made in the editor that waits for the publish.
  * - Link status: the entry's links, worst first (Link Manager).
  * - Buttondown: the entry's email draft (its state, warnings and link), with
  *   Create draft now and Refresh draft from post. Only in collections a
@@ -149,8 +150,23 @@ interface AiEntry {
 		descriptionStatus: "none" | "suggested" | "applied" | "dismissed";
 		updated: string;
 	} | null;
+	/** AI Enrich's analysis of the unpublished text, waiting for the publish (since 0.52.0). */
+	staged?: { entities: Array<{ name: string; type: string; primary: boolean }>; description: string; updated: string } | null;
 	covered: boolean;
 	features: { entities: boolean; descriptions: boolean };
+}
+
+function EntityBadges(props: { entities: Array<{ name: string; type: string; primary: boolean }> }) {
+	if (!props.entities.length) return <Muted>None found.</Muted>;
+	return (
+		<ul role="list" className="flex flex-wrap gap-1.5">
+			{props.entities.slice(0, 12).map((e) => (
+				<li key={`${e.type}:${e.name}`}>
+					<Badge variant={e.primary ? "primary" : "outline"}>{e.name}</Badge>
+				</li>
+			))}
+		</ul>
+	);
 }
 
 export function AiPanel(props: PanelProps) {
@@ -176,6 +192,7 @@ export function AiPanel(props: PanelProps) {
 		);
 	}
 	const record = data.record;
+	const staged = data.staged ?? null;
 	const run = async (kind: "reanalyze" | "dismiss") => {
 		setPending(kind);
 		setNotice(undefined);
@@ -205,8 +222,14 @@ export function AiPanel(props: PanelProps) {
 	};
 	return (
 		<div className="space-y-3">
+			{staged && (
+				<div className="space-y-1.5">
+					<Muted>Analyzed in the editor, waiting for publish.</Muted>
+					{data.features.entities && <EntityBadges entities={staged.entities} />}
+				</div>
+			)}
 			{!record ? (
-				<Muted>Not analyzed yet. Entries are analyzed a few minutes after they're saved.</Muted>
+				!staged && <Muted>Not analyzed yet. Entries are analyzed a few minutes after they're saved.</Muted>
 			) : record.status === "error" ? (
 				<Muted>The last analysis failed: {record.error || "unknown error"}</Muted>
 			) : (
@@ -236,17 +259,7 @@ export function AiPanel(props: PanelProps) {
 					{data.features.entities && (
 						<div className="space-y-1.5">
 							<span className="text-xs text-kumo-subtle">Entities</span>
-							{record.entities.length ? (
-								<ul className="flex flex-wrap gap-1.5">
-									{record.entities.slice(0, 12).map((e) => (
-										<li key={`${e.type}:${e.name}`}>
-											<Badge variant={e.primary ? "primary" : "outline"}>{e.name}</Badge>
-										</li>
-									))}
-								</ul>
-							) : (
-								<Muted>None found.</Muted>
-							)}
+							<EntityBadges entities={record.entities} />
 						</div>
 					)}
 				</>

@@ -1608,3 +1608,63 @@ test("Buttondown Drafts: entryTerms reads every term an entry has in one taxonom
 	const parents = (await termParentMaps(d1, ["category"])).get("category");
 	assert.deepEqual(ancestorTrail("bd-special", parents), ["bd-newsletter", "bd-special"]);
 });
+
+// ── AI Enrich, the editor button (src/editor.ts, src/ai/editor-enrich.ts) ──
+
+/** EmDash's runtime chunk (hashed per release). */
+const runtimeSource = () => [...emdashDist.values()].find((src) => src.includes("getPluginEditorExtension(pluginId, kind, extensionId, collection) {"));
+
+test("AI Enrich is a companion plugin: EmDash serves an editor action only for a plugin without a React admin entry, and its admin lists actions only for adminMode \"blocks\"", () => {
+	const runtime = runtimeSource();
+	assert.ok(runtime, "no getPluginEditorExtension in EmDash's runtime");
+	// When this fails, EmDash may allow actions for plugins with an admin entry: the button can then move into the pack (docs/ai.md).
+	assert.match(runtime, /getPluginEditorExtension\(pluginId, kind, extensionId, collection\) \{[\s\S]{0,400}?if \(configured\) \{\s*if \(configured\.admin\.entry\) return null;\s*panels = configured\.admin\.editorPanels;\s*actions = configured\.admin\.editorActions;/);
+	assert.match(runtime, /if \(hasAdminEntry\) adminMode = "react";\s*else if \(hasAdminPages \|\| hasWidgets \|\| hasEditorExtensions\) adminMode = "blocks";/);
+	assert.match(runtime, /editorActions: plugin\.admin\?\.editorActions/, "the manifest reads the plugin's actions on each build (the button's live getter)");
+	assert.match(functionSource(admin, "resolveSandboxedEditorActions"), /plugin\.adminMode !== "blocks"/);
+	// The action's route gets `{ type: "editor_action", draft }`, the draft validated first.
+	const dispatch = [...emdashDist.values()].find((src) => src.includes("function dispatchPluginEditorExtensionApiRequest("));
+	assert.match(dispatch, /type: "editor_action",\s*\.\.\.Object\.hasOwn\(editorBody, "draft"\) \? \{ draft: editorBody\.draft \} : \{\}/);
+	assert.match(dispatch, /canRead: definition\.capabilities\.includes\("admin\.editor-draft:read"\),\s*canPatch: definition\.capabilities\.includes\("admin\.editor-draft:patch"\)/);
+	assert.ok(emdashRoutes().has("/_emdash/api/content/[collection]/[id]/plugin-extensions/[pluginId]/[kind]/[extensionId]"));
+});
+
+test("AI Enrich's bridge: locals.emdash.handlePluginApiRoute is the runtime's own dispatcher, bound, taking (pluginId, method, path, request, user)", () => {
+	const middleware = readFileSync(join(emdashDir, "dist/astro/middleware.mjs"), "utf8");
+	assert.match(middleware, /handlePluginApiRoute: runtime\.handlePluginApiRoute\.bind\(runtime\),/);
+	assert.match(runtimeSource(), /async handlePluginApiRoute\(pluginId, method, path, request, user, invalidateContentCache, editorDispatch\) \{/);
+	// Typed for sites (astro/types.ts), with the same parameters.
+	assert.match(readFileSync(join(emdashDir, "src/astro/types.ts"), "utf8"), /handlePluginApiRoute: \(\s*pluginId: string,\s*method: string,\s*path: string,\s*request: Request,\s*user\?: RouteCallerInput \| null,/);
+});
+
+test("AI Enrich's limits are EmDash's: a draft field, the patch, and an editor action's answer (src/ai/editor-images.ts ACTION_LIMITS)", async () => {
+	const { ACTION_LIMITS } = await import("../src/ai/editor-images.ts");
+	const dispatch = [...emdashDist.values()].find((src) => src.includes("function dispatchPluginEditorExtensionApiRequest("));
+	assert.match(dispatch, /EDITOR_DRAFT_LIMITS = \{\s*maxFields: 32,\s*maxSnapshotBytes: 192 \* 1024,\s*maxFieldBytes: 64 \* 1024\s*\}/);
+	assert.equal(ACTION_LIMITS.fieldBytes, 64 * 1024);
+	const blocks = await import("@emdash-cms/blocks/server");
+	const limits = blocks.BLOCK_RESPONSE_LIMITS;
+	assert.deepEqual(
+		{ nodes: limits.maxNodes, depth: limits.maxDepth, arrayItems: limits.maxArrayItems, stringBytes: limits.maxStringBytes, responseBytes: limits.maxBytes },
+		{ nodes: ACTION_LIMITS.nodes, depth: ACTION_LIMITS.depth, arrayItems: ACTION_LIMITS.arrayItems, stringBytes: ACTION_LIMITS.stringBytes, responseBytes: ACTION_LIMITS.responseBytes },
+	);
+	const validation = readFileSync(join(packageDir("@emdash-cms/blocks", emdashDir), "dist", readdirSync(join(packageDir("@emdash-cms/blocks", emdashDir), "dist")).find((f) => /^validation-.*\.js$/.test(f))), "utf8");
+	assert.match(validation, /EDITOR_DRAFT_LIMITS = \{\s*maxOperations: (\d+),\s*maxPatchBytes: 192 \* 1024\s*\}/);
+	assert.equal(Number(/maxOperations: (\d+)/.exec(validation)[1]), ACTION_LIMITS.operations);
+	// An answer may have only toast, refresh, navigate and patch; a toast is success, error or info.
+	const policy = { pluginPagePaths: [], allowedImageHosts: [] };
+	const patch = { type: "editor-draft-patch", operations: [{ op: "set", field: "content", value: [] }] };
+	assert.equal(blocks.validateContentEditorActionResponse({ toast: { type: "success", message: "Done." }, patch }, policy).valid, true);
+	assert.equal(blocks.validateContentEditorActionResponse({ toast: { type: "info", message: "Nothing." } }, policy).valid, true);
+	assert.equal(blocks.validateContentEditorActionResponse({ toast: { type: "warning", message: "x" } }, policy).valid, false);
+	assert.equal(blocks.validateContentEditorActionResponse({ toast: { type: "info", message: "x" }, notice: "x" }, policy).valid, false);
+});
+
+test("AI Enrich: definePlugin keeps the companion's admin.editorActions as a getter and checks its route", async () => {
+	const { createPlugin } = await import("../src/editor.ts");
+	const resolved = createPlugin();
+	assert.equal(typeof Object.getOwnPropertyDescriptor(resolved.admin, "editorActions")?.get, "function", "definePlugin copied editorActions instead of keeping the getter");
+	assert.equal(resolved.admin.entry, undefined);
+	const { definePlugin } = await import("emdash");
+	assert.throws(() => definePlugin({ id: "contract-editor-action", version: "0.0.0", admin: { editorActions: [{ id: "a", label: "A", route: "missing", placement: "toolbar" }] }, routes: {} }), /unknown route/);
+});

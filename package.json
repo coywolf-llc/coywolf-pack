@@ -47,6 +47,7 @@
 		"./admin": "./src/admin/index.tsx",
 		"./astro": "./src/astro/index.ts",
 		"./middleware": "./src/middleware.ts",
+		"./editor": "./src/editor.ts",
 		"./worker": "./src/worker.ts",
 		"./forms": "./src/forms.ts"
 	},
