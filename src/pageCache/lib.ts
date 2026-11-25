@@ -371,9 +371,6 @@ export function applyPageLifetime(cache: RouteCache | undefined, maxAgeDays: num
 	return true;
 }
 
-/** Longest edge lifetime of a not-found page, in seconds (EmDash 1.6's cap, applied by settlePage to every path). */
-export const NOT_FOUND_MAX_AGE = 60;
-
 /** Lifetime of a page rendered with a stopgap (a Stream poster while its media-host copy is made). */
 export const STOPGAP_LIFETIME = { maxAge: 300, swr: 60 } as const;
 
@@ -421,11 +418,6 @@ export async function settlePage(cache: RouteCache | undefined, response: Respon
 	const maxAge = cache.options?.maxAge;
 	if (maxAge === undefined || maxAge <= 0 || response.status !== 200 || !response.body || !(response.headers.get("content-type") ?? "").startsWith("text/html")) {
 		if (checks.failed()) cache.set(false);
-		// A not-found page: at most a minute at the edge, with no stale period. That's EmDash 1.6's rule for 404s, which
-		// it doesn't apply at a path with a file extension (/wp-login.php, /old.html): those would keep the route's
-		// lifetime, days with the Page cache lifetime, so a redirect or page added there later would stay hidden. EmDash 1.5
-		// turns caching off for every 404 after this (its middleware runs outside the pack's), so nothing changes there.
-		else if (response.status === 404 && maxAge !== undefined && maxAge > NOT_FOUND_MAX_AGE) cache.set({ maxAge: NOT_FOUND_MAX_AGE, swr: 0 });
 		return response;
 	}
 	const body = await response.arrayBuffer();

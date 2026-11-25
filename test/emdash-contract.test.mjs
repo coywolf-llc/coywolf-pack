@@ -1140,17 +1140,17 @@ function methodSource(src, name) {
 	return src.slice(at, walk(src, open + 1, true, []) + 1);
 }
 
-test("not-found pages: EmDash 1.6+ keeps a 404 in the route cache for at most 60 seconds where the path has no file extension, 1.5 never (docs/performance.md)", async () => {
+test("not-found pages: EmDash 1.6+ keeps a 404 in the route cache for at most 60 seconds where the path has no file extension, 1.5 turns caching off for it (docs/performance.md)", () => {
 	const redirect = [...emdashDist.entries()].find(([file]) => file.endsWith(join("middleware", "redirect.mjs")))?.[1];
 	assert.ok(redirect, `EmDash ${emdashVersion} has no astro/middleware/redirect.mjs`);
 	const never = /if \(response\.status === 404\) routeCache\?\.set\(false\);/.test(redirect);
-	// 1.6: only where the path has no file extension; at /wp-login.php a 404 keeps the route's lifetime, so the pack's
-	// settlePage caps every 404 itself (NOT_FOUND_MAX_AGE in src/pageCache/lib.ts).
+	// 1.6: only where the path has no file extension. A 404 at /wp-login.php is left to the route, as 1.5 left every
+	// file-like path (it returned before its 404 handling).
 	const capped = /if \(!isFilePath && response\.status === 404 && routeCacheStores\(routeCache\)\) routeCache\?\.set\(\{\s*maxAge: Math\.min\(routeCache\.options\.maxAge \?\? 60, 60\),\s*swr: 0\s*\}\)/.test(redirect);
-	assert.ok(never || capped, `EmDash ${emdashVersion} caches not-found pages differently: check the pack's 404 cap (settlePage) and "Not-found pages" in docs/performance.md`);
-	if (!/^1\.5\./.test(emdashVersion)) assert.ok(capped, `EmDash ${emdashVersion} changed its 404 cap (now also at file paths, or another lifetime): check the pack's own cap (settlePage) and docs/performance.md`);
-	const { NOT_FOUND_MAX_AGE } = await import("../src/pageCache/lib.ts");
-	assert.equal(NOT_FOUND_MAX_AGE, 60, "the pack's cap matches EmDash's");
+	assert.ok(never || capped, `EmDash ${emdashVersion} caches not-found pages differently: update "Not-found pages" in docs/performance.md`);
+	if (!/^1\.5\./.test(emdashVersion)) assert.ok(capped, `EmDash ${emdashVersion} changed its 404 cap (another lifetime, or file paths too): update docs/performance.md`);
+	// Both leave paths with a file extension alone: 1.5 returns before its 404 handling, 1.6 before its 404 log.
+	assert.match(redirect, /if \(ASSET_EXTENSION\.test\(pathname\)\) return next\(\);|if \(isFilePath\) return response;/);
 });
 
 test("replacing a media file: EmDash 1.6+ runs media:afterUpload with the item's id and type (the pack's image sizes and AI image text listen); the pack's PUT …/replace watch still forces new sizes (src/images/pack.ts)", () => {
