@@ -4,7 +4,7 @@
 // provider (a stand-in with the same invalidate(): test/fixtures/astro-cloudflare-cache-provider.mjs), with
 // invalidate() doing nothing when Workers Cache is off, Astro's own purge in a request, and, during the Worker's
 // scheduled run (EmDash's scheduled publishing and plugins' scheduled edits), a purge through the Worker's own
-// fetch, since Workers Cache ignores purges made in the scheduled run itself.
+// default entrypoint (an RPC call), since Workers Cache ignores purges made in the scheduled run itself.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -20,8 +20,9 @@ registerHooks({
 		if (specifier === "cloudflare:workers") {
 			return {
 				url: `data:text/javascript,export const env = {}; export const waitUntil = () => {};
-export const cache = { get purge() { return globalThis.__noCache ? undefined : async (o) => { if (globalThis.__purgeThrow) throw new Error("purge failed"); globalThis.__purges.push({ scope: o, inFetch: globalThis.__inFetch > 0 }); return { success: globalThis.__purgeOk !== false }; }; } };
-export const exports = new Proxy({}, { get: (_, k) => globalThis.__moduleExports?.[k] });`,
+export const cache = { get purge() { return globalThis.__noCache ? undefined : async (o) => { if (globalThis.__purgeThrow) throw new Error("purge failed"); globalThis.__purges.push({ scope: o, inEntrypoint: globalThis.__inEntrypoint > 0 }); return { success: globalThis.__purgeOk !== false }; }; } };
+export const exports = new Proxy({}, { get: (_, k) => globalThis.__moduleExports?.[k] });
+export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }`,
 				shortCircuit: true,
 			};
 		}
@@ -33,7 +34,7 @@ const { default: coywolfCloudflareCache, batching } = await import("../src/cache
 // Short waits, so the tests don't sit through the real 5 s (with room for a slow CI machine's pauses).
 batching.quietMs = 100;
 batching.maxWaitMs = 5_000;
-const { PURGE_PROP } = await import("../src/core/scheduled-purge.ts");
+const { PURGE_METHOD } = await import("../src/core/scheduled-purge.ts");
 const { stripTrackingParams } = await import("../src/worker.ts");
 
 function reset() {
@@ -41,7 +42,7 @@ function reset() {
 	globalThis.__purgeOk = true;
 	globalThis.__purgeThrow = false;
 	globalThis.__noCache = false;
-	globalThis.__inFetch = 0;
+	globalThis.__inEntrypoint = 0;
 	globalThis.__moduleExports = undefined;
 	globalThis.__astro = { configs: [], invalidates: [], setHeaders: [] };
 }
@@ -49,28 +50,30 @@ reset();
 
 /**
  * A site Worker wrapped like the sites' src/worker.ts, whose scheduled() runs `work(ctx)`, and a ctx whose
- * exports.default calls the wrapped Worker's fetch with the props it's given (what ctx.exports does).
+ * exports.default is the loopback binding: its PURGE_METHOD calls the wrapped Worker's (what ctx.exports does by RPC).
  */
 function site(work, { respond } = {}) {
 	const loopbacks = [];
 	const waits = [];
-	const wrapped = stripTrackingParams({
+	const Worker = stripTrackingParams({
 		fetch: async () => new Response("page"),
 		scheduled: async (_controller, _env, ctx) => work(ctx),
 	});
-	const ownDefault = (options) => ({
-		fetch: async (request) => {
-			loopbacks.push({ props: options.props, method: request.method });
-			if (respond) return respond(request);
-			globalThis.__inFetch++;
+	/** The class as the runtime uses it: an instance per invocation. */
+	const wrapped = { scheduled: (controller, env = {}, ctx = {}) => new Worker(ctx, env).scheduled(controller) };
+	const binding = {
+		async [PURGE_METHOD](scope) {
+			loopbacks.push({ scope });
+			if (respond) return respond(scope);
+			globalThis.__inEntrypoint++;
 			try {
-				return await wrapped.fetch(request, {}, { props: options.props });
+				return await new Worker({ props: {} }, {})[PURGE_METHOD](scope);
 			} finally {
-				globalThis.__inFetch--;
+				globalThis.__inEntrypoint--;
 			}
 		},
-	});
-	const ctx = { exports: { default: ownDefault }, waitUntil: (p) => waits.push(p) };
+	};
+	const ctx = { exports: { default: binding }, waitUntil: (p) => waits.push(p) };
 	/** Wait for everything the run handed to ctx.waitUntil, including what's handed over meanwhile (the batch's purge). */
 	const drain = async () => {
 		for (let i = 0; i < waits.length; i++) await waits[i];
@@ -95,7 +98,7 @@ test("in a request: Astro's own invalidate(), with the same options (path tags i
 	await provider.invalidate(options);
 	assert.equal(globalThis.__astro.invalidates.length, 1);
 	assert.equal(globalThis.__astro.invalidates[0], options, "the same object, untouched");
-	assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts", "01X"] }, inFetch: false }]);
+	assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts", "01X"] }, inEntrypoint: false }]);
 
 	reset();
 	await provider.invalidate({ path: "/x" });
@@ -122,15 +125,15 @@ test("Workers Cache off (a staging Worker): nothing is purged and nothing throws
 	assert.equal(loopbacks.length, 0);
 });
 
-test("in a scheduled run: the tags Astro would purge go through the Worker's own fetch, never a direct purge", async () => {
+test("in a scheduled run: the tags Astro would purge go through the Worker's own default entrypoint, never a direct purge", async () => {
 	reset();
 	const provider = coywolfCloudflareCache(undefined);
 	const tags = ["posts", "01X"];
 	const { wrapped, ctx, loopbacks, drain } = site(() => provider.invalidate({ tags, path: "/p" }));
 	await wrapped.scheduled({}, {}, ctx);
 	await drain();
-	assert.deepEqual(loopbacks, [{ props: { [PURGE_PROP]: { tags: ["posts", "01X", "astro-path:/p"] } }, method: "POST" }]);
-	assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts", "01X", "astro-path:/p"] }, inFetch: true }]);
+	assert.deepEqual(loopbacks, [{ scope: { tags: ["posts", "01X", "astro-path:/p"] } }]);
+	assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts", "01X", "astro-path:/p"] }, inEntrypoint: true }]);
 	assert.deepEqual(globalThis.__astro.invalidates, [], "Astro's direct purge, which clears nothing here, isn't made");
 	assert.deepEqual(tags, ["posts", "01X"], "the caller's array is left as it was");
 });
@@ -163,11 +166,11 @@ test("in a scheduled run: no tags, no call; over 100 tags, one call per 100 (dup
 	}
 	assert.ok(Date.now() - started < 1_000, `purged after ${Date.now() - started} ms`);
 	assert.deepEqual(
-		big.loopbacks.map((l) => l.props[PURGE_PROP].tags.length),
+		big.loopbacks.map((l) => l.scope.tags.length),
 		[100, 1],
 	);
-	assert.deepEqual(big.loopbacks[0].props[PURGE_PROP].tags.slice(0, 2), ["posts", "id-0"]);
-	assert.deepEqual(big.loopbacks[1].props[PURGE_PROP].tags, ["id-99"]);
+	assert.deepEqual(big.loopbacks[0].scope.tags.slice(0, 2), ["posts", "id-0"]);
+	assert.deepEqual(big.loopbacks[1].scope.tags, ["id-99"]);
 });
 
 test("in a scheduled run: a purge that's refused or fails is logged, never thrown", async (t) => {
@@ -181,7 +184,7 @@ test("in a scheduled run: a purge that's refused or fails is logged, never throw
 	assert.equal(ran.loopbacks.length, 1);
 
 	reset();
-	ran = site(() => provider.invalidate({ tags: ["posts"] }), { respond: () => new Response("oops", { status: 500 }) });
+	ran = site(() => provider.invalidate({ tags: ["posts"] }), { respond: async () => { throw new Error("oops"); } });
 	await assert.doesNotReject(ran.wrapped.scheduled({}, {}, ran.ctx));
 	await assert.doesNotReject(ran.drain());
 	assert.equal(ran.loopbacks.length, 1);
@@ -218,8 +221,8 @@ test("EmDash's scheduled publishing: the provider it keeps on globalThis purges 
 		});
 		wrapped.scheduled({ cron: "0 * * * *" }, {}, ctx);
 		await drain();
-		assert.deepEqual(loopbacks.map((l) => l.props[PURGE_PROP]), [{ tags: ["posts", "01A", "01B"] }]);
-		assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts", "01A", "01B"] }, inFetch: true }]);
+		assert.deepEqual(loopbacks.map((l) => l.scope), [{ tags: ["posts", "01A", "01B"] }]);
+		assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts", "01A", "01B"] }, inEntrypoint: true }]);
 	} finally {
 		globalThis[KEY] = previous;
 	}
@@ -241,8 +244,8 @@ test("in a scheduled run: EmDash's purges are gathered into one (glossary.io's d
 	assert.equal(loopbacksWhenDone, 0, "nothing purged while the run is still publishing");
 	await drain();
 	assert.equal(loopbacks.length, 1, "one purge, not 25");
-	assert.deepEqual(loopbacks[0].props[PURGE_PROP].tags, ["terms", ...Array.from({ length: 25 }, (_, i) => `term-${i}`)]);
-	assert.deepEqual(globalThis.__purges.map((p) => p.inFetch), [true]);
+	assert.deepEqual(loopbacks[0].scope.tags, ["terms", ...Array.from({ length: 25 }, (_, i) => `term-${i}`)]);
+	assert.deepEqual(globalThis.__purges.map((p) => p.inEntrypoint), [true]);
 });
 
 test("in a scheduled run: a batch is purged at most maxWaitMs after its first tags, even while more keep coming; a string tag counts", async (t) => {
@@ -262,7 +265,7 @@ test("in a scheduled run: a batch is purged at most maxWaitMs after its first ta
 	await wrapped.scheduled({}, {}, ctx);
 	await drain();
 	assert.ok(loopbacks.length >= 2, `${loopbacks.length} purges`);
-	const all = loopbacks.flatMap((l) => l.props[PURGE_PROP].tags);
+	const all = loopbacks.flatMap((l) => l.scope.tags);
 	assert.equal(new Set(all).size, all.length, "each tag once");
 	assert.equal(all[0], "one-0");
 });
@@ -282,8 +285,8 @@ test("in a scheduled run: two runs at once (two isolates' worth in one) keep the
 	});
 	await Promise.all([a.wrapped.scheduled({}, {}, a.ctx), b.wrapped.scheduled({}, {}, b.ctx)]);
 	await Promise.all([a.drain(), b.drain()]);
-	assert.deepEqual(a.loopbacks.map((l) => l.props[PURGE_PROP].tags), [["A1", "A2"]]);
-	assert.deepEqual(b.loopbacks.map((l) => l.props[PURGE_PROP].tags), [["B1", "B2"]]);
+	assert.deepEqual(a.loopbacks.map((l) => l.scope.tags), [["A1", "A2"]]);
+	assert.deepEqual(b.loopbacks.map((l) => l.scope.tags), [["B1", "B2"]]);
 });
 
 test("in a scheduled run whose ctx has no waitUntil, the purge is made before invalidate() returns", async () => {
@@ -297,7 +300,7 @@ test("in a scheduled run whose ctx has no waitUntil, the purge is made before in
 	const { waitUntil: _held, ...unheld } = ctx;
 	await wrapped.scheduled({}, {}, unheld);
 	assert.equal(seen, 1);
-	assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts"] }, inFetch: true }]);
+	assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts"] }, inEntrypoint: true }]);
 });
 
 test("package.json exports it, and @astrojs/cloudflare is an optional peer (only this file needs it)", () => {

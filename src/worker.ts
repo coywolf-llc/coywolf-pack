@@ -6,9 +6,9 @@
  * stripTrackingParams also makes the pack's page cache purges work during the
  * Worker's scheduled run (the Cron Trigger), where Workers Cache purges report
  * success and clear nothing: it runs the site's scheduled handler inside a
- * store the pack's purges look for, and answers their call to the Worker's
- * own fetch, made with a ctx.props value only the Worker can set (see
- * "Scheduled runs" below, and src/core/scheduled-purge.ts).
+ * store the pack's purges look for, and answers their RPC call to the
+ * Worker's own default entrypoint (see "Scheduled runs" below, and
+ * src/core/scheduled-purge.ts).
  *
  * stripTrackingParams: pages linked with utm_…, fbclid, gclid and similar
  * parameters are served from Workers Cache as if the parameters weren't
@@ -73,18 +73,24 @@
  * publishing), the wrapper runs it inside the pack's scheduled-run store.
  * A page cache purge the pack makes during that run (glossary.io links with
  * keepDates, Social Images, slug-change redirects, child pages, discovery
- * files, video captions…) is then sent to this same Worker as a fetch call
- * through ctx.exports.default, which this wrapper answers by purging, before
- * the site's handler and before any of the above. Each such purge costs one
- * call to the Worker, with almost no CPU time. It needs ctx.exports (a
- * compatibility date of 2025-11-17 or later); without it those purges are
- * logged and reported as refused. EmDash's own purges from the scheduled run
- * take the same way when the site uses the pack's cache provider
- * (src/cache-provider.ts).
+ * files, video captions…) is then sent to this same Worker's default
+ * entrypoint by RPC (ctx.exports.default.coywolfPackPurge(scope)), which
+ * purges. That's why the wrapper returns a WorkerEntrypoint class and not an
+ * object: only a class has RPC methods, and the purge has to be made by the
+ * default entrypoint, whose cache holds the pages. A fetch call to itself
+ * doesn't do: on a Worker with "placement" (all eight sites) it runs in the
+ * placed location and loses the ctx.props it was made with
+ * (src/core/scheduled-purge.ts). Each such purge costs one call, with almost
+ * no CPU time. It needs ctx.exports (a compatibility date of 2025-11-17 or
+ * later); without it those purges are logged and reported as refused.
+ * EmDash's own purges from the scheduled run take the same way when the site
+ * uses the pack's cache provider (src/cache-provider.ts).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { type ScheduledRun, answerInternalPurge, installScheduledRuns, internalPurge } from "./core/scheduled-purge.js";
+import { WorkerEntrypoint } from "cloudflare:workers";
+
+import { PURGE_METHOD, type PurgeOutcome, type ScheduledRun, answerPurgeCall, installScheduledRuns } from "./core/scheduled-purge.js";
 import {
 	TRACKING_HEADER,
 	TRACKING_PARAMS,
@@ -182,16 +188,29 @@ function stateRecorder(database: string) {
 
 type FetchHandler = (request: Request, env: never, ctx: never) => Response | Promise<Response>;
 type ScheduledHandler = (controller: unknown, env: unknown, ctx: unknown) => unknown;
+type EventHandler = (event: unknown, env: unknown, ctx: unknown) => unknown;
+
+/** Event handlers besides fetch and scheduled that a handler object may have, passed on as they are. */
+const OTHER_HANDLERS = ["queue", "email", "tail", "tailStream", "trace", "test", "connect"] as const;
+
+/** The Worker's default export that stripTrackingParams returns: a WorkerEntrypoint class (see "Scheduled runs" above). */
+export type CoywolfPackWorker = new (ctx: ExecutionContext, env: unknown) => WorkerEntrypoint<unknown>;
 
 /**
  * The site's Worker handler, with requests that carry tracking parameters
  * served from the cache entry of the same URL without them. Everything else
  * (other methods, EmDash's admin and API, URLs without tracking parameters)
  * goes to the handler unchanged. Its scheduled() (if it has one) runs inside
- * the pack's scheduled-run store, and the pack's own purge calls are answered
- * here (see "Scheduled runs" above).
+ * the pack's scheduled-run store, and the pack's own purges from it are
+ * answered here (see "Scheduled runs" above).
+ *
+ * Returned as a WorkerEntrypoint class, the site's default export: its fetch,
+ * scheduled and other event handlers call the handler's with (event, env,
+ * ctx) as an object export gets them, and its one RPC method (PURGE_METHOD)
+ * takes those purges. Only the handler's event handlers are passed on, so no
+ * other function of the handler can be called by RPC.
  */
-export function stripTrackingParams<H extends object>(handler: H & { fetch?: unknown }, options: StripTrackingOptions = {}): H {
+export function stripTrackingParams<H extends object>(handler: H & { fetch?: unknown }, options: StripTrackingOptions = {}): CoywolfPackWorker {
 	const inner = handler.fetch as FetchHandler | undefined;
 	if (typeof inner !== "function") throw new TypeError("stripTrackingParams: the Worker handler has no fetch()");
 	const loopback = options.loopback ?? defaultLoopback;
@@ -199,42 +218,59 @@ export function stripTrackingParams<H extends object>(handler: H & { fetch?: unk
 	markTrackingWrapper({ params: (options.params ?? TRACKING_PARAMS).length, prefixes: (options.prefixes ?? TRACKING_PREFIXES).length });
 	const runs = installScheduledRuns(() => new AsyncLocalStorage<ScheduledRun>());
 	const innerScheduled = (handler as { scheduled?: unknown }).scheduled;
-	return {
-		...handler,
-		...(typeof innerScheduled === "function"
-			? {
-					scheduled(controller: unknown, env: unknown, ctx: unknown): unknown {
-						// Returned as it comes, so the runtime still waits for an async handler.
-						return runs.run({ ctx, env }, () => (innerScheduled as ScheduledHandler).call(handler, controller, env, ctx));
-					},
-				}
-			: {}),
-		async fetch(request: Request, env: never, ctx: never): Promise<Response> {
-			// The pack's purge from a scheduled run (only the Worker's own code can set ctx.props): purged here, in a fetch invocation.
-			const internal = internalPurge(ctx);
-			if (internal) return answerInternalPurge(request, internal.scope, purgeDirect);
-			const url = new URL(request.url);
-			const clean = trackingFreeUrl(url, request.method, options);
-			if (!clean) return inner.call(handler, request, env, ctx);
-			const self = loopback(env, ctx);
-			if (!self) {
-				record(env, ctx, { loopback: false });
-				return inner.call(handler, request, env, ctx);
-			}
-			let response: Response;
-			try {
-				response = await self.fetch(new Request(clean.url.href, request));
-			} catch (error) {
-				console.error("coywolf-pack: calling the Worker without its tracking parameters failed; serving the request as it came", error);
-				return inner.call(handler, request, env, ctx);
-			}
-			if (response.status >= 500) {
-				// A server error from the call through the cache: let the handler try the request itself.
-				await response.body?.cancel().catch(() => undefined);
-				return inner.call(handler, request, env, ctx);
-			}
-			record(env, ctx, { loopback: true, status: response.status, cache: response.headers.get("cf-cache-status") });
-			return forVisitor(response, url, clean.removed, options.hosts ?? []);
-		},
-	} as H;
+
+	const wrappedFetch = async (request: Request, env: never, ctx: never): Promise<Response> => {
+		const url = new URL(request.url);
+		const clean = trackingFreeUrl(url, request.method, options);
+		if (!clean) return inner.call(handler, request, env, ctx);
+		const self = loopback(env, ctx);
+		if (!self) {
+			record(env, ctx, { loopback: false });
+			return inner.call(handler, request, env, ctx);
+		}
+		let response: Response;
+		try {
+			response = await self.fetch(new Request(clean.url.href, request));
+		} catch (error) {
+			console.error("coywolf-pack: calling the Worker without its tracking parameters failed; serving the request as it came", error);
+			return inner.call(handler, request, env, ctx);
+		}
+		if (response.status >= 500) {
+			// A server error from the call through the cache: let the handler try the request itself.
+			await response.body?.cancel().catch(() => undefined);
+			return inner.call(handler, request, env, ctx);
+		}
+		record(env, ctx, { loopback: true, status: response.status, cache: response.headers.get("cf-cache-status") });
+		return forVisitor(response, url, clean.removed, options.hosts ?? []);
+	};
+
+	class Worker extends WorkerEntrypoint<unknown> {
+		fetch(request: Request): Promise<Response> {
+			return wrappedFetch(request, this.env as never, this.ctx as never);
+		}
+
+		/** RPC from the pack's purges during a scheduled run (purgeThroughEntrypoint): purged here, by the default entrypoint. */
+		[PURGE_METHOD](scope: unknown): Promise<PurgeOutcome> {
+			return answerPurgeCall(scope, purgeDirect);
+		}
+	}
+	// Defined like class methods (on the prototype, not enumerable), and only those the handler has.
+	const define = (name: string, method: (this: { env: unknown; ctx: unknown }, event: unknown) => unknown) =>
+		Object.defineProperty(Worker.prototype, name, { value: method, writable: true, configurable: true, enumerable: false });
+	if (typeof innerScheduled === "function") {
+		define("scheduled", function (controller) {
+			const { env, ctx } = this;
+			// Returned as it comes, so the runtime still waits for an async handler.
+			return runs.run({ ctx, env }, () => (innerScheduled as ScheduledHandler).call(handler, controller, env, ctx));
+		});
+	}
+	for (const name of OTHER_HANDLERS) {
+		const own = (handler as Record<string, unknown>)[name];
+		if (typeof own === "function") {
+			define(name, function (event) {
+				return (own as EventHandler).call(handler, event, this.env, this.ctx);
+			});
+		}
+	}
+	return Worker;
 }
