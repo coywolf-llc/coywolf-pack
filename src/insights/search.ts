@@ -24,6 +24,7 @@
 import { PLUGIN_ID, isOn, knownFeatures, siteFeatures } from "../core/features.js";
 import { INSIGHTS_FEATURES } from "./keys.js";
 import { MAX_QUERIES_PER_DAY, MIN_DAYS, MIN_SHOWN, RETENTION_DAYS, SEARCH_COLLECTION, type SearchEvent, type SearchSource, collapseBatch, dayOf, firstDay, normalizeSearchQuery, rowId } from "./search-core.js";
+import { errorSummary } from "../core/error-summary.js";
 
 /** How long searches wait in memory before they're written together. */
 const BATCH_MS = 2_000;
@@ -93,7 +94,7 @@ async function drain(db: SearchDb, self: { flush: Promise<void> | null }): Promi
 		try {
 			await write(db, events);
 		} catch (error) {
-			console.error("coywolf-pack: could not record searches", error);
+			console.error("coywolf-pack: could not record searches", errorSummary(error), error);
 		}
 	}
 	if (flushing === self.flush) flushing = null; // Same tick as the empty check above.
@@ -119,7 +120,7 @@ export function noteSearch(db: SearchDb | undefined | null, raw: string, results
 		}
 		if (flushing) waitUntil(flushing);
 	} catch (error) {
-		console.error("coywolf-pack: could not note a search", error);
+		console.error("coywolf-pack: could not note a search", errorSummary(error), error);
 	}
 }
 

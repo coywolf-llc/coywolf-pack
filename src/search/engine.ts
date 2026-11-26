@@ -41,6 +41,7 @@ import {
 } from "../core/content-url.js";
 import { buildOrQuery, rankByCoverage } from "./fallback.js";
 import { buildSnippet, highlightHtml, highlightWords, portableTextProse } from "./snippet.js";
+import { errorSummary } from "../core/error-summary.js";
 
 // ── Metadata ─────────────────────────────────────────────────────
 
@@ -316,7 +317,7 @@ export async function runBatch<T = Record<string, unknown>>(db: D1Database, quer
 					.all<T>()
 					.then((r) => r.results)
 					.catch((error: unknown) => {
-						if (!(error instanceof Error && FTS_SYNTAX.test(error.message))) console.error("coywolf-pack search: query failed", error);
+						if (!(error instanceof Error && FTS_SYNTAX.test(error.message))) console.error("coywolf-pack search: query failed", errorSummary(error), error);
 						return [] as T[];
 					}),
 			),

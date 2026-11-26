@@ -33,6 +33,7 @@ import { noteReadFailure } from "../core/read-failures.js";
 import { requestStore } from "../core/request-memo.js";
 import { workerEnv } from "../shared.js";
 import { PAGINATION_FEATURE } from "./pack.js";
+import { errorSummary } from "../core/error-summary.js";
 
 /** What getEmDashCollection takes that changes which entries are listed (its other keys are ignored here). */
 export interface CountFilter {
@@ -183,7 +184,7 @@ export async function countEntries(collection: string, filter: CountFilter = {},
 		if (query.taxonomies && Number(row.known) < query.taxonomies) return null;
 		return Number(row.n);
 	} catch (error) {
-		console.error(`coywolf-pack pagination: could not count the ${collection} entries`, error);
+		console.error(`coywolf-pack pagination: could not count the ${collection} entries`, errorSummary(error), error);
 		noteReadFailure("entry count");
 		return null;
 	}

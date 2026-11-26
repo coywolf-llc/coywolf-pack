@@ -17,6 +17,7 @@ import { afterResponse, workerEnv } from "../shared.js";
 import { batchedAll } from "./d1-batch.js";
 import { noteReadFailure } from "./read-failures.js";
 import { sharedRead, sharedSlot } from "./single-flight.js";
+import { errorSummary } from "./error-summary.js";
 
 export const PLUGIN_ID = "coywolf-pack";
 export const FEATURES_SETTING = "features";
@@ -487,7 +488,7 @@ async function queryOptions(database: Database): Promise<SiteOptions> {
 			}
 		}
 	} catch (error) {
-		console.error("coywolf-pack: could not read feature switches", error);
+		console.error("coywolf-pack: could not read feature switches", errorSummary(error), error);
 		return { features: resolveFeatures({}), settings, keys, ok: false };
 	}
 	const features = remember(resolveFeatures(stored));

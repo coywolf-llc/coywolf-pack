@@ -52,6 +52,7 @@ import {
 	startVariantsRun,
 } from "./variants-store.js";
 import { upgradeListedPosters } from "../videos/poster.js";
+import { errorSummary } from "../core/error-summary.js";
 
 export const F = { main: "images" } as const;
 export const FEATURES = [
@@ -178,7 +179,7 @@ async function postNextStep(deps: BackfillDeps, chain: Chain & { self: Fetcher; 
 		if (response.status === 202) return renewed;
 		console.error(`coywolf-pack images: the next backfill step answered ${response.status}`);
 	} catch (error) {
-		console.error("coywolf-pack images: couldn't start the next backfill step", error);
+		console.error("coywolf-pack images: couldn't start the next backfill step", errorSummary(error), error);
 	}
 	return null;
 }
@@ -264,7 +265,7 @@ export async function handleBackfillRequest(request: Request, waitUntil: (p: Pro
 	if (!deps) return forbidden();
 	const { state } = await readVariantsState(deps.db);
 	if (!state?.lease || !sameToken(state.lease, token)) return forbidden();
-	waitUntil(chainStep(deps, { token, step, origin: url.origin, self: await selfBinding() }).catch((error) => console.error("coywolf-pack images: backfill step failed", error)));
+	waitUntil(chainStep(deps, { token, step, origin: url.origin, self: await selfBinding() }).catch((error) => console.error("coywolf-pack images: backfill step failed", errorSummary(error), error)));
 	return new Response(null, { status: 202, headers: { "Cache-Control": "no-store" } });
 }
 
@@ -280,7 +281,7 @@ function maybeStartChain(origin: string, waitUntil: (p: Promise<unknown>) => voi
 	const now = Date.now();
 	if (now < chainCheckUntil || !backfillMayHaveWork(siteOption(VARIANTS_STATE_OPTION), now)) return;
 	chainCheckUntil = now + CHAIN_CHECK_MS;
-	waitUntil(startBackfillChain(origin).catch((error) => console.error("coywolf-pack images: couldn't start the backfill", error)));
+	waitUntil(startBackfillChain(origin).catch((error) => console.error("coywolf-pack images: couldn't start the backfill", errorSummary(error), error)));
 }
 
 /** The bindings stored sizes need, or null when one is missing (or there's no media host). */
@@ -694,7 +695,7 @@ function queueCrops(id: string, names: string[], now = Date.now()): boolean {
 		await withDeadline(makeCrops(id, fresh), DEADLINES.cropJobMs, `making crops ${fresh.join(", ")} of ${id}`);
 	})()
 		.catch((error) => {
-			console.error(`coywolf-pack images: couldn't make crops ${fresh.join(", ")} of ${id}`, error);
+			console.error(`coywolf-pack images: couldn't make crops ${fresh.join(", ")} of ${id}`, errorSummary(error), error);
 			for (const name of fresh) cropJobs.set(`${id}:${name}`, { until: Date.now() + CROP_RETRY_MS, failed: true });
 		})
 		.finally(() => {

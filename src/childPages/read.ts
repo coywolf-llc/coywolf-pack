@@ -22,6 +22,7 @@ import { isOn, knownFeatures, knownSiteSetting, registerSiteSetting, siteFeature
 import { noteReadFailure } from "../core/read-failures.js";
 import { peekRequestMemo, requestMemo, seedRequestMemo } from "../core/request-memo.js";
 import { PARENT_FIELD, type PageRow, type PageTreeData, type ParentLink, buildPageTree, storedParentsOf } from "./tree.js";
+import { errorSummary } from "../core/error-summary.js";
 
 export const CHILD_PAGES_FEATURE = "childPages";
 
@@ -357,7 +358,7 @@ export async function pageTitlesByPath(db?: D1Database | null): Promise<Map<stri
 		return (lastTitles = await pageTitles(db));
 	} catch (error) {
 		noteReadFailure("child pages: page titles");
-		console.error("coywolf-pack: Child Pages: could not read the page titles for a breadcrumb trail; using the last ones read (or the slugs)", error);
+		console.error("coywolf-pack: Child Pages: could not read the page titles for a breadcrumb trail; using the last ones read (or the slugs)", errorSummary(error), error);
 		return lastTitles;
 	}
 }

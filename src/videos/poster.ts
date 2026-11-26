@@ -26,6 +26,7 @@ import { type ImagesBinding, VARIANTS_VERSION, type VariantBucket, generateVaria
 import { DEADLINES, withDeadline } from "../core/single-flight.js";
 import { afterResponse, workerEnv } from "../shared.js";
 import { POSTER_WIDTHS, posterImage, posterUrl } from "./lib.js";
+import { errorSummary } from "../core/error-summary.js";
 
 /** Width of the copy kept in the bucket: covers the largest poster on a 2x screen. */
 export const SOURCE_WIDTH = 1600;
@@ -224,7 +225,7 @@ export async function mediaPoster(uid: string, source: string, deps: PosterDeps)
 				if (images && bucket.get && bucket.list && bucket.delete) {
 					const sized = await posterVariants(bucket as VariantBucket, images, key).then(
 						() => true,
-						(error) => (console.error("coywolf-pack videos: couldn't make the poster's stored sizes", key, error), false),
+						(error) => (console.error("coywolf-pack videos: couldn't make the poster's stored sizes", key, errorSummary(error), error), false),
 					);
 					if (sized) {
 						madeHere.add(posterEntry(key));
@@ -282,7 +283,7 @@ export async function upgradeListedPosters(db: Db, bucket: VariantBucket, images
 			await posterVariants(bucket, images, key);
 			await relistPoster(db, entry, posterEntry(key));
 		} catch (error) {
-			console.error("coywolf-pack videos: couldn't make a listed poster's stored sizes", key, error);
+			console.error("coywolf-pack videos: couldn't make a listed poster's stored sizes", key, errorSummary(error), error);
 			await relistPoster(db, entry, null);
 		}
 	}

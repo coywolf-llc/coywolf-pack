@@ -26,6 +26,7 @@ import { requestMemo, requestStore } from "../core/request-memo.js";
 import { workerEnv } from "../shared.js";
 import { collectionTree, type CollectionTree } from "./read.js";
 import { type PageNode } from "./tree.js";
+import { errorSummary } from "../core/error-summary.js";
 
 export interface PageTreeItem {
 	/** The entry id (EmDash's ULID). */
@@ -203,7 +204,7 @@ export async function loadPageTree(db?: D1Database | string, options: { collecti
 			const last = lastTrees.get(collection);
 			if (!last) throw error;
 			noteReadFailure("child pages: page tree");
-			console.error("coywolf-pack: Child Pages: could not read the page tree; using the last one read for this render", error);
+			console.error("coywolf-pack: Child Pages: could not read the page tree; using the last one read for this render", errorSummary(error), error);
 			return last;
 		}
 		if (!source) throw new Error(`coywolf-pack: loadPageTree: no collection "${collection}"`);

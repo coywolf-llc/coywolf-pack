@@ -38,6 +38,7 @@ import { withMediaPreconnect } from "./images/lib.js";
 import { pendingMediaRenders, renderedPendingMedia } from "./images/pending.js";
 import { refreshMediaHost } from "./images/settings.js";
 import { variantsAfterMediaWrite } from "./images/pack.js";
+import { errorSummary } from "./core/error-summary.js";
 
 // The warming progress row is read with the feature switches, so requests can skip an idle warmer without a query.
 registerSiteOption(WARM_STATE_OPTION);
@@ -120,7 +121,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				context.request = signInHeld;
 			} catch (error) {
 				// An Astro whose context can't be given a request: the request goes on unchanged (the limit isn't applied), as after a database error.
-				console.error("coywolf-pack: the sign-in email limit couldn't hold a request, so EmDash handles it as sent", error);
+				console.error("coywolf-pack: the sign-in email limit couldn't hold a request, so EmDash handles it as sent", errorSummary(error), error);
 			}
 		}
 		// Pages rendered in this isolate may now load the live search client as a file (it's served below).
@@ -173,7 +174,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				// This isolate's settings caches go now; other isolates drop theirs when they see the new generation.
 				invalidateFeatures();
 				const recorded = db
-					? recordSettingsChange(db, scope, undefined, { byGeneration: true }).catch((error) => console.error("coywolf-pack: could not record the settings change", error))
+					? recordSettingsChange(db, scope, undefined, { byGeneration: true }).catch((error) => console.error("coywolf-pack: could not record the settings change", errorSummary(error), error))
 					: Promise.resolve();
 				if (scope) waitUntil(recorded.then(() => purge(scope)));
 				else waitUntil(recorded);
@@ -221,13 +222,13 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				waitUntil(
 					(db ? recordSettingsChange(db, settingsScope) : Promise.resolve())
 						.then(() => purge(settingsScope))
-						.catch((error) => console.error("coywolf-pack: could not clear robots.txt or pages after EmDash's settings changed", error)),
+						.catch((error) => console.error("coywolf-pack: could not clear robots.txt or pages after EmDash's settings changed", errorSummary(error), error)),
 				);
 			}
 			// Stored image sizes follow media deletes, replaced files and WordPress media imports (new uploads: the media:afterUpload hook).
 			if (method !== "GET" && method !== "HEAD" && response.status < 400) {
 				const work = variantsAfterMediaWrite(method, context.url.pathname, isOn(features, "images"), context.url.origin);
-				if (work) waitUntil(work.catch((error) => console.error("coywolf-pack images: stored sizes after a media change failed", error)));
+				if (work) waitUntil(work.catch((error) => console.error("coywolf-pack images: stored sizes after a media change failed", errorSummary(error), error)));
 			}
 			if (invalidated?.() && response.status < 400 && db) {
 				waitUntil(
@@ -235,7 +236,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 						if (!(await siteSetting<boolean>(WARM_SETTING, options.database))) return;
 						const state = await scheduleRewarm(db);
 						if (state) rememberSiteOption(WARM_STATE_OPTION, JSON.stringify(state));
-					})().catch((error) => console.error("coywolf-pack: could not schedule cache warming", error)),
+					})().catch((error) => console.error("coywolf-pack: could not schedule cache warming", errorSummary(error), error)),
 				);
 			}
 			return response;
@@ -246,7 +247,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 			waitUntil(
 				claimSettle(db)
 					.then((scope) => (scope ? purge(scope, true) : undefined))
-					.catch((error) => console.error("coywolf-pack: settling purge failed", error)),
+					.catch((error) => console.error("coywolf-pack: settling purge failed", errorSummary(error), error)),
 			);
 		}
 		// Page cache lifetimes from Plugins → Performance, on routes the site made cacheable.
@@ -278,7 +279,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 				const origin = (context.site ?? context.url).origin;
 				waitUntil(
 					warmStep(db, self, origin, { budgetMs: WARM_BUDGET_MS, batchSize: 4, daily: await warmDaily(options.database) })
-						.catch((error) => console.error("coywolf-pack: cache warming failed", error))
+						.catch((error) => console.error("coywolf-pack: cache warming failed", errorSummary(error), error))
 						.finally(() => {
 							warmingUntil = Date.now() + WARM_EVERY_MS;
 						}),
@@ -298,7 +299,7 @@ export function coywolfPack(options: CoywolfPackMiddlewareOptions = {}, handlers
 					return response;
 				}
 			} catch (error) {
-				console.error(`coywolf-pack: ${handler.module} middleware failed`, error);
+				console.error(`coywolf-pack: ${handler.module} middleware failed`, errorSummary(error), error);
 				// The request goes on to the site instead (a page, or EmDash's own robots.txt): not into the edge cache.
 				noteReadFailure(`${handler.module} middleware`);
 			}

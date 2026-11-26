@@ -1,3 +1,4 @@
+import { errorSummary } from "./error-summary.js";
 /**
  * Sign-in email limit: a cap on the sign-in links EmDash emails to one
  * address.
@@ -229,7 +230,7 @@ let failureLogged = false;
 function logFailure(error: unknown): void {
 	if (failureLogged) return;
 	failureLogged = true;
-	console.error("coywolf-pack: the sign-in email limit couldn't be checked, so EmDash handles the request (logged once per isolate)", error);
+	console.error("coywolf-pack: the sign-in email limit couldn't be checked, so EmDash handles the request (logged once per isolate)", errorSummary(error), error);
 }
 
 /**

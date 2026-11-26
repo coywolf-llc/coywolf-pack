@@ -1,3 +1,4 @@
+import { errorSummary } from "./error-summary.js";
 /**
  * Whether the pack has started in this isolate: createPlugin() has run, so the
  * module-level state it sets (content URLs, term and page parents, the
@@ -57,7 +58,7 @@ export async function ensurePackStarted(load: () => Promise<PluginsModule> = loa
 		try {
 			(mod.plugins as () => unknown)();
 		} catch (error) {
-			console.error("coywolf-pack: starting EmDash's plugins failed", error);
+			console.error("coywolf-pack: starting EmDash's plugins failed", errorSummary(error), error);
 		}
 	}
 	return ready || !mod.plugins;

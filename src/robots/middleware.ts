@@ -22,6 +22,7 @@ import { DEADLINES, sharedRead, sharedSlot, withDeadline } from "../core/single-
 import { afterResponse } from "../shared.js";
 import { emdashRobots, importRobots } from "./importer.js";
 import { type RobotsConfig, automaticFrom, generate, normalizeConfig } from "./rules.js";
+import { errorSummary } from "../core/error-summary.js";
 
 export const CONFIG_SETTING = "robots.config";
 export const CONFIG_OPTION = `plugin:${PLUGIN_ID}:settings:${CONFIG_SETTING}`;
@@ -80,7 +81,7 @@ async function importOnce(db: D1Database, siteUrl: string): Promise<RobotsConfig
 				custom = await readEmdashCustomRobots(db);
 			} catch (error) {
 				// Can't tell what EmDash serves: keep serving EmDash's file and try again on a later request.
-				console.error("coywolf robots: could not read EmDash's robots.txt; not importing yet", error);
+				console.error("coywolf robots: could not read EmDash's robots.txt; not importing yet", errorSummary(error), error);
 				noteReadFailure("robots.txt import");
 				return null;
 			}
@@ -88,7 +89,7 @@ async function importOnce(db: D1Database, siteUrl: string): Promise<RobotsConfig
 			try {
 				return await insertIfAbsent(db, config);
 			} catch (error) {
-				console.error("coywolf robots: could not save the imported rules", error);
+				console.error("coywolf robots: could not save the imported rules", errorSummary(error), error);
 				noteReadFailure("robots.txt import");
 				return null;
 			}
@@ -133,7 +134,7 @@ export async function serveRobots(url: URL, method: string, env: Record<string, 
 		if (!config) return undefined;
 		loaded = { config, siteUrl: site, aiTraining: seo?.disallowAiTraining === true };
 	} catch (error) {
-		console.error("coywolf robots: could not load rules", error);
+		console.error("coywolf robots: could not load rules", errorSummary(error), error);
 		// EmDash's own robots.txt answers instead: keep it out of the edge cache.
 		noteReadFailure("robots.txt rules");
 		return undefined;

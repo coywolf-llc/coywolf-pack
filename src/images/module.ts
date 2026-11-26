@@ -26,6 +26,7 @@ import { type BackfillDeps, type VariantsState, estimateRows, publicState, publi
 import { summarizeLibrary } from "./variants-estimate.js";
 import { imageCrops } from "./variants.js";
 import { readOnlyRoute } from "../core/routes.js";
+import { errorSummary } from "../core/error-summary.js";
 
 const F = "images";
 
@@ -348,7 +349,7 @@ export function imagesModule(options: { database?: string; media?: string; varia
 					if (on && deps) {
 						await startVariantsRun(deps.db, { force: true });
 						// The run's steps follow in the background (a chain of requests of their own).
-						await afterResponse(variants.start(requestOrigin(ctx)).catch((error) => console.error("coywolf-pack images: couldn't start the backfill", error)));
+						await afterResponse(variants.start(requestOrigin(ctx)).catch((error) => console.error("coywolf-pack images: couldn't start the backfill", errorSummary(error), error)));
 					}
 					ctx.log.info(on ? "Stored sizes for existing images turned on" : "Stored sizes for existing images turned off");
 					return variantsStatus(variants, on);
@@ -371,7 +372,7 @@ export function imagesModule(options: { database?: string; media?: string; varia
 					if (!(await bulkSetting(ctx))) throw PluginRouteError.badRequest("Turn on stored sizes for existing images first.");
 					const { start } = parseInput(z.object({ start: z.boolean().optional() }), ctx.input ?? {});
 					if (start) await startVariantsRun(deps.db, { force: true });
-					await afterResponse(variants.start(requestOrigin(ctx)).catch((error) => console.error("coywolf-pack images: couldn't start the backfill", error)));
+					await afterResponse(variants.start(requestOrigin(ctx)).catch((error) => console.error("coywolf-pack images: couldn't start the backfill", errorSummary(error), error)));
 					return variantsStatus(variants, true);
 				},
 			}),

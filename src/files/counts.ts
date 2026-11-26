@@ -1,3 +1,4 @@
+import { errorSummary } from "../core/error-summary.js";
 /**
  * Batched counters. Counts made in one isolate within `delayMs` are written
  * together in one D1 batch after the response. The flush loop drains
@@ -44,7 +45,7 @@ export function createBatchedCounter(statement: CountStatement, options: { delay
 			try {
 				await write(db);
 			} catch (error) {
-				console.error(`coywolf-pack: could not record ${options.label}`, error);
+				console.error(`coywolf-pack: could not record ${options.label}`, errorSummary(error), error);
 			}
 		}
 		if (flushing === self.flush) flushing = null; // Same tick as the empty check above.

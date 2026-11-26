@@ -15,7 +15,13 @@
  * - Workers Cache off (no cache.purge in cloudflare:workers, as on a staging
  *   Worker with "cache": { "enabled": false }): does nothing. Astro's provider
  *   would throw there, and every save with it.
- * - In a request: Astro's own invalidate(), unchanged.
+ * - In a request: the same purge as Astro's own invalidate() (the same tags,
+ *   from collectInvalidationTags, with cache.purge; a purge that throws still
+ *   throws), but its result is disposed of: Astro's provider (@astrojs/cloudflare
+ *   14.4.8) never disposes of it, and the runtime then warns "An RPC result was
+ *   not disposed properly" whenever it collects one, on whatever request is
+ *   running then. A refused purge (the account's purge limit) is logged; Astro's
+ *   provider doesn't read the result. Over 100 tags go in calls of 100.
  * - During the Worker's scheduled run (EmDash publishing scheduled entries, and
  *   plugins' scheduled tasks editing entries): through an RPC call to the
  *   Worker's own default entrypoint, like the pack's own purges
@@ -43,6 +49,7 @@ import type { CacheProviderFactory, InvalidateOptions } from "astro";
 import { collectInvalidationTags } from "astro/cache/provider-utils";
 
 import { type ScheduledRun, purgeThroughEntrypoint, scheduledRun } from "./core/scheduled-purge.js";
+import { disposeRpcResult } from "./pageCache/lib.js";
 
 /** Most tags one Workers Cache purge takes (Cloudflare's limit per call). */
 const TAGS_PER_PURGE = 100;
@@ -115,6 +122,29 @@ function queue(run: ScheduledRun, tags: string[]): void {
 	batch.timer = setTimeout(() => void flush(run, current), wait);
 }
 
+/** Workers Cache's purge, as cloudflare:workers has it. */
+interface PurgeApi {
+	purge(options: { tags: string[] }): Promise<{ success?: boolean; errors?: unknown } | undefined>;
+}
+
+/** The tags Astro's provider would purge (its path tag included), on a copy: collectInvalidationTags adds to the array it's given. */
+const tagsOf = (options: InvalidateOptions): string[] =>
+	collectInvalidationTags({ ...options, tags: Array.isArray(options.tags) ? [...options.tags] : options.tags }).filter(Boolean);
+
+/** A request's purge: Astro's, with each result disposed of (and a refusal logged). Throws when a purge does, as Astro's provider does. */
+async function purgeInRequest(cache: PurgeApi, tags: string[]): Promise<void> {
+	for (let i = 0; i < tags.length; i += TAGS_PER_PURGE) {
+		const chunk = tags.slice(i, i + TAGS_PER_PURGE);
+		// Called as a method of `cache` (the runtime's purge needs it as `this`).
+		const result = await cache.purge({ tags: chunk });
+		try {
+			if (result && result.success === false) console.error(`coywolf-pack: EmDash's page cache purge was refused (${chunk.length} tags); those pages stay cached until they expire`, result.errors);
+		} finally {
+			disposeRpcResult(result);
+		}
+	}
+}
+
 const coywolfCloudflareCache: CacheProviderFactory = (config) => {
 	const provider = cloudflare(config);
 	return {
@@ -122,11 +152,10 @@ const coywolfCloudflareCache: CacheProviderFactory = (config) => {
 		async invalidate(options: InvalidateOptions): Promise<void> {
 			const { cache } = (await import("cloudflare:workers")) as unknown as { cache?: { purge?: unknown } };
 			if (typeof cache?.purge !== "function") return; // Workers Cache off: nothing is cached, nothing to purge.
-			const run = scheduledRun();
-			if (!run) return provider.invalidate(options);
-			// The tags Astro's provider would purge (its path tag included), on a copy: collectInvalidationTags adds to the array it's given.
-			const tags = collectInvalidationTags({ ...options, tags: Array.isArray(options.tags) ? [...options.tags] : options.tags }).filter(Boolean);
+			const tags = tagsOf(options);
 			if (!tags.length) return;
+			const run = scheduledRun();
+			if (!run) return purgeInRequest(cache as PurgeApi, tags);
 			// A run whose ctx can't be held open (no waitUntil: never on Workers) purges now, as nothing would keep a later purge alive.
 			if (typeof (run.ctx as { waitUntil?: unknown } | undefined)?.waitUntil !== "function") {
 				for (let i = 0; i < tags.length; i += TAGS_PER_PURGE) await purgeThroughEntrypoint(run, { tags: tags.slice(i, i + TAGS_PER_PURGE) });

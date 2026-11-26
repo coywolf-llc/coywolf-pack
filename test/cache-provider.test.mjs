@@ -2,7 +2,7 @@
 //
 // The pack's Astro cache provider (src/cache-provider.ts, "@coywolf/emdash/cache-provider"): Astro's Cloudflare
 // provider (a stand-in with the same invalidate(): test/fixtures/astro-cloudflare-cache-provider.mjs), with
-// invalidate() doing nothing when Workers Cache is off, Astro's own purge in a request, and, during the Worker's
+// invalidate() doing nothing when Workers Cache is off, Astro's purge in a request (its result disposed of), and, during the Worker's
 // scheduled run (EmDash's scheduled publishing and plugins' scheduled edits), a purge through the Worker's own
 // default entrypoint (an RPC call), since Workers Cache ignores purges made in the scheduled run itself.
 import assert from "node:assert/strict";
@@ -20,7 +20,7 @@ registerHooks({
 		if (specifier === "cloudflare:workers") {
 			return {
 				url: `data:text/javascript,export const env = {}; export const waitUntil = () => {};
-export const cache = { get purge() { return globalThis.__noCache ? undefined : async (o) => { if (globalThis.__purgeThrow) throw new Error("purge failed"); globalThis.__purges.push({ scope: o, inEntrypoint: globalThis.__inEntrypoint > 0 }); return { success: globalThis.__purgeOk !== false }; }; } };
+export const cache = { get purge() { return globalThis.__noCache ? undefined : async (o) => { if (globalThis.__purgeThrow) throw new Error("purge failed"); globalThis.__purges.push({ scope: o, inEntrypoint: globalThis.__inEntrypoint > 0 }); return { success: globalThis.__purgeOk !== false, errors: globalThis.__purgeOk === false ? [{ message: "rate limited" }] : [], [Symbol.dispose]() { globalThis.__disposed++; } }; }; } };
 export const exports = new Proxy({}, { get: (_, k) => globalThis.__moduleExports?.[k] });
 export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }`,
 				shortCircuit: true,
@@ -41,6 +41,7 @@ function reset() {
 	globalThis.__purges = [];
 	globalThis.__purgeOk = true;
 	globalThis.__purgeThrow = false;
+	globalThis.__disposed = 0;
 	globalThis.__noCache = false;
 	globalThis.__inEntrypoint = 0;
 	globalThis.__moduleExports = undefined;
@@ -91,26 +92,49 @@ test("it's Astro's Cloudflare provider: name, setHeaders and its config are Astr
 	assert.deepEqual(globalThis.__astro.setHeaders, [{ options: { maxAge: 60, tags: ["posts"] }, url: "https://example.com/a/" }]);
 });
 
-test("in a request: Astro's own invalidate(), with the same options (path tags included), and its errors", async () => {
+test("in a request: the tags Astro's invalidate() would purge, purged directly with its result disposed of; a throwing purge still throws", async () => {
 	reset();
 	const provider = coywolfCloudflareCache(undefined);
 	const options = { tags: ["posts", "01X"] };
 	await provider.invalidate(options);
-	assert.equal(globalThis.__astro.invalidates.length, 1);
-	assert.equal(globalThis.__astro.invalidates[0], options, "the same object, untouched");
+	assert.deepEqual(globalThis.__astro.invalidates, [], "Astro's invalidate() isn't called: it never disposes of the purge's result");
+	assert.deepEqual(options, { tags: ["posts", "01X"] }, "the options are left untouched");
 	assert.deepEqual(globalThis.__purges, [{ scope: { tags: ["posts", "01X"] }, inEntrypoint: false }]);
+	assert.equal(globalThis.__disposed, 1, "the purge's RPC result is disposed of");
 
 	reset();
 	await provider.invalidate({ path: "/x" });
 	await provider.invalidate({ tags: "one", path: "/y" });
+	await provider.invalidate({});
 	assert.deepEqual(
 		globalThis.__purges.map((p) => p.scope),
 		[{ tags: ["astro-path:/x"] }, { tags: ["one", "astro-path:/y"] }],
+		"the same tags as Astro's provider (its path tag included); no tags, no purge",
 	);
+	assert.equal(globalThis.__disposed, 2);
 
 	reset();
 	globalThis.__purgeThrow = true;
 	await assert.rejects(provider.invalidate({ tags: ["posts"] }), /purge failed/, "a failing purge still throws in a request, as Astro's does");
+});
+
+test("in a request: a refused purge is logged and disposed of, not thrown; over 100 tags go in calls of 100", async (t) => {
+	reset();
+	const errors = t.mock.method(console, "error", () => {});
+	const provider = coywolfCloudflareCache(undefined);
+	globalThis.__purgeOk = false;
+	await provider.invalidate({ tags: ["posts"] });
+	assert.equal(globalThis.__disposed, 1);
+	assert.equal(errors.mock.callCount(), 1);
+	assert.match(String(errors.mock.calls[0].arguments[0]), /purge was refused \(1 tags\)/);
+	assert.deepEqual(errors.mock.calls[0].arguments[1], [{ message: "rate limited" }]);
+
+	reset();
+	const tags = Array.from({ length: 205 }, (_, i) => `t${i}`);
+	await provider.invalidate({ tags });
+	assert.deepEqual(globalThis.__purges.map((p) => p.scope.tags.length), [100, 100, 5]);
+	assert.deepEqual(globalThis.__purges.flatMap((p) => p.scope.tags), tags);
+	assert.equal(globalThis.__disposed, 3);
 });
 
 test("Workers Cache off (a staging Worker): nothing is purged and nothing throws, in a request or a scheduled run", async () => {
