@@ -17,8 +17,9 @@
  *   would throw there, and every save with it.
  * - In a request: Astro's own invalidate(), unchanged.
  * - During the Worker's scheduled run (EmDash publishing scheduled entries, and
- *   plugins' scheduled tasks editing entries): through a fetch call to the
- *   Worker itself, like the pack's own purges (src/core/scheduled-purge.ts).
+ *   plugins' scheduled tasks editing entries): through an RPC call to the
+ *   Worker's own default entrypoint, like the pack's own purges
+ *   (src/core/scheduled-purge.ts).
  *   Workers Cache ignores a purge made in the scheduled run itself: it reports
  *   success and the pages stay cached (tested on November 25, 2026). Needs the
  *   stripTrackingParams wrapper in src/worker.ts; without it, this is the same

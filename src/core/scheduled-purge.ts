@@ -13,26 +13,32 @@
  * a word: on coywolf.com a post the hourly run had linked kept its cached copy
  * from before the run.
  *
- * So a purge made during a scheduled run goes through a fetch invocation of
- * the same Worker:
- * - stripTrackingParams (src/worker.ts) runs the site's scheduled handler inside
- *   a store (AsyncLocalStorage) holding the invocation's ctx;
- * - purgeOutcome (src/pageCache/lib.ts) sees the store and calls the Worker's
- *   own default export through ctx.exports, with the scope in ctx.props
- *   (purgeThroughFetch);
- * - the wrapper's fetch answers that call by purging, before the site's handler
- *   runs (internalPurge, answerInternalPurge);
+ * So a purge made during a scheduled run goes through the Worker's own default
+ * entrypoint, called by RPC:
+ * - stripTrackingParams (src/worker.ts) makes the site's default export a
+ *   WorkerEntrypoint class, runs the site's scheduled handler inside a store
+ *   (AsyncLocalStorage) holding the invocation's ctx, and has one RPC method,
+ *   PURGE_METHOD, that purges (answerPurgeCall);
+ * - purgeOutcome (src/pageCache/lib.ts) sees the store and calls that method
+ *   through ctx.exports.default (purgeThroughEntrypoint);
  * - the pack's cache provider (src/cache-provider.ts) sends EmDash's own purges
  *   from the scheduled run through purgeOutcome too.
- * Only the Worker's own code can set ctx.props (requests from the internet
- * always have {}), so nothing outside the Worker can make it purge. ctx.props
- * doesn't partition the cache either: a purge made with it clears visitors'
- * pages (tested the same day).
+ * Why RPC and not a fetch call: every site sets "placement" (a region hint),
+ * which sends each fetch to the default entrypoint, the Worker's call to
+ * itself included, to the placed location, and that call arrives there without
+ * the ctx.props it was made with (0.51.1 sent the scope in ctx.props, and on
+ * the sites every such call was answered as a page: 301, then 404). Placement
+ * doesn't move RPC calls, and a purge clears only the cache of the entrypoint
+ * that makes it, so it has to be the default entrypoint (the one that caches
+ * the pages), not a separate one. Both tested on November 25, 2026 with
+ * throwaway Workers with the sites' placement. Only the Worker's own code (and
+ * service bindings to it, which only the account sets up) can call the method.
  *
  * No runtime imports: src/worker.ts creates the store (it imports
- * node:async_hooks) and keeps it on globalThis, so this file and lib.ts load
- * anywhere (astro.config.mjs loads the pack in Node), and a second copy of the
- * pack's modules in the same Worker finds the same store.
+ * node:async_hooks and cloudflare:workers) and keeps it on globalThis, so
+ * this file and lib.ts load anywhere (astro.config.mjs loads the pack in
+ * Node), and a second copy of the pack's modules in the same Worker finds the
+ * same store.
  */
 import type { PurgeScope } from "../pageCache/lib.js";
 
@@ -51,10 +57,8 @@ export interface RunStorage {
 export type PurgeOutcome = "purged" | "refused" | "unavailable";
 
 const RUNS = Symbol.for("coywolf-pack.scheduledRuns");
-/** The ctx.props key that carries a purge scope to the Worker's own fetch (and marks the call as the pack's). */
-export const PURGE_PROP = "coywolf-pack:purge";
-/** The loopback's URL: nothing reads its host or path (the prop alone marks the call), but logs show it. */
-export const PURGE_URL = "https://coywolf-pack.internal/page-cache/purge";
+/** The RPC method of the Worker's default entrypoint (stripTrackingParams' class) that purges for a scheduled run. */
+export const PURGE_METHOD = "coywolfPackPurge";
 /** How long a purge from a scheduled run waits for the Worker's answer (callers allow 10 s: DEADLINES.purgeMs). */
 export const LOOPBACK_TIMEOUT_MS = 8_000;
 
@@ -77,7 +81,7 @@ export function scheduledRun(): ScheduledRun | undefined {
 /**
  * A scope Workers Cache takes: exactly { purgeEverything: true }, or path
  * prefixes (starting with "/") and/or tags, non-empty strings, at least one in
- * all. Checked on the receiving side of the loopback.
+ * all. Checked by the receiving side (answerPurgeCall).
  */
 export function isPurgeScope(value: unknown): value is PurgeScope {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -92,15 +96,20 @@ export function isPurgeScope(value: unknown): value is PurgeScope {
 	return ((tags as string[] | undefined)?.length ?? 0) + ((pathPrefixes as string[] | undefined)?.length ?? 0) > 0;
 }
 
-type Loopback = (options: { props: Record<string, unknown> }) => { fetch(request: Request): Promise<Response> };
+type PurgeCall = (scope: PurgeScope) => Promise<unknown>;
 
-/** The Worker's own default export as a loopback that takes props: ctx.exports.default, else the cloudflare:workers export. */
-async function ownDefault(run: ScheduledRun): Promise<Loopback | undefined> {
+/**
+ * The Worker's own default entrypoint, which takes the purge by RPC: ctx.exports.default, else the
+ * cloudflare:workers exports. (An RPC stub answers any method name, so whether the method is there only shows
+ * when it's called.)
+ */
+async function ownDefault(run: ScheduledRun): Promise<Record<string, unknown> | undefined> {
+	const isBinding = (value: unknown): value is Record<string, unknown> => (typeof value === "function" || typeof value === "object") && value !== null;
 	const fromCtx = (run.ctx as { exports?: { default?: unknown } } | undefined)?.exports?.default;
-	if (typeof fromCtx === "function") return fromCtx as Loopback;
+	if (isBinding(fromCtx)) return fromCtx;
 	try {
 		const workers = (await import("cloudflare:workers")) as unknown as { exports?: { default?: unknown } };
-		if (typeof workers.exports?.default === "function") return workers.exports.default as Loopback;
+		if (isBinding(workers.exports?.default)) return workers.exports.default;
 	} catch {
 		// Not on Workers.
 	}
@@ -112,16 +121,17 @@ const OUTCOMES = new Set<string>(["purged", "refused", "unavailable"]);
 let noLoopbackLogged = false;
 
 /**
- * Purge from a scheduled run: through a fetch invocation of the same Worker
- * (its default export, called with the scope in ctx.props). The scope goes as
- * given. "refused" (logged) when there's no loopback (a compatibility date
- * before 2025-11-17 without enable_ctx_exports), the call fails, answers with
+ * Purge from a scheduled run: through the Worker's own default entrypoint, by
+ * RPC (PURGE_METHOD, answered by answerPurgeCall). The scope goes as given.
+ * "refused" (logged) when there's no ctx.exports (a compatibility date before
+ * 2025-11-17 without enable_ctx_exports), the call fails (a default export
+ * that isn't stripTrackingParams' class has no such method), answers with
  * anything but one of the three outcomes, or takes longer than `timeoutMs`:
  * callers that keep refused purges for later (settleLater) then retry them
  * from a request. A purge made here directly would report success and clear
  * nothing, so it's never tried. Never throws.
  */
-export async function purgeThroughFetch(run: ScheduledRun, scope: PurgeScope, timeoutMs = LOOPBACK_TIMEOUT_MS): Promise<PurgeOutcome> {
+export async function purgeThroughEntrypoint(run: ScheduledRun, scope: PurgeScope, timeoutMs = LOOPBACK_TIMEOUT_MS): Promise<PurgeOutcome> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		const own = await ownDefault(run);
@@ -133,15 +143,9 @@ export async function purgeThroughFetch(run: ScheduledRun, scope: PurgeScope, ti
 			return "refused";
 		}
 		const answer = (async () => {
-			const response = await own({ props: { [PURGE_PROP]: scope } }).fetch(new Request(PURGE_URL, { method: "POST" }));
-			if (response.status !== 200) {
-				// The wrapper's reason (a scope it refused, a method), when it gave one.
-				const reason = await response.text().then((text) => text.slice(0, 200), () => "");
-				throw new Error(`the Worker answered ${response.status}${reason ? ` ${reason}` : ""}`);
-			}
-			const body = (await response.json()) as { outcome?: unknown } | null;
-			const outcome = body?.outcome;
-			if (typeof outcome !== "string" || !OUTCOMES.has(outcome)) throw new Error(`the Worker answered ${JSON.stringify(body)}`);
+			// Called as a method of the binding (an RPC stub's methods need it as `this`).
+			const outcome = await (own as Record<string, PurgeCall>)[PURGE_METHOD](scope);
+			if (typeof outcome !== "string" || !OUTCOMES.has(outcome)) throw new Error(`the Worker answered ${JSON.stringify(outcome) ?? String(outcome)}`);
 			return outcome as PurgeOutcome;
 		})();
 		// Settled after a timeout: nothing waits for it anymore. (An answer that comes after the timeout has purged
@@ -159,25 +163,22 @@ export async function purgeThroughFetch(run: ScheduledRun, scope: PurgeScope, ti
 	}
 }
 
-/** The scope of the pack's own purge call (purgeThroughFetch), from the invocation's ctx; null for any other request. */
-export function internalPurge(ctx: unknown): { scope: unknown } | null {
-	const props = (ctx as { props?: unknown } | undefined)?.props;
-	if (!props || typeof props !== "object" || !Object.hasOwn(props, PURGE_PROP)) return null;
-	return { scope: (props as Record<string, unknown>)[PURGE_PROP] };
-}
-
-/** The Worker's answer to the pack's purge call: `purge` (the direct purge) runs here, in a fetch invocation. */
-export async function answerInternalPurge(request: Request, scope: unknown, purge: (scope: PurgeScope) => Promise<PurgeOutcome>): Promise<Response> {
-	const headers = { "Cache-Control": "no-store" };
-	if (request.method !== "POST") return Response.json({ outcome: "refused", error: "POST only" }, { status: 405, headers });
-	if (!isPurgeScope(scope)) return Response.json({ outcome: "refused", error: "not a purge scope" }, { status: 400, headers });
-	let outcome: PurgeOutcome = "refused";
+/**
+ * The default entrypoint's answer to purgeThroughEntrypoint (stripTrackingParams' PURGE_METHOD): `purge` (the
+ * direct purge) runs here, in the default entrypoint's own invocation, where Workers Cache takes it. A scope it
+ * wouldn't take is refused. Never throws.
+ */
+export async function answerPurgeCall(scope: unknown, purge: (scope: PurgeScope) => Promise<PurgeOutcome>): Promise<PurgeOutcome> {
+	if (!isPurgeScope(scope)) {
+		console.error("coywolf-pack: page cache purge call refused: not a purge scope", JSON.stringify(scope) ?? String(scope));
+		return "refused";
+	}
 	try {
-		outcome = await purge(scope);
+		return await purge(scope);
 	} catch (error) {
 		console.error("coywolf-pack: page cache purge for the scheduled run failed", String(error));
+		return "refused";
 	}
-	return Response.json({ outcome }, { headers });
 }
 
 let warned = false;

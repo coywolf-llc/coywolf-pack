@@ -9,10 +9,10 @@
  *
  * Purging runs inside the Worker with cache.purge() from cloudflare:workers, so
  * it needs no API token. Outside Workers Cache it does nothing. Purges made
- * during the Worker's scheduled run go through a fetch invocation of the same
- * Worker, where they work (src/core/scheduled-purge.ts).
+ * during the Worker's scheduled run go through an RPC call to the Worker's own
+ * default entrypoint, where they work (src/core/scheduled-purge.ts).
  */
-import { purgeThroughFetch, scheduledRun } from "../core/scheduled-purge.js";
+import { purgeThroughEntrypoint, scheduledRun } from "../core/scheduled-purge.js";
 
 /** Option row holding the Worker version whose pages are in the cache. */
 export const VERSION_OPTION = "plugin:coywolf-pack:pageCache:version";
@@ -186,7 +186,7 @@ export async function purgePageCache(scope: PurgeScope = { purgeEverything: true
  *
  * During the Worker's scheduled run (EmDash's cron tasks and scheduled
  * publishing) a purge made here would report success and clear nothing, so
- * it's made by a fetch invocation of the same Worker instead
+ * it's made by the Worker's own default entrypoint instead, called by RPC
  * (src/core/scheduled-purge.ts), with the same scope.
  */
 export async function purgeOutcome(scope: PurgeScope = { purgeEverything: true }): Promise<"purged" | "refused" | "unavailable"> {
@@ -199,10 +199,10 @@ export async function purgeOutcome(scope: PurgeScope = { purgeEverything: true }
 		return "unavailable"; // Not on Workers.
 	}
 	if (!workers.cache?.purge) return "unavailable"; // No Workers Cache: no call to make.
-	return purgeThroughFetch(run, scope);
+	return purgeThroughEntrypoint(run, scope);
 }
 
-/** The purge itself, with cache.purge(). Clears pages only in a fetch invocation (see purgeOutcome). */
+/** The purge itself, with cache.purge(). Clears nothing from the scheduled run itself (see purgeOutcome). */
 export async function purgeDirect(scope: PurgeScope = { purgeEverything: true }): Promise<"purged" | "refused" | "unavailable"> {
 	let workers: { cache?: { purge(options: PurgeScope): Promise<{ success?: boolean; errors?: Array<{ message: string }> } | undefined> } };
 	try {
