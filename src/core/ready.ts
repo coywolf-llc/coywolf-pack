@@ -1,4 +1,5 @@
 import { errorSummary } from "./error-summary.js";
+
 /**
  * Whether the pack has started in this isolate: createPlugin() has run, so the
  * module-level state it sets (content URLs, term and page parents, the
@@ -20,7 +21,6 @@ import { errorSummary } from "./error-summary.js";
  * plugins list never starts the pack, so its pages aren't edge-cached and the
  * log says "pack not started": the README's setup needs both.
  */
-
 let ready = false;
 
 /** createPlugin() calls this once the pack's module-level state is set. */

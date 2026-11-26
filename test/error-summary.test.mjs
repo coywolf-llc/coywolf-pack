@@ -10,7 +10,7 @@ const { errorSummary } = await import("../src/core/error-summary.ts");
 
 test("an error: its name and message; a cause that isn't in the message is added", () => {
 	assert.equal(errorSummary(new Error("D1_ERROR: internal error", { cause: new Error("internal error") })), "Error: D1_ERROR: internal error");
-	assert.equal(errorSummary(new Error("query failed", { cause: new Error("D1_ERROR: Network connection lost.") })), "Error: query failed (cause: D1_ERROR: Network connection lost.)");
+	assert.equal(errorSummary(new Error("query failed", { cause: new Error("D1_ERROR: Network connection lost.") })), "Error: query failed (cause: Error: D1_ERROR: Network connection lost.)");
 	assert.equal(errorSummary(new TypeError("x is not a function")), "TypeError: x is not a function");
 	assert.equal(errorSummary(new Error("failed", { cause: "a string cause" })), "Error: failed (cause: a string cause)");
 });
@@ -25,6 +25,34 @@ test("an error without a message: its name; anything else thrown: as text (objec
 	const cyclic = {};
 	cyclic.self = cyclic;
 	assert.equal(errorSummary(cyclic), "[object Object]");
+});
+
+test("deeper causes (D1's own error is often a cause's cause), object causes, error-like objects and AggregateErrors", () => {
+	const deep = new Error("render failed", { cause: new Error("query failed", { cause: new Error("D1_ERROR: internal error") }) });
+	assert.equal(errorSummary(deep), "Error: render failed (cause: Error: query failed (cause: Error: D1_ERROR: internal error))");
+	assert.equal(errorSummary(new Error("failed", { cause: { code: "SQLITE_BUSY" } })), 'Error: failed (cause: {"code":"SQLITE_BUSY"})');
+	assert.equal(errorSummary({ name: "Error", message: "from another realm" }), "Error: from another realm");
+	assert.equal(errorSummary(new AggregateError([new Error("a"), "b"], "")), "AggregateError [Error: a; b]");
+	assert.equal(errorSummary(new AggregateError([1, 2, 3, 4], "all failed")), "AggregateError: all failed [1; 2; 3; …]");
+});
+
+test("never throws, whatever was thrown (it runs inside catch handlers)", () => {
+	assert.equal(errorSummary(new Error("x", { cause: Object.create(null) })), "Error: x (cause: {})");
+	const symbolMessage = new Error("x");
+	symbolMessage.message = Symbol("odd");
+	assert.equal(errorSummary(symbolMessage), "Error: Symbol(odd)");
+	const nullProtoMessage = new Error("x");
+	nullProtoMessage.message = Object.create(null);
+	assert.equal(errorSummary(nullProtoMessage), "Error: {}");
+	const getter = new Error("x");
+	Object.defineProperty(getter, "cause", {
+		get() {
+			throw new Error("no");
+		},
+	});
+	assert.equal(errorSummary(getter), "(no error text)");
+	assert.equal(errorSummary(Object.create(null)), "{}");
+	assert.equal(errorSummary(Symbol("s")), "Symbol(s)");
 });
 
 test("at most 1,000 characters", () => {

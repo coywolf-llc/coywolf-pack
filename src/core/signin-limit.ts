@@ -1,4 +1,3 @@
-import { errorSummary } from "./error-summary.js";
 /**
  * Sign-in email limit: a cap on the sign-in links EmDash emails to one
  * address.
@@ -69,6 +68,8 @@ import { errorSummary } from "./error-summary.js";
  *
  * Kept free of EmDash imports so tests can load it directly.
  */
+
+import { errorSummary } from "./error-summary.js";
 
 /** EmDash's route that emails a sign-in link (as Astro routes it: decoded, no trailing slash). */
 export const SIGNIN_SEND_PATH = "/_emdash/api/auth/magic-link/send";

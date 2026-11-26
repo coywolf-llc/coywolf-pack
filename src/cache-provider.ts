@@ -20,8 +20,9 @@
  *   throws), but its result is disposed of: Astro's provider (@astrojs/cloudflare
  *   14.4.8) never disposes of it, and the runtime then warns "An RPC result was
  *   not disposed properly" whenever it collects one, on whatever request is
- *   running then. A refused purge (the account's purge limit) is logged; Astro's
- *   provider doesn't read the result. Over 100 tags go in calls of 100.
+ *   running then. A refused purge (the account's purge limit) is logged, and
+ *   the rest of its tags aren't sent; Astro's provider doesn't read the result.
+ *   Over 100 tags go in calls of 100.
  * - During the Worker's scheduled run (EmDash publishing scheduled entries, and
  *   plugins' scheduled tasks editing entries): through an RPC call to the
  *   Worker's own default entrypoint, like the pack's own purges
@@ -137,11 +138,15 @@ async function purgeInRequest(cache: PurgeApi, tags: string[]): Promise<void> {
 		const chunk = tags.slice(i, i + TAGS_PER_PURGE);
 		// Called as a method of `cache` (the runtime's purge needs it as `this`).
 		const result = await cache.purge({ tags: chunk });
+		let refused = false;
 		try {
-			if (result && result.success === false) console.error(`coywolf-pack: EmDash's page cache purge was refused (${chunk.length} tags); those pages stay cached until they expire`, result.errors);
+			refused = Boolean(result && result.success === false);
+			// The rest would only spend more of the account's purge limit and be refused too.
+			if (refused) console.error(`coywolf-pack: EmDash's page cache purge was refused (${tags.length - i} tags); those pages stay cached until they expire`, result?.errors);
 		} finally {
 			disposeRpcResult(result);
 		}
+		if (refused) return;
 	}
 }
 

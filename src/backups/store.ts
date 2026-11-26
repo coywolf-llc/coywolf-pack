@@ -1,4 +1,5 @@
 import { errorSummary } from "../core/error-summary.js";
+
 /**
  * Backup storage layout (shared with .github/workflows/backup.yml):
  *
@@ -12,7 +13,6 @@ import { errorSummary } from "../core/error-summary.js";
  * The backup bucket must stay private: uploads/ holds files people sent
  * through forms, which aren't public on the site.
  */
-
 export interface Manifest {
 	stamp: string;
 	database?: string;

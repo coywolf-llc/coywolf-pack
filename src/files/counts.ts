@@ -1,4 +1,3 @@
-import { errorSummary } from "../core/error-summary.js";
 /**
  * Batched counters. Counts made in one isolate within `delayMs` are written
  * together in one D1 batch after the response. The flush loop drains
@@ -15,6 +14,8 @@ import { errorSummary } from "../core/error-summary.js";
  * write per request would let a flood of uncached requests (a query string
  * skips the edge cache) write as fast as it can send.
  */
+
+import { errorSummary } from "../core/error-summary.js";
 
 /** The slice of D1 the counter uses (stubbed in tests). */
 export interface CountDb {

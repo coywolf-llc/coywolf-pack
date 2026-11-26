@@ -20,7 +20,7 @@ registerHooks({
 		if (specifier === "cloudflare:workers") {
 			return {
 				url: `data:text/javascript,export const env = {}; export const waitUntil = () => {};
-export const cache = { get purge() { return globalThis.__noCache ? undefined : async (o) => { if (globalThis.__purgeThrow) throw new Error("purge failed"); globalThis.__purges.push({ scope: o, inEntrypoint: globalThis.__inEntrypoint > 0 }); return { success: globalThis.__purgeOk !== false, errors: globalThis.__purgeOk === false ? [{ message: "rate limited" }] : [], [Symbol.dispose]() { globalThis.__disposed++; } }; }; } };
+export const cache = { get purge() { return globalThis.__noCache ? undefined : async function (o) { if (this !== cache) throw new TypeError("Illegal invocation"); if (globalThis.__purgeThrow) throw new Error("purge failed"); globalThis.__purges.push({ scope: o, inEntrypoint: globalThis.__inEntrypoint > 0 }); if (globalThis.__purgeUndefined) return undefined; return { success: globalThis.__purgeOk !== false, errors: globalThis.__purgeOk === false ? [{ message: "rate limited" }] : [], [Symbol.dispose]() { globalThis.__disposed++; } }; }; } };
 export const exports = new Proxy({}, { get: (_, k) => globalThis.__moduleExports?.[k] });
 export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }`,
 				shortCircuit: true,
@@ -42,6 +42,7 @@ function reset() {
 	globalThis.__purgeOk = true;
 	globalThis.__purgeThrow = false;
 	globalThis.__disposed = 0;
+	globalThis.__purgeUndefined = false;
 	globalThis.__noCache = false;
 	globalThis.__inEntrypoint = 0;
 	globalThis.__moduleExports = undefined;
@@ -118,15 +119,16 @@ test("in a request: the tags Astro's invalidate() would purge, purged directly w
 	await assert.rejects(provider.invalidate({ tags: ["posts"] }), /purge failed/, "a failing purge still throws in a request, as Astro's does");
 });
 
-test("in a request: a refused purge is logged and disposed of, not thrown; over 100 tags go in calls of 100", async (t) => {
+test("in a request: a refused purge is logged and disposed of, not thrown, and the rest isn't sent; over 100 tags go in calls of 100", async (t) => {
 	reset();
 	const errors = t.mock.method(console, "error", () => {});
 	const provider = coywolfCloudflareCache(undefined);
 	globalThis.__purgeOk = false;
-	await provider.invalidate({ tags: ["posts"] });
+	await provider.invalidate({ tags: Array.from({ length: 150 }, (_, i) => `r${i}`) });
+	assert.equal(globalThis.__purges.length, 1, "after a refusal the second 100 isn't sent: it would only be refused too");
 	assert.equal(globalThis.__disposed, 1);
 	assert.equal(errors.mock.callCount(), 1);
-	assert.match(String(errors.mock.calls[0].arguments[0]), /purge was refused \(1 tags\)/);
+	assert.match(String(errors.mock.calls[0].arguments[0]), /purge was refused \(150 tags\)/);
 	assert.deepEqual(errors.mock.calls[0].arguments[1], [{ message: "rate limited" }]);
 
 	reset();
@@ -135,6 +137,22 @@ test("in a request: a refused purge is logged and disposed of, not thrown; over 
 	assert.deepEqual(globalThis.__purges.map((p) => p.scope.tags.length), [100, 100, 5]);
 	assert.deepEqual(globalThis.__purges.flatMap((p) => p.scope.tags), tags);
 	assert.equal(globalThis.__disposed, 3);
+});
+
+test("in a request: a purge that answers nothing is fine; the result is disposed of even when logging the refusal throws", async (t) => {
+	reset();
+	const provider = coywolfCloudflareCache(undefined);
+	globalThis.__purgeUndefined = true;
+	await provider.invalidate({ tags: ["posts"] });
+	assert.equal(globalThis.__purges.length, 1);
+
+	reset();
+	t.mock.method(console, "error", () => {
+		throw new Error("logging failed");
+	});
+	globalThis.__purgeOk = false;
+	await assert.rejects(provider.invalidate({ tags: ["posts"] }), /logging failed/);
+	assert.equal(globalThis.__disposed, 1, "disposed of in a finally");
 });
 
 test("Workers Cache off (a staging Worker): nothing is purged and nothing throws, in a request or a scheduled run", async () => {

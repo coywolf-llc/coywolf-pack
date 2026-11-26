@@ -5,6 +5,7 @@
  * nothing when File Downloads is off or the file no longer exists. Markup and
  * CSS come from files/card.ts, which the admin preview uses too.
  */
+import { errorSummary } from "../../core/error-summary.js";
 import { siteFeatureOn } from "../../core/features.js";
 import { noteReadFailure } from "../../core/read-failures.js";
 import { workerEnv } from "../../shared.js";
@@ -59,7 +60,7 @@ if (node?.id && (await siteFeatureOn("files"))) {
 			);
 		}
 	} catch (error) {
-		console.error("coywolf-pack files: could not render a download card", error);
+		console.error("coywolf-pack files: could not render a download card", errorSummary(error), error);
 		// The page goes out without its card: not into the edge cache.
 		noteReadFailure("file card");
 	}
