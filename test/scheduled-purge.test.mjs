@@ -32,7 +32,7 @@ export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env
 	},
 });
 
-const { PURGE_METHOD, installScheduledRuns, isPurgeScope, purgeThroughEntrypoint, scheduledRun, warnOutsideScheduledRun } = await import("../src/core/scheduled-purge.ts");
+const { PURGE_METHOD, answerPurgeCall, installScheduledRuns, isPurgeScope, purgeThroughEntrypoint, scheduledRun, warnOutsideScheduledRun } = await import("../src/core/scheduled-purge.ts");
 const { purgeOutcome, purgePageCache } = await import("../src/pageCache/lib.ts");
 const { stripTrackingParams } = await import("../src/worker.ts");
 const { purgeEntryPages } = await import("../src/pageCache/entries.ts");
@@ -198,9 +198,12 @@ test("the RPC method purges by the default entrypoint, refuses a scope Workers C
 	assert.equal(globalThis.__purges.length, 1, "nothing else purged");
 	assert.equal(errors.length, bad.length, "each refusal is logged");
 	for (const scope of [{ purgeEverything: true }, { tags: ["a"] }, { pathPrefixes: ["/a"] }, { pathPrefixes: ["/a"], tags: ["b"] }, { pathPrefixes: [], tags: ["a"] }]) assert.ok(isPurgeScope(scope), JSON.stringify(scope));
-	// A purge that throws comes back refused.
+	// A refused purge comes back refused; one that throws (or rejects) too, and nothing escapes.
 	globalThis.__purgeOk = false;
 	assert.equal(await method({ tags: ["t"] }), "refused");
+	assert.equal(await answerPurgeCall({ tags: ["t"] }, async () => { throw new Error("purge broke"); }), "refused");
+	assert.equal(await answerPurgeCall({ tags: ["t"] }, () => Promise.reject(new Error("purge rejected"))), "refused");
+	assert.ok(errors.some((e) => e.includes("purge rejected")), "logged");
 	globalThis.__noCache = true;
 	assert.equal(await method({ tags: ["t"] }), "unavailable");
 });
@@ -304,6 +307,7 @@ test("the wrapper is a WorkerEntrypoint class: the handler's event handlers and 
 		},
 	};
 	const Worker = stripTrackingParams(handler);
+	assert.equal(PURGE_METHOD, "coywolfPackPurge", "the method name the docs and the Worker logs show");
 	assert.ok(Worker.prototype instanceof WorkerEntrypoint, "a class the runtime takes as an entrypoint");
 	assert.deepEqual(Object.getOwnPropertyNames(Worker.prototype).sort(), ["constructor", "fetch", PURGE_METHOD, "queue", "scheduled"].sort());
 	for (const name of ["scheduled", "queue"]) assert.equal(Object.getOwnPropertyDescriptor(Worker.prototype, name).enumerable, false, `${name} is defined like a class method`);

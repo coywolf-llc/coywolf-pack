@@ -42,8 +42,7 @@ import cloudflare from "@astrojs/cloudflare/cache/provider";
 import type { CacheProviderFactory, InvalidateOptions } from "astro";
 import { collectInvalidationTags } from "astro/cache/provider-utils";
 
-import { type ScheduledRun, scheduledRun } from "./core/scheduled-purge.js";
-import { purgeOutcome } from "./pageCache/lib.js";
+import { type ScheduledRun, purgeThroughEntrypoint, scheduledRun } from "./core/scheduled-purge.js";
 
 /** Most tags one Workers Cache purge takes (Cloudflare's limit per call). */
 const TAGS_PER_PURGE = 100;
@@ -89,7 +88,8 @@ async function flush(run: ScheduledRun, batch: Batch): Promise<void> {
 	try {
 		for (let i = 0; i < tags.length; i += TAGS_PER_PURGE) {
 			const chunk = tags.slice(i, i + TAGS_PER_PURGE);
-			const outcome = await purgeOutcome({ tags: chunk });
+			// Through the run the tags were queued in (not whatever store the timer sees): the purge must go to the default entrypoint.
+			const outcome = await purgeThroughEntrypoint(run, { tags: chunk });
 			// Refused (the account's purge limit) or failed: said here too, where the scheduled run's logs show it.
 			if (outcome === "refused") console.error(`coywolf-pack: EmDash's page cache purge from the scheduled run was refused (${chunk.length} tags); those pages stay cached until they expire`);
 		}
@@ -129,7 +129,7 @@ const coywolfCloudflareCache: CacheProviderFactory = (config) => {
 			if (!tags.length) return;
 			// A run whose ctx can't be held open (no waitUntil: never on Workers) purges now, as nothing would keep a later purge alive.
 			if (typeof (run.ctx as { waitUntil?: unknown } | undefined)?.waitUntil !== "function") {
-				for (let i = 0; i < tags.length; i += TAGS_PER_PURGE) await purgeOutcome({ tags: tags.slice(i, i + TAGS_PER_PURGE) });
+				for (let i = 0; i < tags.length; i += TAGS_PER_PURGE) await purgeThroughEntrypoint(run, { tags: tags.slice(i, i + TAGS_PER_PURGE) });
 				return;
 			}
 			queue(run, tags);

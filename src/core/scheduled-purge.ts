@@ -22,7 +22,8 @@
  * - purgeOutcome (src/pageCache/lib.ts) sees the store and calls that method
  *   through ctx.exports.default (purgeThroughEntrypoint);
  * - the pack's cache provider (src/cache-provider.ts) sends EmDash's own purges
- *   from the scheduled run through purgeOutcome too.
+ *   from the scheduled run the same way (purgeThroughEntrypoint, with the run
+ *   it gathered them in).
  * Why RPC and not a fetch call: every site sets "placement" (a region hint),
  * which sends each fetch to the default entrypoint, the Worker's call to
  * itself included, to the placed location, and that call arrives there without

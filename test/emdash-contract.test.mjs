@@ -1197,6 +1197,28 @@ test("scheduled run: EmDash leaves its cache purges to the host's scheduled hand
 	if (!/^1\.5\./.test(emdashVersion)) assert.match(worker, /publishUpcomingWithinMs: PUBLISH_UPCOMING_WITHIN_MS/, changed);
 });
 
+test("the sites' Worker handler: @emdash-cms/cloudflare's default export has only event handlers stripTrackingParams passes on (src/worker.ts)", (t) => {
+	const dir = process.env.EMDASH_CLOUDFLARE_DIR;
+	if (!dir) return t.skip("EMDASH_CLOUDFLARE_DIR isn't set (CI unpacks @emdash-cms/cloudflare there)");
+	// stripTrackingParams returns a WorkerEntrypoint class that passes on fetch, scheduled and OTHER_HANDLERS only (every
+	// function on the class is an RPC method, so nothing else of the handler is copied): a key the sites' handler gains
+	// would be dropped.
+	const source = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
+	const list = /const OTHER_HANDLERS = \[([^\]]*)\] as const;/.exec(source)?.[1];
+	assert.ok(list, "src/worker.ts has no OTHER_HANDLERS list");
+	const forwarded = new Set(["fetch", "scheduled", ...[...list.matchAll(/"(\w+)"/g)].map((m) => m[1])]);
+	const worker = readFileSync(join(dir, "dist", "worker.mjs"), "utf8");
+	const changed = `@emdash-cms/cloudflare ${emdashVersion} changed its default Worker handler: check that stripTrackingParams (src/worker.ts) passes on every event handler it has`;
+	const block = /var worker_default = \{\n([\s\S]*?)\n\};/.exec(worker)?.[1];
+	assert.ok(block, changed);
+	// Astro's handler ({ fetch }, from @astrojs/cloudflare, which isn't installed here), then its own keys.
+	assert.deepEqual([...block.matchAll(/^\t\.\.\.(\w+),$/gm)].map((m) => m[1]), ["handler"], changed);
+	assert.match(worker, /const handler = astroHandler;/, changed);
+	const keys = [...block.matchAll(/^\t(?:async )?(\w+)\s*[(:]/gm)].map((m) => m[1]);
+	for (const key of ["fetch", "scheduled"]) assert.ok(keys.includes(key), changed);
+	assert.deepEqual(keys.filter((key) => !forwarded.has(key)), [], changed);
+});
+
 test("sign-in email limits: the pack counts in EmDash's _emdash_rate_limits the way checkRateLimit does, finds EmDash's users, and holds with an address EmDash accepts (src/core/signin-limit.ts)", async () => {
 	const limit = await import("../src/core/signin-limit.ts");
 	const path = "/_emdash/api/auth/magic-link/send";
