@@ -196,7 +196,7 @@ export function PerformancePage() {
 					Cloudflare keeps copies of your public pages at its edge (Workers Cache), so visitors get them without waiting for the
 					site to build them. EmDash clears the pages that change when you publish or edit content, menus or settings; Coywolf
 					Pack clears the pages its settings change. Each deploy starts with an empty cache. These settings take effect on sites that
-					turn on Workers Cache (Astro's cacheCloudflare(); see <DocsLink doc="performance">the Performance docs</DocsLink>).
+					turn on Workers Cache (the Cloudflare cache provider; see <DocsLink doc="performance">the Performance docs</DocsLink>).
 					</>
 				}
 			/>

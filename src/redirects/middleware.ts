@@ -15,7 +15,7 @@
  * the table is created by the first admin write. Hits are counted after the
  * response is sent, batched per isolate (one D1 write a second at most).
  *
- * With Astro's cacheCloudflare() provider, GET and HEAD redirects are kept in
+ * With the Cloudflare cache provider, GET and HEAD redirects are kept in
  * the edge cache (Workers Cache) for 30 days, tagged REDIRECTS_TAG; any
  * redirect edit purges that tag (src/pageCache/lib.ts purgeScope). Repeats
  * served from the cache don't reach the Worker, so they aren't counted as hits.

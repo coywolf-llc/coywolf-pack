@@ -4,9 +4,21 @@
 // parameters go, that everything else is left exactly as it was, and that the Worker wrapper
 // serves such a request from the clean URL's cache entry without storing it again.
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import { test } from "node:test";
 
 import "./ts-resolve.mjs";
+
+// src/worker.ts extends cloudflare:workers' WorkerEntrypoint (the wrapper is the site's default export class).
+registerHooks({
+	resolve(specifier, context, next) {
+		if (specifier === "cloudflare:workers") return { url: "data:text/javascript,export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }", shortCircuit: true };
+		return next(specifier, context);
+	},
+});
+
+/** The wrapped Worker (a WorkerEntrypoint class) as the runtime uses it: an instance per request, with its ctx and env. */
+const invoke = (Worker) => ({ fetch: (request, env = {}, ctx = {}) => new Worker(ctx, env).fetch(request) });
 
 const { TRACKING_HEADER, privateCacheControl, stripTrackingQuery, trackingFreeUrl, trackingWrapperInstalled, withTrackingParams } = await import("../src/core/tracking-params.ts");
 
@@ -105,9 +117,10 @@ test("the wrapper: tracking URLs are served from the clean URL through the cache
 		return new Response("cached page", { headers: { "Cache-Control": "no-cache", "Cloudflare-CDN-Cache-Control": "public, max-age=604800", "Cache-Tag": "posts" } });
 	};
 	const ctx = { exports: { default: { fetch: async (request) => cached(request) } } };
-	const wrapped = stripTrackingParams(handler);
-	assert.equal(wrapped.marker, "kept");
-	assert.equal(typeof wrapped.scheduled, "function");
+	const Worker = stripTrackingParams(handler);
+	const wrapped = invoke(Worker);
+	assert.equal(new Worker({}, {}).marker, undefined, "only event handlers are passed on");
+	assert.equal(typeof Worker.prototype.scheduled, "function");
 	assert.ok(trackingWrapperInstalled(), "the checkup can tell the wrapper is installed");
 
 	const page = await wrapped.fetch(new Request("https://coywolf.com/?utm_source=news&p=2", { headers: { "user-agent": "test" } }), {}, ctx);
@@ -139,14 +152,14 @@ test("the wrapper: tracking URLs are served from the clean URL through the cache
 test("the wrapper falls back to SELF, then to serving the request as it came", async () => {
 	const { stripTrackingParams } = await import("../src/worker.ts");
 	const handler = { fetch: async (request) => new Response(`rendered ${new URL(request.url).search}`) };
-	const viaSelf = await stripTrackingParams(handler).fetch(new Request("https://x.test/?gclid=1"), { SELF: { fetch: async (r) => new Response(`self ${new URL(r.url).search || "(none)"}`) } }, {});
+	const viaSelf = await invoke(stripTrackingParams(handler)).fetch(new Request("https://x.test/?gclid=1"), { SELF: { fetch: async (r) => new Response(`self ${new URL(r.url).search || "(none)"}`) } }, {});
 	assert.equal(await viaSelf.text(), "self (none)");
-	const neither = await stripTrackingParams(handler).fetch(new Request("https://x.test/?gclid=1"), {}, {});
+	const neither = await invoke(stripTrackingParams(handler)).fetch(new Request("https://x.test/?gclid=1"), {}, {});
 	assert.equal(await neither.text(), "rendered ?gclid=1");
 	// A loopback that throws, or answers with a server error: served as it came, not an error page.
-	const broken = await stripTrackingParams(handler).fetch(new Request("https://x.test/?gclid=1"), { SELF: { fetch: async () => { throw new Error("down"); } } }, {});
+	const broken = await invoke(stripTrackingParams(handler)).fetch(new Request("https://x.test/?gclid=1"), { SELF: { fetch: async () => { throw new Error("down"); } } }, {});
 	assert.equal(await broken.text(), "rendered ?gclid=1");
-	const failing = await stripTrackingParams(handler).fetch(new Request("https://x.test/?gclid=1"), { SELF: { fetch: async () => new Response("oops", { status: 502 }) } }, {});
+	const failing = await invoke(stripTrackingParams(handler)).fetch(new Request("https://x.test/?gclid=1"), { SELF: { fetch: async () => new Response("oops", { status: 502 }) } }, {});
 	assert.equal(await failing.text(), "rendered ?gclid=1");
 	assert.equal(failing.headers.get(TRACKING_HEADER), null);
 	assert.throws(() => stripTrackingParams({}), /no fetch/);
@@ -165,7 +178,7 @@ test("the wrapper records what it saw for the checkup: no loopback, an answer, t
 		return last && { name: last.values[0], ...JSON.parse(last.values[1]) };
 	};
 
-	const none = stripTrackingParams(handler);
+	const none = invoke(stripTrackingParams(handler));
 	await none.fetch(new Request("https://x.test/?gclid=1"), { DB: db }, ctx);
 	await none.fetch(new Request("https://x.test/?gclid=2"), { DB: db }, ctx);
 	await Promise.all(waits);
@@ -176,7 +189,7 @@ test("the wrapper records what it saw for the checkup: no loopback, an answer, t
 	writes.length = 0;
 	let cacheStatus = "MISS";
 	const env = { DB: db, SELF: { fetch: async () => new Response("page", { headers: { "cf-cache-status": cacheStatus } }) } };
-	const looped = stripTrackingParams(handler);
+	const looped = invoke(stripTrackingParams(handler));
 	await looped.fetch(new Request("https://x.test/?gclid=1"), env, ctx);
 	await looped.fetch(new Request("https://x.test/?gclid=2"), env, ctx);
 	await Promise.all(waits);

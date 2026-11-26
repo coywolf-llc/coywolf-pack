@@ -676,6 +676,41 @@ test("ctx.email and ctx.users: no ctx.email until a provider is selected, then s
 	assert.deepEqual(Object.keys(items[0]).sort(), ["createdAt", "email", "id", "name", "role"]);
 });
 
+test("the Worker's scheduled-run store reaches plugin hooks EmDash runs from a scheduled run: cron tasks and content:afterPublish (src/core/scheduled-purge.ts)", async () => {
+	// The pack's page cache purges made in these hooks go through the Worker's own fetch only while the store is
+	// there: EmDash's hook pipeline (timeouts, its own context) must keep the async context it's called in.
+	const { AsyncLocalStorage } = await import("node:async_hooks");
+	const { installScheduledRuns, scheduledRun } = await import("../src/core/scheduled-purge.ts");
+	const { createHookPipeline, definePlugin } = await import("emdash");
+	const seen = [];
+	const pack = definePlugin({
+		id: PLUGIN_ID,
+		version: "0.0.0",
+		// Content hooks need content:read (EmDash skips them without it); the pack declares it.
+		capabilities: ["content:read"],
+		hooks: {
+			cron: { handler: async () => void seen.push(["cron", scheduledRun()]) },
+			"content:afterPublish": { handler: async () => void seen.push(["afterPublish", scheduledRun()]) },
+		},
+	});
+	const pipeline = createHookPipeline([pack], { db });
+	const storage = installScheduledRuns(() => new AsyncLocalStorage());
+	const run = { ctx: { marker: "scheduled" }, env: {} };
+	await storage.run(run, async () => {
+		await pipeline.invokeCronHook(PLUGIN_ID, { name: "contract", scheduledAt: new Date().toISOString() });
+		await pipeline.runContentAfterPublish({ id: "e1", slug: "e1", status: "published" }, "posts");
+	});
+	await pipeline.invokeCronHook(PLUGIN_ID, { name: "contract", scheduledAt: new Date().toISOString() });
+	assert.deepEqual(
+		seen.map(([hook, store]) => [hook, store?.ctx?.marker ?? null]),
+		[
+			["cron", "scheduled"],
+			["afterPublish", "scheduled"],
+			["cron", null],
+		],
+	);
+});
+
 test("ctx.cron: schedule, list and cancel by name", async () => {
 	await cron.schedule("contract-task", { schedule: "@daily" });
 	assert.deepEqual((await cron.list()).map((t) => [t.name, t.schedule]), [["contract-task", "@daily"]]);
@@ -1093,6 +1128,95 @@ test("EmDash's routes the pack calls, links to or watches exist, with those meth
 		const exported = routeMethods(routes.get(pattern));
 		for (const m of methods) assert.ok(exported.has(m) || exported.has("ALL"), `${pattern} doesn't export ${m} (exports ${[...exported].join(", ")})`);
 	}
+});
+
+// ── EmDash behavior the pack's docs describe (1.5 and 1.6) ─────
+
+/** A class method's source, `async name(…) { … }`, from a bundle. */
+function methodSource(src, name) {
+	const at = src.indexOf(`async ${name}(`);
+	assert.ok(at !== -1, `method ${name} isn't in the bundle`);
+	const open = src.indexOf("{", src.indexOf(")", at));
+	return src.slice(at, walk(src, open + 1, true, []) + 1);
+}
+
+test("not-found pages: EmDash 1.6+ keeps a 404 in the route cache for at most 60 seconds where the path has no file extension, 1.5 turns caching off for it (docs/performance.md)", () => {
+	const redirect = [...emdashDist.entries()].find(([file]) => file.endsWith(join("middleware", "redirect.mjs")))?.[1];
+	assert.ok(redirect, `EmDash ${emdashVersion} has no astro/middleware/redirect.mjs`);
+	const never = /if \(response\.status === 404\) routeCache\?\.set\(false\);/.test(redirect);
+	// 1.6: only where the path has no file extension. A 404 at /wp-login.php is left to the route, as 1.5 left every
+	// file-like path (it returned before its 404 handling).
+	const capped = /if \(!isFilePath && response\.status === 404 && routeCacheStores\(routeCache\)\) routeCache\?\.set\(\{\s*maxAge: Math\.min\(routeCache\.options\.maxAge \?\? 60, 60\),\s*swr: 0\s*\}\)/.test(redirect);
+	assert.ok(never || capped, `EmDash ${emdashVersion} caches not-found pages differently: update "Not-found pages" in docs/performance.md`);
+	if (!/^1\.5\./.test(emdashVersion)) assert.ok(capped, `EmDash ${emdashVersion} changed its 404 cap (another lifetime, or file paths too): update docs/performance.md`);
+	// Both leave paths with a file extension alone: 1.5 returns before its 404 handling, 1.6 before its 404 log.
+	assert.match(redirect, /if \(ASSET_EXTENSION\.test\(pathname\)\) return next\(\);|if \(isFilePath\) return response;/);
+});
+
+test("replacing a media file: EmDash 1.6+ runs media:afterUpload with the item's id and type (the pack's image sizes and AI image text listen); the pack's PUT …/replace watch still forces new sizes (src/images/pack.ts)", () => {
+	const runtime = [...emdashDist.values()].find((src) => src.includes("async handleMediaReplaceMetadata("));
+	assert.ok(runtime, `EmDash ${emdashVersion} has no handleMediaReplaceMetadata`);
+	const replace = methodSource(runtime, "handleMediaReplaceMetadata");
+	const fires = /this\.hooks\.hasHooks\("media:afterUpload"\)[\s\S]*?id: item\.id,[\s\S]*?mimeType: item\.mimeType,[\s\S]*?this\.runMediaAfterUploadHook\(mediaItem\)/.test(replace);
+	if (/^1\.5\./.test(emdashVersion)) return assert.doesNotMatch(replace, /media:afterUpload/);
+	assert.ok(fires, `EmDash ${emdashVersion} no longer runs media:afterUpload after a replaced file: update the replace notes in src/images/pack.ts, docs/images.md and docs/ai.md`);
+});
+
+test("editor extensions: EmDash still serves none to a configured plugin with an admin entry, as the pack is (docs/internals.md)", () => {
+	// The runtime chunk defines it (another chunk only calls it): pick the definition, not the first chunk listed.
+	const runtime = [...emdashDist.values()].find((src) => /\n\tgetPluginEditorExtension\(pluginId/.test(src));
+	assert.ok(runtime, `EmDash ${emdashVersion} has no getPluginEditorExtension method`);
+	assert.match(
+		runtime,
+		/getPluginEditorExtension\([^)]*\) \{[\s\S]{0,600}?if \(configured\) \{\s*if \(configured\.admin\.entry\) return null;/,
+		`EmDash ${emdashVersion} now serves editor actions to a plugin with an admin entry: the pack's editor features could use them (docs/internals.md)`,
+	);
+});
+
+test("scheduled run: EmDash leaves its cache purges to the host's scheduled handler, and @emdash-cms/cloudflare's makes them with the Astro cache provider's invalidate({ tags }) (what src/cache-provider.ts reroutes)", (t) => {
+	const changed = `EmDash ${emdashVersion} changed how its scheduled run purges the cache: check whether the pack's cache provider (src/cache-provider.ts) is still needed (docs/performance.md)`;
+	// EmDash's runtime takes both purges as callbacks: scheduled publishing's and plugin content actions'.
+	const runtime = [...emdashDist.values()].find((src) => src.includes("async runScheduledTasks("));
+	assert.ok(runtime, `EmDash ${emdashVersion} has no runtime runScheduledTasks`);
+	// runScheduledTasks calls runScheduledTasksWithStats, which does the work (1.5 and 1.6).
+	assert.match(methodSource(runtime, "runScheduledTasks"), /this\.runScheduledTasksWithStats\(options\)/, changed);
+	const run = methodSource(runtime, "runScheduledTasksWithStats");
+	assert.match(run, /if \(options\.invalidateContentCache\) this\.pluginContentCacheInvalidator = options\.invalidateContentCache;/, changed);
+	// 1.5.0 hands the whole options object to the publish sweep; 1.6.0 passes onPublished on by name.
+	assert.match(run, /options\.onPublished|runScheduledMaintenanceTick\(options,/, changed);
+	// The sites' worker (@emdash-cms/cloudflare): CI unpacks the matching release (no install: its exact peers would
+	// pin one EmDash and bring Wrangler) and names the folder in EMDASH_CLOUDFLARE_DIR.
+	const dir = process.env.EMDASH_CLOUDFLARE_DIR;
+	if (!dir) return t.skip("EMDASH_CLOUDFLARE_DIR isn't set (CI unpacks @emdash-cms/cloudflare there)");
+	assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version, emdashVersion, "EMDASH_CLOUDFLARE_DIR holds another release than the installed EmDash");
+	const worker = readFileSync(join(dir, "dist", "worker.mjs"), "utf8");
+	assert.match(worker, /app\.manifest\.cacheProvider\?\.\(\)/, changed);
+	for (const name of ["invalidatePublishedTags", "invalidateContentTags"]) assert.match(functionSource(worker, name), /await provider\.invalidate\(\{ tags \}\);/, changed);
+	assert.match(worker, /runScheduledTasks\(\{\s*onPublished: invalidatePublishedTags,\s*invalidateContentCache: invalidateContentTags[,\s]/, changed);
+	// 1.6.0: each run also waits up to 70 s for entries due within that window; the purges still run inside it.
+	if (!/^1\.5\./.test(emdashVersion)) assert.match(worker, /publishUpcomingWithinMs: PUBLISH_UPCOMING_WITHIN_MS/, changed);
+});
+
+test("the sites' Worker handler: @emdash-cms/cloudflare's default export has only event handlers stripTrackingParams passes on (src/worker.ts)", (t) => {
+	const dir = process.env.EMDASH_CLOUDFLARE_DIR;
+	if (!dir) return t.skip("EMDASH_CLOUDFLARE_DIR isn't set (CI unpacks @emdash-cms/cloudflare there)");
+	// stripTrackingParams returns a WorkerEntrypoint class that passes on fetch, scheduled and OTHER_HANDLERS only (every
+	// function on the class is an RPC method, so nothing else of the handler is copied): a key the sites' handler gains
+	// would be dropped.
+	const source = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
+	const list = /const OTHER_HANDLERS = \[([^\]]*)\] as const;/.exec(source)?.[1];
+	assert.ok(list, "src/worker.ts has no OTHER_HANDLERS list");
+	const forwarded = new Set(["fetch", "scheduled", ...[...list.matchAll(/"(\w+)"/g)].map((m) => m[1])]);
+	const worker = readFileSync(join(dir, "dist", "worker.mjs"), "utf8");
+	const changed = `@emdash-cms/cloudflare ${emdashVersion} changed its default Worker handler: check that stripTrackingParams (src/worker.ts) passes on every event handler it has`;
+	const block = /var worker_default = \{\n([\s\S]*?)\n\};/.exec(worker)?.[1];
+	assert.ok(block, changed);
+	// Astro's handler ({ fetch }, from @astrojs/cloudflare, which isn't installed here), then its own keys.
+	assert.deepEqual([...block.matchAll(/^\t\.\.\.(\w+),$/gm)].map((m) => m[1]), ["handler"], changed);
+	assert.match(worker, /const handler = astroHandler;/, changed);
+	const keys = [...block.matchAll(/^\t(?:async )?(\w+)\s*[(:]/gm)].map((m) => m[1]);
+	for (const key of ["fetch", "scheduled"]) assert.ok(keys.includes(key), changed);
+	assert.deepEqual(keys.filter((key) => !forwarded.has(key)), [], changed);
 });
 
 test("sign-in email limits: the pack counts in EmDash's _emdash_rate_limits the way checkRateLimit does, finds EmDash's users, and holds with an address EmDash accepts (src/core/signin-limit.ts)", async () => {
