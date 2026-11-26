@@ -531,6 +531,13 @@ export interface StageCache {
 	hash: string;
 	mentions?: Mention[];
 	choices?: Record<string, string | null>;
+	/**
+	 * Wikidata's candidates by mention name (none when it answered with no results), kept only for a caller with a
+	 * deadline (the editor's AI Enrich button), so a round stopped by time doesn't look the same names up again in the next.
+	 */
+	candidates?: Record<string, Candidate[]>;
+	/** The grounded, verified entities (the end of groundEntities), so nothing is looked up or paid for again. */
+	entities?: Entity[];
 	description?: string;
 }
 
@@ -620,13 +627,18 @@ export function retryAt(job: QueueJob, now: number): number | null {
 /**
  * Merge a re-enqueue into an existing job: push the debounce later, keep attempts reset, keep force if either asked.
  * It stays a save's job (source "save") only when both are: a save merged into a bulk run's job (or the reverse)
- * keeps the bulk run's check, so new settings still re-analyze it.
+ * keeps the bulk run's check, so new settings still re-analyze it. Outputs already paid for (`cache`) stay with the
+ * job unless the new one brings its own (of the same hash: both are kept) or is forced (Analyze again): they're only
+ * used for the hash they were made for. A forced job never takes a new one's: it's there to pay for a fresh analysis,
+ * and what AI Enrich staged (handed over at a publish) would stand in for it.
  */
 export function mergeJob(existing: QueueJob | null, next: QueueJob): QueueJob {
 	if (!existing) return next;
-	const { source: _s, ...rest } = next;
+	const { source: _s, cache: _c, ...rest } = next;
 	const saves = existing.source === "save" && next.source === "save";
-	return { ...rest, ...(saves ? { source: "save" as const } : {}), force: Boolean(existing.force || next.force), enqueuedAt: Math.min(existing.enqueuedAt, next.enqueuedAt), attempts: 0 };
+	const brought = next.cache && existing.cache?.hash === next.cache.hash ? { ...existing.cache, ...next.cache } : next.cache;
+	const cache = next.force ? undefined : existing.force ? existing.cache : (brought ?? existing.cache);
+	return { ...rest, ...(saves ? { source: "save" as const } : {}), ...(cache ? { cache } : {}), force: Boolean(existing.force || next.force), enqueuedAt: Math.min(existing.enqueuedAt, next.enqueuedAt), attempts: 0 };
 }
 
 /** UTC day key for the daily call counter. */

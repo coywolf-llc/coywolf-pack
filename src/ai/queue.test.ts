@@ -74,6 +74,28 @@ test("mergeJob keeps a save's mark only when both jobs are saves'", () => {
 	assert.deepEqual(logic.mergeJob(null, saved), saved);
 });
 
+test("mergeJob keeps the outputs a job already paid for, unless the new one brings its own or is forced (Analyze again)", () => {
+	const paid = { hash: "h1", mentions: [], entities: [] };
+	const queued: Job = { kind: "entry", collection: "posts", entryId: "1", due: 100, attempts: 1, enqueuedAt: 50, source: "save", cache: paid };
+	const save: Job = { kind: "entry", collection: "posts", entryId: "1", due: 500, attempts: 0, enqueuedAt: 400, source: "save" };
+	assert.deepEqual(logic.mergeJob(queued, save).cache, paid, "a second publish hook for the same save, or a later save");
+	const own = { hash: "h2", description: "d" };
+	assert.deepEqual(logic.mergeJob(queued, { ...save, cache: own }).cache, own);
+	assert.equal("cache" in logic.mergeJob(queued, { ...save, force: true }), false);
+	assert.equal("cache" in logic.mergeJob({ ...queued, cache: undefined }, save), false);
+	assert.deepEqual(logic.mergeJob(queued, { ...save, cache: { hash: "h1", description: "d" } }).cache, { ...paid, description: "d" }, "of the same text: both are kept");
+});
+
+test("mergeJob: a forced job never takes outputs a later save brings (AI Enrich's staged analysis), and keeps its own attempt's", () => {
+	const forced: Job = { kind: "entry", collection: "posts", entryId: "1", due: 100, attempts: 0, enqueuedAt: 50, force: true };
+	const save: Job = { kind: "entry", collection: "posts", entryId: "1", due: 500, attempts: 0, enqueuedAt: 400, source: "save", cache: { hash: "h1", entities: [] } };
+	const merged = logic.mergeJob(forced, save);
+	assert.equal(merged.force, true);
+	assert.equal("cache" in merged, false);
+	const own = { hash: "h1", mentions: [] };
+	assert.deepEqual(logic.mergeJob({ ...forced, attempts: 1, cache: own }, save).cache, own, "what its own failed attempt paid for");
+});
+
 test("queueId and dayKey", () => {
 	assert.equal(logic.queueId({ kind: "entry", collection: "posts", entryId: "x" }), "entry:posts:x");
 	assert.equal(logic.queueId({ kind: "media", mediaId: "m" }), "media:m");

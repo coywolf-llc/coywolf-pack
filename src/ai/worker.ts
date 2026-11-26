@@ -5,12 +5,13 @@
  */
 import { siteName } from "../core/site.js";
 import { workerEnv } from "../shared.js";
-import type { CollectionSchemaInfo, PluginContext } from "emdash";
+import type { CollectionSchemaInfo, PluginContext, StorageCollection } from "emdash";
 
 import { type FeatureMap, ctxFeatures, isOn } from "../core/features.js";
 import {
 	type Entity,
 	type GroundedMention,
+	type ImageText,
 	type QueueJob,
 	type StageCache,
 	applyChoices,
@@ -35,6 +36,7 @@ import {
 	type AiSettings,
 	type BulkState,
 	DailyLimitError,
+	type DraftRecord,
 	type EntryRecord,
 	type MediaRecord,
 	TEXT_HASHES_KEY,
@@ -48,14 +50,19 @@ import {
 	enqueue,
 	entryKey,
 	logUsage,
+	optionalCol,
 	providerConfig,
+	pruneDrafts,
+	pruneEditorLocks,
 	pruneUsage,
 	readSettings,
+	stagedCache,
+	stagedSpent,
 	takeCall,
 	withLock,
 } from "./store.js";
-import { WikidataBusyError, entityDetails, searchCandidates } from "./wikidata.js";
-import { BUSY_MS, changeCounts, linkEntry, linkMemos, retryDue, shouldLink, withRetry, withoutPendingNew } from "./glossary-linker.js";
+import { WikidataBusyError, entityDetails, findCandidates } from "./wikidata.js";
+import { BUSY_MS, changeCounts, linkEntry, linkMemos, markOwnPublish, retryDue, shouldLink, withRetry, withoutPendingNew } from "./glossary-linker.js";
 import { checkGoneTerms, removeGoneOn } from "./glossary-gone.js";
 import { VERSION } from "../version.js";
 
@@ -71,6 +78,11 @@ export class SkipError extends Error {}
 // ── Helpers ──────────────────────────────────────────────────────
 
 const schemaCache = new Map<string, { info: CollectionSchemaInfo | null; at: number }>();
+
+/** Tests only: read every collection's schema again. */
+export function resetSchemaCacheForTests(): void {
+	schemaCache.clear();
+}
 
 async function collectionInfo(ctx: PluginContext, slug: string): Promise<CollectionSchemaInfo | null> {
 	const hit = schemaCache.get(slug);
@@ -92,8 +104,11 @@ async function sha256(text: string): Promise<string> {
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** The provider and text model an analysis is made with: what AI Enrich staged under another is never reused (DraftRecord.model). */
+export const modelSignature = (s: Pick<Settings, "provider" | "textModel">): string => `p:${s.provider}|m:${s.textModel}`;
+
 function signature(s: Settings, features: FeatureMap): string {
-	return `p:${s.provider}|m:${s.textModel}|ent:${isOn(features, "ai.entities") ? 1 : 0}|desc:${isOn(features, "ai.descriptions") ? 1 : 0}`;
+	return `${modelSignature(s)}|ent:${isOn(features, "ai.entities") ? 1 : 0}|desc:${isOn(features, "ai.descriptions") ? 1 : 0}`;
 }
 
 export interface EntryText {
@@ -170,34 +185,91 @@ async function callModel(
 
 // ── Entries ──────────────────────────────────────────────────────
 
-async function groundEntities(ctx: PluginContext, options: AiOptions, s: Settings, t: EntryText, ref: string, cache: StageCache, budget: Budget): Promise<Entity[]> {
+/**
+ * For a person waiting on the result (the editor's AI Enrich button): each model call's timeout, and no new stage
+ * after `deadline` (epoch ms). `paid`: called once a model call's output is in the cache, so the caller can save it
+ * right away (a failure there is the caller's to handle; it never fails the stage). `oneAtATime`: runs an image's
+ * read and resize, so images described at once don't hold several large files in memory together. describeImage
+ * throws OutOfTimeError when the deadline passes before its file is read: no call is made for that image.
+ */
+export interface CallLimits {
+	timeoutMs?: number;
+	deadline?: number;
+	paid?: () => Promise<void> | void;
+	oneAtATime?: <T>(work: () => Promise<T>) => Promise<T>;
+}
+
+/** A stage wasn't started because the caller's deadline had passed (CallLimits). Outputs already paid for are in the cache. */
+export class OutOfTimeError extends Error {
+	constructor() {
+		super("it took too long");
+		this.name = "OutOfTimeError";
+	}
+}
+
+const inTime = (limits: CallLimits | undefined) => {
+	if (limits?.deadline !== undefined && Date.now() >= limits.deadline) throw new OutOfTimeError();
+};
+
+const paid = async (limits: CallLimits | undefined) => {
+	try {
+		await limits?.paid?.();
+	} catch {
+		// Saving early is the caller's extra: the stage goes on.
+	}
+};
+
+export async function groundEntities(ctx: PluginContext, options: AiOptions, s: Settings, t: EntryText, ref: string, cache: StageCache, budget: Budget, limits?: CallLimits): Promise<Entity[]> {
+	// The whole result, from an earlier attempt that got this far (or AI Enrich's, handed to the job at the publish).
+	if (cache.entities) return cache.entities;
 	// Stage 1 (cached on the job, so a retry doesn't pay for it twice).
-	cache.mentions ??= parseMentions(
-		await callModel(ctx, options, s, "entities", { system: EXTRACT_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 2000 }, ref, budget),
-	);
+	if (!cache.mentions) {
+		inTime(limits);
+		cache.mentions = parseMentions(
+			await callModel(ctx, options, s, "entities", { system: EXTRACT_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 2000, timeoutMs: limits?.timeoutMs }, ref, budget),
+		);
+		await paid(limits);
+	}
 	const mentions = cache.mentions;
-	if (!mentions.length) return [];
+	if (!mentions.length) return (cache.entities = []);
 	const lang = language(ctx);
 	const f = fetcher(ctx, budget);
 	const ua = userAgent(VERSION, ctx.site?.url);
 	// Stage 2: real candidates, one lookup at a time (Wikimedia's API etiquette).
+	// With a deadline (AI Enrich), what Wikidata answered is kept in the cache, "no results" too: the next round goes
+	// on after it. A lookup it didn't answer isn't, so it's tried again.
+	const known = limits?.deadline !== undefined ? (cache.candidates ??= {}) : null;
 	const candidates = [];
-	for (const m of mentions) candidates.push(await searchCandidates(f, m.name, lang, ua));
+	for (const m of mentions) {
+		if (known && Object.hasOwn(known, m.name)) {
+			candidates.push(known[m.name]);
+			continue;
+		}
+		inTime(limits);
+		const found = await findCandidates(f, m.name, lang, ua);
+		if (known && found) known[m.name] = found;
+		candidates.push(found ?? []);
+	}
 	let { mentions: grounded, ambiguous } = attachCandidates(mentions, candidates);
 	// Stage 3: the model chooses among real candidates only.
 	if (ambiguous.length) {
 		const subset: GroundedMention[] = ambiguous.map((i) => grounded[i]);
-		cache.choices ??= parseChoices(
-			await callModel(ctx, options, s, "entities", { system: DISAMBIGUATE_SYSTEM, user: disambiguatePrompt(subset, t.title, t.text), maxTokens: 1000 }, ref, budget),
-		);
+		if (!cache.choices) {
+			inTime(limits);
+			cache.choices = parseChoices(
+				await callModel(ctx, options, s, "entities", { system: DISAMBIGUATE_SYSTEM, user: disambiguatePrompt(subset, t.title, t.text), maxTokens: 1000, timeoutMs: limits?.timeoutMs }, ref, budget),
+			);
+			await paid(limits);
+		}
 		grounded = applyChoices(grounded, ambiguous, cache.choices);
 	}
 	// Stage 4: type verification against P31.
 	const resolved = grounded.filter((m) => m.qid);
-	if (!resolved.length) return [];
+	if (!resolved.length) return (cache.entities = []);
+	inTime(limits);
 	const details = await entityDetails(f, resolved.map((m) => m.qid), lang, ua);
 	if (!details) throw new Error("Wikidata didn't answer, so the entities couldn't be verified. Retrying later.");
-	return verifyEntities(resolved, details);
+	return (cache.entities = verifyEntities(resolved, details));
 }
 
 export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Settings, features: FeatureMap, job: QueueJob, budget: Budget): Promise<"done" | "skipped"> {
@@ -219,8 +291,14 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 	}
 
 	const ref = key;
-	// Outputs from an earlier failed attempt on the same text are reused (the job is saved with them on failure).
-	if (job.cache?.hash !== t.hash) job.cache = { hash: t.hash };
+	// Outputs from an earlier failed attempt on the same text are reused (the job is saved with them on failure), and
+	// for a save's job what AI Enrich paid for this text: also what a click still running at the publish finished
+	// after the job got the rest (it fills only what the job lacks). Never for a forced job: that pays for a fresh one.
+	const drafts = optionalCol<DraftRecord>(ctx, "aiDrafts");
+	const staged = await stagedFor(drafts, key, t);
+	const paidFor = staged && job.source === "save" && !job.force && staged.model === modelSignature(s) ? stagedCache(staged, t.hash) : null;
+	if (job.cache?.hash !== t.hash) job.cache = paidFor ?? { hash: t.hash };
+	else if (paidFor) job.cache = { ...paidFor, ...job.cache };
 	const cache = job.cache;
 	const wantEntities = isOn(features, "ai.entities");
 	const hasDescription = Boolean(item.seo?.description?.trim());
@@ -230,11 +308,13 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 
 	let description = previous?.description ?? "";
 	let descriptionStatus: EntryRecord["descriptionStatus"] = hasDescription && previous?.descriptionStatus !== "applied" ? "none" : (previous?.descriptionStatus ?? "none");
+	// The live description is the one AI Enrich's review filled in (the staged analysis'): applied, as the publish would mark it.
+	if (hasDescription && staged?.description.trim() && item.seo!.description!.trim() === staged.description.trim()) {
+		description = staged.description;
+		descriptionStatus = "applied";
+	}
 	if (wantDescription) {
-		cache.description ??= cleanDescription(
-			await callModel(ctx, options, s, "descriptions", { system: DESCRIBE_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 300 }, ref, budget),
-		);
-		description = cache.description;
+		description = await suggestDescription(ctx, options, s, t, ref, cache, budget);
 		descriptionStatus = description ? "suggested" : "none";
 		if (description && s.descriptionsMode === "apply") {
 			descriptionStatus = (await applyDescription(ctx, collection, id, description, false)) ? "applied" : "none";
@@ -255,8 +335,28 @@ export async function analyzeEntry(ctx: PluginContext, options: AiOptions, s: Se
 		updated: new Date().toISOString(),
 	};
 	await records.put(key, record);
+	// What was staged for this text alone has had its publish, and the entry its analysis: the editor's panel stops saying it waits.
+	if (staged && stagedSpent(staged, t)) await drafts!.delete(key).catch(() => undefined);
 	if (wantEntities && isOn(features, "ai.glossaryLinks")) await afterAnalysis(ctx, options, record, previous, t.textHash, budget);
 	return "done";
+}
+
+/** What AI Enrich staged for this title and text (src/ai/editor-enrich.ts); null when there's none. */
+async function stagedFor(drafts: StorageCollection<DraftRecord> | undefined, key: string, t: EntryText): Promise<DraftRecord | null> {
+	const staged = drafts ? await drafts.get(key).catch(() => null) : null;
+	return staged?.textHashes?.includes(t.textHash) ? staged : null;
+}
+
+/** A meta description for the entry's text (cached with the other stage outputs, so a retry doesn't pay for it twice). */
+export async function suggestDescription(ctx: PluginContext, options: AiOptions, s: Settings, t: EntryText, ref: string, cache: StageCache, budget: Budget, limits?: CallLimits): Promise<string> {
+	if (cache.description === undefined) {
+		inTime(limits);
+		cache.description = cleanDescription(
+			await callModel(ctx, options, s, "descriptions", { system: DESCRIBE_SYSTEM, user: articlePrompt(t.title, t.text), maxTokens: 300, timeoutMs: limits?.timeoutMs }, ref, budget),
+		);
+		await paid(limits);
+	}
+	return cache.description;
 }
 
 /**
@@ -297,7 +397,9 @@ export async function afterAnalysis(ctx: PluginContext, options: AiOptions, reco
 /**
  * Write a meta description into EmDash's SEO panel (a SEO-only update touches
  * nothing else). Unless `replace`, only when the entry still has none, so a
- * description an editor wrote meanwhile is never overwritten.
+ * description an editor wrote meanwhile is never overwritten. The write is the
+ * pack's own (markOwnPublish): its save hook settles nothing AI Enrich staged
+ * or planned for a draft the entry's live revision doesn't have yet.
  */
 export async function applyDescription(ctx: PluginContext, collection: string, id: string, description: string, replace: boolean): Promise<boolean> {
 	const content = ctx.content;
@@ -305,6 +407,7 @@ export async function applyDescription(ctx: PluginContext, collection: string, i
 	const fresh = await content.get(collection, id);
 	if (!fresh || fresh.seo === undefined) return false;
 	if (!replace && fresh.seo.description?.trim()) return false;
+	markOwnPublish(entryKey(collection, id), (fresh as { liveRevisionId?: string | null }).liveRevisionId ?? null);
 	await content.update(collection, id, { seo: { description } });
 	return true;
 }
@@ -363,6 +466,46 @@ async function imageArticleContext(ctx: PluginContext, mediaId: string): Promise
 	}
 }
 
+/**
+ * One image's alt text, title and caption from the vision model. `articleContext`: the entry it's used in
+ * (buildImageContext), read only once the image's bytes are ready. Throws SkipError when the image can't be sent.
+ */
+export async function describeImage(
+	ctx: PluginContext,
+	options: AiOptions,
+	s: Settings,
+	media: { id: string; filename: string; mimeType: string; width?: number | null; height?: number | null },
+	articleContext: string | (() => Promise<string>),
+	ref: string,
+	budget: Budget,
+	limits?: CallLimits,
+): Promise<ImageText> {
+	// The deadline is checked again when the image's turn to be read comes, and once it's read: the reads queue one
+	// behind another, so the check before this call can be long past by then.
+	const read = () => {
+		inTime(limits);
+		return imagePayload(ctx, options, media);
+	};
+	const payload = await (limits?.oneAtATime ? limits.oneAtATime(read) : read());
+	inTime(limits);
+	const raw = await callModel(
+		ctx,
+		options,
+		s,
+		"imageText",
+		{
+			system: IMAGE_SYSTEM,
+			user: imagePrompt({ filename: media.filename, site: await siteName(ctx), locale: ctx.site?.locale || "en", extra: s.imageInstructions, articleContext: typeof articleContext === "string" ? articleContext : await articleContext() }),
+			image: payload,
+			maxTokens: 1024,
+			timeoutMs: limits?.timeoutMs,
+		},
+		ref,
+		budget,
+	);
+	return parseImageText(raw);
+}
+
 export async function analyzeMedia(ctx: PluginContext, options: AiOptions, s: Settings, job: QueueJob, budget: Budget): Promise<"done" | "skipped"> {
 	const id = job.mediaId!;
 	const media = await ctx.media?.get(id);
@@ -380,29 +523,14 @@ export async function analyzeMedia(ctx: PluginContext, options: AiOptions, s: Se
 	const needsCaption = s.imageCaption && !media.caption?.trim();
 	if (!job.force && !s.imageOverwrite && !needsAlt && !needsCaption) return "skipped";
 
-	let payload: { mimeType: string; base64: string };
+	let suggestion: ImageText;
 	try {
-		payload = await imagePayload(ctx, options, media);
+		suggestion = await describeImage(ctx, options, s, media, () => imageArticleContext(ctx, id), `media:${id}`, budget);
 	} catch (error) {
 		if (!(error instanceof SkipError)) throw error;
 		await records.put(id, { ...base, suggestion: null, status: "skipped", written: [], error: error.message });
 		return "skipped";
 	}
-	const raw = await callModel(
-		ctx,
-		options,
-		s,
-		"imageText",
-		{
-			system: IMAGE_SYSTEM,
-			user: imagePrompt({ filename: media.filename, site: await siteName(ctx), locale: ctx.site?.locale || "en", extra: s.imageInstructions, articleContext: await imageArticleContext(ctx, id) }),
-			image: payload,
-			maxTokens: 1024,
-		},
-		`media:${id}`,
-		budget,
-	);
-	const suggestion = parseImageText(raw);
 
 	let written: string[] = [];
 	if (s.imageMode === "apply") written = await applyImageText(ctx, id, suggestion, { caption: s.imageCaption, overwrite: s.imageOverwrite });
@@ -700,8 +828,13 @@ export interface TickResult {
 	busy?: boolean;
 }
 
+/**
+ * A job's model calls at most. Outputs it already has (job.cache: an earlier attempt's, or AI Enrich's) aren't paid
+ * for again. A save drops a queued job's outputs for another text (enqueue's `hash`), so they're of the entry's text;
+ * after a change of model alone the count can be low, and takeCall still holds the day's limit.
+ */
 const callsPerJob = (features: FeatureMap) => (job: QueueJob) =>
-	job.kind === "media" ? 1 : (isOn(features, "ai.entities") ? 2 : 0) + (isOn(features, "ai.descriptions") ? 1 : 0) || 1;
+	job.kind === "media" ? 1 : (isOn(features, "ai.entities") && !job.cache?.entities ? 2 : 0) + (isOn(features, "ai.descriptions") && job.cache?.description === undefined ? 1 : 0) || 1;
 
 /** Process due jobs. `maxJobs` overrides the per-tick setting (the admin's Run now uses 1). */
 export async function tick(ctx: PluginContext, options: AiOptions, opts: { maxJobs?: number; budgetMs: number }): Promise<TickResult> {
@@ -796,6 +929,8 @@ export async function tick(ctx: PluginContext, options: AiOptions, opts: { maxJo
 		// Text hashes for analyses made before 0.51.0 (no model calls), with what the run has left.
 		if (entriesOn) await fillTextHashesTick(ctx, options, budget, started + opts.budgetMs).catch((error) => ctx.log.warn("AI: recording text hashes failed", { error: String(error) }));
 		await pruneUsage(ctx).catch(() => undefined);
+		await pruneDrafts(ctx).catch(() => undefined);
+		await pruneEditorLocks(ctx).catch(() => undefined);
 		return out;
 	});
 	return result ?? { processed: 0, skipped: 0, failed: 0, stoppedForLimit: false, busy: true };

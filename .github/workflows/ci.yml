@@ -33,9 +33,10 @@ jobs:
         # Only valid combinations run: a site's Kumo is the one its EmDash's admin pins (the pack's admin
         # pages share it). EmDash 1.5.0 moved the pin from 2.6.0 to 2.15.0, and 1.6.0 to 2.19.0.
         include:
-          # The 8 sites (update this when they move to a new EmDash).
-          - emdash: "1.5.0"
-            kumo: "2.15.0"
+          # The 8 sites (update this when they move to a new EmDash). The pack needs EmDash 1.6.0 or later
+          # since 0.52.0 (peerDependencies), so this is also its oldest supported EmDash.
+          - emdash: "1.6.0"
+            kumo: "2.19.0"
           - emdash: latest
             kumo: "2.19.0"
     env:

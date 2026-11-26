@@ -18,6 +18,11 @@ const SPARQL = `https://${WIKIDATA_QUERY_HOST}/sparql`;
 const CACHE_MAX = 500;
 const searchCache = new Map<string, Candidate[]>();
 
+/** Tests only: forget every search, as another isolate would have. */
+export function resetSearchCacheForTests(): void {
+	searchCache.clear();
+}
+
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 /** Wikidata asked us to slow down (HTTP 429, or api.php's maxlag): try the job again after `retryAfterMs`. */
@@ -64,13 +69,19 @@ async function getJson(fetcher: Fetch, url: string, userAgent: string, accept: s
 	return body;
 }
 
+/** Wikidata's candidates for a name; [] when it has none or didn't answer. */
 export async function searchCandidates(fetcher: Fetch, name: string, language: string, userAgent: string): Promise<Candidate[]> {
+	return (await findCandidates(fetcher, name, language, userAgent)) ?? [];
+}
+
+/** As searchCandidates, telling "no answer" (null: try again later) from "no results" ([]: Wikidata answered). */
+export async function findCandidates(fetcher: Fetch, name: string, language: string, userAgent: string): Promise<Candidate[] | null> {
 	const key = `${language}|${name.toLowerCase()}`;
 	const hit = searchCache.get(key);
 	if (hit) return hit;
 	const params = { action: "wbsearchentities", format: "json", maxlag: "5", language, uselang: language, type: "item", limit: "5", search: name };
 	const body = await getJson(fetcher, `${API}?${new URLSearchParams(params)}`, userAgent, "application/json");
-	if (body === null) return []; // Don't cache failures.
+	if (body === null) return null; // Don't cache failures.
 	const candidates = parseSearch(body);
 	if (searchCache.size >= CACHE_MAX) searchCache.delete(searchCache.keys().next().value as string);
 	searchCache.set(key, candidates);

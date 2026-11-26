@@ -537,3 +537,36 @@ test("shouldLink and withRetry", () => {
 	assert.equal(m.retryAt, undefined, "it stops after the last try");
 	assert.equal(linker.withRetry({ ...memo, retryAt: 5, tries: 2 }, "linked").retryAt, undefined);
 });
+
+test("planEntryLinks (AI Enrich's plan) makes what linkEntry publishes, and only fixes possessives with only", async () => {
+	glossary.resetGlossaryForTests();
+	const site = fakeSite();
+	const before = structuredClone(site.item().data.content) as unknown[];
+	assert.equal((await linker.linkEntry(site.ctx, {}, "posts", "E1")).status, "linked");
+	const published = site.item().data.content as unknown[];
+	const entities = [ent("Q911595", "StumbleUpon", { wikipedia: "https://en.wikipedia.org/wiki/StumbleUpon" }), ent("Q95", "Google")];
+	const index: Record<string, { slug: string; names: string[] }> = { Q911595: { slug: "stumbleupon", names: ["StumbleUpon"] }, Q95: { slug: "google", names: ["Google"] } };
+	const config = linker.linkConfig({}, "https://coywolf.com");
+	const plan = linker.planEntryLinks({ content: before }, ["content"], entities, (qid) => index[qid] ?? null, config, []);
+	assert.deepEqual(linksOf(plan.patch.content as unknown[]), linksOf(published));
+	assert.deepEqual(plan.terms.map((c) => [c.action, c.slug]), [["switch", "stumbleupon"], ["add", "google"]]);
+	assert.deepEqual(plan.termFields, ["content", "content"]);
+	assert.deepEqual([...plan.handled], []);
+	// Already handled (remembered, or linked already): nothing planned for it.
+	const again = linker.planEntryLinks({ content: published }, ["content"], entities, (qid) => index[qid] ?? null, config, ["Q1"]);
+	assert.deepEqual(again.terms, []);
+	assert.deepEqual([...again.handled].sort(), ["Q1", "Q911595", "Q95"]);
+	const only = linker.planEntryLinks({ content: before }, ["content"], entities, (qid) => index[qid] ?? null, config, [], { only: true });
+	assert.deepEqual(only.patch, {});
+});
+
+test("settlePlanned: applied (a planned link there, or none planned) counts the plan as handled; otherwise only planned goes", () => {
+	const memo = { collection: "posts", entryId: "E1", linked: ["Q7"], planned: { qids: ["Q1", "Q95"], slugs: ["fastmail", "google"], at: 1 }, updated: "" };
+	const applied = linker.settlePlanned(memo, new Set(["google"]), { textHash: "th", now: 1000 });
+	assert.deepEqual(applied, { collection: "posts", entryId: "E1", linked: ["Q1", "Q7", "Q95"], textHash: "th", retryAt: 1000 + linker.LINK_CHECK_MS, tries: 0, updated: "" });
+	assert.deepEqual(linker.settlePlanned(memo, new Set(), { textHash: "th", now: 1000 }).linked, ["Q7"], "not applied: nothing more counts as linked");
+	assert.deepEqual(linker.settlePlanned({ ...memo, planned: { qids: ["Q1"], slugs: [], at: 1 } }, new Set(), null), { collection: "posts", entryId: "E1", linked: ["Q1", "Q7"], updated: "" }, "nothing to add: applied; no check without a current analysis");
+	assert.equal(linker.settlePlanned({ ...memo, pendingNew: true }, new Set(["google"]), { textHash: "th", now: 0 }).pendingNew, undefined, "the text is recorded: an ordinary memo");
+	const { planned: _p, ...plain } = memo;
+	assert.equal(linker.settlePlanned(plain, new Set(), null), plain);
+});

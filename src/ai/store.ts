@@ -11,11 +11,13 @@
  *               what Remove links to deleted terms tracks ("gone"; src/ai/glossary-gone.ts)
  *   aiLinks   — glossary.io links per entry: QIDs linked, text hash, links to
  *               remove, retries
+ *   aiDrafts  — analyses made by the editor's AI Enrich button (src/ai/editor-enrich.ts),
+ *               waiting for the entry's publish (kept 30 days)
  */
 import type { PluginContext, StorageCollection } from "emdash";
 
 import { workerEnv } from "../shared.js";
-import { type Entity, type ImageText, type QueueJob, dayKey, mergeJob, queueId } from "./logic.js";
+import { type Entity, type ImageText, type QueueJob, type StageCache, dayKey, mergeJob, queueId } from "./logic.js";
 import { PROVIDERS, type ProviderConfig, type ProviderId } from "./providers.js";
 
 export interface AiOptions {
@@ -52,6 +54,8 @@ export const STORAGE = {
 	aiGlossary: { indexes: [] as string[] },
 	/** glossary.io links: what each entry's links remember (LinkMemo in src/ai/glossary-linker.ts). Kept when an entry is trashed. */
 	aiLinks: { indexes: ["retryAt"] },
+	/** AI Enrich in the editor: an entry's analysis of its unpublished text (DraftRecord), until its publish (src/ai/pack.ts). */
+	aiDrafts: { indexes: ["updated"] },
 };
 
 export const SETTINGS_SCHEMA = {
@@ -198,6 +202,54 @@ export interface EntryRecord {
 	updated: string;
 }
 
+/**
+ * An analysis the editor's AI Enrich button made (aiDrafts, id "<collection>:<id>"). Never in aiEntries: the live
+ * page's JSON-LD keeps the live entry's entities until the publish whose title and text are one of `textHashes`
+ * promotes it there (src/ai/pack.ts). `partial`: a click that stopped early, with the outputs it paid for in `cache`.
+ */
+export interface DraftRecord {
+	collection: string;
+	entryId: string;
+	title: string;
+	/** EntryText.hash of the text the patch makes. */
+	hash: string;
+	/** EntryText.textHash before and after the patch (captions change the text; links and alt text don't). */
+	textHashes: string[];
+	entities: Entity[];
+	description: string;
+	/** Whether the click wrote (or didn't need) a description: Meta descriptions was on. */
+	described: boolean;
+	partial?: true;
+	cache?: StageCache;
+	/** The provider and text model that made it (modelSignature in src/ai/worker.ts): under another it's never reused. */
+	model?: string;
+	updated: string;
+}
+
+/**
+ * What a staged analysis paid for, as an entry job's stage cache for `hash` (the published text's), so the job pays
+ * only for what's missing: a complete one's entities and description (when it wrote or didn't need one), a partial
+ * one's outputs so far. The captions its patch added don't change the entities.
+ */
+export function stagedCache(staged: DraftRecord, hash: string): StageCache {
+	const paid: Partial<StageCache> = staged.cache ?? {};
+	return {
+		hash,
+		...(paid.mentions ? { mentions: paid.mentions } : {}),
+		...(paid.choices ? { choices: paid.choices } : {}),
+		...(!staged.partial ? { entities: staged.entities } : paid.entities ? { entities: paid.entities } : {}),
+		...(staged.described ? { description: staged.description } : paid.description !== undefined ? { description: paid.description } : {}),
+	};
+}
+
+/**
+ * Whether a staged analysis waits for no publish any more, now that the entry's analysis is of this published text:
+ * it's of this text alone, or this is the text its patch made. One made for the live text and a patch not published
+ * yet (captions) still waits for that.
+ */
+export const stagedSpent = (staged: DraftRecord, t: { hash: string; textHash: string }): boolean =>
+	Array.isArray(staged.textHashes) && (staged.textHashes.every((h) => h === t.textHash) || (!staged.partial && staged.hash === t.hash));
+
 export interface MediaRecord {
 	mediaId: string;
 	filename: string;
@@ -225,15 +277,26 @@ export function col<T>(ctx: Pick<PluginContext, "storage">, name: keyof typeof S
 	return (ctx.storage as Record<string, StorageCollection>)[name] as StorageCollection<T>;
 }
 
+/** A storage collection that may not be there (a host that hasn't synced a newly declared one yet, a test's partial storage). */
+export function optionalCol<T>(ctx: Pick<PluginContext, "storage">, name: keyof typeof STORAGE): StorageCollection<T> | undefined {
+	return (ctx.storage as Record<string, StorageCollection | undefined>)[name] as StorageCollection<T> | undefined;
+}
+
 export const entryKey = (collection: string, id: string) => `${collection}:${id}`;
 
 // ── Queue ────────────────────────────────────────────────────────
 
-export async function enqueue(ctx: Pick<PluginContext, "storage">, job: Omit<QueueJob, "attempts" | "enqueuedAt"> & Partial<QueueJob>): Promise<void> {
+/**
+ * Queue a job, merged into the one already queued for it (mergeJob). `hash` (a save's: the entry's EntryText.hash
+ * now): outputs the queued job paid for another text are dropped, so the scheduled run counts its calls in full.
+ */
+export async function enqueue(ctx: Pick<PluginContext, "storage">, job: Omit<QueueJob, "attempts" | "enqueuedAt"> & Partial<QueueJob>, hash?: string): Promise<void> {
 	const queue = col<QueueJob>(ctx, "aiQueue");
 	const id = queueId(job);
 	const next: QueueJob = { attempts: 0, enqueuedAt: Date.now(), ...job };
-	await queue.put(id, mergeJob(await queue.get(id), next));
+	const queued = await queue.get(id);
+	if (queued?.cache && hash !== undefined && queued.cache.hash !== hash) delete queued.cache;
+	await queue.put(id, mergeJob(queued, next));
 }
 
 export async function queueCounts(ctx: Pick<PluginContext, "storage">) {
@@ -250,10 +313,14 @@ export async function callsToday(ctx: Pick<PluginContext, "kv">): Promise<number
 	return (await ctx.kv.get<number>(callsKey())) ?? 0;
 }
 
-/** Count one model call against today's cap. Returns false (and counts nothing) when the cap is reached. */
+/**
+ * Count one model call against today's cap. Returns false (and counts nothing) when the cap is reached. Each lost
+ * try means another caller counted one: the tries outnumber the callers there can be at once (AI Enrich's five and
+ * a scheduled run's one), so losing them all never reads as the cap.
+ */
 export async function takeCall(ctx: Pick<PluginContext, "kv">, max: number): Promise<boolean> {
 	const key = callsKey();
-	for (let i = 0; i < 5; i++) {
+	for (let i = 0; i < 12; i++) {
 		const current = await ctx.kv.getVersioned<number>(key);
 		const used = current?.value ?? 0;
 		if (used >= max) return false;
@@ -289,23 +356,31 @@ export async function pruneUsage(ctx: Pick<PluginContext, "storage">): Promise<v
 	if (old.items.length) await usage.deleteMany(old.items.map((i) => i.id));
 }
 
+/** Delete AI Enrich analyses whose entry wasn't published within 30 days, a page at a time. */
+export async function pruneDrafts(ctx: Pick<PluginContext, "storage">): Promise<void> {
+	const cutoff = new Date(Date.now() - 30 * 86_400_000).toISOString();
+	const drafts = col<DraftRecord>(ctx, "aiDrafts");
+	const old = await drafts.query({ where: { updated: { lt: cutoff } }, limit: 200 });
+	if (old.items.length) await drafts.deleteMany(old.items.map((i) => i.id));
+}
+
 // ── Lock ─────────────────────────────────────────────────────────
 
 const LOCK_KEY = "state:ai:lock";
 
-/** A soft lock so the cron tick and "Run now" don't process the queue concurrently. */
-export async function withLock<T>(ctx: Pick<PluginContext, "kv">, ttlMs: number, fn: () => Promise<T>): Promise<T | null> {
+/** A soft lock so the cron tick and "Run now" don't process the queue concurrently. `key`: another lock (AI Enrich's per entry). */
+export async function withLock<T>(ctx: Pick<PluginContext, "kv">, ttlMs: number, fn: () => Promise<T>, key = LOCK_KEY): Promise<T | null> {
 	const now = Date.now();
-	const current = await ctx.kv.getVersioned<{ until: number; token: string }>(LOCK_KEY);
+	const current = await ctx.kv.getVersioned<{ until: number; token: string }>(key);
 	if (current?.value && current.value.until > now) return null;
 	const token = crypto.randomUUID();
-	const taken = await ctx.kv.compareAndSet(LOCK_KEY, current?.revision ?? null, { until: now + ttlMs, token });
+	const taken = await ctx.kv.compareAndSet(key, current?.revision ?? null, { until: now + ttlMs, token });
 	if (!taken.applied) return null;
 	try {
 		return await fn();
 	} finally {
-		const mine = await ctx.kv.getVersioned<{ token: string }>(LOCK_KEY);
-		if (mine?.value?.token === token) await ctx.kv.compareAndDelete(LOCK_KEY, mine.revision).catch(() => undefined);
+		const mine = await ctx.kv.getVersioned<{ token: string }>(key);
+		if (mine?.value?.token === token) await ctx.kv.compareAndDelete(key, mine.revision).catch(() => undefined);
 	}
 }
 
@@ -344,3 +419,20 @@ export interface TextHashFillState {
 export const TEXT_HASHES_KEY = "state:ai:textHashes";
 /** Epoch ms until which Wikidata asked to slow down (shared by every entry job, so one Retry-After throttles them all). */
 export const WIKIDATA_BUSY_KEY = "state:ai:wikidataBusyUntil";
+/** AI Enrich's lock for one entry, so two clicks don't pay for the same work. */
+const EDITOR_LOCK_PREFIX = "state:ai:editor:";
+export const editorLockKey = (collection: string, id: string) => `${EDITOR_LOCK_PREFIX}${collection}:${id}`;
+
+/**
+ * Delete the locks of AI Enrich clicks that never released theirs (a cancelled request), once they're an hour past
+ * their time. Each is read again and deleted only as read: a click that took it meanwhile keeps its lock.
+ */
+export async function pruneEditorLocks(ctx: Pick<PluginContext, "kv">): Promise<void> {
+	const cutoff = Date.now() - 3_600_000;
+	const stale = (value: unknown) => ((value as { until?: number } | null)?.until ?? 0) < cutoff;
+	for (const { key, value } of await ctx.kv.list(EDITOR_LOCK_PREFIX)) {
+		if (!stale(value)) continue;
+		const current = await ctx.kv.getVersioned<{ until?: number }>(key);
+		if (current && stale(current.value)) await ctx.kv.compareAndDelete(key, current.revision);
+	}
+}

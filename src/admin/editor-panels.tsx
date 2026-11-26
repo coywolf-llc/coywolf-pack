@@ -7,7 +7,9 @@
  *   published, Slug changes off).
  * - Schema & Social: the entry's page and article types (its own or its
  *   collection's), main subject and custom markup, with a link to edit them.
- * - AI suggestions: the entry's AI description and entities (AI Enrichment).
+ * - AI suggestions: the entry's AI description and entities (AI Enrichment), an
+ *   analysis AI Enrich made in the editor that waits for the publish, and the
+ *   AI Enrich button (src/admin/enrich.tsx, EmDash 1.6+).
  * - Link status: the entry's links, worst first (Link Manager).
  * - Buttondown: the entry's email draft (its state, warnings and link), with
  *   Create draft now and Refresh draft from post. Only in collections a
@@ -18,9 +20,11 @@
  *
  * Each shows only while its module is on (src/admin/extensions.ts; the Child
  * Pages ones only in collections with the Parent page field) and to admins
- * only (the routes need plugins:manage). They never change the entry: changes are
- * made on the module pages (the Buttondown panel's buttons change only the email draft
- * in Buttondown), so nothing here races the editor's own save.
+ * only (the routes need plugins:manage). Only the AI panel changes the entry,
+ * and only through EmDash's editorDraft.patch() after a review (AI Enrich): the
+ * change goes into the editor's form, which saves it as usual, so it never
+ * races the editor's own save. Other changes are made on the module pages (the
+ * Buttondown panel's buttons change only the email draft in Buttondown).
  */
 import { Badge, Button } from "@cloudflare/kumo";
 import { ArrowClockwise, ArrowSquareOut, ArrowsClockwise, Copy, EnvelopeSimple } from "@phosphor-icons/react";
@@ -29,6 +33,8 @@ import * as React from "react";
 import { PACK_API, apiPost, errorText } from "./api.js";
 import { type ButtondownEntry, STATE_BADGE, type RecordView, badgeLabel, buttondownEntry, buttondownPanelVisible, timeAgo } from "./buttondown-core.js";
 import { useConfirm } from "./confirm-dialog.js";
+import { EnrichButton } from "./enrich.js";
+import { type EditorDraft, type EnrichInfo, runKey, runState } from "./enrich-core.js";
 import { EDITOR_PANELS, LIST_COLUMNS, extensionShows } from "./extensions.js";
 import { AdminLink, PackLink, WarningBadge } from "./page.js";
 import { packPagePath } from "./router.js";
@@ -38,6 +44,8 @@ interface PanelProps {
 	collection: string;
 	entry: { id: string; updatedAt?: string; slug?: string | null };
 	locale?: string;
+	/** The editor's unsaved values (EmDash 1.6+; absent on older hosts, where AI Enrich doesn't show). */
+	editorDraft?: EditorDraft;
 }
 
 /** What EmDash hands a column cell (its ContentListColumnCellContext). */
@@ -149,13 +157,46 @@ interface AiEntry {
 		descriptionStatus: "none" | "suggested" | "applied" | "dismissed";
 		updated: string;
 	} | null;
+	/** AI Enrich's analysis of the unpublished text, waiting for the publish (since 0.52.0). */
+	staged?: { entities: Array<{ name: string; type: string; primary: boolean }>; description: string; updated: string } | null;
 	covered: boolean;
 	features: { entities: boolean; descriptions: boolean };
+	/** The AI Enrich button (since 0.52.0). */
+	enrich?: EnrichInfo;
+}
+
+function EntityBadges(props: { entities: Array<{ name: string; type: string; primary: boolean }> }) {
+	if (!props.entities.length) return <Muted>None found.</Muted>;
+	return (
+		<ul role="list" className="flex flex-wrap gap-1.5">
+			{props.entities.slice(0, 12).map((e) => (
+				<li key={`${e.type}:${e.name}`}>
+					<Badge variant={e.primary ? "primary" : "outline"}>{e.name}</Badge>
+				</li>
+			))}
+		</ul>
+	);
 }
 
 export function AiPanel(props: PanelProps) {
 	const { collection, entry } = props;
 	const { data, error, loading, reload } = useEntryData(() => aiPost<AiEntry>("entry", { collection, id: entry.id }, "Couldn't read the AI suggestions"), [collection, entry.id, entry.updatedAt]);
+	// AI Enrich: with EmDash's draft, when a click could do something, or while this entry has a run (it outlives the
+	// panel, so a review shows again when the panel mounts, even before the panel's data is back).
+	const draft = props.editorDraft;
+	const showEnrich = Boolean(draft) && (Boolean(data?.enrich?.available) || runState(runKey(collection, entry.id)).phase !== "idle");
+	const enrich = showEnrich && draft ? <EnrichButton collection={collection} entryId={entry.id} draft={draft} info={data?.enrich} updatedAt={entry.updatedAt} onApplied={reload} /> : null;
+	// One wrapper with or without the button, so the suggestions below keep their state when it appears.
+	return (
+		<div className="space-y-3">
+			{enrich}
+			<AiSuggestions {...props} data={data} error={error} loading={loading} reload={reload} />
+		</div>
+	);
+}
+
+function AiSuggestions(props: PanelProps & { data?: AiEntry; error?: string; loading: boolean; reload: () => void }) {
+	const { collection, entry, data, error, loading, reload } = props;
 	const [pending, setPending] = React.useState<"reanalyze" | "dismiss">();
 	const [notice, setNotice] = React.useState<string>();
 	const [copied, setCopied] = React.useState(false);
@@ -176,6 +217,7 @@ export function AiPanel(props: PanelProps) {
 		);
 	}
 	const record = data.record;
+	const staged = data.staged ?? null;
 	const run = async (kind: "reanalyze" | "dismiss") => {
 		setPending(kind);
 		setNotice(undefined);
@@ -205,8 +247,14 @@ export function AiPanel(props: PanelProps) {
 	};
 	return (
 		<div className="space-y-3">
+			{staged && (
+				<div className="space-y-1.5">
+					<Muted>Analyzed in the editor, waiting for publish.</Muted>
+					{data.features.entities && <EntityBadges entities={staged.entities} />}
+				</div>
+			)}
 			{!record ? (
-				<Muted>Not analyzed yet. Entries are analyzed a few minutes after they're saved.</Muted>
+				!staged && <Muted>Not analyzed yet. Entries are analyzed a few minutes after they're saved.</Muted>
 			) : record.status === "error" ? (
 				<Muted>The last analysis failed: {record.error || "unknown error"}</Muted>
 			) : (
@@ -236,17 +284,7 @@ export function AiPanel(props: PanelProps) {
 					{data.features.entities && (
 						<div className="space-y-1.5">
 							<span className="text-xs text-kumo-subtle">Entities</span>
-							{record.entities.length ? (
-								<ul className="flex flex-wrap gap-1.5">
-									{record.entities.slice(0, 12).map((e) => (
-										<li key={`${e.type}:${e.name}`}>
-											<Badge variant={e.primary ? "primary" : "outline"}>{e.name}</Badge>
-										</li>
-									))}
-								</ul>
-							) : (
-								<Muted>None found.</Muted>
-							)}
+							<EntityBadges entities={record.entities} />
 						</div>
 					)}
 				</>

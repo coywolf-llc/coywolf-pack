@@ -24,6 +24,8 @@ export interface ChatRequest {
 	user: string;
 	image?: { mimeType: string; base64: string };
 	maxTokens: number;
+	/** Give up after this long (default 90 s): the editor's AI Enrich button waits for its calls. */
+	timeoutMs?: number;
 }
 
 export interface ChatResult {
@@ -72,14 +74,14 @@ async function httpError(response: Response, key: string, label: string): Promis
 	return new ProviderError(`${label} returned HTTP ${response.status}${detail ? `: ${redact(detail, key)}` : ""}`, response.status);
 }
 
-async function postJson(cfg: ProviderConfig, url: string, headers: Record<string, string>, body: unknown, label: string): Promise<unknown> {
+async function postJson(cfg: ProviderConfig, url: string, headers: Record<string, string>, body: unknown, label: string, timeoutMs = TIMEOUT_MS): Promise<unknown> {
 	let response: Response;
 	try {
 		response = await cfg.fetch(url, {
 			method: "POST",
 			headers: { "content-type": "application/json", ...headers },
 			body: JSON.stringify(body),
-			signal: AbortSignal.timeout(TIMEOUT_MS),
+			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch (error) {
 		throw new ProviderError(`${label} request failed: ${redact(String((error as Error)?.message ?? error), cfg.apiKey)}`);
@@ -97,16 +99,21 @@ async function workersAi(cfg: ProviderConfig, req: ChatRequest): Promise<ChatRes
 			]
 		: req.user;
 	let result: unknown;
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		result = await cfg.binding.run(cfg.model, {
+		const run = cfg.binding.run(cfg.model, {
 			messages: [
 				{ role: "system", content: req.system },
 				{ role: "user", content },
 			],
 			max_tokens: req.maxTokens,
 		});
+		// The binding takes no signal: a request's own timeout (AI Enrich's) stops waiting instead.
+		result = req.timeoutMs ? await Promise.race([run, new Promise((_, reject) => (timer = setTimeout(() => reject(new Error("timed out")), req.timeoutMs)))]) : await run;
 	} catch (error) {
 		throw new ProviderError(`Workers AI: ${redact(String((error as Error)?.message ?? error), "")}`);
+	} finally {
+		clearTimeout(timer);
 	}
 	const r = result as { response?: unknown; usage?: { prompt_tokens?: number; completion_tokens?: number }; choices?: Array<{ message?: { content?: string } }> };
 	const raw = r.response ?? r.choices?.[0]?.message?.content ?? "";
@@ -127,6 +134,7 @@ async function anthropic(cfg: ProviderConfig, req: ChatRequest): Promise<ChatRes
 		{ "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" },
 		{ model: cfg.model, max_tokens: req.maxTokens, system: req.system, messages: [{ role: "user", content }] },
 		"Anthropic",
+		req.timeoutMs,
 	)) as { content?: Array<{ type?: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } };
 	return {
 		text: (data.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join(""),
@@ -153,12 +161,12 @@ async function openai(cfg: ProviderConfig, req: ChatRequest): Promise<ChatResult
 	const headers = { authorization: `Bearer ${cfg.apiKey}` };
 	let data: unknown;
 	try {
-		data = await postJson(cfg, "https://api.openai.com/v1/chat/completions", headers, body, "OpenAI");
+		data = await postJson(cfg, "https://api.openai.com/v1/chat/completions", headers, body, "OpenAI", req.timeoutMs);
 	} catch (error) {
 		// Some models reject max_completion_tokens; retry once with the legacy field.
 		if (!(error instanceof ProviderError) || error.status !== 400 || !error.message.includes("max_completion_tokens")) throw error;
 		const { max_completion_tokens, ...rest } = body;
-		data = await postJson(cfg, "https://api.openai.com/v1/chat/completions", headers, { ...rest, max_tokens: max_completion_tokens }, "OpenAI");
+		data = await postJson(cfg, "https://api.openai.com/v1/chat/completions", headers, { ...rest, max_tokens: max_completion_tokens }, "OpenAI", req.timeoutMs);
 	}
 	const d = data as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } };
 	return { text: d.choices?.[0]?.message?.content ?? "", inputTokens: d.usage?.prompt_tokens ?? 0, outputTokens: d.usage?.completion_tokens ?? 0 };
@@ -179,6 +187,7 @@ async function gemini(cfg: ProviderConfig, req: ChatRequest): Promise<ChatResult
 			generationConfig: { maxOutputTokens: Math.max(4096, req.maxTokens) },
 		},
 		"Gemini",
+		req.timeoutMs,
 	)) as {
 		candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
 		usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
