@@ -15,6 +15,8 @@
  * skips the edge cache) write as fast as it can send.
  */
 
+import { errorSummary } from "../core/error-summary.js";
+
 /** The slice of D1 the counter uses (stubbed in tests). */
 export interface CountDb {
 	prepare(sql: string): { bind(...values: unknown[]): unknown };
@@ -44,7 +46,7 @@ export function createBatchedCounter(statement: CountStatement, options: { delay
 			try {
 				await write(db);
 			} catch (error) {
-				console.error(`coywolf-pack: could not record ${options.label}`, error);
+				console.error(`coywolf-pack: could not record ${options.label}`, errorSummary(error), error);
 			}
 		}
 		if (flushing === self.flush) flushing = null; // Same tick as the empty check above.

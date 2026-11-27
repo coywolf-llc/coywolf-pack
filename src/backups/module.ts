@@ -39,6 +39,7 @@ import {
 } from "./retention.js";
 import { FILE, type Manifest, STAMP, listBackups, makeStamp, mirrorBucket, mirrorMedia, newestStamp, pruneBackups, stampToDate, writeDumpStream, writeManifest, writeMirrorCounts } from "./store.js";
 import { readOnlyRoute } from "../core/routes.js";
+import { errorSummary } from "../core/error-summary.js";
 
 export interface BackupsOptions {
 	/** D1 binding of the site database. Default "DB". */
@@ -168,18 +169,18 @@ export function backupsModule(options: BackupsOptions) {
 		try {
 			result = await record({ ...result, media: await mirrorMedia(media, backups, stamp) });
 		} catch (error) {
-			console.error("coywolf backups: media mirror failed; the database backup was saved", error);
+			console.error("coywolf backups: media mirror failed; the database backup was saved", errorSummary(error), error);
 		}
 		if (uploads) {
 			try {
 				result = await record({ ...result, uploads: await mirrorBucket(uploads, backups, stamp, "uploads") });
 			} catch (error) {
-				console.error("coywolf backups: form uploads mirror failed; the database backup was saved", error);
+				console.error("coywolf backups: form uploads mirror failed; the database backup was saved", errorSummary(error), error);
 			}
 		}
 		if (locked && (result.media || result.uploads)) {
 			await writeMirrorCounts(backups, stamp, { media: result.media, uploads: result.uploads }).catch((error: unknown) =>
-				console.error("coywolf backups: couldn't record the mirror counts; the backup was saved", error),
+				console.error("coywolf backups: couldn't record the mirror counts; the backup was saved", errorSummary(error), error),
 			);
 		}
 		return result;

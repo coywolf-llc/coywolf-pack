@@ -27,6 +27,7 @@
  */
 import { getPublicPluginApiRouteHandler } from "emdash/plugin-utils";
 
+import { errorSummary } from "../../core/error-summary.js";
 import { PLUGIN_ID, siteFeatureOn } from "../../core/features.js";
 import { noteReadFailure, routeFailed } from "../../core/read-failures.js";
 import {
@@ -87,7 +88,7 @@ if (on && uid) {
 			// A server error (a read that failed): the player renders with defaults, so the page isn't edge-cached.
 			if (routeFailed(res)) noteReadFailure("video embed data");
 		} catch (error) {
-			console.warn("coywolf-pack: video embed data failed", error);
+			console.warn("coywolf-pack: video embed data failed", errorSummary(error), error);
 			noteReadFailure("video embed data");
 		}
 	}

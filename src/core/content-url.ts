@@ -46,6 +46,7 @@
 import type { PluginContext } from "emdash";
 
 import { noteReadFailure } from "./read-failures.js";
+import { errorSummary } from "./error-summary.js";
 
 // ── Pattern interpolation (pure) ─────────────────────────────────
 
@@ -383,7 +384,7 @@ let storedParents: StoredParentsProvider | null = null;
 function parentsFailed<T>(error: unknown, strict: boolean | undefined, fallback: () => T): T {
 	if (!(error instanceof ParentPagesUnreadable)) {
 		noteReadFailure("child pages: parent pages");
-		console.error(`coywolf-pack: Child Pages: could not read the parent pages; ${strict ? "nothing is written from this read" : "using the last ones read (or none) for this render"}`, error);
+		console.error(`coywolf-pack: Child Pages: could not read the parent pages; ${strict ? "nothing is written from this read" : "using the last ones read (or none) for this render"}`, errorSummary(error), error);
 	}
 	if (strict) throw error instanceof ParentPagesUnreadable ? error : new ParentPagesUnreadable(error);
 	return fallback();

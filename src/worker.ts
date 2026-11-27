@@ -105,6 +105,7 @@ import {
 } from "./core/tracking-params.js";
 
 import { purgeDirect } from "./pageCache/lib.js";
+import { errorSummary } from "./core/error-summary.js";
 
 export { TRACKING_PARAMS, TRACKING_PREFIXES };
 export type { TrackingOptions };
@@ -232,7 +233,7 @@ export function stripTrackingParams<H extends object>(handler: H & { fetch?: unk
 		try {
 			response = await self.fetch(new Request(clean.url.href, request));
 		} catch (error) {
-			console.error("coywolf-pack: calling the Worker without its tracking parameters failed; serving the request as it came", error);
+			console.error("coywolf-pack: calling the Worker without its tracking parameters failed; serving the request as it came", errorSummary(error), error);
 			return inner.call(handler, request, env, ctx);
 		}
 		if (response.status >= 500) {

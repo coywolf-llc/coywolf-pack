@@ -13,6 +13,7 @@
  * default entrypoint, where they work (src/core/scheduled-purge.ts).
  */
 import { purgeThroughEntrypoint, scheduledRun } from "../core/scheduled-purge.js";
+import { errorSummary } from "../core/error-summary.js";
 
 /** Option row holding the Worker version whose pages are in the cache. */
 export const VERSION_OPTION = "plugin:coywolf-pack:pageCache:version";
@@ -230,7 +231,7 @@ export async function purgeDirect(scope: PurgeScope = { purgeEverything: true })
 			disposeRpcResult(result);
 		}
 	} catch (error) {
-		console.error("coywolf-pack: page cache purge failed", error);
+		console.error("coywolf-pack: page cache purge failed", errorSummary(error), error);
 		return "refused";
 	}
 }

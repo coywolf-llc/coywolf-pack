@@ -29,6 +29,7 @@ import { createBatchedCounter } from "../files/counts.js";
 import { REDIRECTS_TAG } from "../pageCache/lib.js";
 import { afterResponse } from "../shared.js";
 import { type CompiledRules, compile, encodeLocation, findExactRule, hitStatement, loadExactSources, loadPatternRules, match, sourceKey } from "./rules.js";
+import { errorSummary } from "../core/error-summary.js";
 
 export interface CoywolfRedirectsOptions {
 	/** D1 binding of the site database. Default "DB". */
@@ -90,7 +91,7 @@ export async function noteRedirectsChanged(db: D1Database): Promise<void> {
 		rememberSiteOption(REDIRECTS_VERSION_OPTION, version);
 	} catch (error) {
 		// The change itself is saved; other isolates then see it when their index expires (cacheSeconds).
-		console.error("coywolf-pack: could not record the redirects version", error);
+		console.error("coywolf-pack: could not record the redirects version", errorSummary(error), error);
 	}
 }
 
@@ -192,7 +193,7 @@ export async function serveRedirect(
 	try {
 		compiled = await rulesFor(url, db, ttlOf(options));
 	} catch (error) {
-		console.error("coywolf redirects: could not load rules", error);
+		console.error("coywolf redirects: could not load rules", errorSummary(error), error);
 		// The page this URL renders instead of its redirect mustn't be edge-cached.
 		noteReadFailure("redirect rules");
 		return undefined;

@@ -39,6 +39,7 @@ import {
 	generateVariants,
 	ineligibleReason,
 } from "./variants.js";
+import { errorSummary } from "../core/error-summary.js";
 
 export const VARIANTS_COLLECTION = "imageVariants";
 export const VARIANTS_STATE_OPTION = `plugin:${PLUGIN_ID}:images:variantsState`;
@@ -168,7 +169,7 @@ export async function processMedia(
 		await writeVariantRecord(deps.db, row.id, doc);
 		return "done";
 	} catch (error) {
-		console.error(`coywolf-pack images: couldn't make stored sizes for ${row.storage_key}`, error);
+		console.error(`coywolf-pack images: couldn't make stored sizes for ${row.storage_key}`, errorSummary(error), error);
 		onError?.(error);
 		return "failed";
 	}
@@ -343,7 +344,7 @@ export async function backfillStep(deps: BackfillDeps, options: { budgetMs: numb
 			);
 			state = after ?? state;
 			if (after && after === finishing.state && state.done > 0 && deps.onDone) {
-				await deps.onDone(state).catch((error) => console.error("coywolf-pack images: after the run finished", error));
+				await deps.onDone(state).catch((error) => console.error("coywolf-pack images: after the run finished", errorSummary(error), error));
 			}
 			break;
 		}

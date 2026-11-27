@@ -1,3 +1,5 @@
+import { errorSummary } from "../core/error-summary.js";
+
 /**
  * Backup storage layout (shared with .github/workflows/backup.yml):
  *
@@ -11,7 +13,6 @@
  * The backup bucket must stay private: uploads/ holds files people sent
  * through forms, which aren't public on the site.
  */
-
 export interface Manifest {
 	stamp: string;
 	database?: string;
@@ -450,7 +451,7 @@ export async function pruneBackups(bucket: R2Bucket, days: number): Promise<numb
 					if (prefix === "d1/") pruned++;
 				} catch (error) {
 					refused++;
-					if (refused === 1) console.warn(`coywolf backups: couldn't delete ${dir} (a bucket lock may still keep it); trying again tomorrow`, error);
+					if (refused === 1) console.warn(`coywolf backups: couldn't delete ${dir} (a bucket lock may still keep it); trying again tomorrow`, errorSummary(error), error);
 				}
 			}
 			cursor = page.truncated ? page.cursor : undefined;

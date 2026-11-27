@@ -56,6 +56,7 @@
  * that's claimed and never recorded counts as failed after BATCH_STALE_MS.
  */
 import { DEADLINES, DeadlineError, withDeadline } from "../core/single-flight.js";
+import { errorSummary } from "../core/error-summary.js";
 
 /** Option rows: the switch, and the job's progress (its URLs are in WARM_QUEUE_PREFIX rows). */
 export const WARM_SETTING = "pageCacheWarm";
@@ -467,7 +468,7 @@ async function queueSlice(db: D1Database, generation: string, start: number, end
 export async function startWarm(db: D1Database, reason: string): Promise<WarmState> {
 	const state = newWarmState(reason);
 	await writeWarmState(db, state);
-	await deleteQueue(db, { keep: state.generation }).catch((error) => console.error("coywolf-pack: could not clear old warm queues", error));
+	await deleteQueue(db, { keep: state.generation }).catch((error) => console.error("coywolf-pack: could not clear old warm queues", errorSummary(error), error));
 	return state;
 }
 
@@ -613,7 +614,7 @@ export async function claimWork(db: D1Database, batchSize: number, now = Date.no
 		// Or a day passed since the last run: pages Cloudflare dropped from its cache are built again.
 		const fresh = newWarmState(due, new Date(now));
 		if (!(await swap(db, raw, fresh))) return null;
-		await deleteQueue(db, { keep: fresh.generation }).catch((error) => console.error("coywolf-pack: could not clear old warm queues", error));
+		await deleteQueue(db, { keep: fresh.generation }).catch((error) => console.error("coywolf-pack: could not clear old warm queues", errorSummary(error), error));
 		raw = JSON.stringify(fresh);
 		state = fresh;
 	}
@@ -647,7 +648,7 @@ async function claimRevisit(db: D1Database, raw: string, state: WarmState, batch
 		const lost = missing > 0 && now - Date.parse(state.claimedAt ?? state.startedAt) >= BATCH_STALE_MS ? missing : 0;
 		const settled = lost ? { ...state, failed: state.failed + lost } : state;
 		if ((lost || state.revisitBusy) && runFinished(settled, now) && (await swap(db, raw, finished(settled, now)))) {
-			await deleteQueue(db, { upTo: state.generation }).catch((error) => console.error("coywolf-pack: could not clear warm queues", error));
+			await deleteQueue(db, { upTo: state.generation }).catch((error) => console.error("coywolf-pack: could not clear warm queues", errorSummary(error), error));
 		}
 		return null;
 	}
@@ -731,7 +732,7 @@ async function recordProgress(db: D1Database, generation: string, now: number, u
 		const done = runFinished(next, now);
 		if (done) next = finished(next, now);
 		if (await swap(db, raw, next)) {
-			if (done) await deleteQueue(db, { upTo: generation }).catch((error) => console.error("coywolf-pack: could not clear warm queues", error));
+			if (done) await deleteQueue(db, { upTo: generation }).catch((error) => console.error("coywolf-pack: could not clear warm queues", errorSummary(error), error));
 			return;
 		}
 	}

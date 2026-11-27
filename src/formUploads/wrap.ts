@@ -47,6 +47,7 @@ import {
 	type FormUploadsConfig,
 	type UploadEntry,
 } from "./lib.js";
+import { errorSummary } from "../core/error-summary.js";
 
 export const FEATURE = "formUploads";
 const PACK_FEATURES_OPTION = "plugin:coywolf-pack:settings:features";
@@ -155,7 +156,7 @@ export function defaultDeps(options: PrivateFormUploadsOptions = {}): Deps {
 				return stored?.[FEATURE] === true;
 			} catch (error) {
 				// Can't tell whether the switch is on: keep the file private rather than publish it.
-				console.error("coywolf-pack: could not read the Private form uploads switch; keeping files private", error);
+				console.error("coywolf-pack: could not read the Private form uploads switch; keeping files private", errorSummary(error), error);
 				return true;
 			}
 		},

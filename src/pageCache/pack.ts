@@ -11,6 +11,7 @@ import { workerEnv } from "../shared.js";
 import { ROBOTS_TAG, VERSION_OPTION, keepAtEdge, noteNewVersion, purgePageCache, versionId } from "./lib.js";
 import { usageReport } from "./usage.js";
 import { WARM_DAILY_SETTING, WARM_SETTING, WARM_STATE_OPTION, WARM_TASK, nextDailyAt, pendingRevisits, readWarmState, remainingUrls, startWarm, warmFromCron } from "./warm.js";
+import { errorSummary } from "../core/error-summary.js";
 
 /**
  * Performance is always on (its page sits right below Coywolf Pack). On a site
@@ -280,7 +281,7 @@ export const pageCacheMiddleware: PackMiddleware = {
 					.then(async (deployed) => {
 						if (deployed && (await siteSetting<boolean>(WARM_SETTING))) rememberSiteOption(WARM_STATE_OPTION, JSON.stringify(await startWarm(db, "deploy")));
 					})
-					.catch((error) => console.error("coywolf-pack: page cache version check failed", error)),
+					.catch((error) => console.error("coywolf-pack: page cache version check failed", errorSummary(error), error)),
 			);
 		return undefined;
 	},

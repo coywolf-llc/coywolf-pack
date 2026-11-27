@@ -11,6 +11,7 @@ import { warnOutsideScheduledRun } from "./scheduled-purge.js";
 import { withOutcome } from "./task-health.js";
 import { trackingWrapperInstalled } from "./tracking-params.js";
 import { afterResponse } from "../shared.js";
+import { errorSummary } from "./error-summary.js";
 
 /**
  * Capability EmDash requires before it registers each hook
@@ -155,11 +156,11 @@ export function composeHooks(modules: PackModule[], extra: { tasks: TaskDef[] })
 							try {
 								await module.hooks?.[name as "media:afterUpload"]?.(event, ctx);
 							} catch (error) {
-								console.error(`coywolf-pack: ${module.id}: ${name} failed`, error);
+								console.error(`coywolf-pack: ${module.id}: ${name} failed`, errorSummary(error), error);
 							}
 						}
 					} catch (error) {
-						console.error(`coywolf-pack: ${name} failed`, error);
+						console.error(`coywolf-pack: ${name} failed`, errorSummary(error), error);
 					}
 				})();
 				// Synchronous: nothing has been awaited yet. Tracked as one of EmDash's deferred tasks too (as its

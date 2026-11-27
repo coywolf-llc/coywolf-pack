@@ -69,6 +69,8 @@
  * Kept free of EmDash imports so tests can load it directly.
  */
 
+import { errorSummary } from "./error-summary.js";
+
 /** EmDash's route that emails a sign-in link (as Astro routes it: decoded, no trailing slash). */
 export const SIGNIN_SEND_PATH = "/_emdash/api/auth/magic-link/send";
 /** Largest body read: a sign-in request is `{"email":"…"}`, an address at most 254 characters. */
@@ -229,7 +231,7 @@ let failureLogged = false;
 function logFailure(error: unknown): void {
 	if (failureLogged) return;
 	failureLogged = true;
-	console.error("coywolf-pack: the sign-in email limit couldn't be checked, so EmDash handles the request (logged once per isolate)", error);
+	console.error("coywolf-pack: the sign-in email limit couldn't be checked, so EmDash handles the request (logged once per isolate)", errorSummary(error), error);
 }
 
 /**
